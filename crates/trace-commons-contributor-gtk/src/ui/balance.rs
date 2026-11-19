@@ -57,6 +57,10 @@ pub struct BalanceSection {
     /// read. Emptied first, so a state that offers nothing leaves nothing
     /// behind.
     action: gtk::Box,
+    pub(super) card: gtk::Box,
+    /// The toned row's words, rebuilt on every read: Home counts the
+    /// figure up in it when NEAR AI credit arrives.
+    head: Rc<std::cell::RefCell<Option<gtk::Label>>>,
 }
 
 impl Default for BalanceSection {
@@ -66,6 +70,28 @@ impl Default for BalanceSection {
 }
 
 impl BalanceSection {
+    /// Apply the generated flat card role only on Home's instance.
+    pub fn use_flat_style(&self) {
+        self.card.remove_css_class("tc-card");
+        self.card.add_css_class("tc-insights-card");
+    }
+
+    /// Writes over the figure the row shows, until the next read draws the
+    /// row again; a read mid-count is written over by the next step.
+    pub fn head_writer(&self) -> impl Fn(&str) + 'static {
+        let head = Rc::clone(&self.head);
+        move |text| {
+            if let Some(head) = head.borrow().as_ref() {
+                head.set_text(text);
+            }
+        }
+    }
+
+    /// A balance sign-in cannot replace an in-progress browser ceremony.
+    pub fn set_action_sensitive(&self, sensitive: bool) {
+        self.action.set_sensitive(sensitive);
+    }
+
     pub fn new() -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         root.append(&style::section(copy::BALANCE_TITLE));
@@ -88,6 +114,8 @@ impl BalanceSection {
             root,
             status,
             action,
+            card,
+            head: Rc::new(std::cell::RefCell::new(None)),
         }
     }
 }
@@ -104,6 +132,11 @@ pub fn refresh(app: &Rc<App>) {
         // in either direction -- is the one move this section may not make.
         let Ok(Ok(balance)) = result.map(serde_json::from_value::<crate::model::NearAiBalance>)
         else {
+            render_section(
+                app,
+                &app.home.balance,
+                &crate::model::NearAiBalance::default(),
+            );
             return;
         };
         render(app, &balance);
@@ -122,6 +155,12 @@ pub fn refresh(app: &Rc<App>) {
 ///
 /// Gated on [`crate::balance::BalanceView::figures_carry_the_row`], which is
 /// the shared table's own answer rather than a label matched on here.
+/// The toned row's words for `balance`, as a read draws them: what Home
+/// puts back when a count stops.
+pub fn head_text(balance: &crate::model::NearAiBalance) -> String {
+    head(&crate::balance::view(balance)).to_owned()
+}
+
 fn head(row: &crate::balance::BalanceView) -> &str {
     if row.figures_carry_the_row() {
         &row.remaining_line
@@ -155,18 +194,26 @@ fn details(row: &crate::balance::BalanceView) -> Vec<&str> {
 
 /// One toned statement, the figures under it, and at most one control.
 pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
-    let view = &app.private_inference.balance;
+    render_section(app, &app.private_inference.balance, balance);
+    render_section(app, &app.home.balance, balance);
+    // A read that answered: Home marks credit that arrived since the
+    // figure it last showed.
+    app.home.balance_read(balance);
+}
+
+fn render_section(app: &Rc<App>, view: &BalanceSection, balance: &crate::model::NearAiBalance) {
     let row = crate::balance::view(balance);
     while let Some(child) = view.status.first_child() {
         view.status.remove(&child);
     }
 
     let head = head(&row);
+    *view.head.borrow_mut() = None;
     if !head.is_empty() {
-        view.status.append(&private_inference::tone_row(
-            head,
-            private_inference::indicator_tone(row.tone),
-        ));
+        let tone_row =
+            private_inference::tone_row(head, private_inference::indicator_tone(row.tone));
+        *view.head.borrow_mut() = tone_row.last_child().and_downcast::<gtk::Label>();
+        view.status.append(&tone_row);
     }
     for line in details(&row) {
         style::append_meta(&view.status, line);
@@ -176,6 +223,7 @@ pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
         view.action.remove(&child);
     }
     let action = row.action;
+    view.set_action_sensitive(!super::credential::obtain_in_progress(app));
     if let Some(label) = super::credential::action_label(action) {
         // Before the button, because it is what somebody reads before
         // pressing it. Empty draws nothing at all rather than a blank line.

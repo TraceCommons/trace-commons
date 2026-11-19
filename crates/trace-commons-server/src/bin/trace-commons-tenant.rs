@@ -1,6 +1,8 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 //! `trace-commons-tenant` — tenant-audience operator CLI.
 //!
 //! Twelve subcommands covering tenant-policy management, tenant access-grant
@@ -1127,17 +1129,28 @@ mod tests {
         format!("TC_TENANT_TEST_BEARER_{n}")
     }
 
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     struct EnvGuard {
         name: String,
     }
     impl EnvGuard {
+        #[allow(unsafe_code)]
         fn set(name: String, value: &str) -> Self {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock` and uses a unique variable name per test.
             unsafe { std::env::set_var(&name, value) };
             EnvGuard { name }
         }
     }
     impl Drop for EnvGuard {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
+            let _lock = env_lock();
+            // SAFETY: serialized via `env_lock`; see `EnvGuard::set`.
             unsafe { std::env::remove_var(&self.name) };
         }
     }
@@ -1396,6 +1409,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(unsafe_code)]
     async fn privacy_filter_canary_errors_when_unconfigured() {
         // Capture and clear the env vars the adapter reads so this test
         // is hermetic regardless of operator-level configuration.
@@ -1403,10 +1417,15 @@ mod tests {
             "TRACE_COMMONS_PRIVACY_FILTER_COMMAND",
             "IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND",
         ];
-        let prior: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
-        for k in &keys {
-            unsafe { std::env::remove_var(k) };
-        }
+        let prior: Vec<_> = {
+            let _lock = env_lock();
+            let snap: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+            for k in &keys {
+                // SAFETY: serialized via `env_lock` across env-mutating tests in this binary.
+                unsafe { std::env::remove_var(k) };
+            }
+            snap
+        };
         let args = PrivacyFilterCanaryArgs {
             text: "trace-canary.person@example.invalid".to_string(),
             timeout_seconds: 2,
@@ -1419,10 +1438,17 @@ mod tests {
         );
         // Confirm we no longer emit the legacy stub message.
         assert!(!msg.contains("not yet ported"), "stub message must be gone");
+        let _lock = env_lock();
         for (k, v) in prior {
             match v {
-                Some(value) => unsafe { std::env::set_var(k, value) },
-                None => unsafe { std::env::remove_var(k) },
+                Some(value) => {
+                    // SAFETY: serialized via `env_lock` across env-mutating tests in this binary.
+                    unsafe { std::env::set_var(k, value) }
+                }
+                None => {
+                    // SAFETY: serialized via `env_lock` across env-mutating tests in this binary.
+                    unsafe { std::env::remove_var(k) }
+                }
             }
         }
     }

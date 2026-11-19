@@ -3468,9 +3468,8 @@ impl PipelineService {
                 // which reads its output, never the source. The run as
                 // recorded carries the pass record `commit_review` checks
                 // and links; its lease is the claim's.
-                let (run, source_artifact) = self.ensure_privacy_pass(run).await?;
+                let (run, mut source_artifact) = self.ensure_privacy_pass(run).await?;
                 let run = &run;
-                let source_content_hash = sha256_prefixed(&source_artifact);
                 // Ruling T3-5: loads whatever assessment a reviewer has
                 // already recorded for this run, so `MinimalReviewPolicy`
                 // (and any other Review policy) can resolve a quarantine
@@ -3481,6 +3480,17 @@ impl PipelineService {
                     .store
                     .load_review_assessment(&run.tenant_id, run.run_id)
                     .await?;
+                if let Some(candidate) = stored_assessment
+                    .as_ref()
+                    .and_then(|stored| stored.recheck.as_ref())
+                {
+                    source_artifact = self.load_object_bytes(run, candidate.object_ref_id).await?;
+                    anyhow::ensure!(
+                        sha256_prefixed(&source_artifact) == candidate.content_hash,
+                        PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL
+                    );
+                }
+                let source_content_hash = sha256_prefixed(&source_artifact);
                 // The pass escalated the run: the server holds it for a human
                 // whatever Admission decided, and the policy is not called
                 // until an assessment recorded after the pass exists. One

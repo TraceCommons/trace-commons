@@ -829,11 +829,48 @@ fn flatpak_manifest_has_its_vendored_sources_enabled() {
         !manifest.contains("--filesystem=home"),
         "a blanket home grant defeats the point of shipping this confined"
     );
+    // The third grant is the host link's runtime directory (host-daemon
+    // mode, docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md):
+    // one socket and one lock file, never the host state directory that
+    // holds the device key.
+    assert!(
+        manifest.contains("--filesystem=xdg-run/trace-commons:create"),
+        "the window reaches the host daemon through the host link's runtime \
+         directory and nothing wider"
+    );
+    assert!(
+        !manifest.contains("--filesystem=xdg-config"),
+        "the host state directory holds the device key; the sandbox must not \
+         be granted it to reach the daemon socket"
+    );
     assert_eq!(
         manifest.matches("--filesystem=").count(),
-        2,
-        "the two read-only session roots must be the ONLY filesystem grants; \
-         a third would widen what a transcript-reading app can reach"
+        3,
+        "the two read-only session roots and the host link's runtime \
+         directory must be the ONLY filesystem grants; another would widen \
+         what a transcript-reading app can reach"
+    );
+}
+
+#[test]
+fn flatpak_manifest_grants_network_to_the_in_sandbox_daemon() {
+    // The daemon runs inside the sandbox and talks to the Trace Commons
+    // server and NEAR AI; without --share=network it cannot enroll, upload
+    // or reach inference. Only the finish-args section is checked, so a
+    // comment mentioning the flag cannot satisfy this.
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    let finish_args: Vec<&str> = manifest
+        .lines()
+        .skip_while(|l| !l.starts_with("finish-args:"))
+        .skip(1)
+        .take_while(|l| l.starts_with(' ') || l.is_empty())
+        .map(str::trim)
+        .collect();
+    assert!(
+        finish_args.contains(&"- --share=network"),
+        "finish-args must include --share=network, or the in-sandbox daemon \
+         cannot reach the server or NEAR AI"
     );
 }
 
@@ -1071,6 +1108,22 @@ fn flatpak_repo_is_gpg_signed_before_publication() {
         publish.contains("GPGKey="),
         "the .flatpakref must embed the public key, or the contributor's \
          first install has nothing to verify against"
+    );
+}
+
+/// GNOME Software shows the `.flatpakref`'s `Title=` when the app is
+/// installed from it, so it is the app's name, the one its windows use.
+#[test]
+fn flatpakref_title_is_the_app_name() {
+    let publish = read("scripts/flatpak/publish-repo.sh");
+    let titles: Vec<&str> = publish
+        .lines()
+        .filter_map(|l| l.strip_prefix("Title="))
+        .collect();
+    assert_eq!(
+        titles,
+        [trace_commons_contributor::brand::APP_NAME],
+        "the .flatpakref Title= must be the app's name"
     );
 }
 
@@ -2151,7 +2204,7 @@ fn the_flatpak_vendor_set_matches_the_gtk_lockfile() {
 /// a step can neither satisfy nor defeat it, and each pinned value is
 /// matched as a whole line rather than a substring.
 #[test]
-fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
+fn cargo_deny_jobs_pin_their_graphs_and_enforce_bans_and_audit() {
     let workflow = executable_text(&read(".github/workflows/cargo-deny.yml"));
 
     let has_line = |job: &str, want: &str| job.lines().any(|line| line.trim() == want);
@@ -2169,8 +2222,8 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
          feature list has to track every deployable feature and did not"
     );
     assert!(
-        has_line(all_features, "command-arguments: licenses sources"),
-        "cargo-deny-all-features must run licences and sources together, \
+        has_line(all_features, "command-arguments: licenses bans sources"),
+        "cargo-deny-all-features must run licences, bans and sources together, \
          loading the dependency graph once"
     );
 
@@ -2192,27 +2245,80 @@ fn cargo_deny_jobs_pin_their_graphs_and_omit_bans() {
         "cargo-deny-advisories must run the advisories check"
     );
 
-    // `check bans` must not run anywhere: deny.toml's [bans] section sets
-    // only `multiple-versions = "allow"` and configures no deny/skip list,
-    // so the check is a standing no-op today -- a job for it would be
-    // ceremony, not a gate. If deny.toml ever grows a real ban list, this
-    // assertion is the reminder to add the job back. Both spellings are
-    // checked: cargo-deny-action takes the checks through
-    // `command-arguments`, and its own README uses `command` for the same
-    // thing.
-    for (name, job) in [
-        ("cargo-deny-all-features", all_features),
-        ("cargo-deny-advisories", advisories),
+    let clients = extract_job(&workflow, "cargo-deny-clients");
+    assert!(
+        clients.contains("uses: EmbarkStudios/cargo-deny-action"),
+        "cargo-deny-clients must run cargo-deny-action"
+    );
+    assert!(
+        has_line(
+            clients,
+            "workspace: [crates/trace-commons-contributor-gtk, tauri-desktop]"
+        ),
+        "cargo-deny-clients must check both standalone client workspaces"
+    );
+    assert!(
+        has_line(
+            clients,
+            r#"checks: ["licenses bans sources", "advisories"]"#
+        ),
+        "cargo-deny-clients must run licenses, bans, sources, and advisories"
+    );
+
+    let audit = extract_job(&workflow, "cargo-audit");
+    for lockfile in [
+        "- Cargo.lock",
+        "- crates/trace-commons-contributor-gtk/Cargo.lock",
+        "- tauri-desktop/Cargo.lock",
     ] {
         assert!(
-            !job.lines().any(|line| {
-                let line = line.trim_start();
-                (line.starts_with("command-arguments:") || line.starts_with("command:"))
-                    && line.contains("bans")
-            }),
-            "{name} must not name `bans` -- deny.toml's [bans] section \
-             enforces nothing today, so running the check would only be \
-             ceremony"
+            has_line(audit, lockfile),
+            "cargo-audit matrix must cover {lockfile}"
+        );
+    }
+    assert!(
+        has_line(
+            audit,
+            r#"run: python3 scripts/ci/cargo-audit.py --file "$AUDIT_LOCKFILE""#
+        ),
+        "cargo-audit must run scripts/ci/cargo-audit.py via env binding"
+    );
+
+    let audit_script = read("scripts/ci/cargo-audit.py");
+    assert!(
+        audit_script.contains(r#"["cargo", "audit", "--deny", "warnings"]"#),
+        "scripts/ci/cargo-audit.py must deny all cargo-audit warnings (unmaintained, unsound, yanked)"
+    );
+}
+
+/// The Flatpak is built on the newest GNOME runtime Flathub supports, 51
+/// (owner, 2026-11-18: "Newest supported"; 48 is end-of-life on Flathub
+/// since 2026-03-24), and the release job installs exactly the runtime and
+/// SDK branch the manifest names: a job that installs another branch fails
+/// at `flatpak-builder` after the tag exists.
+#[test]
+fn flatpak_manifest_and_release_job_agree_on_gnome_51() {
+    let manifest =
+        read("crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.yml");
+    assert!(
+        manifest
+            .contains("\nruntime: org.gnome.Platform\nruntime-version: '51'\nsdk: org.gnome.Sdk\n"),
+        "the manifest must build on org.gnome.Platform and org.gnome.Sdk 51"
+    );
+    let workflow = read(".github/workflows/release-apps.yml");
+    assert!(
+        workflow.contains("org.gnome.Platform//51 org.gnome.Sdk//51"),
+        "the linux-flatpak job must install the runtime and SDK the manifest names"
+    );
+    for stale in [
+        "org.gnome.Platform//46",
+        "org.gnome.Sdk//46",
+        "org.gnome.Platform//48",
+        "org.gnome.Sdk//48",
+    ] {
+        assert!(
+            !workflow.contains(stale),
+            "release-apps.yml still names {stale}"
         );
     }
 }

@@ -37,7 +37,6 @@ use adw::prelude::*;
 
 use super::App;
 use super::community_brand;
-use super::mark::{Scheme, current_scheme};
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::model::{HistoryRecord, HistoryRollup, human_when};
@@ -174,16 +173,46 @@ pub fn refresh(app: &Rc<App>) {
         let standing = RosterStanding::from_rollup(&value);
         app.call(
             "list_history",
-            serde_json::json!({ "limit": 50 }),
+            serde_json::json!({ "limit": HISTORY_LIMIT }),
             move |app, result| {
-                let records: Vec<HistoryRecord> = result
+                // Kept for the Traces graph and an opened row's details. A
+                // failed or unreadable read is unknown, not an empty record.
+                let read: Option<Vec<HistoryRecord>> = result
                     .ok()
-                    .and_then(|v| serde_json::from_value(v.get("history").cloned()?).ok())
-                    .unwrap_or_default();
+                    .and_then(|v| serde_json::from_value(v.get("history").cloned()?).ok());
+                *app.history_records.borrow_mut() = read.clone();
+                let records = read.unwrap_or_default();
                 render(app, &rollup, standing.as_ref(), &records);
+                app.shell.render(app);
             },
         );
     });
+}
+
+/// How many rows `list_history` is asked for. A page that comes back this
+/// full may have been cut, so the Traces map counts nothing from it as a
+/// whole (`monitor::map_scene::Contributions`).
+pub const HISTORY_LIMIT: usize = 50;
+
+/// Draws History with a community standing at the widest the types allow
+/// (a `u32` rank and count), plus a credit past nine digits, so a fit test
+/// covers the Community panel. The figures ellipsize, so no value widens the
+/// pane.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+pub(crate) fn show_community_for_test(app: &Rc<App>) {
+    let value = serde_json::json!({
+        "community": {
+            "rank": u32::MAX,
+            "novelty_credit": 123_456_789_012.0,
+            "window_label": "30d",
+            "accepted_in_window": u32::MAX,
+            "accept_rate": 0.98,
+            "profile_url": "https://tracecommons.example/u/someone",
+        }
+    });
+    let standing = RosterStanding::from_rollup(&value).expect("a standing decodes");
+    render(app, &HistoryRollup::default(), Some(&standing), &[]);
 }
 
 fn render(
@@ -207,8 +236,16 @@ fn render(
     // the card said nothing was ever in flight even while a dozen traces
     // were.
     let waiting = rollup.all_time.submitted;
-    let stats = gtk::Box::new(gtk::Orientation::Horizontal, space::M);
-    stats.set_homogeneous(true);
+    // Side by side where they fit, fewer to a line in a narrow pane (the
+    // Monitor's main pane is 440).
+    let stats = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(space::M as u32)
+        .row_spacing(space::M as u32)
+        .homogeneous(true)
+        .build();
     for (glyph, label, count) in [
         (
             Glyph::Accepted,
@@ -218,7 +255,7 @@ fn render(
         (Glyph::Held, copy::QUARANTINE_HEADING, rollup.quarantined),
         (Glyph::Waiting, copy::HISTORY_WAITING_TO_BE_SCORED, waiting),
     ] {
-        stats.append(&stat_card(glyph, label, count));
+        style::grid_append(&stats, &stat_card(glyph, label, count));
     }
     content.append(&stats);
 
@@ -289,6 +326,7 @@ fn render(
             let refreshed = gtk::Label::builder()
                 .label(format!("Refreshed {}", human_when(Some(refreshed_at))))
                 .xalign(1.0)
+                .wrap(true)
                 .valign(gtk::Align::End)
                 .build();
             refreshed.add_css_class("tc-meta");
@@ -612,6 +650,47 @@ fn held_group(quarantined: u32) -> gtk::Expander {
 /// One record: name and when on the first line, the state as a chip on the
 /// right, then whatever that state owes an explanation for.
 fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
+    let card = record_detail(record);
+    // The row's way into its details, which are the inspector's while
+    // History is shown. A record with no id cannot be found again.
+    if !record.submission_id.is_empty() {
+        let open = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .open,
+        );
+        open.add_css_class("tc-quiet");
+        open.set_halign(gtk::Align::Start);
+        // The core's word is its name; which record it opens is its
+        // description, the record's own label, so no name is composed here.
+        open.update_property(&[gtk::accessible::Property::Description(
+            &record.project_label,
+        )]);
+        let weak = Rc::downgrade(app);
+        let id = record.submission_id.clone();
+        open.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.shell.open_history_row(&app, &id);
+            }
+        });
+        card.append(&open);
+    }
+
+    // Withdrawal, which the shared spec calls first-class: it is on every
+    // contribution still open to it. It is the one promise on this screen that is the
+    // contributor's to make about their own trace, so it is on the row
+    // rather than behind a menu. See `offers_withdrawal` for which rows
+    // get it.
+    if offers_withdrawal(record) {
+        card.append(&withdraw_control(app, record));
+    }
+    card
+}
+
+/// One record's facts, with no control on it: what the History row says,
+/// and what the inspector shows for an opened row. Read-only, so the
+/// inspector adds no action the row does not already carry.
+pub(crate) fn record_detail(record: &HistoryRecord) -> gtk::Box {
     let card = style::card(gtk::Orientation::Vertical, space::S);
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
@@ -676,15 +755,6 @@ fn record_row(app: &Rc<App>, record: &HistoryRecord) -> gtk::Box {
         line.add_css_class("tc-neutral");
         card.append(&line);
     }
-
-    // Withdrawal, which the shared spec calls first-class: it is on every
-    // contribution still open to it. It is the one promise on this screen that is the
-    // contributor's to make about their own trace, so it is on the row
-    // rather than behind a menu. See `offers_withdrawal` for which rows
-    // get it.
-    if offers_withdrawal(record) {
-        card.append(&withdraw_control(app, record));
-    }
     card
 }
 
@@ -713,7 +783,9 @@ const WITHDRAWABLE_STATUSES: [&str; 6] = [
 /// so the button would have nothing to send and would fail for a reason the
 /// contributor could do nothing about.
 fn offers_withdrawal(record: &HistoryRecord) -> bool {
-    WITHDRAWABLE_STATUSES.contains(&record.status.as_str()) && !record.submission_id.is_empty()
+    !record.previous_account
+        && WITHDRAWABLE_STATUSES.contains(&record.status.as_str())
+        && !record.submission_id.is_empty()
 }
 
 /// The withdraw button, or -- once an attempt has been made -- what that
@@ -958,17 +1030,15 @@ impl Glyph {
     /// `tc_blue_icon`, `tc_muted`, `tc_coral_text`), which is what the
     /// mockup strokes an 11px glyph in. The accent and coral twins are the
     /// generated design tokens themselves, so they cannot drift.
-    fn ink(self, scheme: Scheme) -> &'static str {
-        use style::brand_tokens::{dark, light};
-        match (self, scheme) {
-            (Glyph::Accepted, Scheme::Light) => light::ACCENT_TEXT,
-            (Glyph::Accepted, Scheme::Dark) => dark::ACCENT_TEXT,
-            (Glyph::Held, Scheme::Light) => "#315FBA",
-            (Glyph::Held, Scheme::Dark) => "#9DB6F1",
-            (Glyph::Waiting, Scheme::Light) => "#5C635B",
-            (Glyph::Waiting, Scheme::Dark) => "#A6AC9F",
-            (Glyph::Withdrawn, Scheme::Light) => light::STATUS_OUTSIDE_TEXT,
-            (Glyph::Withdrawn, Scheme::Dark) => dark::STATUS_OUTSIDE_TEXT,
+    ///
+    /// The per-scheme literals now live in `style::Inks::standard`, beside
+    /// the Omarchy skin's, so the glyphs follow whichever is showing.
+    fn ink(self, inks: &style::Inks) -> &str {
+        match self {
+            Glyph::Accepted => &inks.accent_text,
+            Glyph::Held => &inks.held_icon,
+            Glyph::Waiting => &inks.muted,
+            Glyph::Withdrawn => &inks.outside_text,
         }
     }
 }
@@ -986,7 +1056,7 @@ fn icon(glyph: Glyph, size: i32) -> gtk::DrawingArea {
     // announcing "circle" before each of them is noise.
     area.set_can_focus(false);
     area.set_draw_func(move |_, cr, width, height| {
-        draw_glyph(cr, glyph, current_scheme(), width as f64, height as f64);
+        draw_glyph(cr, glyph, &style::inks(), width as f64, height as f64);
     });
     follow_scheme(&area);
     area
@@ -1018,14 +1088,14 @@ fn follow_scheme(area: &gtk::DrawingArea) {
 /// The mockup's 16-unit space, scaled to whatever the widget was given.
 const GLYPH_VIEW: f64 = 16.0;
 
-fn draw_glyph(cr: &gtk::cairo::Context, glyph: Glyph, scheme: Scheme, width: f64, height: f64) {
+fn draw_glyph(cr: &gtk::cairo::Context, glyph: Glyph, inks: &style::Inks, width: f64, height: f64) {
     let unit = width.min(height) / GLYPH_VIEW;
     if unit <= 0.0 {
         return;
     }
     let _ = cr.save();
     cr.scale(unit, unit);
-    set_source(cr, glyph.ink(scheme));
+    set_source(cr, glyph.ink(inks));
     cr.set_line_width(1.5);
     cr.set_line_cap(gtk::cairo::LineCap::Round);
     cr.set_line_join(gtk::cairo::LineJoin::Round);
@@ -1138,10 +1208,11 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
     panel.append(&head);
 
     // 2. The metric strip: one framed box divided into four equal cells by
-    // 1px rules, which is the site's table, not a row of cards.
+    // 1px rules, which is the site's table, not a row of cards. Two rows of
+    // two: four cells in one row make the panel, and with it the whole left
+    // pane's page stack, wider than the 440 main pane.
     let strip = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .homogeneous(true)
+        .orientation(gtk::Orientation::Vertical)
         .build();
     strip.add_css_class("tc-brand-box");
     let cells = [
@@ -1165,30 +1236,50 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
                 .unwrap_or_else(dash),
         ),
     ];
-    let last = cells.len() - 1;
-    for (index, (label, value)) in cells.iter().enumerate() {
-        let cell = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        cell.add_css_class("tc-brand-cell");
-        // The 1px rule belongs to the cell that has a neighbour to its
-        // right, so the last cell simply never asks for one.
-        if index != last {
-            cell.add_css_class("tc-brand-divided");
-        }
-        let caption = gtk::Label::builder()
-            .label(label.to_uppercase())
-            .xalign(0.0)
+    for (row_index, pair) in cells.chunks(2).enumerate() {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .homogeneous(true)
             .build();
-        caption.add_css_class("tc-brand-label");
-        cell.append(&caption);
-        let figure = gtk::Label::builder().label(value).xalign(0.0).build();
-        figure.add_css_class("tc-brand-figure");
-        cell.append(&figure);
-        strip.append(&cell);
+        // The 1px rule between the rows belongs to the lower row.
+        if row_index > 0 {
+            row.add_css_class("tc-brand-ruled");
+        }
+        for (index, (label, value)) in pair.iter().enumerate() {
+            let cell = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            cell.add_css_class("tc-brand-cell");
+            // The 1px rule belongs to the cell that has a neighbour to its
+            // right, so the last cell of a row never asks for one.
+            if index + 1 < pair.len() {
+                cell.add_css_class("tc-brand-divided");
+            }
+            let caption = gtk::Label::builder()
+                .label(label.to_uppercase())
+                .xalign(0.0)
+                .wrap(true)
+                .build();
+            caption.add_css_class("tc-brand-label");
+            cell.append(&caption);
+            // One line that gives way to an ellipsis rather than widening the
+            // pane (the Mac's cell is `lineLimit(1)`); the whole figure stays
+            // in the tooltip. A rank and a count are `u32` and the credit is
+            // unbounded, so no layout is wide enough for every value.
+            let figure = gtk::Label::builder()
+                .label(value)
+                .xalign(0.0)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .tooltip_text(value)
+                .build();
+            figure.add_css_class("tc-brand-figure");
+            cell.append(&figure);
+            row.append(&cell);
+        }
+        strip.append(&row);
     }
     panel.append(&strip);
 
     // 3. What the figures are figures of. Stated, never assumed.
-    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+    let meta = style::wrap_row(18);
     let mut facts = vec![format!("Window {}", window_label(standing))];
     if let Some(since) = standing.public_since {
         facts.push(format!("Public since {}", since.format("%B %-d, %Y")));
@@ -1199,7 +1290,7 @@ fn community_panel(standing: &RosterStanding) -> gtk::Box {
     for fact in facts {
         let label = gtk::Label::builder().label(fact.to_uppercase()).build();
         label.add_css_class("tc-brand-label");
-        meta.append(&label);
+        style::wrap_append(&meta, &label);
     }
     panel.append(&meta);
 
@@ -1263,8 +1354,39 @@ fn grouped(value: f64) -> String {
     if value < 0.0 { format!("-{out}") } else { out }
 }
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_history_tests.rs"]
+mod consent_mounted_tests;
+
 #[cfg(test)]
 mod tests {
+    /// History's status glyphs stroke in the inks they are given: the
+    /// standard text-safe twins, or the Omarchy palette's.
+    #[test]
+    fn status_glyphs_take_their_ink_from_the_inks() {
+        use super::Glyph;
+        use crate::ui::omarchy::{self, fixtures::LATTE};
+        use crate::ui::style::{Inks, brand_tokens};
+        let light = Inks::standard(false);
+        assert_eq!(
+            Glyph::Accepted.ink(&light),
+            brand_tokens::light::ACCENT_TEXT
+        );
+        assert_eq!(Glyph::Held.ink(&light), "#315FBA");
+        assert_eq!(Glyph::Waiting.ink(&light), "#5C635B");
+        let dark = Inks::standard(true);
+        assert_eq!(Glyph::Held.ink(&dark), "#9DB6F1");
+        assert_eq!(
+            Glyph::Withdrawn.ink(&dark),
+            brand_tokens::dark::STATUS_OUTSIDE_TEXT
+        );
+        let p = omarchy::parse(LATTE, false).unwrap();
+        let skin = Inks::omarchy(&p);
+        assert_eq!(Glyph::Accepted.ink(&skin), p.accent_text.hex());
+        assert_eq!(Glyph::Held.ink(&skin), p.held_text.hex());
+        assert_eq!(Glyph::Waiting.ink(&skin), p.muted.hex());
+        assert_eq!(Glyph::Withdrawn.ink(&skin), p.status_outside_text.hex());
+    }
 
     fn folder_record(id: &str, project: &str, label: &str) -> HistoryRecord {
         HistoryRecord {
@@ -1392,6 +1514,7 @@ mod tests {
     fn record(status: &str, submission_id: &str) -> HistoryRecord {
         HistoryRecord {
             submission_id: submission_id.to_string(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),
@@ -1399,7 +1522,26 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         }
+    }
+
+    /// Never on a previous account's row (the Mac's `isWithdrawable`): the
+    /// current account cannot withdraw it, and the daemon refuses it.
+    #[test]
+    fn a_previous_accounts_record_is_not_offered_withdrawal() {
+        let wire: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted", "previous_account": true,
+        }))
+        .unwrap();
+        assert!(wire.previous_account);
+        assert!(!offers_withdrawal(&wire));
+        let current: HistoryRecord = serde_json::from_value(serde_json::json!({
+            "submission_id": "sub-1", "status": "accepted",
+        }))
+        .unwrap();
+        assert!(!current.previous_account);
+        assert!(offers_withdrawal(&current));
     }
 
     #[test]
@@ -1509,6 +1651,7 @@ mod tests {
     fn no_credit_figure_carries_a_symbol_or_a_projection() {
         let record = HistoryRecord {
             submission_id: String::new(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),
@@ -1516,6 +1659,7 @@ mod tests {
             credit_points_pending: 0.0,
             credit_points_final: Some(12.5),
             explanations: vec![],
+            previous_account: false,
         };
         let line = credit_line(&record).expect("a final figure is a figure");
         assert_eq!(line, "credit 12.5");
@@ -1528,6 +1672,7 @@ mod tests {
     fn a_record_with_nothing_scored_yet_states_that_rather_than_a_zero() {
         let mut record = HistoryRecord {
             submission_id: String::new(),
+            source: None,
             submitted_at: None,
             project_id: String::new(),
             project_label: String::new(),
@@ -1535,6 +1680,7 @@ mod tests {
             credit_points_pending: 3.0,
             credit_points_final: None,
             explanations: vec![],
+            previous_account: false,
         };
         assert_eq!(
             credit_line(&record).as_deref(),

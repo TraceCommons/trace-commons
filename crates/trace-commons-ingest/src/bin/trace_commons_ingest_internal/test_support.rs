@@ -753,6 +753,7 @@ pub mod near_ai_provisioning_fixture {
     }
 
     impl ProvisioningEnv {
+        #[allow(unsafe_code)]
         pub fn publish() -> Self {
             let vars = [
                 (
@@ -774,6 +775,7 @@ pub mod near_ai_provisioning_fixture {
     }
 
     impl Drop for ProvisioningEnv {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             for (name, value) in self.previous.drain(..) {
                 // SAFETY: as above.
@@ -1052,6 +1054,7 @@ pub mod near_ai_provisioning_fixture {
     }
 
     impl EnvVar {
+        #[allow(unsafe_code)]
         pub fn set(name: &'static str, value: Option<&str>) -> Self {
             let previous = std::env::var(name).ok();
             // SAFETY: the PostgreSQL suite runs single-threaded.
@@ -1066,6 +1069,7 @@ pub mod near_ai_provisioning_fixture {
     }
 
     impl Drop for EnvVar {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             // SAFETY: as above.
             unsafe {

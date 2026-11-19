@@ -1,13 +1,14 @@
-# Licence audit for the AGPL split.
+# Dependency policy for licenses, bans, advisories, and sources.
 #
 # `trace-commons-server`, `-gate-api`, `-gate-enclave`, and `-ingest` are
-# AGPL-3.0-or-later.
-# Everything they link must therefore be under a licence that can be combined
-# into an AGPL-3.0 work. The allow list below is exactly that set; a dependency
-# under GPL-2.0-only, SSPL, or a proprietary licence is a hard conflict.
+# AGPL-3.0-or-later; every other crate and every shipped client is
+# `MIT OR Apache-2.0`. Everything in the server graph must be combinable into
+# an AGPL-3.0 work, and no third-party or client crate may carry AGPL-3.0-or-later
+# (enforced below by scoping AGPL-3.0-or-later strictly to the four server
+# crates via `[[licenses.exceptions]]`).
 #
-# Run: cargo deny check licenses
-#      cargo deny --all-features check licenses
+# Run: cargo deny check
+#      cargo deny --all-features check
 
 [graph]
 all-features = false
@@ -32,24 +33,59 @@ allow = [
     # 0BSD (recvmsg, via interprocess under local-gpu-models). Public-domain
     # equivalent.
     "0BSD",
-    # Our own server and gate crates. Spelled `-or-later` because that is what
-    # they declare, and cargo-deny does not treat it as a synonym for
-    # "AGPL-3.0".
-    "AGPL-3.0-or-later",
     # webpki-roots. A data licence over the Mozilla CA root store, not code:
     # permissive, no copyleft or attribution obligation that conflicts with
-    # AGPL-3.0. Combinable into an AGPL work.
+    # AGPL-3.0 or proprietary client embedding.
     "CDLA-Permissive-2.0",
 ]
-# Our own crates are not published, so an allowed licence with no match in the
-# graph is expected while the split is in progress.
+# GTK and Tauri workspaces never resolve the four AGPL server crates, and
+# default-feature checks omit 0BSD/NCSA crates behind optional ML features.
 unused-allowed-license = "allow"
+
+# Only our four server/gate crates, and the unpublished test package that
+# links the contributor against the ingest service, may declare
+# AGPL-3.0-or-later. Keeping it out
+# of the global `allow` list ensures a third-party AGPL dependency or an
+# accidental AGPL header on a client crate fails `cargo deny check licenses`
+# across all three workspaces (root, GTK, and Tauri).
+[[licenses.exceptions]]
+name = "trace-commons-server"
+allow = ["AGPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "trace-commons-gate-api"
+allow = ["AGPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "trace-commons-gate-enclave"
+allow = ["AGPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "trace-commons-ingest"
+allow = ["AGPL-3.0-or-later"]
+
+[[licenses.exceptions]]
+name = "trace-commons-ingest-contributor-tests"
+allow = ["AGPL-3.0-or-later"]
 
 [bans]
 multiple-versions = "allow"
+# `wildcards = "deny"` cannot be enabled because cargo-deny's
+# `allow-wildcard-paths` only exempts crates with `publish = false`, flagging
+# internal `path = "../..."` edges across workspace crates and git dependencies.
+wildcards = "allow"
+deny = [
+    # PostgreSQL-only repository (CLAUDE.md "Database backend").
+    { crate = "libsql" },
+    # Parquet + Arrow were removed from pilot-bootstrap in favour of streaming
+    # JSONL; do not reintroduce them (CLAUDE.md "Working with this codebase").
+    { crate = "parquet" },
+    { crate = "arrow" },
+]
 
 [advisories]
 version = 2
+yanked = "deny"
 # hf-hub is not feature-gated, so this reaches every cargo-deny job
 # (default, near-ai-scorer, local-gpu-models) alike. Also revisit if
 # number_prefix itself ships a fix for RUSTSEC-2025-0119.
@@ -60,21 +96,12 @@ version = 2
 # hickory-proto 0.25 entries, RUSTSEC-2026-0118/0119, were dropped when
 # reqwest 0.13.5 moved to hickory-resolver 0.26.)
 ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; all versions are affected and no fixed release exists. Used directly across the protocol, contributor, IronWire and server, including public timestamp types, and transitively through ironclaw_llm, chrono-tz, dcap-qvl and PostgreSQL integration. A lockfile bump cannot remove it; migrating our direct uses to jiff or time would still leave upstream dependencies. Revisit when a maintained unaffected release exists or a reviewed date/time migration removes chrono from all three workspace graphs." },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz is unmaintained; all versions are affected and no fixed release exists. Every client graph reaches it through trace-commons-contributor -> ironwire_proxy -> ironwire_ledger -> ironclaw_common, whose dependency is unconditional in both pinned revisions and current upstream main. Contributor and Insights also use it in DST tests; removing those test edges would lose coverage while retaining the production dependency. Drop when IronClaw and the tests migrate and all three lockfiles omit chrono-tz, or a maintained unaffected release becomes available." },
     { id = "RUSTSEC-2025-0119", reason = "number_prefix is unmaintained with no fixed release, pulled in via indicatif via hf-hub, a direct unconditional dependency of trace-commons-server. Revisit when hf-hub is upgraded past 0.4.x -- hf-hub 1.0 has no indicatif/number_prefix dependency at all (verified via `cargo tree`) -- but that is a breaking rewrite, not a lockfile bump, so it is out of scope here." },
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5: timing variability in operations meant to be constant-time. Fixed only in 0.7.6, a new major line; 0.5.5 is pinned by elliptic-curve 0.13 via k256 0.13, so the fix needs a k256 0.14 upgrade, not a lockfile bump. Not exploitable here: production code only verifies secp256k1 signatures (EIP-191 receipt and witness signer recovery) over public data; every k256 SigningKey use is in a test module, so no secret key passes through crypto-bigint. Drop this when k256 moves to crypto-bigint 0.7." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained with no fixed release and no successor named by the advisory. A proc-macro crate that expands at compile time and ships no runtime code, reached via the ML stack under near-ai-scorer and local-gpu-models. Revisit if its dependents drop it." },
-    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no fixed release. A non-cryptographic hash function with no known vulnerability, reached only under local-gpu-models-cuda via the ML stack, which production does not build. Revisit if its dependents move to rustc-hash." },
-    # zip 7.2.0 group: RUSTSEC-2026-0367, 0368, 0369, 0429. All four are in
-    # ZipArchive::extract(), which nothing in this tree calls, and they lift
-    # together once a candle-core release on zip >= 9 reaches mistralrs.
-    # Caveat: these ids are ignored for every lockfile (cargo-audit.py and
-    # the Tauri deny policy reuse this list), but the reachability argument
-    # covers only the root Cargo.lock. Re-check them if zip ever appears in
-    # tauri-desktop/Cargo.lock or crates/trace-commons-contributor-gtk/Cargo.lock.
-    { id = "RUSTSEC-2026-0367", reason = "zip 7.2.0: ZipArchive::extract() and ZipStreamReader::extract() keep SUID/SGID/sticky bits from the archive. Reached only under local-gpu-models (and -cuda), via candle-core 0.10.2 via candle-nn via mistralrs (git rev 2d4ba4f) via trace-commons-gate-enclave; default, near-ai-scorer and the production set (gcs-client, gcp-kms, near-ai-scorer, near-attestation-collateral) do not build zip at all (`cargo tree -i zip`). The extraction API is not reachable: candle-core opens npz/pth archives with ZipArchive::new plus by_index/by_name and reads entries into memory, and writes npz with ZipWriter; nothing in candle-core, mistralrs or this tree calls extract(), extract_unwrapped_root_dir() or ZipStreamReader::extract(), which are the only zip 7.2.0 paths that touch the filesystem (make_symlink, make_writable_dir_all, set_permissions). Fixed in zip 9.0.0, which no candle release reaches: candle-core 0.10.2 pins zip ^7.2.0 (`cargo update -p zip` stops at 7.4.0), and candle-core 0.11.0 and candle main require zip ^8.6.0. Drop when a candle-core release on zip >= 9 reaches this tree through mistralrs; the zip 7.2.0 entries lift together." },
-    { id = "RUSTSEC-2026-0368", reason = "zip 7.2.0: ZipArchive::extract() creates symlinks whose archive-supplied targets point outside the destination. Same path as RUSTSEC-2026-0367 (local-gpu-models only, candle-core 0.10.2 via mistralrs). Not reachable: ZipArchive::extract() is never called in candle-core, mistralrs or this tree, and the symlink is created only inside it (make_symlink); candle reads entries through by_index/by_name. Same zip 9.0.0 fix and same candle pin as RUSTSEC-2026-0367; the zip 7.2.0 entries lift together." },
-    { id = "RUSTSEC-2026-0369", reason = "zip 7.2.0: ZipArchive::extract() and ZipStreamReader::extract() apply Unix permissions through extracted symlinks. Same path as RUSTSEC-2026-0367 (local-gpu-models only, candle-core 0.10.2 via mistralrs). Not reachable: neither extract() is called in candle-core, mistralrs or this tree, and set_permissions runs only inside them; candle reads entries through by_index/by_name. Same zip 9.0.0 fix and same candle pin as RUSTSEC-2026-0367; the zip 7.2.0 entries lift together." },
-    { id = "RUSTSEC-2026-0429", reason = "zip 7.2.0: ZipArchive::extract() sizes a symlink-target buffer from the archive's declared uncompressed size and aborts the process on a huge one. Same path as RUSTSEC-2026-0367 (local-gpu-models only, candle-core 0.10.2 via mistralrs). Not reachable: ZipArchive::extract() is never called in candle-core, mistralrs or this tree, and the allocation happens only inside it; candle reads entries through by_index/by_name. Same zip 9.0.0 fix and same candle pin as RUSTSEC-2026-0367; the zip 7.2.0 entries lift together." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained with no fixed release. A non-cryptographic hash function with no known vulnerability, reached under local-gpu-models (and -cuda) via bm25 in mistralrs-core, which pilot production does not build. Revisit if its dependents move to rustc-hash." },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2.0 is unmaintained; the advisory states no safe upgrade is available. Reached only under gcp-kms, via tonic 0.12.3 via google-cloud-kms 0.6.0. The migration target is rustls-pki-types' PemObject trait, which is tonic's call to make, not ours. Revisit when google-cloud-kms moves to a tonic release that has migrated." },
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error is unmaintained with no fixed release. Tauri 2.11.5 reaches it only as a build-time macro through GTK 3's glib-macros on Linux; it ships no runtime code. Revisit when Tauri's Linux stack leaves GTK 3 or glib-macros removes it." },
     { id = "RUSTSEC-2025-0075", reason = "unic-char-range is unmaintained with no fixed release. Tauri 2.11.5 reaches it through urlpattern 0.3.0 and tauri-utils 2.9.3. Revisit when tauri-utils replaces that parser stack." },
@@ -85,9 +112,17 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant is unmaintained as a standalone crate because zbus 6.0.0 absorbed it; the advisory names no vulnerability. zbus 5 reaches it through the Linux D-Bus stack: secret-service 5.2.0 and zbus-secret-service-keyring-store 1.0.1 (contributor keyring, every workspace), notify-rust 4.18.2 (GTK shell) and tauri-plugin-single-instance (Tauri). The latest release of each still requires zbus ^5, so no lockfile bump reaches zbus 6. Drop when they all move to zbus 6; the three zbus entries lift together." },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names is unmaintained as a standalone crate because zbus 6.0.0 absorbed it; the advisory names no vulnerability. zbus 5 reaches it through the Linux D-Bus stack: secret-service 5.2.0 and zbus-secret-service-keyring-store 1.0.1 (contributor keyring, every workspace), notify-rust 4.18.2 (GTK shell) and tauri-plugin-single-instance (Tauri). The latest release of each still requires zbus ^5, so no lockfile bump reaches zbus 6. Drop when they all move to zbus 6; the three zbus entries lift together." },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is unmaintained as a standalone crate because zbus 6.0.0 absorbed it; the advisory names no vulnerability. zbus 5 reaches it through the Linux D-Bus stack: secret-service 5.2.0 and zbus-secret-service-keyring-store 1.0.1 (contributor keyring, every workspace), notify-rust 4.18.2 (GTK shell) and tauri-plugin-single-instance (Tauri). The latest release of each still requires zbus ^5, so no lockfile bump reaches zbus 6. Drop when they all move to zbus 6; the three zbus entries lift together." },
-    { id = "RUSTSEC-2026-0381", reason = "webpki-roots bundled the emSign ECC Root CA - G3, which lets distrusted emSign intermediates chain. The advisory's only patched range is >= 1.0.10, so it also flags webpki-roots 0.26.11, the last 0.26.x release. That release is a semver-trick shim with no roots of its own: its lib.rs is `pub use parent::TLS_SERVER_ROOTS` over webpki-roots ^1, which this lockfile resolves to the patched 1.0.10 -- so the roots it hands out are the fixed set. It is reached through tokio-tungstenite 0.23.1 (rig-core 0.33.0 via ironclaw_llm via ironwire, the contributor's default build), ureq 2.12.1 (hf-hub 0.4.3 via mistralrs, under near-ai-scorer and local-gpu-models) and tonic 0.12.3 (google-cloud-kms 0.6.0, under gcp-kms). Each is already the latest release of its semver line and none of those lines moves to webpki-roots 1, so no lockfile bump removes the shim. Caveat: this id-based ignore would also hide a later regression of webpki-roots 1.x below 1.0.10. Drop when those three move to webpki-roots 1." },
 ]
 
 [sources]
 unknown-registry = "deny"
-unknown-git = "allow"
+unknown-git = "deny"
+# Only the two reviewed git repositories may appear in any workspace's
+# resolved graph. `required-git-spec = "rev"` cannot be enabled yet because
+# the vendored `ironwire_*` crates pull `nearai/ironclaw` with
+# `branch = "main"`. (`nearai/ironwire` itself is now vendored under
+# `crates/ironwire_*`, so it is no longer a git source.)
+allow-git = [
+    "https://github.com/nearai/ironclaw",
+    "https://github.com/EricLBuehler/mistral.rs.git",
+]

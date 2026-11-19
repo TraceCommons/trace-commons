@@ -72,11 +72,20 @@ thread_local! {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn durable_rename(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+    if source.as_os_str().encode_wide().any(|u| u == 0)
+        || destination.as_os_str().encode_wide().any(|u| u == 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains interior NUL",
+        ));
+    }
     let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let destination: Vec<u16> = destination
         .as_os_str()

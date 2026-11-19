@@ -32,3 +32,6 @@ trace-commons-contributor = { path = "../trace-commons-contributor", features = 
 trace-commons-protocol = { path = "../trace-commons-protocol" }
 trace-commons-server = { path = "../trace-commons-server" }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[lints.rust]
+unsafe_code = "forbid"

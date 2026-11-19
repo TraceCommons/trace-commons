@@ -506,7 +506,6 @@ fn enroll(store: &ConfigStore) {
         user_subject: "sample".into(),
         device_key_id: device.device_key_id.clone(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -537,6 +536,7 @@ struct SampleHome {
 
 const RECORDED_HOME: &str = "/Users/sample";
 
+#[allow(unsafe_code)]
 fn sample_home() -> &'static SampleHome {
     static HOME: OnceLock<SampleHome> = OnceLock::new();
     HOME.get_or_init(|| {

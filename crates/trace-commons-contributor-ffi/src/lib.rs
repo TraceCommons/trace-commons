@@ -89,6 +89,10 @@
 // (`include/trace_commons.h`) and the Swift/C# callers that bind to it
 // verbatim, not Rust naming conventions.
 #![allow(non_camel_case_types)]
+// Dedicated C ABI boundary crate (`extern "C"` exports and pointer marshaling);
+// crate-level `unsafe_code = "deny"` and `unsafe_op_in_unsafe_fn = "forbid"`
+// govern the package while allowing the C ABI implementation here.
+#![allow(unsafe_code)]
 
 mod insights;
 pub use insights::{tc_insights_call, tc_insights_copy_json};
@@ -1598,6 +1602,9 @@ pub unsafe extern "C" fn tc_preview_unsure_spans_json(
     // Every error below is a fixed, content-free label, as in
     // `tc_preview_turns_json`.
     let outcome = guard_forwarding(|| {
+        if !err.is_null() {
+            unsafe { *err = std::ptr::null_mut() };
+        }
         if handle.is_null() {
             anyhow::bail!("null-handle");
         }
@@ -1760,9 +1767,10 @@ pub unsafe extern "C" fn tc_subscribe_with_accepts(
     cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
     ctx: *mut c_void,
 ) -> u64 {
-    let accepts = if accepts_json.is_null() {
-        None
-    } else {
+    let parsed_accepts = guard(|| {
+        if accepts_json.is_null() {
+            return Ok(Some(None));
+        }
         let parsed = unsafe { CStr::from_ptr(accepts_json) }
             .to_str()
             .ok()
@@ -1772,12 +1780,20 @@ pub unsafe extern "C" fn tc_subscribe_with_accepts(
         // and would otherwise leave the caller a live token with no events.
         match parsed {
             Some(value @ serde_json::Value::Array(_)) if ipc::subscribe_accepts_valid(&value) => {
-                Some(value)
+                Ok(Some(Some(value)))
             }
             _ => {
                 set_last_error(ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID);
-                return 0;
+                Ok(None)
             }
+        }
+    });
+    let accepts = match parsed_accepts {
+        Ok(Some(accepts)) => accepts,
+        Ok(None) => return 0,
+        Err(e) => {
+            set_last_error(&e);
+            return 0;
         }
     };
     unsafe { subscribe_inner(handle, accepts, cb, ctx) }
@@ -2352,11 +2368,23 @@ pub unsafe extern "C" fn tc_preview_search(
     needle: *const c_char,
     matches_json: *mut *mut c_char,
 ) -> i32 {
-    if !preview.is_null() && !preview_pointer_is_live(preview) {
-        if !matches_json.is_null() {
-            unsafe { *matches_json = std::ptr::null_mut() };
+    if !preview.is_null() {
+        match guard(|| Ok(preview_pointer_is_live(preview))) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = guard(|| {
+                    if !matches_json.is_null() {
+                        unsafe { *matches_json = std::ptr::null_mut() };
+                    }
+                    Ok(())
+                });
+                return -1;
+            }
+            Err(e) => {
+                set_last_error(&e);
+                return -1;
+            }
         }
-        return -1;
     }
     let outcome = guard(|| {
         if preview.is_null() {
@@ -6611,21 +6639,6 @@ pub extern "C" fn tc_withdrawal_confirmation_prompt_text() -> *mut c_char {
     })
 }
 
-/// The extra privacy scan's words (`privacy_scan_copy::privacy_scan_copy`),
-/// for onboarding's scan screen and the recovery prompt shown while the
-/// daemon holds uploads for `near-ai-notice-not-acknowledged`, as a JSON
-/// object of `PrivacyScanCopy`'s fields.
-///
-/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
-/// on a caught panic.
-#[unsafe(no_mangle)]
-pub extern "C" fn tc_privacy_scan_copy_json() -> *mut c_char {
-    guarded_string_no_err(|| {
-        let copy = trace_commons_contributor::privacy_scan_copy::privacy_scan_copy();
-        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
-    })
-}
-
 /// The "keychain" block of the private-AI credential status
 /// (`DaemonSettings::keychain_status_json`): what the credential store at
 /// `config_dir` currently holds, as labels and booleans only -- never the
@@ -7088,7 +7101,12 @@ pub unsafe extern "C" fn tc_second_look_line_text(reason: *const c_char) -> *mut
 /// otherwise. Reads nothing and writes nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn tc_credential_store_self_check() -> i32 {
-    trace_commons_contributor::daemon::credential_store_self_check()
+    guard(|| Ok(trace_commons_contributor::daemon::credential_store_self_check())).unwrap_or_else(
+        |e| {
+            set_last_error(&e);
+            2
+        },
+    )
 }
 
 #[cfg(test)]

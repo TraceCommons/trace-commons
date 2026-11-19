@@ -148,6 +148,24 @@ final class LightContrastGroundsTests: XCTestCase {
         }
     }
 
+    /// The flat settings ground is distinct from the opaque backing used
+    /// for Reduce Transparency, popovers, map piles and transfer cut-outs.
+    func test_flatOpaqueAndSettingsGroundsKeepReadableText() throws {
+        let flat = FlatThemeContrastTests.self
+        XCTAssertEqual(try NearAccentTests.hex("paneOpaque", theme: "flatLight"), 0xF2F3F6)
+        XCTAssertEqual(try NearAccentTests.hex("settingsGround", theme: "flatLight"), 0xE9EBEF)
+        for theme in ["flatLight", "flatDark"] {
+            for token in ["paneOpaque", "settingsGround"] {
+                let ground = try flat.colour(token, theme: theme).rgb
+                for ink in FlatThemeContrastTests.textTokens {
+                    let text = try flat.colour(ink, theme: theme)
+                    XCTAssertGreaterThanOrEqual(flat.contrast(flat.over(ground, text), ground), 4.5,
+                                                "\(theme) \(ink) on \(token)")
+                }
+            }
+        }
+    }
+
     // MARK: Helpers
 
     static func solid(_ c: GlassRGBA) -> RGB { (c.red, c.green, c.blue) }

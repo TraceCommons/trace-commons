@@ -11,6 +11,8 @@ mod feature_flags_cli;
 mod insights_cli;
 #[path = "cli/mission_draft.rs"]
 mod mission_draft_cli;
+#[path = "cli/skills_catalog.rs"]
+mod skills_catalog_cli;
 
 /// The `--version` line: the build identity, then the channel
 /// (`channel::VERSION_CHANNEL_SUFFIX`), last, where the macOS bundle scripts
@@ -48,8 +50,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Inspect environment-wide feature flags.
+    /// Inspect feature flags and change per-machine overrides.
     FeatureFlags(feature_flags_cli::FlagArgs),
+    /// Sign and verify the server's Skills catalog document (operator use).
+    SkillsCatalog(skills_catalog_cli::CatalogArgs),
     /// Discover, inspect, preview, and apply running-app settings as JSON
     Config(config_cli::ConfigArgs),
     /// Launch a coding tool in this terminal with an isolated saved account.
@@ -202,8 +206,10 @@ enum Command {
         /// Run the full pipeline but upload nothing
         #[arg(long)]
         dry_run: bool,
-        /// PII filter backend: near-ai (requires TRACE_NEAR_AI_PRIVACY_API_KEY)
-        #[arg(long)]
+        /// Retired with the client-side NEAR AI second scan. Accepted so an
+        /// older script still runs, and ignored: uploads are scrubbed locally
+        /// only.
+        #[arg(long, hide = true)]
         pii_filter: Option<String>,
         /// Write a JSON manifest of uploaded envelope ids (submission_id + status) to this path
         #[arg(long)]
@@ -648,6 +654,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
     if let Command::FeatureFlags(args) = &cli.command {
         return feature_flags_cli::run(args, cli.json, cli.config_dir.clone());
     }
+    if let Command::SkillsCatalog(args) = &cli.command {
+        return skills_catalog_cli::run(args);
+    }
     if let Command::Config(args) = &cli.command {
         let store = ConfigStore::resolve_existing(cli.config_dir.clone())
             .map_err(|_| anyhow::anyhow!("config-state-dir-unavailable: check --config-dir"))?;
@@ -752,6 +761,9 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             outcome,
             invite,
         } => {
+            if pii_filter.is_some() {
+                crate::retired_second_scan::note_ignored();
+            }
             let sel = commands::SubmitSelection {
                 all,
                 since: since.as_deref(),
@@ -760,7 +772,6 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 yes,
                 pick,
                 dry_run,
-                pii_filter: pii_filter.as_deref(),
                 manifest: manifest.as_deref(),
                 attest_out: attest_out.as_deref(),
                 attest_post: attest_post.as_deref(),
@@ -775,6 +786,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         Command::ImportPreview { .. }
         | Command::FeatureFlags(_)
+        | Command::SkillsCatalog(_)
         | Command::Config(_)
         | Command::Insights(_)
         | Command::MissionDraft { .. }

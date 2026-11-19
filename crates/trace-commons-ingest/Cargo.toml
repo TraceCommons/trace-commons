@@ -82,3 +82,10 @@ path = "src/bin/trace_commons_ingest_main.rs"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

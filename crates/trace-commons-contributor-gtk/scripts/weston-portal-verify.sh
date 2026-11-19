@@ -14,7 +14,8 @@
 #      composition) -- not a display-less pixel sink. This captures the
 #      composited output with weston-screenshooter and asserts the frame is
 #      not blank/uniform (a standard-deviation check on pixel values) and
-#      that the header-bar switcher text ("Queue") is present via OCR
+#      that the Insights page's own tabs and its "Tokens by day" card
+#      are present via OCR
 #      (tesseract). A test that only checked "the process stayed alive"
 #      would be exactly the weak evidence this script exists to replace.
 #
@@ -54,6 +55,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 CRATE_DIR="$REPO_ROOT/crates/trace-commons-contributor-gtk"
+
+# Guard probe reachability and combined failure status before starting services.
+python3 "$HERE/test_weston_portal_gate.py"
 
 # shellcheck source=fixture.sh
 source "$HERE/fixture.sh"

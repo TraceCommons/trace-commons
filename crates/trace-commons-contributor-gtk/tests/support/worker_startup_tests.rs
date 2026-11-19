@@ -55,7 +55,8 @@ fn readiness_yields_while_backend_is_blocked_and_failure_allows_retry() {
         // source. It exercises readiness and ownership without starting a
         // daemon or accessing the developer's real state.
         Ok(Backend::Attached {
-            store: trace_commons_contributor::config::ConfigStore::open(dir)?,
+            socket: trace_commons_contributor::config::ConfigStore::open(dir)?
+                .daemon_path(trace_commons_contributor::config::DAEMON_SOCK_FILE),
         })
     }));
     let worker = finish(retry.as_mut()).unwrap();
@@ -113,4 +114,122 @@ fn abandoning_a_pending_start_retires_the_late_daemon() {
     lock.unlock().unwrap();
     drop(lock);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A reopen replaces the backend on the worker thread: later calls reach the
+/// new one, and the window learns whether it now hosts the loop.
+#[test]
+fn a_reopen_replaces_the_backend_and_reports_the_attachment() {
+    use std::io::{BufRead, BufReader, Write};
+    // Short: a socket path must fit in `sun_path`.
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let dir = std::env::temp_dir().join(format!("tc-ro-{}", &suffix[..8]));
+    std::fs::create_dir(&dir).unwrap();
+    let first = dir.join("a.sock");
+    let second = dir.join("b.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&second).unwrap();
+    let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&opens);
+    let (first_c, second_c) = (first.clone(), second.clone());
+    let mut start = Box::pin(Worker::start_with(dir.clone(), move |_| {
+        let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Backend::Attached {
+            socket: if n == 0 {
+                first_c.clone()
+            } else {
+                second_c.clone()
+            },
+        })
+    }));
+    let worker = finish(start.as_mut()).unwrap();
+    let id = worker.reopen(false);
+    let (got, outcome) = worker.results.recv_blocking().unwrap();
+    assert_eq!(got, id);
+    match outcome {
+        crate::worker::Outcome::Reopened { attachment, error } => {
+            assert!(!attachment.hosts);
+            assert_eq!(error, None);
+        }
+        _ => panic!("expected a reopen outcome"),
+    }
+    assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+    // The new backend answers: the event subscription connects first, then
+    // the call.
+    let server = std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let stream = stream.unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            if line.contains("\"status\"") {
+                (&stream)
+                    .write_all(b"{\"id\":1,\"result\":{\"from\":\"second\"}}\n")
+                    .unwrap();
+                return;
+            }
+        }
+    });
+    let id = worker.call("status", serde_json::json!({}));
+    let (got, outcome) = worker.results.recv_blocking().unwrap();
+    assert_eq!(got, id);
+    server.join().unwrap();
+    match outcome {
+        crate::worker::Outcome::Call(Ok(value)) => assert_eq!(value["from"], "second"),
+        _ => panic!("expected the second backend's answer"),
+    }
+    drop(worker);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder declaration must not be mapped for one backend and sent to
+/// another. A reopen queued ahead of it replaces the backend on the worker
+/// thread before the window learns where the new one is, so until the
+/// window has recorded the reopen's attachment, where a declaration would
+/// land is unknown and none is sent.
+#[test]
+fn no_declaration_target_while_a_reopen_is_in_flight() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let dir = std::env::temp_dir().join(format!("tc-dt-{}", &suffix[..8]));
+    std::fs::create_dir(&dir).unwrap();
+    let socket = dir.join("a.sock");
+    let (entered, entering) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let opens = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&opens);
+    let released = std::sync::Mutex::new(released);
+    let mut start = Box::pin(Worker::start_with(dir.clone(), move |_| {
+        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            // The second open, from the reopen: held until released.
+            entered.send(()).unwrap();
+            released.lock().unwrap().recv_timeout(DEADLINE).unwrap();
+        }
+        Ok(Backend::Attached {
+            socket: socket.clone(),
+        })
+    }));
+    let worker = finish(start.as_mut()).unwrap();
+    assert_eq!(worker.declaration_target(), Some(false));
+    let id = worker.reopen(false);
+    assert_eq!(
+        worker.declaration_target(),
+        None,
+        "a declaration was allowed while the reopen was queued"
+    );
+    entering.recv_timeout(DEADLINE).unwrap();
+    assert_eq!(
+        worker.declaration_target(),
+        None,
+        "a declaration was allowed while the reopen was running"
+    );
+    release.send(()).unwrap();
+    let (got, outcome) = worker.results.recv_blocking().unwrap();
+    assert_eq!(got, id);
+    let crate::worker::Outcome::Reopened { attachment, .. } = outcome else {
+        panic!("expected a reopen outcome");
+    };
+    // Answered, but not yet recorded by the window: still unknown.
+    assert_eq!(worker.declaration_target(), None);
+    worker.set_attachment(attachment);
+    assert_eq!(worker.declaration_target(), Some(attachment.via_host_link));
+    drop(worker);
+    let _ = std::fs::remove_dir_all(dir);
 }

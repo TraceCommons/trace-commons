@@ -1672,11 +1672,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         // rather than filled with a sentence written here.
         AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
         AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
-        ConnectionRows.Add(new ConnectionStatusViewModel(
-            settings.NearAiConfigured
-                ? "Extra privacy scan configured"
-                : "No extra privacy scan",
-            settings.NearAiConfigured));
 
         QuiescenceMinutes = settings.QuiescenceSeconds / 60.0;
         ApprovalHoldSeconds = settings.ApprovalHoldSeconds;

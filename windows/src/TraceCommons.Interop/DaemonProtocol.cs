@@ -93,7 +93,6 @@ public static class DaemonProtocol
         public const string ListProjects = "list_projects";
         public const string SetProjectMode = "set_project_mode";
         public const string ListAudit = "list_audit";
-        public const string AcknowledgeNearAiNotice = "acknowledge_near_ai_notice";
 
         /// <summary>
         /// Records that the void notices with these ids were shown. Takes

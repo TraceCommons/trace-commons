@@ -7,10 +7,11 @@ import TCBridge
 /// Benchmarks.
 @MainActor
 final class InsightsTabsTests: XCTestCase {
-    func testTheBarShowsOverviewBreakdownAndBenchmarks() {
+    func testTheBarShowsSkillsOnlyWithAnEnabledDecision() {
         XCTAssertEqual(InsightsView.shownTabs, [.overview, .patterns, .benchmarks])
-        XCTAssertEqual(InsightsView.shownTabs.map(\.copyKey),
-                       ["analytics_tab_overview", "analytics_tab_patterns", "analytics_tab_benchmarks"])
+        XCTAssertEqual(InsightsView.enabledShownTabs(isSkillsEnabled: true), [.overview, .patterns, .benchmarks, .skills])
+        XCTAssertEqual(InsightsView.enabledShownTabs(isSkillsEnabled: true).map(\.copyKey),
+                       ["analytics_tab_overview", "analytics_tab_patterns", "analytics_tab_benchmarks", "analytics_tab_skills"])
     }
 
     func testBreakdownIsTheSecondTabsName() throws {

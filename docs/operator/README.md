@@ -22,6 +22,7 @@ the link.
 | If you are... | Start with |
 |---|---|
 | Enabling or disabling client features by environment | [`./feature-flags.md`](./feature-flags.md) |
+| Crawling, signing and publishing the public Skills catalog | [`./skills-catalog.md`](./skills-catalog.md) |
 | First-time deploying `trace-commons-server` | [`./deployment.md`](./deployment.md) |
 | Bringing up the GCP pilot end-to-end | [`./pilot-gcp-deployment.md`](./pilot-gcp-deployment.md) |
 | Standing up the pilot operator dashboard | [`./pilot-dashboard.md`](./pilot-dashboard.md) |
@@ -72,6 +73,7 @@ the link.
 | A tenant's audited writes fail after a file append failed in required-mirror mode | [`./audit-trail-forensics.md#repairing-a-required-mirror-lockout`](./audit-trail-forensics.md#repairing-a-required-mirror-lockout) |
 | Reading hash-only error classes from logs | [`./hash-only-logging.md`](./hash-only-logging.md) |
 | Interpreting `/v1/admin/operational-summary` | [`./operational-summary.md`](./operational-summary.md) |
+| Rechecking held pipeline privacy evidence without modifying a pass | [`./privacy-review-recheck.md`](./privacy-review-recheck.md) |
 | Checking whether a background driver is alive | [`./driver-liveness.md`](./driver-liveness.md) |
 | Running or scheduling admin drills | [`./drills.md`](./drills.md) |
 | Proving the NEAR AI inference endpoint is the enclave you pinned | [`./near-attestation-drill.md`](./near-attestation-drill.md) |
@@ -84,6 +86,7 @@ the link.
 | Deploying the redaction witness on dstack (this project's first CVM) | [`../../deploy/witness/README.md`](../../deploy/witness/README.md) |
 | Load-testing the redaction witness locally | [`./witness-load-testing.md`](./witness-load-testing.md) |
 | Seeing when the redaction witness is overloaded and blocking uploads | [`./witness-monitor.md`](./witness-monitor.md) |
+| Retiring old witness measurements after an upgrade's rollback window | [`./witness-measurement-retirement.md`](./witness-measurement-retirement.md) |
 | Looking up an env var | [`./env-reference.md`](./env-reference.md) |
 | Driving review / admin / worker / tenant workflows from a CLI | [`./operator-binaries.md`](./operator-binaries.md) |
 | Working the quarantine queue (review, release, contributor notification) | [`./quarantine-review.md`](./quarantine-review.md) |

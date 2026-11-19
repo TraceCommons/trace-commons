@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor-ffi"
-version = "1.0.7"
+version = "1.0.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -55,3 +55,7 @@ path = "tests/abi.rs"
 [[test]]
 name = "build_channel"
 path = "tests/build_channel.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"

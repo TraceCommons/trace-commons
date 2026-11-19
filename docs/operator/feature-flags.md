@@ -34,6 +34,24 @@ re-enable. Account/key withdrawal and Private AI off still revoke it. No live
 manifest is published by this PR.
 Tests use fixture flags, which are absent from shipped registry/profile data.
 
+The shipped registry also includes `insights_skills`, a live flag with a false default.
+All three build profiles declare `insights_skills_v1` and permit a remote enable
+of that flag. Missing, unavailable, expired, or omitted decisions leave Skills
+disabled. The dated example manifests keep it false; these files have not been
+published. Other existing features retain their behavior.
+
+Skills checks the daemon decision at its inventory, publisher-follow and
+background-refresh entry points, and throughout skill usage extraction. Reads
+that complete after disable do not publish new skill evidence. Catalog refreshes
+check the gate before each request and discard results after disable. Background
+catalog polling additionally requires a followed publisher; opening Skills or
+choosing Refresh can request a catalog check while enabled. Catalog request paths
+never depend on installed skills; historical hashes come only from previously
+observed public catalog versions.
+The native tab consumes the same daemon snapshot. Disabling it hides the tab and
+blocks new Skills work while ordinary Insights remains available. This does not
+grant folder access, consent, or permission to update installed skills.
+
 Production builds use the production profile. Staging builds default to staging;
 the staging workflow also offers a testing profile. Testing uses the same staging
 services, app identity and user state, with a separate flag cache. It is not a
@@ -44,6 +62,104 @@ build from its workflow artifacts; later updates stay on that testing feed. `TC_
 selection, not a runtime override. Production channel builds reject testing.
 Bundles compare the CLI, FFI and plist feature identities before signing; the
 native application checks its loaded FFI profile against the plist at startup.
+
+Registry version 3 adds two more product flags, both default false.
+`skills_server_catalog` is permitted for remote enable in every profile;
+`skills_catalog_suggestions` only in staging and testing, because its
+consent copy is not yet approved (production waits for that approval):
+
+- `skills_server_catalog`: read the Skills catalog from the operator-signed
+  server document ([`skills-catalog.md`](./skills-catalog.md)) instead of
+  fetching the four publishers from GitHub. GitHub stays the fallback while
+  no verified, current catalog is held, and until a catalog key is pinned.
+- `skills_catalog_suggestions`: offer the opt-in that reports public GitHub
+  skills the catalog lacks. This is the one exception to "catalog requests
+  never depend on installed skills": nothing is sent until the user opts in,
+  only a skill whose git-checkout source GitHub serves anonymously at that
+  commit is eligible, and each report is one anonymous request carrying a
+  repository, a path and a commit. The flag is `product`, not
+  `privacy_sensitive`, by owner decision pending confirmation: the opt-in is
+  the consent, and a `privacy_sensitive` flag cannot be enabled today.
+
+## Local overrides
+
+Every build profile, including production, supports per-machine product flag
+choices through the CLI, a local config file, or environment variables. There
+are no Settings controls. Precedence is: **process environment variable**, then
+**local config**, then the **valid signed environment manifest**, then the
+**compiled default**, always subject to the build's required capabilities.
+Privacy-sensitive flags cannot be overridden. These controls grant no consent,
+folder access, enrollment, or upload permission; Local trace analysis remains a
+separate choice for skill usage evidence.
+
+### CLI
+
+```bash
+near-ai feature-flags set insights_skills on
+near-ai feature-flags set insights_skills off
+near-ai feature-flags set insights_skills default
+near-ai --json feature-flags
+```
+
+Use `near-ai-staging` for the separately installed staging app. Changes require
+the matching app/daemon to be running. The CLI uses authenticated local IPC and
+checks the environment and immutable profile identity before mutation; it never
+writes an offline daemon's state. `default` clears the persisted choice and uses
+the current lower-priority environment policy, unless a process environment
+variable still overrides it. CLI output reports both local and process choices.
+Live flags change immediately; `next_start` flags show the pending value until
+the daemon restarts.
+
+### Config file
+
+The CLI stores choices in `feature-flags-local-<profile_digest>.json` in the
+app's state directory. `near-ai feature-flags build-profile` reports the digest
+and environment. Quit the matching app/daemon before editing this file manually,
+then restart it to load the edit. A minimal document looks like this:
+
+```json
+{
+  "schema_version": 1,
+  "environment": "staging",
+  "profile_digest": "<digest from this build>",
+  "flags": { "insights_skills": true }
+}
+```
+
+Use `false` to force Off; remove the entry to follow the environment. Keep file
+permissions private (`0600`). The state directory for native macOS staging is
+`~/Library/Application Support/trace-commons-staging`. Choices survive restarts
+with the same profile and reset when a release changes the profile. Invalid
+local data is ignored as a whole: a file with any invalid entry enables
+nothing. The file is left in place, and `near-ai feature-flags set` refuses
+with `feature-local-overrides-invalid` until it is fixed or removed and the
+app restarts, so a typo never silently discards the other choices in it. A failed CLI persistence write leaves the running choice
+unchanged. Direct file edits are startup-only, not watched live.
+
+### Environment variable
+
+Set `TRACE_COMMONS_FEATURE_FLAGS` to a JSON object when starting the daemon:
+
+```bash
+TRACE_COMMONS_FEATURE_FLAGS='{"insights_skills":true}' near-ai-staging daemon run
+```
+
+Stop the existing daemon first. For a native app, the variable must be in the
+app process's launch environment; setting it only on a later CLI command does
+not change an already-running app. `false` forces Off; omit a key or unset the
+variable before restart to use the local config or environment policy. Values
+are sampled at startup and never persisted. An empty object is valid. Unknown
+IDs, duplicate keys, non-boolean values, unsupported capabilities, or
+privacy-sensitive entries reject the entire variable; diagnostics report a
+stable error label and use the remaining configuration layers.
+
+Remote refresh, remote disable, and manifest expiry do not erase explicit
+local/process choices. Signed cache and rollback watermarks remain independent;
+no override publishes to other machines or changes the shared feed. Diagnostics
+expose `local_overrides`, `local_override_allowed`,
+`environment_variable_overrides`, and `environment_variable_error` alongside
+the effective `flags`. Existing `source`, `revision`, `expires_at`, and `fresh`
+fields continue to describe the signed environment layer.
 
 ## Add a feature
 
@@ -254,3 +370,15 @@ the daemon through existing IPC/FFI. Hosted ingest runtime integration and
 Windows/Linux UI integrations are follow-up work; these flags cannot disable an
 independently deployed server feature. Local tests do not prove live publication,
 production deployment, or physical-device/cross-platform UI validation.
+
+### Local skill index extension
+
+The local skill Index extension reuses `insights_skills`; it does not introduce a
+second rollout switch. Keep the existing registry default and example manifest
+values false. A reviewer should exercise both a permitted environment enable and
+a live disable before rollout. Do not publish a manifest as part of a code PR.
+
+Validation must cover disabled navigation/polling, inventory with local analysis
+off, extraction only with analysis enabled, Never-folder exclusions, and a disable
+while background work is pending. Counts describe observed usage over retained
+local history, not total lifetime use. Unknown/partial coverage is not zero usage.

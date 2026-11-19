@@ -349,6 +349,7 @@ impl BackendRegistry {
                     models: backend.models(),
                     catalogue_from_provider: backend.catalogue_from_provider(),
                     context_windows: backend.context_windows(),
+                    image_support: backend.image_support(),
                 }
             })
             .collect()

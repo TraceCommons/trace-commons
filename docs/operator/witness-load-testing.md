@@ -120,11 +120,14 @@ so run it last and on a key nothing else is using.
   classifier calls, which looks like a fast witness and is not one.
 - `--events` matters more than `--size-kb`. The witness classifies each
   text leaf separately, so wall time follows the number of leaves.
-- A `503` is either `witness_saturated` (all request slots busy; the
-  witness answers at once with `Retry-After`) or `witness_redaction_failed`
-  (the classifier failed; it arrives after the adapter's retries, about
-  two minutes against a dead endpoint). Read the response body to tell
-  them apart.
+- A `503` is `witness_saturated` (all request slots busy; the witness
+  answers at once with `Retry-After`), `witness_classifier_unavailable`
+  (the classifier stayed down, slow or rate limited through the
+  adapter's retries, or the classify budget ran out first, possibly in the
+  queue; it arrives after them, about two minutes against a dead endpoint,
+  with `Retry-After: 60`), or `witness_redaction_failed`
+  (the pass refused: a permanent classifier refusal, a residual secret, a
+  result too large to keep). Read the response body to tell them apart.
 - The stand-in scales perfectly with concurrency because it does not model
   the endpoint's overlap trip unless you pass `--trip-above`. Treat
   concurrency gains measured here as an upper bound.

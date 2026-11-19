@@ -45,6 +45,7 @@ const PURPOSE: &str = "TRACE_COMMONS_TEST_ONLY_F1_SCHEDULER_PURPOSE";
 /// Serializes the tests below; they share the four variables above.
 static SCHEDULER_HELPER_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[allow(unsafe_code)]
 fn set(var: &str, value: Option<&str>) {
     // SAFETY: the variables are read only by the tests in this file, which
     // hold SCHEDULER_HELPER_ENV_LOCK.

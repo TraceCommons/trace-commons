@@ -26,6 +26,8 @@
 //! Output is labels and counts only; no path, URL or key material besides
 //! the public key `public-key` is asked for.
 
+#![forbid(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

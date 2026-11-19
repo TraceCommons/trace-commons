@@ -7,8 +7,8 @@ import XCTest
 
 /// The status item can only be checked by looking at it, so this draws it
 /// the way the screenshot hook does -- `ImageRenderer`, CPU-side, no window
-/// -- and asserts the one thing a pixel buffer can prove: that a count
-/// changes what is drawn. The item is the glass strip (`GlassMenuBarStrip`):
+/// -- and checks its sizing, ink, and transparent badge figures. The item
+/// is the glass strip (`GlassMenuBarStrip`):
 /// the NEAR AI mark and stacked up-and-down bars, drawn under each
 /// `Condition` with and without a badge and the Private AI segments. The
 /// PNGs it writes
@@ -280,6 +280,180 @@ final class MenuBarGlyphRenderTests: XCTestCase {
                 XCTAssertGreaterThan(colour.redComponent, colour.blueComponent + 0.5, "\(name.rawValue) drew the light image")
             } else {
                 XCTAssertGreaterThan(colour.blueComponent, colour.redComponent + 0.5, "\(name.rawValue) drew the dark image")
+            }
+        }
+    }
+
+    /// The app's exact bounds, with optional extra room to expose clipping.
+    /// Keep the background transparent unless testing the blend's isolation.
+    @MainActor
+    private func stripBitmap(
+        condition: GlassMenuBarStrip.Condition = .live, badge: Int?, mark: GlassMenuBarStrip.Mark = .none,
+        graph: Bool, scheme: ColorScheme, scale: CGFloat, empty: Bool = false,
+        outset: CGFloat = 0, background: Color = .clear
+    ) throws -> NSBitmapImageRep {
+        let renderer = ImageRenderer(content: GlassMenuBarStrip(
+            traces: empty ? [] : Self.columns, privateAI: empty ? nil : Self.privateAI,
+            condition: condition, badge: badge, mark: mark, graph: graph)
+            .padding(.trailing, GlassMenuBarStrip.haloReach)
+            .padding(outset)
+            .background(background)
+            .environment(\.colorScheme, scheme))
+        return try XCTUnwrap(Self.draw(renderer, scale: scale))
+    }
+
+    private func alpha(_ rep: NSBitmapImageRep, x: Int, y: Int) -> CGFloat {
+        rep.colorAt(x: x, y: y)?.alphaComponent ?? 0
+    }
+
+    private func alphaSum(_ rep: NSBitmapImageRep) -> CGFloat {
+        (0..<rep.pixelsHigh).reduce(CGFloat(0)) { total, y in
+            total + (0..<rep.pixelsWide).reduce(CGFloat(0)) { $0 + alpha(rep, x: $1, y: y) }
+        }
+    }
+
+    @MainActor
+    func testMarkOnlyStatesFitWithoutCoveringTheLogoOrDrawingData() throws {
+        let conditions: [GlassMenuBarStrip.Condition] = [.live, .paused, .attention, .unavailable, .loading]
+        let slots: [(Int?, GlassMenuBarStrip.Mark)] = [
+            (nil, .none), (0, .none), (3, .none), (12, .none), (120, .none), (nil, .news), (3, .ready),
+        ]
+        for scale in [CGFloat(1), 2] {
+            for scheme in [ColorScheme.light, .dark] {
+                let logo = try stripBitmap(badge: nil, graph: false, scheme: scheme, scale: scale)
+                XCTAssertEqual(logo.pixelsWide, Int(((14 + 3.5) * scale).rounded(.up)))
+                for condition in conditions {
+                    let noBadge = try stripBitmap(
+                        condition: condition, badge: nil, graph: false, scheme: scheme, scale: scale)
+                    for (badge, mark) in slots {
+                        let label = "\(condition), \(String(describing: badge)), \(mark), \(scheme), \(scale)x"
+                        let tight = try stripBitmap(
+                            condition: condition, badge: badge, mark: mark, graph: false, scheme: scheme, scale: scale)
+                        let empty = try stripBitmap(
+                            condition: condition, badge: badge, mark: mark, graph: false,
+                            scheme: scheme, scale: scale, empty: true)
+                        XCTAssertEqual(tight.pixelsHigh, Int(22 * scale), label)
+                        XCTAssertEqual(
+                            tight.representation(using: .png, properties: [:]),
+                            empty.representation(using: .png, properties: [:]), "hidden data changed the strip: \(label)")
+                        if condition == .unavailable || condition == .loading || (badge == 0 && mark == .none) {
+                            XCTAssertEqual(
+                                tight.representation(using: .png, properties: [:]),
+                                noBadge.representation(using: .png, properties: [:]), "a hidden badge drew ink: \(label)")
+                        }
+                        let roomy = try stripBitmap(
+                            condition: condition, badge: badge, mark: mark, graph: false,
+                            scheme: scheme, scale: scale, outset: 8)
+                        XCTAssertEqual(alphaSum(tight), alphaSum(roomy), accuracy: 0.5, "clipped slot: \(label)")
+                        // Every slot, including the ready halo, leaves the
+                        // mark's pixels intact and a clear point after it.
+                        var logoDifference: CGFloat = 0
+                        var gapInk: CGFloat = 0
+                        for y in 0..<tight.pixelsHigh {
+                            for x in 0..<Int(14 * scale) {
+                                logoDifference += abs(alpha(tight, x: x, y: y) - alpha(logo, x: x, y: y))
+                            }
+                            gapInk += alpha(tight, x: Int(15 * scale), y: y)
+                        }
+                        XCTAssertEqual(logoDifference, 0, accuracy: 0.01, "slot covers the mark: \(label)")
+                        XCTAssertEqual(gapInk, 0, accuracy: 0.01, "slot closes the mark's gap: \(label)")
+                        let graphed = try stripBitmap(
+                            condition: condition, badge: badge, mark: mark, graph: true, scheme: scheme, scale: scale)
+                        // Six pairs of 1pt bars, five 1pt gaps, and the
+                        // 4pt mark-to-graph gap; a slot has 2pt less gap.
+                        let hasSlot = ((badge ?? 0) > 0 && condition != .unavailable && condition != .loading)
+                            || condition == .attention || condition == .unavailable
+                            || (mark == .news && condition == .live && (badge ?? 0) == 0)
+                        XCTAssertEqual(graphed.pixelsWide - tight.pixelsWide, Int((hasSlot ? 19 : 21) * scale), label)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Transparent pixels surrounded by opaque ink cannot be the capsule's
+    /// rounded corners or the empty space around it: they are its figure.
+    private func assertCutOutFigure(
+        _ rep: NSBitmapImageRep, graph: Bool, scheme: ColorScheme, scale: CGFloat,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let start = Int((graph ? 35 : 16) * scale)
+        let end = rep.pixelsWide - Int((3.5 * scale).rounded(.up))
+        let ink: CGFloat = scheme == .dark ? 1 : 0
+        var opaque = 0
+        var holes = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in start..<end {
+                let colour = try XCTUnwrap(rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), file: file, line: line)
+                if colour.alphaComponent > 0.95 {
+                    opaque += 1
+                    XCTAssertEqual(colour.redComponent, ink, accuracy: 0.02, file: file, line: line)
+                    XCTAssertEqual(colour.greenComponent, ink, accuracy: 0.02, file: file, line: line)
+                    XCTAssertEqual(colour.blueComponent, ink, accuracy: 0.02, file: file, line: line)
+                } else if colour.alphaComponent < 0.65,
+                          (start..<x).contains(where: { alpha(rep, x: $0, y: y) > 0.95 }),
+                          ((x + 1)..<end).contains(where: { alpha(rep, x: $0, y: y) > 0.95 }),
+                          (0..<y).contains(where: { alpha(rep, x: x, y: $0) > 0.95 }),
+                          ((y + 1)..<rep.pixelsHigh).contains(where: { alpha(rep, x: x, y: $0) > 0.95 }) {
+                    holes += 1
+                }
+            }
+        }
+        XCTAssertGreaterThan(opaque, Int(20 * scale * scale), "the capsule lost its ink", file: file, line: line)
+        XCTAssertGreaterThan(holes, 0, "the badge has no transparent figure", file: file, line: line)
+    }
+
+    @MainActor
+    private func drawItem(_ image: NSImage, appearance: NSAppearance.Name, scale: CGFloat) throws -> NSBitmapImageRep {
+        let rep = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int((image.size.width * scale).rounded(.up)),
+            pixelsHigh: Int((image.size.height * scale).rounded(.up)), bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: rep))
+        let appearance = try XCTUnwrap(NSAppearance(named: appearance))
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSGraphicsContext.current = context
+        context.cgContext.clear(CGRect(x: 0, y: 0, width: rep.pixelsWide, height: rep.pixelsHigh))
+        context.cgContext.scaleBy(x: scale, y: scale)
+        appearance.performAsCurrentDrawingAppearance {
+            image.draw(in: NSRect(origin: .zero, size: image.size))
+        }
+        return rep
+    }
+
+    @MainActor
+    func testBadgeFiguresStayTransparentThroughRenderingAndAdaptiveImages() throws {
+        for graph in [false, true] {
+            for scale in [CGFloat(1), 2] {
+                for badge in [3, 12, 120] {
+                    let image = MenuBarStripLabel.rendered(MenuBarStripInputs(
+                        traces: Self.columns, privateAI: Self.privateAI, condition: .live,
+                        badge: badge, mark: .none, scale: scale, graph: graph))
+                    XCTAssertFalse(image.isTemplate)
+                    for scheme in [ColorScheme.light, .dark] {
+                        let direct = try stripBitmap(badge: badge, graph: graph, scheme: scheme, scale: scale)
+                        try assertCutOutFigure(direct, graph: graph, scheme: scheme, scale: scale)
+                        let adaptive = try drawItem(image, appearance: scheme == .dark ? .darkAqua : .aqua, scale: scale)
+                        XCTAssertEqual(adaptive.pixelsWide, direct.pixelsWide)
+                        XCTAssertEqual(adaptive.pixelsHigh, direct.pixelsHigh)
+                        try assertCutOutFigure(adaptive, graph: graph, scheme: scheme, scale: scale)
+                        // An ungrouped destinationOut also punches through
+                        // the parent background. The badge must clear only
+                        // itself, leaving this opaque ground intact.
+                        let grounded = try stripBitmap(
+                            badge: badge, graph: graph, scheme: scheme, scale: scale,
+                            background: Color(.sRGB, red: 0.2, green: 0.5, blue: 0.7))
+                        // The layout can end on a fractional pixel; exclude
+                        // its outermost column, which is antialiased.
+                        for y in 0..<grounded.pixelsHigh {
+                            for x in 0..<(grounded.pixelsWide - 1) {
+                                XCTAssertEqual(alpha(grounded, x: x, y: y), 1, accuracy: 0.01,
+                                               "the cut-out escaped the badge's compositing group")
+                            }
+                        }
+                    }
+                }
             }
         }
     }

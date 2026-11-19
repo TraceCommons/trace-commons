@@ -20,6 +20,13 @@
 //! socket's own mode; the daemon refuses to serve from a directory that is
 //! not 0700.
 //!
+//! On Linux a daemon on its default state directory, outside a Flatpak
+//! sandbox, also serves this same dispatcher on the host link
+//! (`daemon::host_link`), for a Flatpak window that cannot see the state
+//! directory. That socket's directory under `XDG_RUNTIME_DIR` is held at
+//! 0700 too, and every connection to it must also come from the daemon's own
+//! uid (`SO_PEERCRED`) before a byte is read.
+//!
 //! Two operations -- arming a project for `auto_upload` and bulk-approving
 //! the whole queue -- used to be refused over the socket and required a
 //! terminal. That restriction is gone: the reasoning behind it does not
@@ -343,6 +350,7 @@ const QUIESCE_POLL_MS: u64 = 200;
 pub const METHODS: &[&str] = &[
     "feature_flags_snapshot",
     "feature_flags_refresh",
+    "feature_flags_override_set",
     "claude_desktop_status",
     "claude_desktop_configure",
     "claude_desktop_preset",
@@ -388,7 +396,6 @@ pub const METHODS: &[&str] = &[
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
     "legacy_invite_migrate",
-    "acknowledge_near_ai_notice",
     "approve",
     "automatic_grant",
     "grant_automatic",
@@ -470,6 +477,9 @@ pub const METHODS: &[&str] = &[
     "inference_activity",
     "insights_glance",
     "insights_week",
+    "insights_skills",
+    "insights_skills_follow",
+    "insights_skills_suggestions",
     "insights_sessions",
     "insights_session_drill",
     "insights_session_label",
@@ -581,7 +591,6 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "set_settings",
     "consent_options",
     "set_consent_scopes",
-    "acknowledge_near_ai_notice",
     "acknowledge_grant_voids",
     "acknowledge_legacy_invite_migration",
     "acknowledge_arming_rewordings",
@@ -1214,6 +1223,7 @@ pub struct DaemonShared {
     /// owner, 2026-10-29). See
     /// `daemon::insights_week`.
     pub(crate) insights_counter: super::insights_week::CounterPass,
+    pub(crate) insights_skills: Arc<super::insights_skills::SkillsService>,
     /// The contribution-mission catalogue behind `list_pending`'s
     /// `mission_fit`. In memory only and `None` until something writes it,
     /// which in production nothing does until Z7/Z8's server catalogue
@@ -1561,6 +1571,7 @@ impl DaemonShared {
         if store.remove_retired_files().is_err() {
             tracing::warn!("could not remove a retired daemon file");
         }
+        super::first_trace::observe(&store, std::iter::empty());
         let mut queue = Queue::load(&store)?;
         // `Uploading` is a transient, in-pass claim. A daemon that died
         // mid-upload leaves entries in it, and nothing else would ever move
@@ -1753,6 +1764,7 @@ impl DaemonShared {
             harness_plans: super::harness::PlanStore::default(),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             insights_counter,
+            insights_skills: Arc::new(Default::default()),
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
             settlement: Mutex::new(Default::default()),
@@ -2838,6 +2850,7 @@ impl DaemonShared {
             .as_ref()
             .and_then(|snapshot| super::commons_credentials::scope_for_snapshot(snapshot).ok());
         let cfg = self.store.load_config().ok().flatten();
+        let first_trace_at = super::first_trace::read(&self.store, cfg.as_ref());
         // No credential-store read and no write (`account_attention`'s doc).
         // `holds_near_ai_key` takes the settings lock, before the locks below.
         let account_attention = super::account_attention::account_attention(
@@ -3082,6 +3095,8 @@ impl DaemonShared {
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
             "account_scope": account_scope,
+            // Enrollment-owned observation date, independent of history pages.
+            "first_trace_at": first_trace_at,
             // Additive (#1836 F1). `ok`, or `needs_attention` while this
             // app's account is locally broken in a way signing in again does
             // not fix; then `account_state_reason` is
@@ -3851,6 +3866,17 @@ pub fn entry_value_with(
     // shares; `trimmed-to-fit` is known from discovery and can appear before
     // any preview.
     super::second_look::insert_fields(&mut value, e.scrub(), e.subagents_dropped, witness);
+    // A session the witness refused as too large to review: how many
+    // classifier requests it needed and the most one review allows. Absent
+    // on every other entry, and on one refused before the counts were kept.
+    if e.state == super::queue::QueueState::Refused
+        && e.reason_label.as_deref()
+            == Some(trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW)
+        && let (Some(needed), Some(allowed)) = (e.review_windows_needed, e.review_windows_allowed)
+    {
+        value["windows_needed"] = serde_json::Value::from(needed);
+        value["windows_allowed"] = serde_json::Value::from(allowed);
+    }
     value
 }
 
@@ -3989,6 +4015,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("claude_desktop_configure", "claude-desktop-requires-async"),
     ("claude_desktop_preset", "claude-desktop-requires-async"),
     ("claude_desktop_disconnect", "claude-desktop-requires-async"),
+    ("insights_skills", "insights-skills-requires-async"),
     // It waits for the revoke at NEAR AI and takes the key out of the
     // running proxy; neither can happen on this dispatcher.
     (
@@ -4155,6 +4182,62 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("clear_public_profile", "profile-requires-async"),
 ];
 
+fn handle_feature_flags_override(shared: &DaemonShared, req: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        id: String,
+        value: Option<bool>,
+        environment: crate::feature_flags::Environment,
+        profile_digest: String,
+    }
+    // Option<bool> alone treats an omitted field as null: default must be explicit.
+    if req.params.get("value").is_none() {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-override-params-invalid");
+    }
+    let Ok(params) = serde_json::from_value::<Params>(req.params.clone()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-override-params-invalid");
+    };
+    let before = shared.feature_flags.snapshot();
+    if params.environment != before.environment || params.profile_digest != before.profile_digest {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-profile-mismatch");
+    }
+    if before.local_override_allowed.get(&params.id) != Some(&true) {
+        return Response::err(req.id, ERR_BAD_PARAMS, "feature-local-override-unavailable");
+    }
+    if shared.feature_flags.local_overrides_unreadable() {
+        return Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            crate::feature_flags::LOCAL_OVERRIDES_INVALID,
+        );
+    }
+    match shared
+        .feature_flags
+        .set_local_override(&params.id, params.value, Utc::now())
+    {
+        Ok(snapshot) => {
+            if snapshot.generation != before.generation {
+                shared.publish(
+                    EVENT_FEATURE_FLAGS_CHANGED,
+                    serde_json::json!({
+                        "instance_id":snapshot.instance_id,"generation":snapshot.generation
+                    }),
+                );
+            }
+            Response::ok(
+                req.id,
+                serde_json::to_value(snapshot).expect("feature snapshot serialization"),
+            )
+        }
+        Err(_) => Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            "feature-local-override-write-failed",
+        ),
+    }
+}
+
 pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     if let Some(refused) = dev_dry_run_refusal(shared, req) {
         return refused;
@@ -4206,6 +4289,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
+                (super::service::HELLO_SERVICE_LEVEL_KEY): super::service::SERVICE_LEVEL,
             }),
         ),
         "feature_flags_snapshot" => Response::ok(
@@ -4213,6 +4297,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             serde_json::to_value(shared.feature_flags.snapshot())
                 .expect("feature snapshot serialization"),
         ),
+        "feature_flags_override_set" => handle_feature_flags_override(shared, req),
         "feature_flags_refresh" => {
             shared.feature_flags.request_refresh();
             Response::ok(req.id, serde_json::json!({"requested":true}))
@@ -4225,6 +4310,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
+        "insights_skills_follow" => super::insights_skills::handle_follow(shared, req),
+        "insights_skills_suggestions" => super::insights_skills::handle_suggestions(shared, req),
         "insights_sessions" => super::insights_sessions::handle_sessions(shared, req),
         "insights_session_drill" => super::insights_sessions::handle_session_drill(shared, req),
         "insights_session_label" => super::insights_sessions::handle_session_label(shared, req),
@@ -4459,7 +4546,6 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         }
         "consent_options" => Response::ok(req.id, enroll::consent_options()),
         "set_consent_scopes" => enroll::handle_set_consent_scopes(shared, req),
-        "acknowledge_near_ai_notice" => enroll::handle_acknowledge_near_ai_notice(shared, req),
         "list_history" => {
             let limit = req
                 .params
@@ -5602,7 +5688,7 @@ fn handle_grant_automatic(shared: &DaemonShared, req: &Request) -> Response {
 // a void raised between the shell drawing and the contributor pressing the
 // button would be cleared unseen, which is the silent void R6 forbids.
 //
-// Audited, like `acknowledge_near_ai_notice`, because it asserts on the
+// Audited, like `set_consent_scopes`, because it asserts on the
 // caller's word that someone was shown something. The audit goes first: a
 // notice cleared with no record of who cleared it is the worse failure, and
 // an acknowledgement that cannot be recorded leaves the notice showing.
@@ -6142,7 +6228,7 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     }
 
     // The audit entry goes down FIRST, before anything is armed,
-    // the way `acknowledge_near_ai_notice` does it.
+    // the way `acknowledge_grant_voids` does it.
     //
     // The reverse order looked equivalent and was not. It saved the
     // policy, then appended, then on an append failure restored the
@@ -7444,6 +7530,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "claude_desktop_configure" => super::claude_desktop::handle(shared, req).await,
         "claude_desktop_preset" => super::claude_desktop::handle(shared, req).await,
         "claude_desktop_disconnect" => super::claude_desktop::handle(shared, req).await,
+        "insights_skills" => super::insights_skills::handle(shared, req).await,
         "harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
@@ -7780,11 +7867,12 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // every call site expresses "unknown" the same way, and the
     // uploader treats it as "re-ask" -- fail-closed.
     let inputs = cfg.as_ref().map(|c| {
-        let (near_ai, attested_bodies) = {
-            let s = shared.settings.lock().expect("settings lock");
-            (s.near_ai.clone(), s.ironwire_attested_bodies)
-        };
-        super::preview::input_fingerprint(c, near_ai.as_ref(), attested_bodies)
+        let attested_bodies = shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .ironwire_attested_bodies;
+        super::preview::input_fingerprint(c, attested_bodies)
     });
     // Whether a GROUP-level selector filters to what can actually be sent.
     //
@@ -8637,6 +8725,32 @@ fn witness_review_response(mut response: Response) -> Response {
     response
 }
 
+/// The refusal for a review the witness found too large, with its own
+/// view: the sentence filled in with the witness's two counts, and the
+/// counts beside it. `None` for any other failure. Written by the handler,
+/// like a busy witness's view, because only the typed error has the counts.
+fn witness_review_too_large(id: u64, error: &anyhow::Error) -> Option<Response> {
+    let Some(crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+        windows_needed,
+        windows_allowed,
+    }) = error.downcast_ref::<crate::witness::WitnessTrustError>()
+    else {
+        return None;
+    };
+    let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+    super::preview::report_failure_label(label);
+    let mut response = Response::err(id, ERR_UNAVAILABLE, label);
+    response.result = Some(serde_json::json!({
+        "view": {
+            "state": "Refused",
+            "message": crate::witness_copy::witness_too_long_line(*windows_needed, *windows_allowed),
+            "windows_needed": windows_needed,
+            "windows_allowed": windows_allowed,
+        }
+    }));
+    Some(response)
+}
+
 /// How long a busy witness asked a person to wait before reviewing again,
 /// or `None` when this failure is not a busy witness.
 ///
@@ -8790,7 +8904,6 @@ async fn handle_witness_preview_request_inner(
     };
     let token_generation = shared.token_review_generation.load(Ordering::Acquire);
     let initial_settings = shared.settings.lock().expect("settings lock").clone();
-    let near_ai = initial_settings.near_ai.clone();
     let bodies = initial_settings.ironwire_attested_bodies;
     let roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&roots);
@@ -8816,7 +8929,6 @@ async fn handle_witness_preview_request_inner(
     let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
-        near_ai,
         source,
         &session_ref,
         super::preview::WitnessPreviewOptions {
@@ -8841,6 +8953,9 @@ async fn handle_witness_preview_request_inner(
             if let Some(secs) = witness_review_busy_secs(&error) {
                 return witness_review_busy(req.id, secs);
             }
+            if let Some(response) = witness_review_too_large(req.id, &error) {
+                return response;
+            }
             return Response::err(req.id, ERR_UNAVAILABLE, witness_review_refusal(&error));
         }
     };
@@ -8855,11 +8970,8 @@ async fn handle_witness_preview_request_inner(
         _ => return Response::err(req.id, ERR_UNAVAILABLE, "witness-review-stale"),
     };
     let settings = shared.settings.lock().expect("settings lock");
-    let fingerprint = super::preview::input_fingerprint(
-        &current_cfg,
-        settings.near_ai.as_ref(),
-        settings.ironwire_attested_bodies,
-    );
+    let fingerprint =
+        super::preview::input_fingerprint(&current_cfg, settings.ironwire_attested_bodies);
     if *settings != initial_settings
         || fingerprint != review.summary.input_fingerprint
         || source
@@ -8936,10 +9048,6 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
     let cfg = shared.store.load_config().ok().flatten();
-    let near_ai = {
-        let s = shared.settings.lock().expect("settings lock");
-        s.near_ai.clone()
-    };
     let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let Some((source, session_ref)) = super::find_session(&sources, &entry) else {
@@ -8956,7 +9064,6 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     match super::preview::build_preview_card(
         &shared.store,
         cfg.as_ref(),
-        near_ai,
         attested_bodies,
         source,
         &session_ref,
@@ -9065,12 +9172,13 @@ fn preview_card_fields(summary: &super::preview::PreviewCardSummary) -> serde_js
 /// unenrolled preview -- holds either way.
 pub(crate) fn preview_config_fingerprint(shared: &DaemonShared) -> String {
     let cfg = shared.store.load_config().ok().flatten();
-    let (near_ai, attested_bodies) = {
-        let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.ironwire_attested_bodies)
-    };
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
     match cfg {
-        Some(c) => super::preview::input_fingerprint(&c, near_ai.as_ref(), attested_bodies),
+        Some(c) => super::preview::input_fingerprint(&c, attested_bodies),
         None => "unenrolled".to_string(),
     }
 }
@@ -9179,10 +9287,11 @@ async fn build_and_pin_preview(
     ),
     (&'static str, &'static str),
 > {
-    let (near_ai, attested_bodies) = {
-        let s = shared.settings.lock().expect("settings lock");
-        (s.near_ai.clone(), s.ironwire_attested_bodies)
-    };
+    let attested_bodies = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .ironwire_attested_bodies;
     let source_roots = shared.source_roots_with_routing();
     let sources = crate::source::all_sources(&source_roots);
     let (source, session_ref) =
@@ -9211,7 +9320,6 @@ async fn build_and_pin_preview(
             &artifact,
             cfg.ok_or(unavailable)?,
             &shared.store,
-            near_ai,
             &transcript,
             session_ref.size_bytes,
             attested_bodies,
@@ -9234,7 +9342,6 @@ async fn build_and_pin_preview(
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
         cfg,
-        near_ai,
         source,
         &session_ref,
         correction,
@@ -9944,16 +10051,19 @@ fn envelope_is_for_enrollment(
             )
 }
 
-/// Settings as returned over IPC: the privacy-filter credential is reported
-/// as present or absent, never echoed.
+/// Settings as returned over IPC, with every credential left out.
+///
+/// `near_ai_configured` reported whether the retired client-side NEAR AI
+/// second scan had a credential. It stays on the wire as a constant `false`:
+/// the macOS shell decodes it as a required field, and every older shell
+/// gates its scan step on it, so `false` turns that step off everywhere. A credential an older build left in the settings file is
+/// never read and never crosses the socket.
 pub(super) fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
     let mut v = serde_json::to_value(s).unwrap_or_else(|_| serde_json::json!({}));
     if let Some(obj) = v.as_object_mut() {
-        let configured = s.near_ai.is_some();
-        obj.remove("near_ai");
         obj.insert(
             "near_ai_configured".to_string(),
-            serde_json::Value::Bool(configured),
+            serde_json::Value::Bool(false),
         );
         // The inference credential is a second, different credential in the
         // same document -- see `DaemonSettings::near_ai_inference` -- and gets
@@ -10736,6 +10846,9 @@ pub(crate) fn signer_attestor_for(
 
 #[cfg(test)]
 mod tests {
+    mod feature_flags_overrides {
+        include!("feature_flags_override_tests.rs");
+    }
     mod missions {
         include!("mission_catalogue_tests.rs");
         include!("activity_missions_tests.rs");
@@ -11283,7 +11396,6 @@ mod tests {
         let (_, _, envelope) = super::super::preview::build_preview_with_correction(
             &s.store,
             Some(&cfg),
-            None,
             source,
             &reference,
             None,
@@ -11304,7 +11416,7 @@ mod tests {
         let artifact = super::super::approved_envelope::WitnessReviewArtifact::new(
             response,
             entry.session_hash,
-            super::super::preview::input_fingerprint(&cfg, None, false),
+            super::super::preview::input_fingerprint(&cfg, false),
             None,
             None,
             None,
@@ -11314,7 +11426,6 @@ mod tests {
             &artifact,
             &cfg,
             &s.store,
-            None,
             &transcript,
             reference.size_bytes,
             false,
@@ -11385,6 +11496,9 @@ mod tests {
             ("witness_body_not_stripped", review.failed_bodies_returned),
             ("witness_quote_replayed", review.failed_unproven),
             ("witness_attestation_unavailable", review.failed_unreachable),
+            // By label alone, with no counts: the number-less sentence. The
+            // handler writes the filled one when it has them.
+            ("witness_trace_too_large_for_review", review.failed_too_long),
         ] {
             let response = witness_review_response(Response::err(1, ERR_UNAVAILABLE, label));
             assert_eq!(
@@ -11472,6 +11586,43 @@ mod tests {
             Some(refusal),
             "the refusal was replaced with a word that names nothing"
         );
+    }
+
+    /// A review the witness refused as too large is a refusal under its own
+    /// label, with the approved sentence filled in with the witness's two
+    /// counts, needed first, and the counts beside it for a shell. Never a
+    /// sentence with its placeholders showing.
+    #[tokio::test]
+    async fn a_too_large_review_carries_its_counts_in_the_sentence() {
+        let (s, id, _dir, _review) = recorded_witness_review().await;
+        let response = witness_review_response(
+            handle_witness_preview_request_inner(
+                &s,
+                &req(
+                    "witness_preview_request",
+                    serde_json::json!({"entry_id":id,"raw_session_confirmed":true}),
+                ),
+                Some(Err(anyhow::Error::new(
+                    crate::witness::WitnessTrustError::WitnessTraceTooLargeForReview {
+                        windows_needed: 1800,
+                        windows_allowed: 720,
+                    },
+                ))),
+            )
+            .await,
+        );
+        assert_eq!(
+            response.error.as_ref().map(|e| e.message.as_str()),
+            Some("witness_trace_too_large_for_review")
+        );
+        let view = &response.result.as_ref().expect("a view")["view"];
+        assert_eq!(view["state"], "Refused", "{view}");
+        assert_eq!(
+            view["message"], "Too long to scan (needs 1800, limit 720).",
+            "{view}"
+        );
+        assert_eq!(view["windows_needed"], 1800);
+        assert_eq!(view["windows_allowed"], 720);
     }
 
     /// A review a person asked for, met by a busy witness, is a busy witness:
@@ -13039,7 +13190,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -14381,7 +14531,7 @@ mod tests {
                 assert_eq!(entry.approved_scopes.as_ref(), Some(&cfg.consent_scopes));
                 assert_eq!(
                     entry.approved_inputs.as_deref(),
-                    Some(super::super::preview::input_fingerprint(&cfg, None, false).as_str())
+                    Some(super::super::preview::input_fingerprint(&cfg, false).as_str())
                 );
                 assert!(
                     entry.previewed_envelope_digest.is_none(),
@@ -16198,6 +16348,24 @@ mod tests {
         assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
     }
 
+    /// The background service's level, which every shell compares with its
+    /// minimum (`daemon::service`): this daemon meets its own shells.
+    #[test]
+    fn hello_reports_the_service_level() {
+        let s = shared();
+        let result = handle_request(&s, &req("hello", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            result[super::super::service::HELLO_SERVICE_LEVEL_KEY],
+            super::super::service::SERVICE_LEVEL
+        );
+        assert_eq!(
+            super::super::service::answer_from_hello(Some(&result)),
+            super::super::service::DaemonAnswer::Meets
+        );
+    }
+
     #[test]
     fn status_exposes_every_field_a_tray_needs() {
         let s = shared();
@@ -16308,17 +16476,31 @@ mod tests {
     }
 
     #[test]
-    fn settings_never_echo_the_privacy_filter_credential() {
-        let s = shared();
-        s.settings.lock().unwrap().near_ai = Some(crate::envelope::NearAiSettings {
-            api_key: "super-secret-key".into(),
-            base_url: None,
-            model: None,
+    fn a_retired_scan_credential_never_crosses_and_reads_as_not_configured() {
+        // A settings file an older build wrote, still holding the retired
+        // second scan's credential.
+        let (_d, store) = temp_store();
+        let mut legacy =
+            serde_json::to_value(crate::daemon::settings::DaemonSettings::default()).unwrap();
+        legacy["near_ai"] = serde_json::json!({
+            "api_key": "super-secret-key",
+            "base_url": null,
+            "model": null,
         });
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_SETTINGS_FILE,
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+        let s = DaemonShared::load(store).unwrap();
         let r = handle_request(&s, &req("get_settings", serde_json::json!({})));
-        let body = serde_json::to_string(&r.result.unwrap()).unwrap();
+        let result = r.result.unwrap();
+        let body = serde_json::to_string(&result).unwrap();
         assert!(!body.contains("super-secret-key"), "{body}");
-        assert!(body.contains("near_ai_configured"));
+        assert!(result.get("near_ai").is_none(), "{body}");
+        // Still on the wire, for the shells that decode it, and always off.
+        assert_eq!(result["near_ai_configured"], false);
     }
 
     /// The ceremony is reachable over the socket, and forgetting says what it
@@ -17635,6 +17817,36 @@ mod tests {
     /// relaxation, and it is stated as an equality rather than a substring
     /// check so that a second path appearing on this shape fails here --
     /// `display_path`'s doc comment carries the reasoning.
+    /// A listing shows the two counts on a session the witness refused as
+    /// too large to review, and on no other entry.
+    #[test]
+    fn a_too_large_refusal_lists_its_counts() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let refused = super::super::queue::QueueEntry {
+            state: super::super::queue::QueueState::Refused,
+            reason_label: Some(label.to_string()),
+            review_windows_needed: Some(1800),
+            review_windows_allowed: Some(208),
+            ..Default::default()
+        };
+        let v = entry_value(&refused, None);
+        assert_eq!(v["reason_label"], label);
+        assert_eq!(v["windows_needed"], 1800);
+        assert_eq!(v["windows_allowed"], 208);
+
+        let elsewhere = super::super::queue::QueueEntry {
+            reason_label: Some("redaction-failed".to_string()),
+            ..refused.clone()
+        };
+        let v = entry_value(&elsewhere, None);
+        assert!(v.get("windows_needed").is_none(), "{v}");
+        let pending = super::super::queue::QueueEntry {
+            state: super::super::queue::QueueState::Pending,
+            ..refused
+        };
+        assert!(entry_value(&pending, None).get("windows_allowed").is_none());
+    }
+
     #[test]
     fn a_queue_entry_on_the_wire_carries_no_session_file_path() {
         use crate::daemon::queue::{QueueEntry, entry_id_for};
@@ -19772,22 +19984,23 @@ mod tests {
         seed_entry_in_state(s, QueueState::Approved)
     }
 
+    /// The retired NEAR AI notice's acknowledge method is gone: an older
+    /// shell calling it gets the ordinary unknown-method answer, and nothing
+    /// is recorded.
     #[test]
-    fn acknowledging_the_near_ai_notice_clears_the_blocking_health_label() {
-        // Without this an app-only contributor (never touching the CLI,
-        // which shows the same notice on stdout) is stuck forever.
+    fn the_retired_notice_acknowledgement_is_an_unknown_method() {
         let s = shared();
-        s.health.lock().unwrap().fail(
-            crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-            Utc::now(),
-        );
         let r = handle_request(
             &s,
             &req("acknowledge_near_ai_notice", serde_json::json!({})),
         );
-        assert!(r.error.is_none(), "{:?}", r.error);
-        assert!(s.store.near_ai_notice_shown());
-        assert!(s.health.lock().unwrap().ok());
+        let err = r.error.expect("an unknown method");
+        assert_eq!(err.code, ERR_UNKNOWN_METHOD);
+        let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
+        assert!(
+            r.result.unwrap()["entries"].as_array().unwrap().is_empty(),
+            "a retired method writes no audit row"
+        );
     }
 
     #[test]
@@ -19990,7 +20203,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: None,
                 display_handle: None,
                 public_bio: None,
@@ -20005,10 +20217,6 @@ mod tests {
                 serde_json::json!({"scopes": ["model_training"]}),
             ),
         );
-        handle_request(
-            &s,
-            &req("acknowledge_near_ai_notice", serde_json::json!({})),
-        );
 
         let r = handle_request(&s, &req("list_audit", serde_json::json!({})));
         let entries = r.result.unwrap()["entries"].as_array().unwrap().clone();
@@ -20018,10 +20226,6 @@ mod tests {
             .collect();
         assert!(
             actions.contains(&"consent-scopes-changed".to_string()),
-            "{actions:?}"
-        );
-        assert!(
-            actions.contains(&"near-ai-notice-acknowledged".to_string()),
             "{actions:?}"
         );
     }
@@ -20301,7 +20505,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 82);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 83);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -20784,8 +20988,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 114, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 89, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 116, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 90, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -22697,10 +22901,11 @@ mod tests {
 
             let unhealthy = live();
             seed_backlog(&unhealthy, NUDGE_BACKLOG_THRESHOLD);
-            unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(
                 nudge_of(&unhealthy),
                 serde_json::json!({
@@ -22949,6 +23154,23 @@ mod tests {
                     "{method}: a refusal publishes nothing"
                 );
             }
+        }
+
+        /// `capabilities.daemon_on_host`: whether the answering daemon is
+        /// the host part, outside any Flatpak sandbox. A sandboxed window
+        /// attached over the host link reads it; absent (an older daemon)
+        /// reads as false. These tests never run in a sandbox.
+        #[test]
+        fn the_managed_snapshot_says_the_daemon_runs_on_the_host() {
+            let s = live();
+            let snapshot = handle_request(&s, &req("managed_snapshot", serde_json::json!({})))
+                .result
+                .expect("snapshot");
+            assert_eq!(
+                snapshot["capabilities"]["daemon_on_host"],
+                !crate::daemon::host_link::runs_sandboxed()
+            );
+            assert_eq!(snapshot["capabilities"]["daemon_on_host"], true);
         }
 
         /// The managed-session terminal: one of three ids, persisted
@@ -24654,18 +24876,20 @@ mod tests {
 
             let unhealthy = live();
             land_verdicts(&unhealthy, 1, 0, at);
-            unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(mark_of(&unhealthy).0, "unknown");
 
             let idle_unhealthy = live();
             seed_idle(&idle_unhealthy, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
-            idle_unhealthy.health.lock().unwrap().fail(
-                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
-                Utc::now(),
-            );
+            idle_unhealthy
+                .health
+                .lock()
+                .unwrap()
+                .fail(crate::daemon::health::LABEL_CANARY_FAILED, Utc::now());
             assert_eq!(mark_of(&idle_unhealthy).0, "unknown");
         }
 

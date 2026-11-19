@@ -462,6 +462,7 @@ mod tests {
     const OWNER_CHILD_ROOT: &str = "TC_TEST_WORKER_OWNER_ROOT";
 
     /// Whether `pid` still names a process (zombies included).
+    #[allow(unsafe_code)]
     fn alive(pid: i32) -> bool {
         unsafe extern "C" {
             fn kill(pid: i32, signal: i32) -> i32;

@@ -187,6 +187,7 @@ async fn stub_rpc(wallet: String) -> String {
     url
 }
 
+#[allow(unsafe_code)]
 async fn state(db: Arc<PgBackend>, wallet: String) -> (Arc<AppState>, tempfile::TempDir) {
     // SAFETY: this ignored suite is serialised and runs in its own CI step.
     unsafe {

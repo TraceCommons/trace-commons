@@ -224,12 +224,7 @@ fn redraw(app: &Rc<App>) {
         content.append(&entry);
     }
     if working {
-        content.append(
-            &gtk::Spinner::builder()
-                .spinning(true)
-                .halign(gtk::Align::Start)
-                .build(),
-        );
+        content.append(&super::glass_feedback::spinner());
     }
     if let Some(error) = &page.error {
         style::append_body(&content, error);

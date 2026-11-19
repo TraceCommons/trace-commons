@@ -129,6 +129,49 @@ struct MonitorWindowView: View {
     let insightsStoreSelection: InsightsStoreSelection
     let missionDrafts: MissionDraftsModel
 
+    init(navigation: MainWindowNavigation, insightsStoreSelection: InsightsStoreSelection, missionDrafts: MissionDraftsModel) {
+        self.navigation = navigation
+        self.insightsStoreSelection = insightsStoreSelection
+        self.missionDrafts = missionDrafts
+        #if DEBUG
+        capture = nil
+        #endif
+    }
+
+    #if DEBUG
+    /// What the screenshot hook draws the whole window from (DEBUG only,
+    /// `DebugScreenshot.captureWindows`): stores already loaded from a
+    /// recorded sample set, and the tab and map view to show. The panes'
+    /// switches are the window's own `@AppStorage`, which the hook points
+    /// at a throwaway defaults suite (`defaultAppStorage`), never the
+    /// person's.
+    struct Capture {
+        let tab: Tab
+        let mapTab: MapTab
+        let traces: TracesStore
+        let home: HomeStore
+        let inference: InferenceStore
+        /// An empty Insights store of the hook's own, never the person's.
+        let insightsStore: InsightsStoreSelection
+    }
+
+    /// Set only by `init(capture:...)`; the window then never attaches the
+    /// live client.
+    let capture: Capture?
+
+    init(capture: Capture, navigation: MainWindowNavigation, missionDrafts: MissionDraftsModel) {
+        self.navigation = navigation
+        self.insightsStoreSelection = capture.insightsStore
+        self.missionDrafts = missionDrafts
+        self.capture = capture
+        _tab = SceneStorage(wrappedValue: capture.tab, "monitor.tab")
+        _mapTab = SceneStorage(wrappedValue: capture.mapTab, "monitor.mapTab")
+        _traces = State(initialValue: capture.traces)
+        _home = State(initialValue: capture.home)
+        _inference = State(initialValue: capture.inference)
+    }
+    #endif
+
     @EnvironmentObject private var model: AppModel
 
     @SceneStorage("monitor.tab") private var tab: Tab = .home
@@ -347,7 +390,10 @@ struct MonitorWindowView: View {
                                  openTraces: {
                                      tab = .traces
                                      tracesPage = .tree
-                                 })
+                                 }, openSkillsSettings: {
+                                     navigation.requestSettings(at: .insights)
+                                     openWindow(id: WindowID.settings)
+                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -500,6 +546,10 @@ struct MonitorWindowView: View {
         // or start-up ends; with none, each store draws the core as down,
         // except while the daemon is still starting, when it is loading.
         .task(id: Attachment(model)) {
+            #if DEBUG
+            // A capture's stores are the sample set's, already loaded.
+            if capture != nil { return }
+            #endif
             let attachment = Attachment(model)
             let client = Self.sampleClient() ?? model.daemonData
             traces.attach(client, awaiting: attachment.awaiting)

@@ -26,13 +26,13 @@ final class RouteDisclosureBridgeTests: XCTestCase {
 
     func testTheLocalRouteBecomesTheRustsDisclosure() throws {
         let facts = """
-            {"route":"local","witness":null,"local_filter":"near_ai",\
+            {"route":"local","witness":null,"local_filter":"sidecar",\
             "receipts":{"endpoint_configured":false,"check_attestation":false},"attested_bodies":false}
             """
         let json = try XCTUnwrap(TCConsentCopy.routeDisclosureJSON(forFacts: facts))
         let value = try XCTUnwrap(RouteDisclosure.decode(fromJSON: json))
         XCTAssertNil(value.copy.witness)
-        XCTAssertTrue(value.copy.localFilter?.contains("NEAR AI") == true)
+        XCTAssertTrue(value.copy.localFilter?.contains("local program") == true)
     }
 
     /// A route or origin newer than this build is not rendered as the

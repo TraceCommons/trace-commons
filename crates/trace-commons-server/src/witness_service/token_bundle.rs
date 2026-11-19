@@ -41,9 +41,9 @@ impl ContributionRedactor for MappedRedactor<'_> {
     async fn redact(
         &self,
         raw: RawTraceContribution,
-    ) -> Result<RedactedContribution, SeamUnavailable> {
+    ) -> Result<RedactedContribution, RedactionUnavailable> {
         let (result, maps) = self.inner.redact_with_edits(raw).await?;
-        *self.maps.lock().map_err(|_| SeamUnavailable)? = maps;
+        *self.maps.lock().map_err(|_| RedactionUnavailable::Failed)? = maps;
         Ok(result)
     }
 }
@@ -416,6 +416,37 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    struct UnavailableClassifier;
+    #[async_trait::async_trait]
+    impl ContributionRedactor for UnavailableClassifier {
+        async fn redact(
+            &self,
+            _raw: RawTraceContribution,
+        ) -> Result<RedactedContribution, RedactionUnavailable> {
+            Err(RedactionUnavailable::ClassifierUnavailable)
+        }
+    }
+
+    /// The token-bundle path wraps the contribution redactor; the wrapper
+    /// keeps why the redaction stopped, so a classifier outage is named as
+    /// one there too.
+    #[tokio::test]
+    async fn the_mapped_redactor_keeps_why_the_redaction_stopped() {
+        use trace_commons_protocol::trace_contribution::RecordedTraceContributionOptions;
+        let mapped = MappedRedactor {
+            inner: &UnavailableClassifier,
+            maps: Default::default(),
+        };
+        let raw = RawTraceContribution::from_capture_turns(
+            &[],
+            RecordedTraceContributionOptions::default(),
+        );
+        assert_eq!(
+            mapped.redact(raw).await.err(),
+            Some(RedactionUnavailable::ClassifierUnavailable)
+        );
     }
 
     struct Classifier {

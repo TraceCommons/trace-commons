@@ -1,4 +1,4 @@
-// Copyright 2026 K&Z Partners LLC
+// Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 //! `deploy/witness/app-compose.json` is generated from

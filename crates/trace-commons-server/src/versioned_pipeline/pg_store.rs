@@ -938,7 +938,7 @@ impl PgPipelineStore {
         }
         let lease_token = required_lease_token(run)?;
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        let tx = Self::read_committed_tenant_transaction(&mut client, &run.tenant_id).await?;
         // Lock order: the run row (`ensure_current_lease`), then the
         // submission row (below) -- held the same way everywhere both are
         // touched -- then the policy row (`lock_runnable_policy`).
@@ -971,95 +971,133 @@ impl PgPipelineStore {
         // The derived record names the object Review read, whose hash it
         // stores in `input_hash`: the privacy pass's output once a pass is
         // recorded, else (a run received before V117) the source.
-        let derived_input_object_ref_id = run
-            .privacy_pass_object_ref_id
+        let selected_recheck =
+            super::review_recheck::latest_recheck_on_tx(&tx, &run.tenant_id, run.run_id).await?;
+        if let Some(candidate) = selected_recheck.as_ref().filter(|_| approved.is_some()) {
+            let bound=tx.query_opt("SELECT 1 FROM pipeline_review_assessments WHERE tenant_id=$1 AND run_id=$2 AND phase='review' AND recommendation='approve' AND recheck_id=$3 AND recheck_content_hash=$4", &[&run.tenant_id,&run.run_id,&candidate.recheck_id,&candidate.content_hash]).await?.is_some();
+            if !bound
+                || approved
+                    .as_ref()
+                    .is_some_and(|revision| revision.source_content_hash != candidate.content_hash)
+            {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_REVIEW_RECHECK_BINDING_REQUIRED_LABEL.to_string(),
+                ));
+            }
+            if !candidate.approval_evidence_complete() {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_REVIEW_RECHECK_UNRESOLVED_LABEL.to_string(),
+                ));
+            }
+        }
+        let derived_input_object_ref_id = selected_recheck
+            .as_ref()
+            .map(|candidate| candidate.object_ref_id)
+            .or(run.privacy_pass_object_ref_id)
             .unwrap_or(run.source_object_ref_id);
-        let (approved_revision_id, approved_object_ref_id, approved_content_hash) =
-            if let Some(approved) = &approved {
-                tx.execute(
-                    "INSERT INTO trace_object_refs (
+        let (approved_revision_id, approved_object_ref_id, approved_content_hash) = if let Some(
+            approved,
+        ) = &approved
+        {
+            tx.execute(
+                "INSERT INTO trace_object_refs (
                         tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
                         object_key, content_sha256, encryption_key_ref, size_bytes, compression,
                         created_by_job_id
                      ) VALUES ($1,$2,$3,'review_snapshot',$4,$5,$6,$7,$8,$9,$10)
                      ON CONFLICT (tenant_id, submission_id, object_ref_id) DO NOTHING",
-                    &[
-                        &approved.object_ref.tenant_id,
-                        &approved.object_ref.submission_id,
-                        &approved.object_ref.object_ref_id,
-                        &approved.object_ref.object_store,
-                        &approved.object_ref.object_key,
-                        &approved.object_ref.content_sha256,
-                        &approved.object_ref.encryption_key_ref,
-                        &approved.object_ref.size_bytes,
-                        &approved.object_ref.compression,
-                        &approved.object_ref.created_by_job_id,
-                    ],
-                )
-                .await?;
-                tx.execute(
-                    "INSERT INTO trace_derived_records (
+                &[
+                    &approved.object_ref.tenant_id,
+                    &approved.object_ref.submission_id,
+                    &approved.object_ref.object_ref_id,
+                    &approved.object_ref.object_store,
+                    &approved.object_ref.object_key,
+                    &approved.object_ref.content_sha256,
+                    &approved.object_ref.encryption_key_ref,
+                    &approved.object_ref.size_bytes,
+                    &approved.object_ref.compression,
+                    &approved.object_ref.created_by_job_id,
+                ],
+            )
+            .await?;
+            tx.execute(
+                "INSERT INTO trace_derived_records (
                         tenant_id, derived_id, submission_id, trace_id, status,
                         worker_kind, worker_version, input_object_ref_id, input_hash,
                         output_object_ref_id, summary_model,
                         canonical_summary, canonical_summary_hash
                      ) VALUES ($1,$2,$3,$4,'current','summary',$5,$6,$7,$8,$5,$9,$10)
                      ON CONFLICT (tenant_id, derived_id) DO NOTHING",
-                    &[
-                        &run.tenant_id,
-                        &approved.revision_id,
-                        &run.submission_id,
-                        &run.trace_id,
-                        &approved.worker_identity,
-                        &derived_input_object_ref_id,
-                        &approved.source_content_hash,
-                        &approved.object_ref.object_ref_id,
-                        &approved.canonical_summary,
-                        &approved.canonical_summary_hash,
-                    ],
-                )
-                .await?;
-                // Defense in depth: the status update stays
-                // conditional on the same pre-review states the gate above
-                // just re-checked, and must touch exactly one row. The
-                // whole transaction has not committed yet, so refusing here
-                // still rolls back the two inserts just above.
-                let updated_submission = tx
-                    .execute(
-                        "UPDATE trace_submissions
+                &[
+                    &run.tenant_id,
+                    &approved.revision_id,
+                    &run.submission_id,
+                    &run.trace_id,
+                    &approved.worker_identity,
+                    &derived_input_object_ref_id,
+                    &approved.source_content_hash,
+                    &approved.object_ref.object_ref_id,
+                    &approved.canonical_summary,
+                    &approved.canonical_summary_hash,
+                ],
+            )
+            .await?;
+            // Defense in depth: the status update stays
+            // conditional on the same pre-review states the gate above
+            // just re-checked, and must touch exactly one row. The
+            // whole transaction has not committed yet, so refusing here
+            // still rolls back the two inserts just above.
+            let updated_submission = tx
+                .execute(
+                    "UPDATE trace_submissions
                          SET status = 'accepted', reviewed_at = NOW(), updated_at = NOW()
                          WHERE tenant_id = $1 AND submission_id = $2
                            AND status IN ('received', 'quarantined')",
-                        &[&run.tenant_id, &run.submission_id],
-                    )
-                    .await?;
-                if updated_submission != 1 {
-                    return Err(DatabaseError::Constraint(
-                        PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
-                    ));
-                }
-                (
-                    Some(approved.revision_id),
-                    Some(approved.object_ref.object_ref_id),
-                    Some(approved.content_hash.clone()),
+                    &[&run.tenant_id, &run.submission_id],
                 )
-            } else {
-                let updated_submission = tx
-                    .execute(
-                        "UPDATE trace_submissions
+                .await?;
+            if updated_submission != 1 {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+                ));
+            }
+            if let Some(candidate) = &selected_recheck {
+                let risk = enum_string(&candidate.residual_pii_risk).map_err(|_| {
+                    DatabaseError::Serialization("review recheck risk encode failed".to_string())
+                })?;
+                let counts = serde_json::to_value(&candidate.redaction_counts).map_err(|_| {
+                    DatabaseError::Serialization("review recheck counts encode failed".to_string())
+                })?;
+                let basis = serde_json::to_value(safe_residual_risk_basis_labels(
+                    &candidate.evidence.basis,
+                ))
+                .map_err(|_| {
+                    DatabaseError::Serialization("review recheck basis encode failed".to_string())
+                })?;
+                tx.execute("UPDATE trace_submissions SET privacy_risk=$3,redaction_counts=$4,residual_risk_basis=$5,redaction_pipeline_version=$6 WHERE tenant_id=$1 AND submission_id=$2", &[&run.tenant_id,&run.submission_id,&risk,&counts,&basis,&candidate.redaction_pipeline_version]).await?;
+            }
+            (
+                Some(approved.revision_id),
+                Some(approved.object_ref.object_ref_id),
+                Some(approved.content_hash.clone()),
+            )
+        } else {
+            let updated_submission = tx
+                .execute(
+                    "UPDATE trace_submissions
                          SET status = 'rejected', reviewed_at = NOW(), updated_at = NOW()
                          WHERE tenant_id = $1 AND submission_id = $2
                            AND status IN ('received', 'quarantined')",
-                        &[&run.tenant_id, &run.submission_id],
-                    )
-                    .await?;
-                if updated_submission != 1 {
-                    return Err(DatabaseError::Constraint(
-                        PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
-                    ));
-                }
-                (None, None, None)
-            };
+                    &[&run.tenant_id, &run.submission_id],
+                )
+                .await?;
+            if updated_submission != 1 {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+                ));
+            }
+            (None, None, None)
+        };
 
         insert_outcome(
             &tx,
@@ -1661,6 +1699,24 @@ impl PgPipelineStore {
         reason: ReasonCode,
         resolved_quarantine_reasons: Vec<ReasonCode>,
     ) -> Result<(HumanReviewAssessment, bool), DatabaseError> {
+        self.record_review_assessment_for_hold_with_recheck(
+            claim,
+            recommendation,
+            reason,
+            resolved_quarantine_reasons,
+            None,
+        )
+        .await
+    }
+
+    pub async fn record_review_assessment_for_hold_with_recheck(
+        &self,
+        claim: &PipelineReviewClaim,
+        recommendation: ReviewRecommendation,
+        reason: ReasonCode,
+        resolved_quarantine_reasons: Vec<ReasonCode>,
+        recheck_binding: Option<PipelineReviewRecheckBinding>,
+    ) -> Result<(HumanReviewAssessment, bool), DatabaseError> {
         let mut resolved = resolved_quarantine_reasons;
         resolved.sort();
         resolved.dedup();
@@ -1669,7 +1725,7 @@ impl PgPipelineStore {
             ReviewRecommendation::Reject => "reject",
         };
         let mut client = self.backend.trace_pool().get().await?;
-        let tx = Self::tenant_transaction(&mut client, &claim.tenant_id).await?;
+        let tx = Self::read_committed_tenant_transaction(&mut client, &claim.tenant_id).await?;
         // Zaki review 1, round 2, finding 7: the run row first, then the
         // claim row, in two statements -- the order `claim_review` takes
         // them in (the run's `FOR UPDATE`, then the claim's upsert) -- so
@@ -1697,7 +1753,7 @@ impl PgPipelineStore {
                      WHERE c.tenant_id = $1 AND c.run_id = $2
                        AND c.lease_token = $3
                        AND c.reviewer_principal_ref = $4
-                       AND c.lease_expires_at > NOW()
+                       AND c.lease_expires_at > clock_timestamp()
                      FOR UPDATE",
                     &[
                         &claim.tenant_id,
@@ -1745,6 +1801,37 @@ impl PgPipelineStore {
                 "review claim is stale or inoperable".to_string(),
             ));
         }
+        let selected_recheck = if at_score {
+            if recheck_binding.is_some() {
+                return Err(DatabaseError::Constraint(
+                    PIPELINE_REVIEW_RECHECK_BINDING_REQUIRED_LABEL.to_string(),
+                ));
+            }
+            None
+        } else {
+            let latest =
+                super::review_recheck::latest_recheck_on_tx(&tx, &claim.tenant_id, claim.run_id)
+                    .await?;
+            match (&latest, &recheck_binding) {
+                (Some(candidate), Some(binding)) if candidate.binding() == *binding => {}
+                (None, None) => {}
+                _ => {
+                    return Err(DatabaseError::Constraint(
+                        PIPELINE_REVIEW_RECHECK_BINDING_REQUIRED_LABEL.to_string(),
+                    ));
+                }
+            }
+            latest
+        };
+        if recommendation == ReviewRecommendation::Approve
+            && selected_recheck
+                .as_ref()
+                .is_some_and(|candidate| !candidate.approval_evidence_complete())
+        {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_REVIEW_RECHECK_UNRESOLVED_LABEL.to_string(),
+            ));
+        }
         if recommendation == ReviewRecommendation::Approve {
             // Every reason that holds the run must be resolved: at Score,
             // the policy's hold label; at Review, Admission's, if it gave
@@ -1783,6 +1870,18 @@ impl PgPipelineStore {
             "reason": reason.as_str(),
             "resolved_quarantine_reasons": resolved,
         });
+        if let Some(candidate) = &selected_recheck {
+            evidence["schema"] = serde_json::json!("trace_commons.pipeline_review_assessment.v2");
+            evidence["recheck_id"] = serde_json::json!(candidate.recheck_id);
+            evidence["recheck_content_hash"] = serde_json::json!(candidate.content_hash);
+            evidence["recheck_source_hash"] = serde_json::json!(candidate.source_content_hash);
+        }
+        let recheck_id = selected_recheck
+            .as_ref()
+            .map(|candidate| candidate.recheck_id);
+        let recheck_content_hash = selected_recheck
+            .as_ref()
+            .map(|candidate| candidate.content_hash.clone());
         if let Some(hold_label) = &hold_label {
             evidence["phase"] = serde_json::json!(assessment_phase(true));
             evidence["hold_label"] = serde_json::json!(hold_label);
@@ -1802,12 +1901,13 @@ impl PgPipelineStore {
             )
             .as_bytes(),
         );
-        tx.execute(
+        let inserted=tx.execute(
             "INSERT INTO pipeline_review_assessments (
                 tenant_id, assessment_id, run_id, reviewer_principal_ref,
                 recommendation, reason_code, resolved_quarantine_reasons, evidence_hash,
-                phase, hold_label
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+                phase, hold_label, recheck_id, recheck_content_hash
+             ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
+               WHERE EXISTS(SELECT 1 FROM pipeline_review_claims c WHERE c.tenant_id=$1 AND c.run_id=$3 AND c.reviewer_principal_ref=$4 AND c.lease_expires_at>clock_timestamp())",
             &[
                 &claim.tenant_id,
                 &assessment_id,
@@ -1819,9 +1919,16 @@ impl PgPipelineStore {
                 &evidence_hash,
                 &assessment_phase(at_score),
                 &hold_label,
+                &recheck_id,
+                &recheck_content_hash,
             ],
         )
         .await?;
+        if inserted != 1 {
+            return Err(DatabaseError::Constraint(
+                "review claim is stale or inoperable".to_string(),
+            ));
+        }
         // V118: the worker's review audit pass appends this assessment's
         // audit event when the route's own append missed it.
         tx.execute(
@@ -1868,12 +1975,23 @@ impl PgPipelineStore {
         let row = tx
             .query_opt(
                 "SELECT assessment_id, recommendation, reason_code,
-                        resolved_quarantine_reasons, evidence_hash, recorded_at
+                        resolved_quarantine_reasons, evidence_hash, recorded_at,
+                        recheck_id, recheck_content_hash
                  FROM pipeline_review_assessments
                  WHERE tenant_id = $1 AND run_id = $2 AND phase = 'review'",
                 &[&tenant_id, &run_id],
             )
             .await?;
+        let recheck = if let Some(assessment_row) = row.as_ref() {
+            if let Some(recheck_id) = assessment_row.get::<_, Option<Uuid>>("recheck_id") {
+                let candidate_row=tx.query_opt("SELECT * FROM pipeline_review_rechecks WHERE tenant_id=$1 AND run_id=$2 AND recheck_id=$3 AND content_hash=$4", &[&tenant_id,&run_id,&recheck_id,&assessment_row.get::<_,Option<String>>("recheck_content_hash")]).await?.ok_or_else(||DatabaseError::Constraint(PIPELINE_REVIEW_RECHECK_BINDING_REQUIRED_LABEL.to_string()))?;
+                Some(super::review_recheck::recheck_from_row(&candidate_row)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         tx.commit().await?;
         row.map(|row| {
             let recommendation = match row.get::<_, String>("recommendation").as_str() {
@@ -1893,6 +2011,7 @@ impl PgPipelineStore {
                 DatabaseError::Serialization("invalid resolved quarantine reasons".to_string())
             })?;
             Ok(StoredReviewAssessment {
+                recheck,
                 assessment: HumanReviewAssessment {
                     assessment_id: row.get("assessment_id"),
                     recommendation,

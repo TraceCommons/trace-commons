@@ -94,7 +94,6 @@ impl Harness {
                 user_subject: "alice".into(),
                 device_key_id: device.device_key_id,
                 consent_scopes: vec!["debugging_evaluation".into()],
-                pii_filter: None,
                 allowed_hosts: Some("127.0.0.1".into()),
                 display_handle: None,
                 public_bio: None,

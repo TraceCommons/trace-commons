@@ -1,0 +1,38 @@
+{
+  "phase": "implication",
+  "status": "proved",
+  "command": [
+    "quint",
+    "verify",
+    "/Users/zakimanian/code/tc-wt-witness-retry-fairness/docs/flows/trace-commons/worker/witness_worker_induction.qnt",
+    "--main",
+    "witness_worker_induction",
+    "--init",
+    "arbitraryInit",
+    "--step",
+    "originalStep",
+    "--invariant",
+    "implication",
+    "--max-steps",
+    "0",
+    "--server-endpoint",
+    "localhost:8899",
+    "--verbosity",
+    "3"
+  ],
+  "modelSha256": "dd75140072f703b70d2b26277b1df7ffc2ff088dc7b3f9d431c3b8ee8d406d9f",
+  "harnessSha256": "730c67a1875c98ac539b55011cf20c325ed746491f3d547ce4a4b2962f267e49",
+  "exitCode": 0,
+  "timedOut": false,
+  "artifactsChanged": false,
+  "logPath": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/w-induction/implication/check.log",
+  "logSha256": "4257a2b7a0472cd44b8fef085ae7af3f9d4aa5ccd51148bd7f6171aa02937682",
+  "cwd": "/private/tmp/claude-501/-Users-zakimanian-code-trace-commons-server/b6ac1df5-e531-47e1-9f87-bca4a60aa3e0/scratchpad/w-induction/implication",
+  "budgetSeconds": 240,
+  "environment": {
+    "PATHPrefix": "/opt/homebrew/opt/openjdk@21/bin",
+    "JDK_JAVA_OPTIONS": "-Xmx3g",
+    "serverEndpoint": "localhost:8899"
+  },
+  "seconds": 19.061
+}

@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod account_device_code;
 pub mod account_login_change;
 pub mod activity_missions;
@@ -30,6 +32,7 @@ pub mod public_run;
 mod redaction;
 pub mod referral;
 pub mod settlement_estimate;
+pub mod skills_catalog;
 pub mod submit_rate;
 pub mod terms;
 pub mod trace_contribution;

@@ -234,8 +234,29 @@ impl Drop for CreditSettlementAdvisoryLock {
     }
 }
 
+/// What `trace_skills_catalog_suggest` did with one suggestion (V160).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillsCatalogSuggestionOutcome {
+    /// A new pending row.
+    Stored,
+    /// A row for this repository and path already existed; its count moved.
+    Counted,
+    /// The pending queue is full; nothing was written.
+    Full,
+}
+
 #[async_trait]
 pub trait Database: TraceCorpusStore + Send + Sync {
+    /// Store one anonymous Skills catalog suggestion (V160) through the
+    /// guard-owned function. The caller has validated it
+    /// (`SkillSuggestion::validate`).
+    async fn record_skills_catalog_suggestion(
+        &self,
+        _suggestion: &trace_commons_protocol::skills_catalog::SkillSuggestion,
+    ) -> Result<SkillsCatalogSuggestionOutcome, DatabaseError> {
+        Err(DatabaseError::Pool("skills_catalog_unavailable".into()))
+    }
+
     /// Store one anonymous usage batch (V152): each row replaces that
     /// install's count for the week and event. The caller has validated it
     /// (`UsageEventBatch::validate`). All rows or none. Returns rows written.

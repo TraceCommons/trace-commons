@@ -276,6 +276,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_admission_usage",
     "pipeline_review_claims",
     "pipeline_review_assessments",
+    "pipeline_review_rechecks",
     "pipeline_index_invalidations",
     "pipeline_export_snapshots",
     "pipeline_export_snapshot_items",
@@ -2137,6 +2138,28 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_terms_acceptances",
         include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
     ),
+    // Immutable corrected review versions and exact assessment binding.
+    (
+        159,
+        "pipeline_review_rechecks",
+        include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
+    ),
+    // V160: the public Skills catalog's crawl state and app suggestions. No
+    // tenant: forced RLS, one guard role, and the runtime reaches only the
+    // guard-owned suggestion function.
+    (
+        160,
+        "skills_catalog",
+        include_str!("../../../../migrations/V160__skills_catalog.sql"),
+    ),
+    // V161: the ingest runtime group may assume the public register-stats
+    // role. V55 granted it only to its applier, so a login that is not the
+    // migrator answered 500 on every public request.
+    (
+        161,
+        "register_stats_runtime_public_read",
+        include_str!("../../../../migrations/V161__register_stats_runtime_public_read.sql"),
+    ),
 ];
 
 /// The body of `create_or_reuse_account`, inside a transaction already under
@@ -2404,6 +2427,31 @@ impl Database for PgBackend {
     ) -> Result<crate::db::postgres_inference_connection::InferenceSelectionOutcome, DatabaseError>
     {
         PgBackend::select_inference_connection(self, tenant, account, request, catalog).await
+    }
+
+    async fn record_skills_catalog_suggestion(
+        &self,
+        suggestion: &trace_commons_protocol::skills_catalog::SkillSuggestion,
+    ) -> Result<crate::db::SkillsCatalogSuggestionOutcome, DatabaseError> {
+        let client = self.trace_pool().get().await?;
+        // No tenant context: V160's tables belong to no tenant, and the
+        // runtime reaches them only through the guard-owned function.
+        let row = client
+            .query_one(
+                "SELECT trace_skills_catalog_suggest($1, $2, $3)",
+                &[
+                    &suggestion.repository,
+                    &suggestion.path,
+                    &suggestion.revision,
+                ],
+            )
+            .await?;
+        let outcome: String = row.get(0);
+        Ok(match outcome.as_str() {
+            "stored" => crate::db::SkillsCatalogSuggestionOutcome::Stored,
+            "counted" => crate::db::SkillsCatalogSuggestionOutcome::Counted,
+            _ => crate::db::SkillsCatalogSuggestionOutcome::Full,
+        })
     }
 
     async fn record_usage_events(
@@ -7948,6 +7996,7 @@ mod tests {
         (111, 4),
         (112, 4),
         (113, 4),
+        (159, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -8683,6 +8732,7 @@ mod tests {
     #[test]
     fn trace_commons_rls_registry_matches_migration_policy_coverage() {
         let central_policy_migrations = [
+            include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
@@ -8736,6 +8786,7 @@ mod tests {
             include_str!("../../../../migrations/V131__starter_plausibility_features.sql"),
         ];
         let force_rls_migrations = [
+            include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql"),
             include_str!("../../../../migrations/V158__account_terms_acceptances.sql"),
             include_str!("../../../../migrations/V154__witness_blocked_days.sql"),
             include_str!("../../../../migrations/V150__near_ai_login_change.sql"),
@@ -9746,6 +9797,90 @@ mod v158_tests {
 }
 
 #[cfg(test)]
+mod v160_tests {
+    /// V160: the Skills catalog tables belong to no tenant, force RLS, give
+    /// PUBLIC nothing, and leave the runtime one guard-owned function.
+    #[test]
+    fn v160_keeps_the_catalog_behind_its_guard() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let file_marker = format!("migrations/V{}__skills_catalog.sql", 160);
+        assert_eq!(
+            THIS_FILE.matches(&file_marker).count(),
+            2,
+            "V160 must be named exactly twice: by the MIGRATIONS table and by this test"
+        );
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 160 && *name == "skills_catalog"),
+            "V160 must record itself under its own file stem"
+        );
+        let sql = include_str!("../../../../migrations/V160__skills_catalog.sql");
+        let code: String = sql
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for table in [
+            "trace_skills_catalog_repositories",
+            "trace_skills_catalog_skills",
+            "trace_skills_catalog_suggestions",
+        ] {
+            for required in [
+                format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;"),
+                format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;"),
+                format!("REVOKE ALL ON {table} FROM PUBLIC;"),
+                format!(
+                    "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO trace_skills_catalog_guard;"
+                ),
+            ] {
+                assert!(code.contains(&required), "V160 is missing `{required}`");
+            }
+        }
+        for required in [
+            "CREATE ROLE trace_skills_catalog_guard NOLOGIN NOSUPERUSER NOBYPASSRLS;",
+            "LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$",
+            "OWNER TO trace_skills_catalog_guard;",
+            "REVOKE ALL ON FUNCTION trace_skills_catalog_suggest(TEXT, TEXT, TEXT) FROM PUBLIC;",
+            "TO trace_ingest_runtime;",
+            "IF v_pending >= 10000 THEN",
+            "REVOKE trace_skills_catalog_guard FROM CURRENT_USER;",
+        ] {
+            assert!(code.contains(required), "V160 is missing `{required}`");
+        }
+        assert_eq!(
+            code.matches("TO trace_ingest_runtime").count(),
+            1,
+            "the runtime gets exactly one grant: EXECUTE on the suggestion function"
+        );
+        assert!(
+            !code.contains("tenant_id"),
+            "V160 tables belong to no tenant"
+        );
+        let upper = code.to_uppercase();
+        for forbidden in [
+            "DISABLE ROW LEVEL SECURITY",
+            "GRANT ALL",
+            "WITH INHERIT",
+            "WITH SET",
+        ] {
+            assert!(
+                !upper.contains(forbidden),
+                "V160 must not contain `{forbidden}`"
+            );
+        }
+        let tokens: Vec<&str> = upper
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert!(
+            !tokens.windows(2).any(|w| w == ["TO", "PUBLIC"]),
+            "V160 must not grant anything TO PUBLIC"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pool_timeout_tests {
     use super::*;
 
@@ -9772,5 +9907,42 @@ mod pool_timeout_tests {
             pool_create_timeout(&config("postgres://u@127.0.0.1/db?connect_timeout=3")),
             Duration::from_secs(3) + POOL_CREATE_TIMEOUT
         );
+    }
+}
+
+#[cfg(test)]
+mod v159_tests {
+    #[test]
+    fn v159_records_immutable_tenant_scoped_rechecks_and_binds_approvals() {
+        const THIS_FILE: &str = include_str!("postgres.rs");
+        let marker = format!("migrations/V{}__pipeline_review_rechecks.sql", 159);
+        assert_eq!(THIS_FILE.matches(&marker).count(), 4);
+        assert!(
+            super::MIGRATIONS
+                .iter()
+                .any(|(version, name, _)| *version == 159 && *name == "pipeline_review_rechecks")
+        );
+        let sql = include_str!("../../../../migrations/V159__pipeline_review_rechecks.sql");
+        for required in [
+            "CREATE TABLE pipeline_review_rechecks",
+            "ALTER TABLE pipeline_review_rechecks FORCE ROW LEVEL SECURITY",
+            "USING (tenant_id = trace_current_tenant_id())",
+            "WITH CHECK (tenant_id = trace_current_tenant_id())",
+            "GRANT SELECT, INSERT ON pipeline_review_rechecks TO trace_ingest_runtime",
+            "pipeline_review_rechecks_reject_update",
+            "pipeline_review_rechecks_reject_delete",
+            "pipeline_review_assessments_require_recheck_binding",
+            "pipeline_runs_require_recheck_approval_source",
+            "d.input_object_ref_id = candidate.object_ref_id",
+            "d.input_hash = candidate.content_hash",
+            "UNIQUE (tenant_id, run_id, ordinal)",
+            "'review-recheck'",
+        ] {
+            assert!(sql.contains(required), "V159 missing {required}");
+        }
+        assert!(!sql.contains("GRANT UPDATE ON pipeline_review_rechecks"));
+        assert!(!sql.contains("GRANT DELETE ON pipeline_review_rechecks"));
+        assert!(!sql.contains("TO PUBLIC"));
+        assert!(!sql.contains("SET privacy_pass_"));
     }
 }

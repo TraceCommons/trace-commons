@@ -40,8 +40,8 @@ use uuid::Uuid;
 
 use super::health::{
     HealthState, LABEL_ADMISSION_LIMIT_REACHED, LABEL_ADMISSION_REFUSED, LABEL_CANARY_FAILED,
-    LABEL_CLAIM_MINT_FAILED, LABEL_INGEST_UNREACHABLE, LABEL_NEAR_AI_NOTICE_PENDING,
-    LABEL_NOT_LOGGED_IN, LABEL_PII_FILTER_UNAVAILABLE,
+    LABEL_CLAIM_MINT_FAILED, LABEL_INGEST_UNREACHABLE, LABEL_NOT_LOGGED_IN,
+    LABEL_PII_FILTER_UNAVAILABLE,
 };
 use super::queue::QueueEntry;
 use super::settings::DaemonSettings;
@@ -49,8 +49,8 @@ use super::state::DaemonState;
 use crate::config::ConfigStore;
 use crate::source::{SessionRef, TraceSource};
 use crate::submit::{
-    PRECONDITION_CANARY_FAILED, PRECONDITION_NEAR_AI_NOTICE_UNRECORDED, PRECONDITION_NOT_LOGGED_IN,
-    SubmitContext, SubmitOutcome, SubmitPreconditionFailure,
+    PRECONDITION_CANARY_FAILED, PRECONDITION_NOT_LOGGED_IN, SubmitContext, SubmitOutcome,
+    SubmitPreconditionFailure,
 };
 use trace_commons_protocol::admission::AdmissionRefusal;
 use trace_commons_protocol::trace_contribution::TraceContributionEnvelope;
@@ -73,8 +73,13 @@ pub enum UploadDecision {
     /// The session changed after it was offered. Nothing was sent, and
     /// `new_hash` describes what is on disk now.
     Superseded { new_hash: String },
-    /// The pipeline declined to send this, fail-closed.
-    Refused { reason_label: String },
+    /// The pipeline declined to send this, fail-closed. `review_limits` is
+    /// `(windows_needed, windows_allowed)` when the witness refused the
+    /// session as too large to review, kept on the entry for listings.
+    Refused {
+        reason_label: String,
+        review_limits: Option<(u64, u64)>,
+    },
     /// The approval no longer covers what would be sent -- an
     /// envelope-determining input moved, or the envelope the pipeline built
     /// is not the one the contributor was shown. Nothing was sent; the
@@ -350,10 +355,18 @@ fn decision_for(
         SubmitOutcome::AlreadySubmitted { submission_id, .. } => {
             UploadDecision::AlreadySubmitted { submission_id }
         }
-        SubmitOutcome::SkippedParseFailure { reason_label } => {
-            UploadDecision::Refused { reason_label }
-        }
-        SubmitOutcome::Refused { reason_label, .. } => UploadDecision::Refused { reason_label },
+        SubmitOutcome::SkippedParseFailure { reason_label } => UploadDecision::Refused {
+            reason_label,
+            review_limits: None,
+        },
+        SubmitOutcome::Refused {
+            reason_label,
+            review_limits,
+            ..
+        } => UploadDecision::Refused {
+            reason_label,
+            review_limits,
+        },
         SubmitOutcome::Failed { reason_label } => UploadDecision::Failed { reason_label },
         // Turned into a decision by `Uploader::hold_for_review`, which has
         // the entry the certified review is saved under; never reaches here.
@@ -382,7 +395,8 @@ fn decision_for(
 /// - `busy`: the witness was at capacity (`503 witness_saturated`).
 /// - `timed_out`: `witness_timeout`, this client's deadline or the
 ///   witness's own `504 witness_request_timed_out`.
-/// - `unreachable`: `witness_unreachable` (no connection at all) and
+/// - `unreachable`: `witness_unreachable` (no connection at all),
+///   `witness_classifier_unavailable`, `witness_redaction_failed` and
 ///   `witness_attestation_unavailable`. The quote fetch is the first request
 ///   to the witness, so a gateway in front of it that answers with an error
 ///   page instead of passing the request on surfaces there.
@@ -398,7 +412,13 @@ pub fn witness_blocked_label(
         UploadDecision::WitnessSaturated { .. } => Some(WitnessBlockedLabel::Busy),
         UploadDecision::Failed { reason_label } => match reason_label.as_str() {
             "witness_timeout" => Some(WitnessBlockedLabel::TimedOut),
-            "witness_unreachable" | "witness_attestation_unavailable" => {
+            // The classifier and redaction labels were reported as
+            // `witness_unreachable` until they were given their own names;
+            // the witness still could not review, so they still count here.
+            "witness_unreachable"
+            | "witness_attestation_unavailable"
+            | trace_commons_protocol::witness_refusal::WITNESS_CLASSIFIER_UNAVAILABLE
+            | trace_commons_protocol::witness_refusal::WITNESS_REDACTION_FAILED => {
                 Some(WitnessBlockedLabel::Unreachable)
             }
             _ => None,
@@ -415,9 +435,8 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
         // Like a lease another attempt holds, nothing to tell anyone about;
         // above all not `ingest-unreachable`, which reads as an outage.
         UploadDecision::RateLimited { .. } | UploadDecision::Paced { .. } => None,
-        UploadDecision::Refused { reason_label } => match reason_label.as_str() {
+        UploadDecision::Refused { reason_label, .. } => match reason_label.as_str() {
             "pii-filter-unavailable" => Some(LABEL_PII_FILTER_UNAVAILABLE),
-            LABEL_NEAR_AI_NOTICE_PENDING => Some(LABEL_NEAR_AI_NOTICE_PENDING),
             LABEL_NOT_LOGGED_IN => Some(LABEL_NOT_LOGGED_IN),
             _ => None,
         },
@@ -426,7 +445,8 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
             crate::submit::REASON_TRANSIENT_REDACTION => Some(LABEL_PII_FILTER_UNAVAILABLE),
             // The privacy witness could not review the trace: unreachable,
             // past its deadline, or its own classifier failed (`503
-            // witness_redaction_failed`, read as `witness_unreachable`).
+            // witness_classifier_unavailable` or `503
+            // witness_redaction_failed`, preserved as distinct queue labels).
             // That is the privacy scan waiting, not the upload server down,
             // so it takes the scan's line rather than the catch-all below.
             label if crate::submit::witness_failure_is_transient(label) => {
@@ -460,7 +480,6 @@ pub fn health_label_for(decision: &UploadDecision) -> Option<&'static str> {
 pub fn precondition_health_label(e: &anyhow::Error) -> &'static str {
     match e.downcast_ref::<SubmitPreconditionFailure>().map(|f| f.0) {
         Some(PRECONDITION_CANARY_FAILED) => LABEL_CANARY_FAILED,
-        Some(PRECONDITION_NEAR_AI_NOTICE_UNRECORDED) => LABEL_NEAR_AI_NOTICE_PENDING,
         Some(PRECONDITION_NOT_LOGGED_IN) => LABEL_NOT_LOGGED_IN,
         _ => LABEL_PII_FILTER_UNAVAILABLE,
     }
@@ -511,7 +530,6 @@ impl Uploader<'_, '_> {
         }
         let fingerprint = super::preview::input_fingerprint(
             self.ctx.effective_cfg(),
-            self.ctx.near_ai(),
             self.settings.ironwire_attested_bodies,
         );
         artifact.validate(
@@ -578,6 +596,7 @@ impl Uploader<'_, '_> {
         if entry.has_no_user_messages() {
             return Some(UploadDecision::Refused {
                 reason_label: super::queue::REASON_NO_USER_MESSAGES.to_string(),
+                review_limits: None,
             });
         }
         // The Manual Scrub check (K4 of #1118): nothing goes without a
@@ -598,24 +617,11 @@ impl Uploader<'_, '_> {
             self.health.fail(LABEL_NOT_LOGGED_IN, now);
             return Some(UploadDecision::Refused {
                 reason_label: LABEL_NOT_LOGGED_IN.to_string(),
+                review_limits: None,
             });
         }
         // Enrollment is live, so retract the not-logged-in condition if it was set.
         self.health.resolve(LABEL_NOT_LOGGED_IN);
-
-        if self.settings.near_ai.is_some() && !self.store.near_ai_notice_shown() {
-            // The one-time notice is delivered interactively. Under a service
-            // manager its output goes to a log nobody reads, so a daemon that
-            // consumed the marker would send the contributor's text to a third
-            // party with the notice never actually delivered.
-            self.health.fail(LABEL_NEAR_AI_NOTICE_PENDING, now);
-            return Some(UploadDecision::Refused {
-                reason_label: LABEL_NEAR_AI_NOTICE_PENDING.to_string(),
-            });
-        }
-        // Near-AI notice requirement is met (either not configured or already shown),
-        // so retract the notice-pending condition if it was set.
-        self.health.resolve(LABEL_NEAR_AI_NOTICE_PENDING);
         None
     }
 
@@ -656,6 +662,7 @@ impl Uploader<'_, '_> {
             Err(_) => {
                 return Err(UploadDecision::Refused {
                     reason_label: "parse-failed".to_string(),
+                    review_limits: None,
                 });
             }
         };
@@ -673,7 +680,6 @@ impl Uploader<'_, '_> {
         // "unknown, so re-ask": fail-closed.
         let inputs_now = super::preview::input_fingerprint(
             self.ctx.effective_cfg(),
-            self.ctx.near_ai(),
             self.settings.ironwire_attested_bodies,
         );
         if entry.approved_inputs.as_deref() != Some(inputs_now.as_str()) {
@@ -717,6 +723,7 @@ impl Uploader<'_, '_> {
             let decision = if label == "admission_request_malformed" {
                 UploadDecision::Refused {
                     reason_label: label.into(),
+                    review_limits: None,
                 }
             } else {
                 UploadDecision::ApprovalStale {
@@ -1049,6 +1056,7 @@ mod tests {
                     session_ref: "hash".to_string(),
                     size_bytes: None,
                     limit_bytes: None,
+                    review_limits: None,
                 },
                 crate::submit::ReceiptShipped::NoCall,
                 None,
@@ -1066,6 +1074,69 @@ mod tests {
                 "{hold}"
             );
         }
+    }
+
+    /// Text the witness's classifier could not classify is a refusal of
+    /// that session, never the privacy scan waiting: the pass moves on.
+    #[test]
+    fn unclassifiable_text_is_a_refusal_not_the_privacy_scan_waiting() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TEXT_UNCLASSIFIABLE;
+        let decision = super::decision_for(
+            crate::submit::SubmitOutcome::Refused {
+                reason_label: label.to_string(),
+                session_ref: "hash".to_string(),
+                size_bytes: None,
+                limit_bytes: None,
+                review_limits: None,
+            },
+            crate::submit::ReceiptShipped::NoCall,
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: label.to_string(),
+                review_limits: None,
+            }
+        );
+        assert_ne!(
+            health_label_for(&decision),
+            Some(LABEL_PII_FILTER_UNAVAILABLE)
+        );
+        assert!(!crate::submit::witness_failure_is_transient(label));
+    }
+
+    /// A session the witness refused as too large to review is a refusal
+    /// that keeps its two counts for the entry, and is neither the privacy
+    /// scan waiting (`pii-filter-unavailable`) nor anything retried.
+    #[test]
+    fn a_too_large_witness_refusal_is_a_refusal_with_its_counts() {
+        let label = trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW;
+        let decision = super::decision_for(
+            crate::submit::SubmitOutcome::Refused {
+                reason_label: label.to_string(),
+                session_ref: "hash".to_string(),
+                size_bytes: None,
+                limit_bytes: None,
+                review_limits: Some((1800, 208)),
+            },
+            crate::submit::ReceiptShipped::NoCall,
+            None,
+            None,
+        );
+        assert_eq!(
+            decision,
+            UploadDecision::Refused {
+                reason_label: label.to_string(),
+                review_limits: Some((1800, 208)),
+            }
+        );
+        assert_ne!(
+            health_label_for(&decision),
+            Some(LABEL_PII_FILTER_UNAVAILABLE)
+        );
+        assert!(!crate::submit::witness_failure_is_transient(label));
     }
 
     use super::*;
@@ -1101,6 +1172,16 @@ mod tests {
             )),
             Some(WitnessBlockedLabel::Unreachable)
         );
+        for blocked in [
+            crate::witness::WitnessTrustError::WitnessClassifierUnavailable.refusal_label(),
+            crate::witness::WitnessTrustError::WitnessRedactionFailed.refusal_label(),
+        ] {
+            assert_eq!(
+                witness_blocked_label(&failed(blocked)),
+                Some(WitnessBlockedLabel::Unreachable),
+                "{blocked}"
+            );
+        }
         for other in [
             "witness_collateral_unavailable",
             "witness_quote_unverified",
@@ -1115,7 +1196,8 @@ mod tests {
         // A refusal under a blocking label is not a blocked send.
         assert_eq!(
             witness_blocked_label(&UploadDecision::Refused {
-                reason_label: "witness_timeout".to_string()
+                reason_label: "witness_timeout".to_string(),
+                review_limits: None,
             }),
             None
         );
@@ -1275,13 +1357,15 @@ mod tests {
     /// A privacy witness that could not review a trace is not the upload
     /// server being down. Every transient witness label fell through to
     /// `ingest-unreachable`, so a witness whose classifier failed
-    /// (`503 witness_redaction_failed`, read as `witness_unreachable`) told
+    /// (`503 witness_redaction_failed`) told
     /// the contributor "Can't reach the upload server" while ingest was up.
     #[test]
     fn a_witness_that_could_not_review_is_not_an_upload_outage() {
         for label in [
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ] {
@@ -1448,7 +1532,7 @@ mod tests {
         /// ordinary case where nothing moved between approval and upload.
         fn entry_for(&self, hash: &str, cfg: &crate::config::ContributorConfig) -> QueueEntry {
             QueueEntry {
-                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, None, false)),
+                approved_inputs: Some(crate::daemon::preview::input_fingerprint(cfg, false)),
                 ..self.entry(hash)
             }
         }
@@ -1472,7 +1556,6 @@ mod tests {
     fn dry_run_opts() -> crate::submit::SubmitOptions {
         crate::submit::SubmitOptions {
             dry_run: true,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
@@ -1580,7 +1663,7 @@ mod tests {
             };
             let entry = session.entry_for(&session.current_hash(), &cfg);
             let opts = dry_run_opts();
-            let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
             let mut state = DaemonState::new();
             let mut health = HealthState::default();
             let settings = settings();
@@ -1603,8 +1686,10 @@ mod tests {
                 panic!("explicit review must not produce a certified artifact");
             };
             if request.starts_with("{invalid") {
-                assert!(matches!(decision, UploadDecision::Refused { reason_label }
-                    if reason_label == expected));
+                assert!(
+                    matches!(decision, UploadDecision::Refused { reason_label, .. }
+                    if reason_label == expected)
+                );
             } else {
                 assert!(
                     matches!(decision, UploadDecision::ApprovalStale { reason_label }
@@ -1644,7 +1729,7 @@ mod tests {
         session.add_subagent("agent-a");
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
@@ -1675,7 +1760,7 @@ mod tests {
         session.append_more_events();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         match decision {
@@ -1701,7 +1786,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -1758,7 +1843,7 @@ mod tests {
         settings: DaemonSettings,
     ) -> (UploadDecision, DaemonState) {
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(store, cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(store, cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let decision = Uploader {
@@ -1844,7 +1929,7 @@ mod tests {
             assert!(
                 matches!(
                     &decision,
-                    UploadDecision::Refused { reason_label }
+                    UploadDecision::Refused { reason_label, .. }
                         if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES
                 ),
                 "{decision:?}"
@@ -1861,7 +1946,7 @@ mod tests {
         )
         .await;
         assert!(
-            !matches!(&decision, UploadDecision::Refused { reason_label }
+            !matches!(&decision, UploadDecision::Refused { reason_label, .. }
                 if reason_label == crate::daemon::queue::REASON_NO_USER_MESSAGES),
             "no recorded shape is unknown, not zero: {decision:?}"
         );
@@ -2206,7 +2291,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2220,14 +2304,13 @@ mod tests {
 
         let opts = crate::submit::SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -2319,14 +2402,13 @@ mod tests {
 
         let opts = crate::submit::SubmitOptions {
             dry_run: false,
-            pii_filter: None,
             no_reasoning: false,
             machine_readable: true,
             unenrolled_preview: false,
             remediate_quarantined: false,
             verdict: None,
         };
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -2398,7 +2480,6 @@ mod tests {
             user_subject: "alice".into(),
             device_key_id: device.device_key_id.clone(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2435,7 +2516,7 @@ mod tests {
         );
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2460,7 +2541,6 @@ mod tests {
         use crate::config::WitnessSettings;
         type Change = Box<dyn Fn(&mut crate::config::ContributorConfig, &mut SettingsLike)>;
         struct SettingsLike {
-            near_ai: Option<crate::envelope::NearAiSettings>,
             attested_bodies: bool,
         }
         let changes: Vec<(&str, Change)> = vec![
@@ -2477,10 +2557,6 @@ mod tests {
                 Box::new(|c, _| c.consent_scopes.push("model_training".into())),
             ),
             (
-                "privacy filter",
-                Box::new(|c, _| c.pii_filter = Some("near-ai".into())),
-            ),
-            (
                 "receipt endpoint",
                 Box::new(|c, _| c.inference_receipt_endpoint = Some("https://r.invalid".into())),
             ),
@@ -2495,16 +2571,6 @@ mod tests {
                     })
                 }),
             ),
-            (
-                "classifier",
-                Box::new(|_, s| {
-                    s.near_ai = Some(crate::envelope::NearAiSettings {
-                        api_key: "k".into(),
-                        base_url: Some("https://classifier.invalid".into()),
-                        model: Some("m".into()),
-                    })
-                }),
-            ),
             ("attested bodies", Box::new(|_, s| s.attested_bodies = true)),
         ];
         for (name, change) in &changes {
@@ -2516,14 +2582,13 @@ mod tests {
 
             let mut cfg = approved_under.clone();
             let mut now = SettingsLike {
-                near_ai: None,
                 attested_bodies: false,
             };
             change(&mut cfg, &mut now);
             store.save_config(&cfg).unwrap();
 
             let opts = dry_run_opts();
-            let mut ctx = SubmitContext::new(&store, &cfg, &opts, now.near_ai.clone()).unwrap();
+            let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
             let mut state = DaemonState::new();
             let mut health = HealthState::default();
             let mut settings = settings();
@@ -2571,7 +2636,7 @@ mod tests {
         };
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2613,7 +2678,6 @@ mod tests {
         let err = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2634,7 +2698,6 @@ mod tests {
         crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2655,7 +2718,6 @@ mod tests {
         let (_summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2668,7 +2730,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2700,7 +2762,6 @@ mod tests {
         let (_summary, _body, mut envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2716,7 +2777,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -2739,7 +2800,6 @@ mod tests {
         let (summary, _body, envelope) = crate::daemon::preview::build_preview(
             &store,
             Some(&cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2752,7 +2812,7 @@ mod tests {
         crate::daemon::approved_envelope::save(&store, entry.entry_id, &envelope).unwrap();
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert!(
@@ -2775,7 +2835,7 @@ mod tests {
         assert!(entry.approved_inputs.is_none());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let (decision, state, _health) = upload_fixture(&mut ctx, &store, &session, &entry).await;
 
         assert_eq!(
@@ -2796,7 +2856,7 @@ mod tests {
         store.save_config(&cfg).unwrap();
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
 
         // Log out underneath the running context.
         store.wipe().unwrap();
@@ -2806,7 +2866,8 @@ mod tests {
         assert_eq!(
             decision,
             UploadDecision::Refused {
-                reason_label: LABEL_NOT_LOGGED_IN.to_string()
+                reason_label: LABEL_NOT_LOGGED_IN.to_string(),
+                review_limits: None,
             }
         );
         assert_eq!(
@@ -2825,7 +2886,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         for _ in 0..BURST_MAX_UPLOADS {
@@ -2871,7 +2932,7 @@ mod tests {
 
         let entry = session.entry_for(&session.current_hash(), &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         let mut health = HealthState::default();
@@ -2902,7 +2963,7 @@ mod tests {
 
         let entry = session.entry_for("sha256:an-earlier-version", &cfg);
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let now = at("2026-08-08T16:00:00Z");
         let mut health = HealthState::default();
@@ -2935,7 +2996,6 @@ mod tests {
         let (summary, _body, envelope) = crate::daemon::preview::build_preview(
             store,
             Some(cfg),
-            None,
             &session.source(),
             &session.session_ref(),
         )
@@ -2967,7 +3027,7 @@ mod tests {
         entry.approved_verdict = Some("failed".to_string());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3005,7 +3065,7 @@ mod tests {
         assert_eq!(entry.approved_verdict, None);
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3044,7 +3104,7 @@ mod tests {
         entry.approved_verdict = Some("failed".to_string());
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();
@@ -3084,7 +3144,7 @@ mod tests {
         entry.previewed_envelope_digest = Some("0".repeat(64));
 
         let opts = dry_run_opts();
-        let mut ctx = SubmitContext::new(&store, &cfg, &opts, None).unwrap();
+        let mut ctx = SubmitContext::new(&store, &cfg, &opts).unwrap();
         let mut state = DaemonState::new();
         let mut health = HealthState::default();
         let settings = settings();

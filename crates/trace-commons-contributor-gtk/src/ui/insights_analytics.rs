@@ -19,6 +19,9 @@
 //! edit" is labelled inferred (owner decision D9); a Codex session has no
 //! turn series (owner decision D11). Feed S compares no weeks, so every
 //! change reads as the dash; this shell shows feed S only and says so.
+#[path = "insights_recap.rs"]
+mod recap;
+
 use super::super::style::brand_tokens::insights as metrics;
 use super::label;
 use adw::prelude::*;
@@ -157,6 +160,20 @@ pub(super) fn state(state: CoverageState) -> String {
 /// The harness's name, or the dash when the session's source is unknown.
 pub(super) fn harness(source: Option<AnalyticsSource>) -> String {
     source.map_or_else(dash, |source| text(&wire(source)))
+}
+
+/// A harness's line led by its tile (`InsightsHarnessTile`); the line
+/// alone for a harness this build has no tile for.
+fn tiled(source: AnalyticsSource, line: &str) -> gtk::Widget {
+    let Some(kind) = crate::ui::tool_tile::Kind::harness(&wire(source)) else {
+        return small(line).upcast();
+    };
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.append(&crate::ui::tool_tile::ToolTile::new(kind, false));
+    let words = small(line);
+    words.set_hexpand(true);
+    row.append(&words);
+    row.upcast()
 }
 
 pub(super) fn source_line(source: AnalyticsSource) -> String {
@@ -435,18 +452,26 @@ pub(super) fn marker_lines(marker: &DrillMarker, threshold: u64) -> Vec<String> 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tab {
     Overview,
+    Benchmarks,
     Patterns,
     Sessions,
     Analyze,
 }
 
 impl Tab {
-    pub(super) const ALL: [Tab; 4] = [Tab::Overview, Tab::Patterns, Tab::Sessions, Tab::Analyze];
+    pub(super) const ALL: [Tab; 5] = [
+        Tab::Overview,
+        Tab::Benchmarks,
+        Tab::Patterns,
+        Tab::Sessions,
+        Tab::Analyze,
+    ];
 
     /// The page name in the tab stack.
     pub(super) fn name(self) -> &'static str {
         match self {
             Tab::Overview => "overview",
+            Tab::Benchmarks => "benchmarks",
             Tab::Patterns => "patterns",
             Tab::Sessions => "sessions",
             Tab::Analyze => "analyze",
@@ -457,6 +482,7 @@ impl Tab {
     pub(super) fn title_key(self) -> &'static str {
         match self {
             Tab::Overview => "analytics_tab_overview",
+            Tab::Benchmarks => "analytics_tab_benchmarks",
             Tab::Patterns => "analytics_tab_patterns",
             Tab::Sessions => "analytics_tab_sessions",
             Tab::Analyze => "analytics_tab_analyze",
@@ -599,6 +625,7 @@ fn summary_grid() -> gtk::FlowBox {
 /// The three analytics tabs. Analyze is the caller's.
 pub(super) struct AnalyticsTabs {
     pub overview: gtk::ScrolledWindow,
+    pub benchmarks: Rc<super::benchmarks::Benchmarks>,
     pub patterns: gtk::ScrolledWindow,
     pub sessions: gtk::ScrolledWindow,
     overview_body: gtk::Box,
@@ -650,6 +677,7 @@ impl AnalyticsTabs {
         let sessions_body = gtk::Box::new(gtk::Orientation::Vertical, metrics::SECTION_GAP);
         Rc::new(Self {
             overview: scrolled(&overview_body),
+            benchmarks: super::benchmarks::Benchmarks::new(),
             patterns: scrolled(&patterns_body),
             sessions: scrolled(&sessions_body),
             overview_body,
@@ -676,6 +704,7 @@ impl AnalyticsTabs {
 
     pub(super) fn bind_app(&self, app: &Rc<super::super::App>) {
         *self.app.borrow_mut() = Rc::downgrade(app);
+        self.benchmarks.bind_app(app);
         self.suspend();
     }
 
@@ -685,6 +714,7 @@ impl AnalyticsTabs {
     }
 
     pub(super) fn invalidate(&self) {
+        self.benchmarks.suspend();
         self.live_again.set(false);
         for generation in &self.generations {
             generation.set(generation.get().wrapping_add(1));
@@ -719,8 +749,7 @@ impl AnalyticsTabs {
         self.bump(Slot::Overview);
         let generation = self.generation(Slot::Overview).get();
         clear(&self.overview_body);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        let spinner = crate::ui::glass_feedback::spinner();
         self.overview_body.append(&spinner);
         if self.live_busy.replace(true) {
             // Keep only the newest selection while the existing worker call runs.
@@ -730,49 +759,61 @@ impl AnalyticsTabs {
         let requested_week = self.overview_week.get();
         let params = week_params(requested_week, local_offset());
         let weak = Rc::downgrade(self);
-        app.call("insights_week", params, move |_, result| {
-            let Some(tabs) = weak.upgrade() else { return };
-            tabs.live_busy.set(false);
-            if tabs.live_again.replace(false)
-                && tabs.active.get()
-                && tabs.shown.get() == Tab::Overview
-            {
-                tabs.load(Tab::Overview);
-                return;
-            }
-            if !accept_live_result(
-                tabs.active.get(),
-                tabs.shown.get(),
-                tabs.generation(Slot::Overview).get(),
-                generation,
-            ) {
-                return;
-            }
-            if let Some((response, overview)) = result.ok().and_then(|response| {
-                super::live::live_overview(&response)
-                    .filter(|overview| {
-                        requested_week.is_none_or(|week| overview.week_start == week)
-                    })
-                    .map(|overview| (response, overview))
-            }) {
-                clear(&tabs.overview_body);
-                tabs.present_overview_heading(&overview);
-                // Live totals are not evidence links into the saved-snapshot feed.
-                let totals = card_box();
-                totals.append(&styled(&text("analytics_card_sessions"), "heading"));
-                totals.append(&styled(
-                    &figure(Some(u64::from(overview.sessions))),
-                    "title-3",
-                ));
-                for source in &overview.sources {
-                    totals.append(&small(&source_line(source.source)));
-                    totals.append(&styled(&figure(source.tokens), "title-3"));
-                }
-                tabs.overview_body.append(&totals);
-                super::live::append_work_cards(&tabs.overview_body, &response);
-            } else {
-                tabs.load_saved_overview();
-            }
+        app.call("insights_week", params, move |app, result| {
+            app.call(
+                "subscription_usage",
+                serde_json::json!({"refresh":false,"interactive":false}),
+                move |_, subscriptions| {
+                    let Some(tabs) = weak.upgrade() else { return };
+                    tabs.live_busy.set(false);
+                    if tabs.live_again.replace(false)
+                        && tabs.active.get()
+                        && tabs.shown.get() == Tab::Overview
+                    {
+                        tabs.load(Tab::Overview);
+                        return;
+                    }
+                    if !accept_live_result(
+                        tabs.active.get(),
+                        tabs.shown.get(),
+                        tabs.generation(Slot::Overview).get(),
+                        generation,
+                    ) {
+                        return;
+                    }
+                    if let Some((response, overview)) = result.ok().and_then(|response| {
+                        super::live::live_overview(&response)
+                            .filter(|overview| {
+                                requested_week.is_none_or(|week| overview.week_start == week)
+                            })
+                            .map(|overview| (response, overview))
+                    }) {
+                        clear(&tabs.overview_body);
+                        tabs.present_overview_heading(&overview);
+                        tabs.load_recap(&response, generation);
+                        // Live totals are not evidence links into the saved-snapshot feed.
+                        let totals = card_box();
+                        totals.append(&styled(&text("analytics_card_sessions"), "heading"));
+                        totals.append(&styled(
+                            &figure(Some(u64::from(overview.sessions))),
+                            "title-3",
+                        ));
+                        for source in &overview.sources {
+                            totals.append(&tiled(source.source, &source_line(source.source)));
+                            totals.append(&styled(&figure(source.tokens), "title-3"));
+                        }
+                        tabs.overview_body.append(&totals);
+                        super::live::append_work_cards(&tabs.overview_body, &response);
+                        super::usage::append(
+                            &tabs.overview_body,
+                            &response,
+                            &subscriptions.unwrap_or_default(),
+                        );
+                    } else {
+                        tabs.load_saved_overview();
+                    }
+                },
+            );
         });
     }
 
@@ -791,6 +832,7 @@ impl AnalyticsTabs {
             return;
         };
         self.bump(Slot::Overview);
+        self.benchmarks.suspend();
         self.shown.set(tab);
         self.load(tab);
     }
@@ -820,6 +862,7 @@ impl AnalyticsTabs {
         }
         let tz = local_offset();
         match tab {
+            Tab::Benchmarks => self.benchmarks.show(),
             Tab::Overview => {
                 // A drill-down still in flight belongs to the old cards.
                 self.open_inputs.set(None);
@@ -896,8 +939,7 @@ impl AnalyticsTabs {
         let generation = self.generation(slot).get() + 1;
         self.generation(slot).set(generation);
         clear(body);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        let spinner = crate::ui::glass_feedback::spinner();
         body.append(&spinner);
         let (tx, rx) = async_channel::bounded(1);
         let store_dir = self.store_dir.clone();
@@ -1004,7 +1046,7 @@ impl AnalyticsTabs {
         }
         for source in &overview.sources {
             tokens.append(&styled(&figure(source.tokens), "title-3"));
-            tokens.append(&small(&source_line(source.source)));
+            tokens.append(&tiled(source.source, &source_line(source.source)));
             tokens.append(&small(&change(source)));
         }
         cards.insert(
@@ -1174,14 +1216,18 @@ impl AnalyticsTabs {
         for line in feed_lines(patterns.feed) {
             body.append(&small(&line));
         }
-        let cards = gtk::Box::new(gtk::Orientation::Horizontal, metrics::HEADING_GAP);
-        cards.set_homogeneous(true);
+        // Wraps as the pane narrows (the Monitor's main pane is 440).
+        let cards = summary_grid();
         for card in &patterns.cards {
-            cards.append(&self.pattern_card(card, patterns.long_context_threshold));
+            cards.insert(
+                &self.pattern_card(card, patterns.long_context_threshold),
+                -1,
+            );
         }
         body.append(&cards);
         if let Some(line) = claude_only_line(patterns) {
-            body.append(&small(&line));
+            // `InsightsScopeLine`: Claude Code's tile beside the line.
+            body.append(&tiled(AnalyticsSource::ClaudeCode, &line));
         }
         let listed = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.append(&listed);
@@ -1400,6 +1446,9 @@ fn breakdown(overview: &WeekOverview) -> gtk::Box {
     let card = card_box();
     let stack = gtk::Stack::new();
     let switcher = gtk::StackSwitcher::new();
+    // Each button as wide as its words: libadwaita's 100px floor for a
+    // switcher button made these three wider than the 440 pane's column.
+    switcher.add_css_class("tc-compact-switcher");
     switcher.set_stack(Some(&stack));
     card.append(&switcher);
     card.append(&stack);

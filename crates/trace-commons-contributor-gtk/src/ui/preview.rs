@@ -34,6 +34,46 @@ use crate::copy;
 use crate::model::{ApproveResult, PreviewSummary, human_bytes, human_when};
 use crate::transcript_paging::{self, ResidentChunks, TranscriptDocument};
 
+/// Each load is a distinct request, even when it names the same session.
+/// Closing invalidates outstanding preview, permission and search replies.
+#[derive(Default)]
+struct RequestEpoch(Cell<u64>);
+
+impl RequestEpoch {
+    fn begin(&self) -> u64 {
+        let next = self
+            .0
+            .get()
+            .checked_add(1)
+            .expect("preview request epoch overflow");
+        self.0.set(next);
+        next
+    }
+
+    fn invalidate(&self) {
+        self.begin();
+    }
+
+    fn accepts(&self, requested: u64) -> bool {
+        self.0.get() == requested
+    }
+}
+
+/// Resolve identity against the live pending list at click time.
+pub fn open_entry(app: &Rc<App>, entry_id: &str) {
+    let index = pending_index(&app.entries.borrow(), entry_id);
+    if let Some(index) = index {
+        open(app, index);
+    }
+}
+
+fn pending_index(entries: &[crate::model::QueueEntry], entry_id: &str) -> Option<usize> {
+    entries
+        .iter()
+        .filter(|entry| entry.state == "pending")
+        .position(|entry| entry.entry_id == entry_id)
+}
+
 /// Open the preview sheet on the `index`-th pending entry.
 pub fn open(app: &Rc<App>, index: usize) {
     open_with_search(app, index, None, None)
@@ -69,6 +109,7 @@ struct Sheet {
     witness_requested: Cell<bool>,
     witness_busy: Cell<bool>,
     witness_supported: Cell<bool>,
+    epoch: RequestEpoch,
     window: adw::Window,
     title: adw::WindowTitle,
     pending: Vec<crate::model::QueueEntry>,
@@ -84,6 +125,10 @@ struct Sheet {
     /// tab. A person who is deciding should not have to go back to a tab to
     /// re-read what the payload was.
     manifest_slot: gtk::Box,
+    /// Why this trace is held for a person, and how unsure the scrubber
+    /// was (the Mac review card's reasons and `unsure` row). Refilled on
+    /// every `load`; nothing of one trace's survives into the next.
+    pub(crate) held_slot: gtk::Box,
 
     /// The two counts the tab strip carries: how many turns are in the
     /// trace, and how many permissions the contribution would run under.
@@ -186,6 +231,32 @@ const TABS: [Tab; 4] = [
 /// The stack child that shows the redacted body itself.
 const TRANSCRIPT_TAB: &str = "would-be-sent";
 
+/// The sheet's width as it opens, and the narrowest it goes, on a screen
+/// that has room for it.
+const SHEET_WIDTH: i32 = 900;
+
+/// The width the sheet opens at and requests: `SHEET_WIDTH`, but never
+/// more than `room`, the monitor's (else the window's) width in logical
+/// pixels, so a narrow screen does not cut its buttons off at the side.
+/// An unknown or empty `room` leaves `SHEET_WIDTH`.
+fn sheet_width(room: Option<i32>) -> i32 {
+    match room {
+        Some(room) if room > 0 => room.min(SHEET_WIDTH),
+        _ => SHEET_WIDTH,
+    }
+}
+
+/// The room the sheet has over `parent`: the width of the monitor it is
+/// on, else its own width once it has one.
+fn room_over(parent: &gtk::Window) -> Option<i32> {
+    parent
+        .surface()
+        .and_then(|surface| WidgetExt::display(parent).monitor_at_surface(&surface))
+        .map(|monitor| monitor.geometry().width())
+        .filter(|width| *width > 0)
+        .or_else(|| Some(parent.width()).filter(|width| *width > 0))
+}
+
 impl Sheet {
     fn present(
         app: &Rc<App>,
@@ -194,10 +265,13 @@ impl Sheet {
         term: Option<String>,
         tab: Option<String>,
     ) {
+        // The opening width and the request below agree (the libadwaita
+        // 1.5 fix needs them to), and neither is wider than the screen.
+        let width = sheet_width(room_over(app.window.upcast_ref()));
         let window = adw::Window::builder()
             .transient_for(&app.window)
             .modal(true)
-            .default_width(900)
+            .default_width(width)
             .default_height(720)
             .build();
 
@@ -232,6 +306,10 @@ impl Sheet {
         let manifest_slot = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .build();
+        let held_slot = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(space::XXS)
+            .build();
 
         // Green, a padlock's worth of words, and a glyph -- the status of
         // the whole sheet, said before anything asks for a decision.
@@ -254,6 +332,7 @@ impl Sheet {
         sheet_header.set_margin_end(space::L);
         sheet_header.append(&identity);
         sheet_header.append(&manifest_slot);
+        sheet_header.append(&held_slot);
         sheet_header.append(&status_row);
 
         let stack = gtk::Stack::builder()
@@ -558,9 +637,8 @@ impl Sheet {
         correction_group.append(&correction_caption);
         correction_group.set_visible(false);
 
-        let skip = gtk::Button::with_label(copy::NOT_THIS_ONE);
+        let skip = gtk::Button::with_label(copy::not_this_one());
         skip.add_css_class("tc-quiet");
-        skip.set_tooltip_text(Some(copy::NOT_THIS_ONE_TOOLTIP));
         let close = gtk::Button::with_label(copy::CLOSE);
         close.add_css_class("tc-quiet");
         let contribute = gtk::Button::with_label(copy::CONTRIBUTE);
@@ -643,6 +721,13 @@ impl Sheet {
         content.append(&stack);
         content.append(&footer_rule);
         content.append(&footer);
+        // libadwaita 1.5 (Ubuntu 24.04) lays the content out as tall as it
+        // is at its narrowest, inside a window sized for its real width: at
+        // the window's minimum height the footer's buttons ended below the
+        // sheet (GNOME box, 2026-11-18). The sheet is no narrower than it
+        // opens, so the two heights agree; on a screen narrower than
+        // `SHEET_WIDTH` it opens and stays at the screen's width.
+        content.set_width_request(width);
         window.set_content(Some(&content));
 
         let sheet = Rc::new(Sheet {
@@ -657,6 +742,7 @@ impl Sheet {
             witness_requested: Cell::new(false),
             witness_busy: Cell::new(false),
             witness_supported: Cell::new(false),
+            epoch: RequestEpoch::default(),
             window: window.clone(),
             title,
             pending,
@@ -665,6 +751,7 @@ impl Sheet {
             identity_agent,
             identity_when,
             manifest_slot,
+            held_slot,
             count_whats_in_it,
             count_permissions,
             search_entry: search_entry.clone(),
@@ -684,6 +771,14 @@ impl Sheet {
             verdict: RefCell::new(None),
             correction_group: correction_group.clone(),
             correction_view: correction_view.clone(),
+        });
+
+        let closing = Rc::downgrade(&sheet);
+        window.connect_close_request(move |_| {
+            if let Some(sheet) = closing.upgrade() {
+                sheet.epoch.invalidate();
+            }
+            glib::Propagation::Proceed
         });
 
         let admission_sheet = Rc::clone(&sheet);
@@ -973,6 +1068,7 @@ impl Sheet {
                         Err(failure) => result_sheet.fill_failure_with(
                             &failure.label,
                             crate::copy::witness_busy_retry_line(failure.result.as_ref()),
+                            too_long_sentence(&failure.label, failure.result.as_ref()),
                         ),
                     }
                     result_sheet.sync_witness();
@@ -983,6 +1079,18 @@ impl Sheet {
     }
 
     fn load(self: &Rc<Self>) {
+        let request = self.epoch.begin();
+        *self.body.borrow_mut() = None;
+        for container in [
+            &self.permissions,
+            &self.whats_in_it,
+            &self.removed_summary,
+            &self.held_slot,
+        ] {
+            while let Some(child) = container.first_child() {
+                container.remove(&child);
+            }
+        }
         self.admission_message.set_label("");
         let Some(entry) = self.current() else {
             self.window.close();
@@ -1003,6 +1111,7 @@ impl Sheet {
         ));
         self.identity_when
             .set_text(&human_when(entry.discovered_at));
+        super::queue::append_held_facts(&self.held_slot, entry);
         // A new entry is a new decision, and nothing about the previous
         // one may carry into it: the pin is dropped here and only set again
         // by a preview that actually came back for THIS entry. The verdict
@@ -1029,6 +1138,9 @@ impl Sheet {
         let entry_id = entry.entry_id.clone();
         let requested = entry_id.clone();
         self.app.preview(&requested, move |app, result| {
+            if !sheet.epoch.accepts(request) {
+                return;
+            }
             match result {
                 Ok((summary, body)) => {
                     app.previews
@@ -1284,10 +1396,14 @@ impl Sheet {
         style::append_body(&self.permissions, copy::PERMISSIONS_INTRO);
         let sheet = Rc::clone(self);
         let scopes = summary.consent_scopes.clone();
+        let request = self.epoch.0.get();
         self.app.call(
             "consent_options",
             serde_json::json!({}),
             move |_, result| {
+                if !sheet.epoch.accepts(request) {
+                    return;
+                }
                 let described: Vec<crate::model::ConsentScope> = result
                     .ok()
                     .and_then(|v| serde_json::from_value(v.get("scopes").cloned()?).ok())
@@ -1315,16 +1431,31 @@ impl Sheet {
     }
 
     fn fill_failure(self: &Rc<Self>, label: &str) {
-        self.fill_failure_with(label, None);
+        self.fill_failure_with(label, None, None);
     }
 
     /// [`Self::fill_failure`], with a second line under the sentence: when a
     /// busy witness asked to be tried again. Shown only for a review the
     /// person asked for, the one path that line can describe.
-    fn fill_failure_with(self: &Rc<Self>, label: &str, retry_line: Option<String>) {
+    ///
+    /// `filled` is a refusal sentence already filled in with the witness's
+    /// numbers (a session too large to review); it wins over the label's
+    /// sentence for a review the person asked for.
+    fn fill_failure_with(
+        self: &Rc<Self>,
+        label: &str,
+        retry_line: Option<String>,
+        filled: Option<String>,
+    ) {
         self.pinned.set(false);
         self.sync_contribute();
         self.sync_witness();
+        if let Some(filled) = filled.filter(|_| self.witness_requested.get()) {
+            self.copy_all.set_sensitive(false);
+            self.transcript.show_sentence(&filled);
+            self.search_summary.set_text(&filled);
+            return;
+        }
         let sentence = if self.witness_requested.get() {
             // The same function the daemon selects with for the other two
             // shells. GTK reaches it directly because it is Rust and has no
@@ -1502,12 +1633,16 @@ impl Sheet {
         let sheet = Rc::clone(self);
         let asked = needle.to_string();
         let asked_of = entry_id.clone();
+        let request = self.epoch.0.get();
         self.app
             .search_original(&entry_id, &asked.clone(), move |_, original| {
                 let still_here = sheet
                     .current()
                     .is_some_and(|entry| entry.entry_id == asked_of);
-                if !still_here || sheet.search_entry.text().trim() != asked {
+                if !sheet.epoch.accepts(request)
+                    || !still_here
+                    || sheet.search_entry.text().trim() != asked
+                {
                     return;
                 }
                 sheet.apply_original_count(remaining, original);
@@ -1573,16 +1708,15 @@ impl Sheet {
 
     fn dismiss_current(self: &Rc<Self>) {
         let Some(entry) = self.current() else { return };
-        let entry_id = entry.entry_id.clone();
         let sheet = Rc::clone(self);
-        self.app.call(
-            "dismiss",
-            serde_json::json!({ "entry_id": entry_id }),
-            move |app, _| {
-                app.refresh();
+        // Asks first, as the Mac's `dismissModal`; the sheet moves on only
+        // once the daemon has taken it.
+        super::queue::confirm_dismiss(&self.app, &self.window, entry, move |app, dismissed| {
+            app.refresh();
+            if dismissed {
                 sheet.advance();
-            },
-        );
+            }
+        });
     }
 
     /// Approve exactly the bytes this sheet described, render the toast
@@ -1602,6 +1736,12 @@ impl Sheet {
     /// (`approved: 0`), which renders "Nothing sent" and offers no undo --
     /// fail-closed, the same rule a genuinely skipped entry gets.
     fn approve_current(self: &Rc<Self>) {
+        // Only a preview that came back for this entry is something a
+        // Contribute can cover; the button is drawn off without one, and
+        // a press that reaches here anyway sends nothing.
+        if !self.pinned.get() {
+            return;
+        }
         let Some(entry) = self.current() else { return };
         let entry_id = entry.entry_id.clone();
         let project_label = entry.project_label.clone();
@@ -1662,7 +1802,12 @@ impl Sheet {
                         app.refresh();
                         return;
                     }
-                    app.render_submit_response(&approve, vec![entry_id.clone()], &project_label);
+                    app.render_submit_response(
+                        &approve,
+                        vec![entry_id.clone()],
+                        &project_label,
+                        None,
+                    );
                 }
                 // A top-level refusal, which for this call means the
                 // parameters themselves were rejected -- an oversized or
@@ -1772,12 +1917,10 @@ impl Sheet {
 /// hole. See `.tc-redaction` in `style.css` for the full treatment, which
 /// applies where a marker is drawn as a widget rather than as buffer text.
 fn highlight_redactions(buffer: &gtk::TextBuffer, text: &str) {
-    let dark = adw::StyleManager::default().is_dark();
-    let (background, foreground) = if dark {
-        ("#4A3C18", "#F0EBDD")
-    } else {
-        ("#f3e3c0", "#202426")
-    };
+    // The scheme's literals live in `style::Inks` now, beside the Omarchy
+    // skin's, so one place answers for both.
+    let inks = style::inks();
+    let (background, foreground) = (inks.redaction_bg.as_str(), inks.redaction_fg.as_str());
     let tag = buffer
         .create_tag(
             None,
@@ -2239,18 +2382,28 @@ impl Excerpt {
     /// can, so the hue and its alpha are written out per scheme. They are
     /// `tc_gold_highlight`'s own two components -- `rgba(185,130,31,.28)`
     /// light, `rgba(220,170,67,.32)` dark -- and must be kept in step with
-    /// it. Only the background is set: the foreground stays the label's own
-    /// ink, which is what keeps the excerpt readable at both ends of the
-    /// scheme.
+    /// it. In the standard look only the background is set: the foreground
+    /// stays the label's own ink, which keeps the excerpt readable at both
+    /// ends of the scheme. In the Omarchy skin the hit's ink is set too,
+    /// solved against the theme's yellow wash (`omarchy::Palette::
+    /// highlight_ink`), since a theme's yellow can leave its own ink under
+    /// 4.5:1.
     fn markup(&self) -> String {
-        let dark = adw::StyleManager::default().is_dark();
-        let (hue, alpha) = if dark {
-            ("#DCAA43", "32%")
-        } else {
-            ("#B9821F", "28%")
-        };
+        self.markup_with(&style::inks())
+    }
+
+    /// [`Self::markup`] with the inks given rather than read from what is
+    /// on screen; `style::Inks::standard` carries the two scheme values
+    /// above.
+    fn markup_with(&self, inks: &style::Inks) -> String {
+        let (hue, alpha) = (&inks.highlight, &inks.highlight_alpha);
+        let ink = inks
+            .highlight_ink
+            .as_ref()
+            .map(|ink| format!(" foreground=\"{ink}\""))
+            .unwrap_or_default();
         format!(
-            "{}<span background=\"{hue}\" bgalpha=\"{alpha}\">{}</span>{}",
+            "{}<span background=\"{hue}\" bgalpha=\"{alpha}\"{ink}>{}</span>{}",
             glib::markup_escape_text(&self.text[..self.hit.start]),
             glib::markup_escape_text(&self.text[self.hit.clone()]),
             glib::markup_escape_text(&self.text[self.hit.end..]),
@@ -2407,6 +2560,19 @@ fn admission_ready(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The sheet asks for no more than the screen has (F-4): 1280 wide at
+    /// 150% is 853 logical pixels, and the sheet opens and stays inside it.
+    #[test]
+    fn the_sheet_is_never_wider_than_the_room_it_has() {
+        use super::{SHEET_WIDTH, sheet_width};
+        assert_eq!(sheet_width(Some(1920)), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(900)), 900);
+        assert_eq!(sheet_width(Some(853)), 853);
+        assert_eq!(sheet_width(None), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(0)), SHEET_WIDTH);
+        assert_eq!(sheet_width(Some(-1)), SHEET_WIDTH);
+    }
+
     /// The control that prepares an evidence-bearing session is offered on
     /// the strength of `admission_evidence_required` -- a consequence of how
     /// the contributor enrolled, not a preference anyone sets. A contributor
@@ -2508,6 +2674,32 @@ mod tests {
     }
     use super::context_around;
 
+    /// The highlighted excerpt is washed in the inks it is given: the
+    /// standard gold, or the Omarchy palette's.
+    #[test]
+    fn the_excerpt_wash_follows_the_inks() {
+        use crate::ui::omarchy::{self, fixtures::TOKYO};
+        use crate::ui::style::Inks;
+        let excerpt = super::Excerpt {
+            text: "a needle here".to_string(),
+            hit: 2..8,
+        };
+        // Standard: the wash only, exactly as before the skin.
+        assert_eq!(
+            excerpt.markup_with(&Inks::standard(false)),
+            "a <span background=\"#B9821F\" bgalpha=\"28%\">needle</span> here"
+        );
+        let palette = omarchy::parse(TOKYO, false).unwrap();
+        let markup = excerpt.markup_with(&Inks::omarchy(&palette));
+        assert!(markup.contains(&format!("background=\"{}\"", palette.highlight.hex())));
+        assert!(markup.contains(&format!("bgalpha=\"{}\"", omarchy::HIGHLIGHT_ALPHA)));
+        // The skin also sets the hit's ink, solved against its wash.
+        assert!(
+            markup.contains(&format!("foreground=\"{}\"", palette.highlight_ink.hex())),
+            "{markup}"
+        );
+    }
+
     #[test]
     fn context_never_splits_a_multibyte_character() {
         let body = "prefix ünïcödé haystack needle tail ünïcödé more";
@@ -2571,4 +2763,66 @@ mod tests {
             assert_eq!(&excerpt.text[excerpt.hit.clone()], "Acme Corp", "{body}");
         }
     }
+}
+
+#[cfg(test)]
+mod request_epoch_tests {
+    use super::{RequestEpoch, pending_index};
+
+    #[test]
+    fn entry_opener_resolves_only_live_pending_positions() {
+        use crate::model::QueueEntry;
+        let entry = |id: &str, state: &str| QueueEntry {
+            entry_id: id.into(),
+            state: state.into(),
+            ..Default::default()
+        };
+        let rows = [
+            entry("sent", "approved"),
+            entry("b", "pending"),
+            entry("a", "pending"),
+        ];
+        assert_eq!(pending_index(&rows, "a"), Some(1));
+        assert_eq!(pending_index(&rows, "b"), Some(0));
+        assert_eq!(pending_index(&rows, "sent"), None);
+        assert_eq!(pending_index(&rows, "gone"), None);
+    }
+
+    #[test]
+    fn advancing_rejects_the_previous_preview() {
+        let epoch = RequestEpoch::default();
+        let first = epoch.begin();
+        let second = epoch.begin();
+        assert!(!epoch.accepts(first));
+        assert!(epoch.accepts(second));
+    }
+
+    #[test]
+    fn closing_rejects_in_flight_preview_and_permissions() {
+        let epoch = RequestEpoch::default();
+        let pending = epoch.begin();
+        epoch.invalidate();
+        assert!(!epoch.accepts(pending));
+    }
+
+    #[test]
+    fn same_entry_reloaded_never_accepts_its_old_answer() {
+        let epoch = RequestEpoch::default();
+        let old = epoch.begin();
+        epoch.begin();
+        assert!(!epoch.accepts(old));
+    }
+}
+
+/// The too-large refusal's sentence, filled in with the counts the daemon
+/// put beside it, through the same function the daemon fills it with for
+/// the other shells. `None` for any other label, or without both counts.
+fn too_long_sentence(label: &str, result: Option<&serde_json::Value>) -> Option<String> {
+    if label != trace_commons_protocol::witness_refusal::WITNESS_TRACE_TOO_LARGE_FOR_REVIEW {
+        return None;
+    }
+    let view = result?.get("view")?;
+    let needed = view.get("windows_needed")?.as_u64()?;
+    let allowed = view.get("windows_allowed")?.as_u64()?;
+    Some(trace_commons_contributor::witness_copy::witness_too_long_line(needed, allowed))
 }

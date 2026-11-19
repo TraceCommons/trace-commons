@@ -1,6 +1,7 @@
 //! Cancellation cleanup for a native CLI spawned in its own Unix process group.
 //! A guard is only constructed from the PID of a newly spawned child whose
 //! command used `process_group(0)`, never from an IPC-supplied process ID.
+#![allow(unsafe_code)]
 
 use std::ffi::c_int;
 
@@ -8,6 +9,7 @@ const SIGKILL: c_int = 9;
 // Darwin and Linux both use ESRCH=3 for an absent process/process group.
 const ESRCH: i32 = 3;
 
+// SAFETY: POSIX libc process-group primitives matching the platform C ABI.
 unsafe extern "C" {
     fn getpgrp() -> c_int;
     fn getpgid(pid: c_int) -> c_int;
@@ -90,6 +92,7 @@ mod tests {
     use std::process::{Child, Command};
     use std::time::{Duration, Instant};
 
+    // SAFETY: POSIX `kill(2)` declaration matching the platform C ABI.
     unsafe extern "C" {
         fn kill(pid: c_int, signal: c_int) -> c_int;
     }

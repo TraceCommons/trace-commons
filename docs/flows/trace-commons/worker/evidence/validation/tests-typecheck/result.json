@@ -1,0 +1,28 @@
+{
+  "name": "tests-typecheck",
+  "kind": "typecheck",
+  "status": "passed",
+  "command": [
+    "quint",
+    "typecheck",
+    "/Users/zakimanian/code/tc-wt-witness-retry-fairness/docs/flows/trace-commons/worker/witness_worker_tests.qnt"
+  ],
+  "exitCode": 0,
+  "timedOut": false,
+  "artifactsChanged": false,
+  "seconds": 1.085,
+  "budgetSeconds": 240,
+  "hashes": {
+    "docs/flows/trace-commons/worker/witness_worker.qnt": "dd75140072f703b70d2b26277b1df7ffc2ff088dc7b3f9d431c3b8ee8d406d9f",
+    "docs/flows/trace-commons/worker/witness_worker_tests.qnt": "8da1af94dff31e4ec601e44ecf801c8d5574201ad9e37ae6966b23319584447e",
+    "docs/flows/trace-commons/worker/check.py": "1ec44538d2300f5fe39bfe14d6582e3386a1b6b46f22e77114bd8b493eda347f",
+    "docs/flows/trace-commons/worker/test_check.py": "3c066304ee2761e152d5edbaf95e65c09e3680593e7f5efb419220712161bf58",
+    "crates/trace-commons-contributor/src/daemon/witness_worker.rs": "6985209fe4147a45d2d30e398ccebafeefa23d02152156480ad820ff82cfedc9",
+    "crates/trace-commons-contributor/src/daemon/witness_retry.rs": "ed7867633aae78494644fcf03e3187942cec3b4429173ac6ba56246096c20b5f",
+    "crates/trace-commons-contributor/src/daemon/queue.rs": "177367e1a334872cea00d8402aa1763ebb7e4254908ed87df3000cc7c12b2a1e",
+    "crates/trace-commons-contributor/src/daemon/mod.rs": "85c888fde7b69a5dde906d1244244a3f855c07700120220c8e35a7f44ddd556b",
+    "crates/trace-commons-contributor/src/submit.rs": "e05d99e2714d79842428b832465a43b5c053bf95f11f50d2ea381c68bec8f903"
+  },
+  "log": "tests-typecheck/check.log",
+  "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

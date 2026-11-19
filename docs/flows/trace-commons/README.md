@@ -27,6 +27,14 @@ source regressions, native tests and deployed behavior remain separate claims.
 agreement and random simulation. None establishes automatic equivalence with
 all executable code or describes a live deployment configuration.
 
+## Background witness queue companion
+
+The [witness worker model](worker/README.md) adds four-trace scheduling,
+independent retries, the correlated-failure circuit, saturation overlap and
+queued approval refresh. It has its own regression tests, sampled checks and full-step safety
+induction; it does not alter the existing lifecycle induction certificates
+or claim unconditional fairness.
+
 ## Model families
 
 | Model | Responsibility |

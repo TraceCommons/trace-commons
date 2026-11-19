@@ -182,7 +182,7 @@
   color: @tc_muted;
 }
 
-/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "held 41s". */
+/* `mono.figure`: "148 KB", "12 secrets - 4 file paths", "Approved 41s ago". */
 .tc-ledger {
   font-family: monospace;
   font-size: 12px;
@@ -214,6 +214,14 @@
 
 .tc-attention {
   color: @tc_gold_text;
+}
+
+/* The Traces count badge with its attention glyph: still text on the
+   accent fill, so it keeps the fill's own label colour. The glyph, not a
+   gold that reads 1.08:1 on purple, is what says "look at this"; the Mac's
+   badge has one colour pair whatever it counts. */
+.tc-count-badge.tc-attention {
+  color: @tc_primary_label;
 }
 
 .tc-held {
@@ -418,6 +426,331 @@ row:selected {
   color: @tc_gold_text;
 }
 
+/* --- The Monitor window's panes ------------------------------------
+   The grip in the gap between the main pane and the map, shown while the
+   divider is pointed at or dragged (the Mac's 3x36 capsule). The container
+   sets its opacity; this only gives it its shape and ink. */
+.tc-pane-grip {
+  background-color: @tc_ink;
+  border-radius: 2px;
+  min-width: 3px;
+  margin: 0 3px;
+}
+
+/* --- The Traces map -------------------------------------------------
+   Each node is a real button over its drawing, for focus and a screen
+   reader; the drawing is the map's own, so the button paints nothing but
+   GTK's focus ring. */
+.tc-map-node {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+}
+
+/* The "+N" pill under the folder column: a glass control (the tier and
+   the type come from the generated sheet; this sets only its fit). */
+.tc-map-pill {
+  min-height: 0;
+  padding: 2px 8px;
+  font-weight: 600;
+  border: none;
+  box-shadow: none;
+  color: @tc_glass_ink;
+}
+
+/* A node's card, on hover or keyboard focus: the node-card tier. */
+.tc-map-card {
+  color: @tc_glass_ink;
+  padding: 10px 12px;
+}
+
+/* A trace being contributed, kept or dismissed: a card at the map's foot
+   while another tab than Traces is shown. The popover tier, opaque. */
+.tc-map-transfer-card {
+  color: @tc_glass_ink;
+  padding: 10px 12px;
+}
+
+/* The tool's coin on the card: its initials in a ring. */
+
+/* The tool's memory files and that they stay on this computer, in the
+   card's Details: a well, as the Mac's `TraceTransferCard` draws it. */
+.tc-map-transfer-memory {
+  background-color: @tc_surface_inset;
+  border-radius: 9px;
+  padding: 4px 8px;
+}
+
+/* What is happening to the trace. */
+.tc-map-transfer-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid @tc_line_divider;
+}
+
+.tc-map-transfer-tag-on {
+  color: @tc_green_text;
+  border-color: @tc_green;
+}
+
+/* --- The painted glass window ----------------------------------------
+   The Monitor window as the Mac draws it under Reduce Transparency: opaque
+   tiers on an opaque ground. Every colour, radius, edge and type step is
+   generated (`brand_tokens::GLASS_*_CSS`, from design-tokens/glass.tokens.json
+   through the flat theme); what is here is fit, state and the rules the
+   generator cannot know. The window follows the system's light or dark, or
+   TRACE_COMMONS_APPEARANCE, because the sheet is chosen when it is loaded. */
+window.tc-glass-window {
+  background-color: @tc_glass_scene;
+  color: @tc_glass_ink;
+}
+
+.tc-glass-pane {
+  color: @tc_glass_ink;
+}
+
+/* The screens the panes host were laid out on the shell's own ground.
+   Inside a pane they take the pane's, and their cards take the card tier's
+   fill, so the screens read as part of the glass. */
+.tc-glass-pane .tc-root {
+  background-color: transparent;
+  border-radius: 0;
+}
+
+.tc-glass-pane .tc-card {
+  background-color: @tc_glass_card;
+  color: @tc_glass_ink;
+}
+
+/* Out of focus a card dims with its pane, as every generated tier does:
+   the Mac's material path fills inactiveDim under its translucent cards. */
+window.tc-glass-window:backdrop .tc-glass-pane .tc-card {
+  background-color: @tc_glass_card_inactive;
+}
+
+/* The tab strip (`GlassRuleTabs`): the tabs share the strip's width
+   equally, over a 1pt rule that runs the strip's full width. The title is
+   body type, medium, semibold when selected. The selected tab's ember
+   line and halo are drawn over the whole strip (`glass_paint::paint_ember`),
+   since the line reaches into the neighbouring tabs. The tabs carry no
+   side padding and their titles ellipsize, as the Mac's centred titles do,
+   so four equal tabs never set the main pane's minimum width. */
+.tc-glass-tabs {
+  background: none;
+  padding: 0 12px;
+  border-radius: 0;
+  border-bottom: 1px solid @tc_glass_rule;
+}
+
+window.tc-glass-window:backdrop .tc-glass-tabs {
+  border-bottom-color: @tc_glass_rule_inactive;
+}
+
+.tc-glass-tabs .tc-tab {
+  font-size: 1em;
+  font-weight: 500;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 0;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-glass-tabs .tc-tab label {
+  font-weight: 500;
+}
+
+.tc-glass-tabs .tc-tab:hover {
+  background-color: transparent;
+  color: @tc_glass_ink;
+}
+
+.tc-glass-tabs .tc-tab:checked {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: @tc_glass_ink;
+}
+
+.tc-glass-tabs .tc-tab:checked label {
+  font-weight: 600;
+}
+
+/* The toolbar's capsule holds the Graph, Map and Inspector toggles
+   (`GlassToolbarGroup`): a glass control, 2px around and between its
+   buttons. Each toggle is `GlassToolbarButton`'s 28 by 24 capsule, its glyph
+   in the toolbar ink while the pane is shown and in the hidden ink while it
+   is not. Settings is `GlassRoundButton`: a 28px round control. */
+.tc-toolbar-capsule {
+  padding: 2px;
+}
+
+.tc-toolbar-toggle {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  min-height: 24px;
+  min-width: 28px;
+  padding: 0;
+  border-radius: 999px;
+  color: @tc_glass_toolbar_glyph_hidden;
+}
+
+.tc-toolbar-toggle:checked {
+  background-color: transparent;
+  box-shadow: none;
+  border-radius: 999px;
+  color: @tc_glass_toolbar_glyph;
+  font-weight: 400;
+}
+
+.tc-toolbar-toggle:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-toolbar-toggle:disabled {
+  opacity: 0.45;
+}
+
+.tc-toolbar-toggle.tc-toolbar-gear {
+  min-width: 28px;
+  min-height: 28px;
+  background-color: @tc_glass_control;
+  color: @tc_glass_toolbar_glyph;
+}
+
+window.tc-glass-window:backdrop .tc-toolbar-toggle.tc-toolbar-gear {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-toolbar-toggle.tc-toolbar-gear:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+/* --- The graph footer (`monitor::graph_footer`) ---------------------
+   `GlassLegendCell`: a capsule well `size.controlLarge` high, the word in
+   the secondary ink and the figure semibold and tabular in the primary.
+   `GlassPillIconButton`: a round glass control 30 wide and `size.control`
+   high, its glyph in the primary ink; the focus pill's glyph alone shows
+   its state (`focusInk`), never its fill. The range sits in an ink(0.07)
+   capsule. The legend cell's left padding is 2 less than the Mac's 10:
+   its dot's box is 2 wider than the dot, to hold the halo. */
+.tc-graph-legend-cell {
+  min-height: 28px;
+  padding: 0 10px 0 8px;
+  border-radius: 999px;
+}
+
+.tc-graph-legend-name {
+  color: @tc_glass_ink_secondary;
+  font-size: 0.923077em;
+}
+
+.tc-graph-legend-value {
+  color: @tc_glass_ink;
+  font-size: 0.923077em;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+.tc-graph-pill {
+  min-width: 30px;
+  min-height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  color: @tc_glass_ink;
+  font-weight: 500;
+}
+
+.tc-graph-pill:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-graph-pill:checked {
+  background-color: @tc_glass_control;
+}
+
+window.tc-glass-window:backdrop .tc-graph-pill:checked {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-graph-pill.tc-focus-on {
+  color: @tc_glass_graph_focus_on;
+}
+
+.tc-graph-pill.tc-focus-idle {
+  color: @tc_glass_graph_focus_idle;
+}
+
+.tc-graph-pill.tc-focus-off {
+  color: @tc_glass_graph_focus_off;
+}
+
+.tc-graph-range {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background-color: @tc_glass_range_fill;
+  color: @tc_glass_ink;
+}
+
+.tc-graph-pill:disabled {
+  opacity: 0.45;
+}
+
+/* --- The inspector's summary (`monitor::summary`) -------------------
+   `SummaryInspector`: a bold heading over a tertiary sub line, quiet
+   cards (`GlassCard(quiet:)`, 10 by 12) for Decisions and Statistics, and
+   the safeguards on a card (12 by 14). A decision line's glyph takes its
+   status's text colour, or the tertiary ink with none. The cards are
+   glass tiers, so an unfocused window dims them with the pane. */
+.tc-summary-section {
+  padding: 10px 12px;
+}
+
+.tc-summary-card {
+  padding: 12px 14px;
+}
+
+.tc-summary-title {
+  font-weight: 700;
+  color: @tc_glass_ink;
+}
+
+.tc-summary-section-title,
+.tc-summary-stat-title {
+  font-weight: 600;
+  color: @tc_glass_ink;
+}
+
+.tc-summary-ink {
+  color: @tc_glass_ink;
+}
+
+.tc-summary-secondary {
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-summary-tertiary {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-summary-on {
+  color: @tc_glass_status_on_text;
+}
+
+.tc-summary-ask {
+  color: @tc_glass_status_ask_text;
+}
+
 /* --- The health banner ---------------------------------------------
    Gold, not coral. Every sentence it can carry ends in "nothing has been
    lost"; this is something to weigh, not a failure. */
@@ -428,6 +761,48 @@ row:selected {
   border: 1px solid @tc_gold;
   border-radius: 8px;
   padding: 12px 14px;
+}
+
+/* A notice that describes work happening to the machine and so carries no
+   X (`monitor::notices::STAYS_CLASS`). A marker the shell reads; it draws
+   nothing of its own. */
+.tc-notice-stays {
+}
+
+/* A notice carrying its X (`monitor::shell`): the X sits inside the card's
+   top-right corner, as the Mac's `GlassPopoverNotice` draws it, and the
+   card keeps the room for it so it never sits on the words. */
+.tc-notice-closable .tc-notice-surface {
+  padding-right: 48px;
+}
+
+/* The notice stack's ground (`monitor::shell`): the pane's colour across
+   the pane's width, so nothing of the tab shows beside a card. */
+.tc-notice-backdrop {
+  background-color: @tc_bg;
+}
+
+/* In a glass pane the screens' ground is the pane's fill
+   (`.tc-glass-pane .tc-root` is transparent), and the stack takes it too:
+   the shell's ground drew a warm band in light and an olive one in dark
+   across the cool pane. */
+.tc-glass-pane .tc-notice-backdrop {
+  background-color: @tc_glass_pane;
+}
+
+/* ...and dims with the pane while the window is not key (the generated
+   `:backdrop` rule, `inactiveDim`). */
+window.tc-glass-window:backdrop .tc-glass-pane .tc-notice-backdrop {
+  background-color: @tc_glass_pane_inactive;
+}
+
+/* A card behind the front one, peeking out under it
+   (`GlassPopoverStack`'s plates). */
+.tc-notice-plate {
+  background-color: @tc_surface;
+  border: 1px solid @tc_line;
+  border-top-width: 0;
+  border-radius: 0 0 8px 8px;
 }
 
 /* --- The transcript ------------------------------------------------ */
@@ -470,4 +845,323 @@ row:selected {
 .tc-field text {
   background-color: @tc_surface;
   color: @tc_ink;
+}
+
+/* A switcher inside an Insights card (By model / By project / By tool):
+   each button as wide as its words. libadwaita gives a switcher's text
+   button a 100px floor, and three of them made the Overview's column wider
+   than the Monitor's 440 main pane. */
+stackswitcher.tc-compact-switcher > button.text-button {
+  min-width: 0;
+}
+
+/* --- The Traces tab's folder list (`monitor::traces_list`) -----------
+   `GlassListRow` as the Traces tree draws it: a row at least
+   `size.listRow` (40) high on the control radius, the hover fill under the
+   pointer and the selection's fill and ink on the selected row; the title
+   in body (semibold for a folder, medium for a trace) over a caption
+   sub-line in the tertiary ink, amber or green when flagged; a 22 tile
+   (`ui::tool_tile`, which paints itself);
+   the Submit pill a glass control `size.submitPill` (24) high with 10 of
+   padding, its disabled form at 0.55 (`disabledSubmit`) in `statusOff`.
+   `GlassTabHeading` is bodyStrong, its round buttons `controlLarge` (28). */
+.tc-tree-heading {
+  font-weight: 600;
+  color: @tc_glass_ink;
+  min-height: 28px;
+}
+
+.tc-tree-round {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+}
+
+window.tc-glass-window:backdrop .tc-tree-round {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-round:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-columns .tc-tree-column {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-tree-row {
+  border-radius: 11px;
+  min-height: 40px;
+}
+
+.tc-tree-row-folder {
+  padding-left: 8px;
+  padding-right: 6px;
+}
+
+.tc-tree-row-session {
+  padding-left: 26px;
+  padding-right: 6px;
+}
+
+.tc-tree-row:hover {
+  background-color: @tc_glass_row_hover;
+}
+
+.tc-tree-row.tc-tree-row-selected,
+.tc-tree-row.tc-tree-row-selected:hover {
+  background-color: @tc_glass_control_selected;
+}
+
+.tc-tree-title-folder {
+  font-weight: 600;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-title-session {
+  font-weight: 500;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-row-off .tc-tree-title-session {
+  color: @tc_glass_ink_secondary;
+}
+
+.tc-tree-row-off .tc-tree-tile {
+  opacity: 0.6;
+}
+
+.tc-tree-sub {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-tree-sub-ask {
+  color: @tc_glass_status_ask;
+}
+
+.tc-tree-sub-on {
+  color: @tc_glass_status_on;
+}
+
+.tc-tree-row-selected .tc-tree-title-folder,
+.tc-tree-row-selected .tc-tree-title-session,
+.tc-tree-row-selected .tc-tree-sub,
+.tc-tree-row-selected .tc-tree-sub-ask,
+.tc-tree-row-selected .tc-tree-sub-on,
+.tc-tree-row-selected .tc-tree-chevron {
+  color: @tc_glass_selected_ink;
+}
+
+.tc-tree-chevron {
+  min-width: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: @tc_glass_status_off;
+  -gtk-icon-size: 10px;
+}
+
+.tc-tree-submit {
+  min-height: 24px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+  font-weight: 500;
+}
+
+window.tc-glass-window:backdrop .tc-tree-submit {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-split-menu > button {
+  min-height: 24px;
+  border: none;
+  border-radius: 999px;
+  background-image: none;
+  background-color: @tc_glass_control;
+  color: @tc_glass_ink;
+  box-shadow: none;
+}
+
+window.tc-glass-window:backdrop .tc-tree-split-menu > button {
+  background-color: @tc_glass_control_inactive;
+}
+
+.tc-tree-split .tc-tree-submit {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.tc-tree-split-menu > button {
+  padding: 0 6px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.tc-tree-submit:hover,
+.tc-tree-split-menu > button:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-submit:disabled {
+  opacity: 0.55;
+  color: @tc_glass_status_off;
+}
+
+.tc-tree-kebab > button {
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: @tc_glass_ink;
+}
+
+.tc-tree-kebab > button:hover {
+  background-color: @tc_glass_control_hover;
+}
+
+.tc-tree-row-selected .tc-tree-kebab > button {
+  color: @tc_glass_selected_ink;
+}
+
+/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
+   `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
+   slider, so a 17-wide slider in 2 of padding is 38 wide. */
+switch.tc-tree-switch {
+  min-width: 0;
+  min-height: 0;
+  padding: 2px;
+  border-radius: 999px;
+}
+
+switch.tc-tree-switch > slider {
+  min-width: 17px;
+  min-height: 18px;
+  margin: 0;
+}
+
+.tc-tree-menu-current {
+  font-weight: 600;
+}
+
+/* --- First run, roots and onboarding text ---------------------------
+   These windows sit on `.tc-root`, which follows the desktop scheme, so
+   their type takes `@tc_ink` and follows it too. The `tc-brand-*` type
+   classes are light-only (a #000000 foreground and no ground) and belong on
+   a brand paper surface, never on these windows. A label inside a
+   `.tc-brand-notice` box still gets the box's own ink, because the brand
+   sheet loads at a higher priority than this one.
+   Title and body are separate classes on separate labels so neither size
+   depends on declaration order. */
+
+.tc-flow-title {
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.95px;
+  color: @tc_ink;
+}
+
+.tc-flow-body {
+  font-size: 13px;
+  font-weight: 500;
+  color: @tc_ink;
+}
+
+.tc-flow-emphasis {
+  font-size: 13px;
+  font-weight: 700;
+  color: @tc_ink;
+}
+
+.tc-flow-link,
+.tc-flow-link label {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  min-height: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: @tc_ink;
+  text-decoration: underline;
+}
+
+/* A transfer card behind the front one, peeking out above it at the map's
+   foot (`GlassPopoverStack`'s plates, hung from the bottom). */
+.tc-map-transfer-plate {
+  background-color: @tc_glass_popover;
+  border-radius: 16px 16px 0 0;
+}
+
+window.tc-glass-window:backdrop .tc-map-transfer-plate {
+  background-color: @tc_glass_popover_inactive;
+}
+
+/* --- The first run's stage ---------------------------------------------
+   The first-run window draws its scene under everything
+   (`first_run_stage_view`), so its ground and header are clear and the
+   scene shows through, as the Mac's first run has no window chrome. The
+   thread's titles: the current step in the primary ink, semibold; a
+   passed one in the secondary ink, a button back to it; one still to come
+   in the tertiary ink (`FirstRunStepThread`). */
+.tc-first-run-stage {
+  background-color: transparent;
+}
+.tc-first-run-stage headerbar {
+  background: none;
+  box-shadow: none;
+}
+.tc-thread-title {
+  padding: 0 10px;
+  font-weight: 500;
+  color: alpha(@tc_ink, 0.84);
+}
+.tc-thread-title.tc-thread-current {
+  font-weight: 600;
+  color: @tc_ink;
+  /* The Mac's glow at 0.35 and shadow radius 7: a blur of 14 here, since
+     GTK's radius is twice the deviation and SwiftUI's is about one. */
+  text-shadow: 0 0 14px alpha(@tc_first_run_glow, 0.35);
+}
+.tc-thread-title.tc-thread-passed {
+  color: alpha(@tc_ink, 0.88);
+}
+.tc-thread-back {
+  padding: 0;
+  min-height: 0;
+}
+
+/* The first run's marker check (`first_run_marker_check`): the check
+   button's own box is cleared and keeps its room, 32 by 30, for the drawn
+   box and the stroke that runs past it; the focus ring stays GTK's. */
+checkbutton.tc-marker-check {
+  padding: 0;
+  border-spacing: 10px;
+}
+checkbutton.tc-marker-check > check {
+  min-width: 32px;
+  min-height: 30px;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: transparent;
+  -gtk-icon-source: none;
 }

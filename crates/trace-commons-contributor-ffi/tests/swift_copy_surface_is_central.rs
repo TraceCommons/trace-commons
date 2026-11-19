@@ -365,13 +365,14 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
         .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
         .chain(trace_commons_contributor::insights::analytics_copy::ANALYTICS_PLACEHOLDERS)
+        .chain(trace_commons_contributor::insights::skills_copy::PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
 fn pinned_sentences() -> Vec<(&'static str, String)> {
     use trace_commons_contributor::{
         consent_copy as consent, daemon::automatic_gate::Disclosure, daemon::policy::ProjectMode,
-        preview_copy, privacy_scan_copy, project_copy, quit_copy, withdraw,
+        preview_copy, project_copy, quit_copy, withdraw,
     };
     let counted = |text: String| text.replace(&COUNT.to_string(), HOLE);
     let mut pinned: Vec<(&'static str, String)> = Vec::new();
@@ -505,6 +506,13 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             .map(|(_, words)| holed((*words).to_owned()))
             .collect(),
     );
+    add(
+        "insights::skills_copy::COPY",
+        trace_commons_contributor::insights::skills_copy::COPY
+            .iter()
+            .map(|(_, words)| holed((*words).to_owned()))
+            .collect(),
+    );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(
@@ -552,12 +560,7 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .collect(),
     );
 
-    // Scrubbing: the extra privacy scan, the removed-summary panel, and the
-    // surviving-secret line.
-    add(
-        "privacy_scan_copy",
-        table(json!(privacy_scan_copy::privacy_scan_copy())),
-    );
+    // Scrubbing: the removed-summary panel and the surviving-secret line.
     // The health banner (R6/R7, #1173): every label's words and the
     // core-down banner.
     {

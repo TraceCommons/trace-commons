@@ -369,7 +369,16 @@ fn seconds_since(at: Option<&str>) -> Option<u64> {
 /// claiming the old answer.
 pub fn render_harnesses(app: &Rc<App>) {
     app.call("harness_list", serde_json::json!({}), |app, result| {
-        let Ok(Ok(list)) = result.map(serde_json::from_value::<crate::model::HarnessList>) else {
+        let read = result.map(serde_json::from_value::<crate::model::HarnessList>);
+        // The Private AI map draws the same list, and after a failed read
+        // none at all: a stale list is never drawn as current.
+        let list = match read {
+            Ok(Ok(list)) => Some(list),
+            _ => None,
+        };
+        app.shell.map.set_harnesses(list.as_ref());
+        app.shell.map.render(app);
+        let Some(list) = list else {
             return;
         };
         let view = &app.private_inference;
@@ -779,7 +788,10 @@ pub fn wire(app: &Rc<App>) {
 pub fn refresh(app: &Rc<App>) {
     super::managed_sessions::refresh(app);
     app.call("get_settings", serde_json::json!({}), |app, result| {
-        let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>) else {
+        let result = result.map(serde_json::from_value::<crate::model::Settings>);
+        app.home
+            .render_inference(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+        let Ok(Ok(settings)) = result else {
             return;
         };
         render(app, &settings);
@@ -836,6 +848,8 @@ pub fn render(app: &Rc<App>, settings: &crate::model::Settings) {
         Some(state) => (state.state.as_str(), state.port),
         None => ("", None),
     };
+    // The Inference tab's dot draws the same state from the same table.
+    app.shell.render_inference_state(label);
     status.append(&tone_row(
         copy::private_inference_state_line(label),
         indicator_tone(copy::private_inference_state_tone(label)),

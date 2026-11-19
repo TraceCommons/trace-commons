@@ -33,7 +33,6 @@ public class HealthCopyTests
         "not-logged-in",
         "pii-filter-unavailable",
         "privacy-filter-canary-failed",
-        "near-ai-notice-not-acknowledged",
         "claim-mint-failed",
         "ingest-unreachable",
         "queue-full",
@@ -49,13 +48,32 @@ public class HealthCopyTests
 
     [Theory]
     [MemberData(nameof(EveryLabel))]
-    public void EveryLabelRendersSomething(string label)
+    public void EveryLabelHasTheApprovedTitleAndDetailPresence(string label)
     {
+        // Banners name the condition and may stop at the title (#2113).
+        // The consent prompt and full-queue recovery still need their detail.
+        (string title, bool hasDetail) = label switch
+        {
+            "not-logged-in" => ("Not connected.", false),
+            "pii-filter-unavailable" => ("Waiting on the privacy scan.", false),
+            "privacy-filter-canary-failed" => ("Privacy scan failed its self-test.", false),
+            "claim-mint-failed" or "ingest-unreachable" => ("Can't reach the upload server.", false),
+            "queue-full" => ("Near.ai has stopped queuing new traces", true),
+            "a-label-nobody-has-written-yet" => ("Contributions on hold.", false),
+            _ => throw new ArgumentOutOfRangeException(nameof(label), label, "Add the approved banner expectation."),
+        };
         HealthCopy? copy = HealthCopy.ForLabel(label);
 
         Assert.NotNull(copy);
-        Assert.NotEmpty(copy!.Title);
-        Assert.NotEmpty(copy.Detail);
+        Assert.Equal(title, copy!.Title);
+        if (hasDetail)
+        {
+            Assert.NotEmpty(copy.Detail);
+        }
+        else
+        {
+            Assert.Empty(copy.Detail);
+        }
     }
 
     /// <summary>
@@ -109,9 +127,6 @@ public class HealthCopyTests
             case "not-logged-in":
                 Assert.Equal("Reconnect", action);
                 break;
-            case "near-ai-notice-not-acknowledged":
-                Assert.Equal("Review and confirm", action);
-                break;
             default:
                 Assert.Null(action);
                 break;
@@ -126,13 +141,6 @@ public class HealthCopyTests
     [Fact]
     public void TheQuotedBannersAreTranscribedNotParaphrased()
     {
-        HealthCopy nearAi = HealthCopy.ForLabel("near-ai-notice-not-acknowledged")!;
-        Assert.Equal("One thing to confirm.", nearAi.Title);
-        Assert.Equal(
-            "You chose the extra privacy scan, which sends message text to NEAR AI. "
-            + "Confirm you're OK with that and contributions resume.",
-            nearAi.Detail);
-
         HealthCopy notConnected = HealthCopy.ForLabel("not-logged-in")!;
         Assert.Equal("Not connected.", notConnected.Title);
         Assert.Equal("", notConnected.Detail);

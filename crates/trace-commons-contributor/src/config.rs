@@ -22,6 +22,9 @@ pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_c
 pub(crate) const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
+/// The marker the retired NEAR AI first-use notice left once it had been
+/// shown. Nothing creates or reads it any more; `wipe()` still sweeps one an
+/// older build left, so logout leaves nothing behind.
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
 
 /// Background-daemon state files. All live in the same 0700 directory as the
@@ -130,8 +133,9 @@ pub const DAEMON_NEAR_AI_LOGIN_FILE: &str = "near-ai-login.json";
 /// record of what this device did, and the audit log records the unenroll
 /// itself), settings, folder rules and the queue (the person's choices about
 /// this Mac, not about an account), and the NEAR AI notice marker.
-pub(crate) const ENROLLMENT_FILES: [&str; 11] = [
+pub(crate) const ENROLLMENT_FILES: [&str; 12] = [
     CONFIG_FILE,
+    crate::daemon::first_trace::FILE,
     DAEMON_SETUP_COMPLETION_FILE,
     DAEMON_INFERENCE_CONNECTION_FILE,
     DAEMON_PAYOUT_LINK_FILE,
@@ -159,7 +163,10 @@ pub struct ContributorConfig {
     pub user_subject: String,
     pub device_key_id: String,
     pub consent_scopes: Vec<String>,
-    pub pii_filter: Option<String>,
+    // `pii_filter` is retired with the client-side NEAR AI second scan. An
+    // older file that still has the key parses (no `deny_unknown_fields`),
+    // the value is ignored, and the next save drops it. See
+    // `crate::retired_second_scan`.
     pub allowed_hosts: Option<String>,
     /// The public handle this device last claimed on the community roster,
     /// with the bio and roster date the server reported alongside it.
@@ -179,8 +186,8 @@ pub struct ContributorConfig {
     /// `#[serde(default)]` on all three is belt-and-braces, and the reason is
     /// worth stating so nobody "fixes" the two `Option` fields above to match.
     /// serde already treats a missing `Option` field as `None` without the
-    /// attribute -- verified, not assumed -- so `pii_filter` and
-    /// `allowed_hosts` are correct as they stand and a `contributor.json`
+    /// attribute -- verified, not assumed -- so `allowed_hosts` is
+    /// correct as it stands and a `contributor.json`
     /// written before any of these fields existed loads either way. The
     /// attribute is kept here because it states the intent at the field, and
     /// because the guarantee it makes explicit is the one that matters: this
@@ -1504,30 +1511,6 @@ impl ConfigStore {
         }
     }
 
-    fn near_ai_notice_marker_path(&self) -> PathBuf {
-        self.dir.join(NEAR_AI_NOTICE_MARKER_FILE)
-    }
-
-    /// Whether the first-use NEAR AI privacy-filter notice has already been
-    /// recorded. This read-only check lets the renderer show the disclosure
-    /// before message text leaves the machine without consuming it until the
-    /// filter has actually succeeded.
-    pub fn near_ai_notice_shown(&self) -> bool {
-        self.near_ai_notice_marker_path().exists()
-    }
-
-    /// Record that the one-time first-use NEAR AI privacy-filter notice was
-    /// shown and the filter then succeeded. Returns `true` when this call
-    /// creates the marker and `false` when it was already present.
-    pub fn ensure_near_ai_notice_shown(&self) -> Result<bool> {
-        let path = self.near_ai_notice_marker_path();
-        if path.exists() {
-            return Ok(false);
-        }
-        std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-        Ok(true)
-    }
-
     /// Remove all local contributor state (logout).
     ///
     /// Also sweeps orphaned atomic-write temp files (`.{name}.tmp-{uuid}`)
@@ -2164,7 +2147,6 @@ mod tests {
             user_subject: "user-1".into(),
             device_key_id: "sha256:00".into(),
             consent_scopes: vec!["debugging_evaluation".into()],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -2416,14 +2398,24 @@ mod tests {
     }
 
     #[test]
-    fn near_ai_notice_shown_once_then_silent() {
-        let (_d, store) = store();
-        // Marker absent: first call reports "shown" and creates the marker.
-        assert!(store.ensure_near_ai_notice_shown().unwrap());
-        assert!(store_path(&store, "near-ai-notice-shown").exists());
-        // Marker present: subsequent calls stay silent.
-        assert!(!store.ensure_near_ai_notice_shown().unwrap());
-        assert!(!store.ensure_near_ai_notice_shown().unwrap());
+    fn an_old_config_naming_the_retired_scan_loads_and_drops_it_on_save() {
+        // Any value, not only "near-ai": the whole key is retired.
+        for value in ["near-ai", "bogus"] {
+            let (_d, store) = store();
+            store.save_config(&sample_config()).unwrap();
+            let path = store_path(&store, CONFIG_FILE);
+            let mut raw: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            raw["pii_filter"] = serde_json::json!(value);
+            std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+            let cfg = store.load_config().unwrap().expect("an old config loads");
+            assert_eq!(cfg.tenant_id, "tenant-abc");
+            store.save_config(&cfg).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!(saved.get("pii_filter").is_none(), "{value}: {saved}");
+        }
     }
 
     #[test]
@@ -2454,13 +2446,13 @@ mod tests {
         let (_d, store) = store();
         store.save_config(&sample_config()).unwrap();
         store.save_device_key(b"k").unwrap();
-        assert!(store.ensure_near_ai_notice_shown().unwrap());
+        // A marker the retired NEAR AI notice left behind.
+        std::fs::write(store_path(&store, NEAR_AI_NOTICE_MARKER_FILE), b"").unwrap();
         store.wipe().unwrap();
         assert!(store.load_config().unwrap().is_none());
         assert!(store.load_device_key().unwrap().is_none());
-        // Logout must also clear the first-use notice marker so a
-        // re-enrolled user sees the notice again.
-        assert!(store.ensure_near_ai_notice_shown().unwrap());
+        // Logout also sweeps the retired notice's marker an older build left.
+        assert!(!store_path(&store, NEAR_AI_NOTICE_MARKER_FILE).exists());
     }
 
     #[test]
@@ -2747,6 +2739,7 @@ mod tests {
     // serialize the mutating tests so they do not race each other.
     static ATTESTATION_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[allow(unsafe_code)]
     fn set_attestation_env(value: Option<&str>) {
         // SAFETY: serialized through ATTESTATION_ENV_LOCK.
         unsafe {

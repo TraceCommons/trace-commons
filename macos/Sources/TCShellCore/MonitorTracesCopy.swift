@@ -151,7 +151,8 @@ public struct MonitorTracesCopy: Decodable, Equatable, Sendable {
     public func failureLine(forLabel label: String) -> String? {
         switch label {
         case "witness-review-required": return needsPrivacyCheck
-        case "preview-timed-out", "witness_timeout", "witness_unreachable": return privacyCheckNoAnswer
+        case "preview-timed-out", "witness_timeout", "witness_unreachable",
+             "witness_classifier_unavailable", "witness_redaction_failed": return privacyCheckNoAnswer
         default: return nil
         }
     }
@@ -224,6 +225,10 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let automaticCount: String?
     /// The titles over the tree's columns while the Automatic switches show.
     public let columnFolders: String?
+    /// `column_folders` in words for every computer but a Mac (owner,
+    /// 2026-11-18). The Linux shell draws it; this shell decodes it so the
+    /// export and the decoder agree, and draws `columnFolders`.
+    public let columnFoldersComputer: String?
     public let columnSubmit: String?
     public let columnAutomatic: String?
     public let dismissSession: String
@@ -266,6 +271,7 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case automaticAll = "automatic_all"
         case automaticCount = "automatic_count"
         case columnFolders = "column_folders"
+        case columnFoldersComputer = "column_folders_computer"
         case columnSubmit = "column_submit"
         case columnAutomatic = "column_automatic"
         case dismissSession = "dismiss_session"

@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Check full-step induction for the four-identity witness-worker projection.
+
+Every original variable field is independently symbolic before filtering by the
+candidate invariant. Maps have exactly the original four keys; integers are
+unbounded (generate(1) does not restrict a primitive integer to one value).
+No transition is rewritten or removed. Domain closure is part of consecution.
+This is neither a liveness proof nor a Rust/source-equivalence theorem.
+"""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'scripts'))
+from induction_checks import certificate_status, classify_obligation
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def generate():
+    model = HERE / 'witness_worker.qnt'
+    source = model.read_text()
+    with tempfile.TemporaryDirectory(prefix='tc-worker-induction-ast-') as folder:
+        ast_path = Path(folder) / 'ast.json'
+        subprocess.run(['quint', 'parse', str(model), '--out', str(ast_path)], check=True, timeout=60)
+        declarations = json.loads(ast_path.read_text())['modules'][0]['declarations']
+    aliases = {d['name']: d['type'] for d in declarations if d['kind'] == 'typedef'}
+    variables = [(d['name'], d['typeAnnotation']) for d in declarations if d['kind'] == 'var']
+    if {name for name, _ in variables} != {'s', 'checked'}:
+        raise ValueError('Review induction assumptions when source variables change')
+    choices, coverage, domains, record_types = [], [], [], []
+
+    def resolve(t):
+        return resolve(aliases[t['name']]) if t['kind'] == 'const' else t
+
+    def render(t):
+        if t['kind'] == 'const':
+            return t['name']
+        if t['kind'] == 'rec':
+            return '{' + ', '.join(f['fieldName'] + ': ' + render(f['fieldType']) for f in t['fields']['fields']) + '}'
+        if t['kind'] == 'fun':
+            return '(' + render(t['arg']) + ' -> ' + render(t['res']) + ')'
+        if t['kind'] not in {'int', 'bool', 'str'}:
+            raise ValueError('Unsupported type: ' + repr(t))
+        return t['kind']
+
+    def choice(type_name):
+        name = 'a' + str(len(choices))
+        choices.append('    nondet ' + name + ': ' + type_name + ' = apalache::generate(1)')
+        return name
+
+    def leaf(t, path, value):
+        kind = resolve(t)['kind']
+        if kind not in {'int', 'str', 'bool'}:
+            raise ValueError('Unsupported primitive: ' + kind)
+        coverage.append({'path': path, 'type': kind, 'domain': 'unrestricted ' + kind, 'arbitraryValue': value})
+
+    def construct(original, path):
+        t = resolve(original)
+        if t['kind'] == 'fun':
+            if resolve(t['arg'])['kind'] != 'int':
+                raise ValueError('Map keys must be integer identities')
+            domains.append(path + '.keys() == Ids')
+            coverage.append({'path': path, 'type': 'map', 'keys': [0, 1, 2, 3]})
+            return 'Map(' + ', '.join(str(i) + ' -> ' + construct(t['res'], path + '.get(' + str(i) + ')') for i in range(4)) + ')'
+        if t['kind'] == 'rec':
+            fields = t['fields']['fields']
+            simple = [f for f in fields if resolve(f['fieldType'])['kind'] in {'int', 'str', 'bool'}]
+            values = {}
+            if simple:
+                # Apalache supports primitive records; decompose nested records/maps.
+                name = 'PrimitiveFields' + str(len(record_types))
+                record_types.append('  type ' + name + ' = {' + ', '.join(f['fieldName'] + ': ' + render(f['fieldType']) for f in simple) + '}')
+                arbitrary = choice(name)
+                for f in simple:
+                    field = f['fieldName']
+                    values[field] = arbitrary + '.' + field
+                    leaf(f['fieldType'], path + '.' + field, values[field])
+            for f in fields:
+                if f['fieldName'] not in values:
+                    values[f['fieldName']] = construct(f['fieldType'], path + '.' + f['fieldName'])
+            return '{' + ', '.join(f['fieldName'] + ': ' + values[f['fieldName']] for f in fields) + '}'
+        value = choice(render(t))
+        leaf(t, path, value)
+        return value
+
+    candidates = {name: construct(t, 't' if name == 's' else 'c') for name, t in variables}
+    # Parameterize the exact source safety expression, avoiding a hand-maintained
+    # second specification. Fail closed if its final-declaration shape changes.
+    match = re.search(r'  val safety = (all \{[\s\S]*\})\s*\}\s*$', source)
+    if not match:
+        raise ValueError('Cannot locate final source safety predicate')
+    safety = re.sub(r'\bchecked\b', 'c', re.sub(r'\bs\b', 't', match.group(1)))
+    text = '\n'.join([
+        '// Generated by induction.py. Exact original init/step; all scalar types unbounded.',
+        '// Domain closure is checked with the invariant; there is no exploration constraint.',
+        'module witness_worker_induction {',
+        '  import witness_worker.* from "./witness_worker"',
+        *record_types,
+        '  pure def domainFor(t: State): bool = all { ' + ', '.join(domains) + ' }',
+        '  pure def safetyFor(t: State, c: Checks): bool = ' + safety,
+        '  pure def strongFor(t: State): bool = all {',
+        '    // Only success creates a pin, while retraction clears it.',
+        '    Ids.forall(i => not(t.entries.get(i).pinned) or Set("approved", "uploaded").contains(t.entries.get(i).state)),',
+        '    // Queue snapshots have not begun; absent jobs can never complete.',
+        '    Ids.forall(i => not(t.queued.get(i).started)),',
+        '    Ids.forall(i => t.running.get(i).present or not(t.running.get(i).started)),',
+        '    // Recovery opens at 30 and doubles to 300; normal mode has delay 0.',
+        '    t.circuit.reopen < 0 or t.circuit.delay >= 30',
+        '  }',
+        '  val strengthened = domainFor(s) and strongFor(s) and safetyFor(s, checked)',
+        '  val implication = not(strengthened) or safety',
+        '  action arbitraryInit = {',
+        *choices,
+        '    val candidate: State = ' + candidates['s'],
+        '    val candidateChecks: Checks = ' + candidates['checked'],
+        "    all {domainFor(candidate), strongFor(candidate), safetyFor(candidate, candidateChecks), s' = candidate, checked' = candidateChecks}",
+        '  }',
+        '  action originalInit = init',
+        '  action originalStep = step',
+        '}',
+    ]) + '\n'
+    paths = [item['path'] for item in coverage]
+    if len(paths) != len(set(paths)):
+        raise ValueError('Duplicate arbitrary field coverage')
+    harness = HERE / 'witness_worker_induction.qnt'
+    harness.write_text(text)
+    metadata = {'modelSha256': sha(model), 'harnessSha256': sha(harness), 'coverage': coverage,
+                'linkage': 'originalInit = init; originalStep = step; imported unchanged witness_worker',
+                'domain': 'exact original four-key maps; unrestricted typed integer, string and boolean scalar values',
+                'closure': 'domainFor is included in strengthened; no state/transition exploration constraints',
+                'conclusion': 'original safety',
+                'limits': 'Four identities, QueueBound=3, original modeled nondeterministic choices; no liveness or source equivalence'}
+    return model, harness, metadata
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--seconds', type=int, default=240)
+    parser.add_argument('--port', type=int, default=8899)
+    parser.add_argument('--generate-only', action='store_true')
+    args = parser.parse_args()
+    if args.out.exists() or args.seconds <= 0:
+        parser.error('Use a fresh evidence directory and positive timeout')
+    args.out.mkdir(parents=True)
+    model, harness, metadata = generate()
+    (args.out / 'domain-coverage.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    subprocess.run(['quint', 'typecheck', str(harness)], check=True, timeout=90)
+    if args.generate_only:
+        return
+    phases = [('initiation', 'originalInit', 'strengthened', 0),
+              ('consecution', 'arbitraryInit', 'strengthened', 1),
+              ('implication', 'arbitraryInit', 'implication', 0),
+              ('nonvacuity', 'arbitraryInit', 'false', 0)]
+    results = []
+    env = dict(os.environ)
+    env['PATH'] = '/opt/homebrew/opt/openjdk@21/bin:' + env['PATH']
+    env['JDK_JAVA_OPTIONS'] = '-Xmx3g'
+    for phase, init, invariant, steps in phases:
+        folder = args.out / phase
+        folder.mkdir()
+        command = ['quint', 'verify', str(harness), '--main', harness.stem,
+                   '--init', init, '--step', 'originalStep', '--invariant', invariant,
+                   '--max-steps', str(steps), '--server-endpoint', 'localhost:' + str(args.port), '--verbosity', '3']
+        before = (sha(model), sha(harness))
+        started = time.monotonic()
+        timed_out = False
+        with (folder / 'check.log').open('w') as log:
+            process = subprocess.Popen(command, cwd=folder, env=env, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                code = process.wait(timeout=args.seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    code = process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    code = process.wait()
+        changed = before != (sha(model), sha(harness))
+        status = classify_obligation((folder / 'check.log').read_text(), code,
+                                     timed_out=timed_out, artifacts_changed=changed)
+        result = {'phase': phase, 'status': status, 'command': command,
+                  'modelSha256': before[0], 'harnessSha256': before[1],
+                  'exitCode': code, 'timedOut': timed_out, 'artifactsChanged': changed,
+                  'logPath': str(folder / 'check.log'), 'logSha256': sha(folder / 'check.log'),
+                  'cwd': str(folder), 'budgetSeconds': args.seconds,
+                  'environment': {'PATHPrefix': '/opt/homebrew/opt/openjdk@21/bin', 'JDK_JAVA_OPTIONS': '-Xmx3g', 'serverEndpoint': 'localhost:' + str(args.port)},
+                  'seconds': round(time.monotonic() - started, 3)}
+        (folder / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        results.append(result)
+        print(phase + ': ' + status, flush=True)
+    summary = {'recordedAt': datetime.now(timezone.utc).isoformat(),
+               'status': certificate_status(results), 'phases': results,
+               'meaning': 'Full-step safety induction for the source Quint model, not liveness or Rust equivalence.'}
+    (args.out / 'certificate.json').write_text(json.dumps(summary, indent=2) + '\n')
+    print('certificate: ' + summary['status'], flush=True)
+    return 0 if summary['status'] == 'proved' else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())

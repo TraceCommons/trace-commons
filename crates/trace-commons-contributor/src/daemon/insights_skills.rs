@@ -1,0 +1,1591 @@
+//! Passive local Skills inventory and a bounded, curated public metadata cache.
+//! Catalog refreshes never send installed paths/content, authenticate, install,
+//! execute publisher code, or follow redirects. Only public metadata is persisted.
+//!
+//! The catalog comes from the server's signed document when
+//! `skills_server_catalog` is on and a verified, current one is held
+//! (`server_catalog`); otherwise from the four fixed publishers on GitHub.
+//! The one exception to "nothing about installed skills leaves the machine"
+//! is `suggestions`: off by default, behind its own flag and the user's own
+//! opt-in, it reports a public GitHub address of a skill the catalog lacks,
+//! one anonymous request at a time, after proving anonymously that GitHub
+//! serves those exact bytes.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use super::ipc::{DaemonShared, ERR_BAD_PARAMS, ERR_UNAVAILABLE, Request, Response};
+use crate::insights::skills::{
+    CatalogSkill, Inventory, freshness, parse_skill_document, scan_inventory_with_policy,
+};
+
+const INSIGHTS_SKILLS_FLAG: &str = "insights_skills";
+const STATE_FILE: &str = "insights-skills-public-v1.json";
+const MAX_STATE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_TREE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SKILL_BYTES: usize = 128 * 1024;
+const MAX_SKILLS: usize = 128;
+const MAX_FEED: usize = 256;
+const REFRESH_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+const REFRESH_DEBOUNCE: Duration = Duration::from_secs(30);
+const REFRESH_TOTAL: Duration = Duration::from_secs(90);
+const ERROR_REFRESH: &str = "insights-skills-refresh-failed";
+const ERROR_CACHE: &str = "insights-skills-cache-unavailable";
+
+#[derive(Clone, Serialize)]
+struct Publisher {
+    id: &'static str,
+    name: &'static str,
+    repository: &'static str,
+    skills_root: &'static str,
+    instructions_url: &'static str,
+}
+
+// Curated Home suggestions, not implicit follows or an activity ranking.
+const DEFAULT_HOME_PUBLISHERS: [&str; 3] = ["obra", "poteto", "slack"];
+
+fn publishers() -> [Publisher; 4] {
+    [
+        Publisher {
+            id: "poteto",
+            name: "Poteto",
+            repository: "cursor/plugins",
+            skills_root: "pstack/skills",
+            instructions_url: "https://github.com/cursor/plugins/blob/main/pstack/README.md",
+        },
+        Publisher {
+            id: "obra",
+            name: "Obra",
+            repository: "obra/superpowers",
+            skills_root: "skills",
+            instructions_url: "https://github.com/obra/superpowers#installation",
+        },
+        Publisher {
+            id: "slack",
+            name: "Slack",
+            repository: "slackapi/slack-skills-plugin",
+            skills_root: "skills",
+            instructions_url: "https://github.com/slackapi/slack-skills-plugin#installation",
+        },
+        Publisher {
+            id: "rex",
+            name: "Rex",
+            repository: "",
+            skills_root: "",
+            instructions_url: "https://www.superlogical.com/rex/docs/automate/agent-skill",
+        },
+    ]
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PublisherState {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct FeedItem {
+    id: String,
+    publisher_id: String,
+    skill_id: String,
+    kind: String,
+    observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicState {
+    #[serde(default)]
+    skills: Vec<CatalogSkill>,
+    #[serde(default)]
+    followed: BTreeSet<String>,
+    #[serde(default)]
+    publisher_states: BTreeMap<String, PublisherState>,
+    #[serde(default)]
+    history: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    feed: Vec<FeedItem>,
+    checked_at: Option<DateTime<Utc>>,
+}
+
+impl PublicState {
+    fn follow(&mut self, id: &str, followed: bool) -> Result<(), &'static str> {
+        if !publishers().iter().any(|publisher| publisher.id == id) {
+            return Err("insights-skills-publisher-invalid");
+        }
+        if followed {
+            self.followed.insert(id.into());
+        } else {
+            self.followed.remove(id);
+        }
+        Ok(())
+    }
+
+    fn accept(&mut self, publisher: &str, skills: Vec<CatalogSkill>, now: DateTime<Utc>) {
+        let has_baseline = self
+            .publisher_states
+            .get(publisher)
+            .is_some_and(|state| state.checked_at.is_some());
+        for skill in &skills {
+            let previous = self.skills.iter().find(|old| old.id == skill.id);
+            let kind = match previous {
+                None if has_baseline => Some("added"),
+                None => None,
+                Some(old) if old.sha256 != skill.sha256 => {
+                    let history = self.history.entry(skill.id.clone()).or_default();
+                    if !history.contains(&old.sha256) {
+                        history.push(old.sha256.clone());
+                    }
+                    if history.len() > 8 {
+                        history.remove(0);
+                    }
+                    Some("updated")
+                }
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                self.feed.insert(
+                    0,
+                    FeedItem {
+                        id: format!("{}:{}:{}", skill.id, now.timestamp_millis(), kind),
+                        publisher_id: publisher.into(),
+                        skill_id: skill.id.clone(),
+                        kind: kind.into(),
+                        observed_at: now,
+                    },
+                );
+            }
+        }
+        self.feed.truncate(MAX_FEED);
+        self.skills.retain(|skill| skill.publisher_id != publisher);
+        self.skills.extend(skills);
+        self.skills.sort_by(|left, right| left.id.cmp(&right.id));
+        let ids: BTreeSet<_> = self.skills.iter().map(|skill| skill.id.clone()).collect();
+        self.history.retain(|id, _| ids.contains(id));
+        self.publisher_states.insert(
+            publisher.into(),
+            PublisherState {
+                status: "current".into(),
+                checked_at: Some(now),
+            },
+        );
+        self.checked_at = Some(now);
+    }
+
+    fn accept_fetched(&mut self, publisher: &str, mut fetched: FetchedCatalog, now: DateTime<Utc>) {
+        if !fetched.complete {
+            // Missing or malformed documents cannot prove deletion. Preserve
+            // their last public metadata and suppress freshness for this publisher.
+            let fetched_ids: BTreeSet<_> = fetched
+                .skills
+                .iter()
+                .map(|skill| skill.id.clone())
+                .collect();
+            fetched.skills.extend(
+                self.skills
+                    .iter()
+                    .filter(|skill| {
+                        skill.publisher_id == publisher && !fetched_ids.contains(&skill.id)
+                    })
+                    .cloned(),
+            );
+            fetched.skills.truncate(MAX_SKILLS);
+        }
+        self.accept(publisher, fetched.skills, now);
+        if !fetched.complete {
+            self.failed(publisher);
+        }
+    }
+
+    fn failed(&mut self, publisher: &str) {
+        self.publisher_states
+            .entry(publisher.into())
+            .and_modify(|state| state.status = "unknown".into())
+            .or_insert(PublisherState {
+                status: "unknown".into(),
+                checked_at: None,
+            });
+    }
+}
+
+#[derive(Default)]
+struct Runtime {
+    loaded: bool,
+    public: PublicState,
+    refreshing: bool,
+    last_attempt: Option<Instant>,
+    error: Option<&'static str>,
+    inventory: Option<(Instant, InventoryPolicy, Inventory)>,
+    inventory_scanned_at: Option<DateTime<Utc>>,
+    /// The verified server catalog last accepted or loaded from its cache.
+    /// Used only while `skills_server_catalog` is on and it is current.
+    server: Option<trace_commons_protocol::skills_catalog::CatalogDocument>,
+    server_loaded: bool,
+}
+
+/// A leaf lock: never held while taking daemon settings, policy, or counter locks.
+#[derive(Default)]
+pub(crate) struct SkillsService {
+    opencode: Mutex<opencode::State>,
+    runtime: Mutex<Runtime>,
+    suggestions: Mutex<suggestions::Runtime>,
+    /// Tests pin their own throwaway catalog keys here.
+    #[cfg(test)]
+    catalog_keys: Mutex<Option<Vec<[u8; 32]>>>,
+}
+
+impl SkillsService {
+    /// The catalog keys this build pins for its environment.
+    fn catalog_keys(&self, shared: &DaemonShared) -> Vec<[u8; 32]> {
+        #[cfg(test)]
+        if let Some(keys) = self.catalog_keys.lock().ok().and_then(|k| k.clone()) {
+            return keys;
+        }
+        crate::skills_catalog::pinned_keys(shared.feature_flags.environment()).unwrap_or_default()
+    }
+
+    /// Load the held server catalog from its cache on first use.
+    fn load_server(&self, shared: &DaemonShared, runtime: &mut Runtime) {
+        if runtime.server_loaded || !server_flag_on(shared) {
+            return;
+        }
+        runtime.server_loaded = true;
+        runtime.server = server_catalog::load_cached(
+            shared.store.dir(),
+            shared.feature_flags.environment(),
+            &self.catalog_keys(shared),
+            Utc::now(),
+        );
+    }
+}
+
+/// The held server catalog, while its flag is on and it is current.
+fn current_server<'a>(
+    shared: &DaemonShared,
+    runtime: &'a Runtime,
+    now: DateTime<Utc>,
+) -> Option<&'a trace_commons_protocol::skills_catalog::CatalogDocument> {
+    runtime
+        .server
+        .as_ref()
+        .filter(|document| server_flag_on(shared) && document.is_current(now))
+}
+
+/// Catalog rows for the snapshot, most relevant first: the few skills in
+/// `first` (repository and path; the recently active publishers' skills,
+/// chosen from the document alone, so they are sent to every install), then
+/// skills matching an installed skill, then the seeded publishers, then the
+/// rest by repository stars. Seeded rows keep today's ids and gain the
+/// server's facts.
+fn catalog_rows(
+    public: &PublicState,
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    inventory: &Inventory,
+    first: &BTreeSet<(&str, &str)>,
+) -> Vec<Value> {
+    let installed: BTreeSet<(&str, &str)> = inventory
+        .skills
+        .iter()
+        .filter_map(|skill| skill.source.as_ref())
+        .map(|source| (source.repository.as_str(), source.path.as_str()))
+        .collect();
+    let server_skill = |repository: &str, path: &str| {
+        server.and_then(|document| {
+            document
+                .skills
+                .iter()
+                .find(|skill| skill.repository == repository && skill.path == path)
+        })
+    };
+    let mut ranked: Vec<((bool, bool, bool, std::cmp::Reverse<u64>, String), Value)> = Vec::new();
+    for skill in &public.skills {
+        let Ok(mut row) = serde_json::to_value(skill) else {
+            continue;
+        };
+        if let (Some(document), Some(facts)) =
+            (server, server_skill(&skill.repository, &skill.path))
+        {
+            server_catalog::add_facts(&mut row, facts, document.checks_version);
+        }
+        let key = (
+            !first.contains(&(skill.repository.as_str(), skill.path.as_str())),
+            !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
+            false,
+            std::cmp::Reverse(u64::MAX),
+            skill.id.clone(),
+        );
+        ranked.push((key, row));
+    }
+    if let Some(document) = server {
+        let seeds: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+        for skill in &document.skills {
+            if seeds.contains(skill.publisher_id.as_str()) {
+                continue;
+            }
+            let Some(publisher) = document
+                .publishers
+                .iter()
+                .find(|p| p.id == skill.publisher_id)
+            else {
+                continue;
+            };
+            let key = (
+                !first.contains(&(skill.repository.as_str(), skill.path.as_str())),
+                !installed.contains(&(skill.repository.as_str(), skill.path.as_str())),
+                true,
+                std::cmp::Reverse(publisher.signals.stars.unwrap_or(0)),
+                skill.id.clone(),
+            );
+            ranked.push((
+                key,
+                server_catalog::skill_row(
+                    skill,
+                    &publisher.instructions_url,
+                    document.checks_version,
+                ),
+            ));
+        }
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0));
+    ranked.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Reserve one real example per Home creator before the shared catalog is
+/// bounded. The remaining rows keep their active/installed/catalog priority;
+/// a large first creator cannot crowd every other default out of Home.
+fn reserve_home_creator_examples(mut rows: Vec<Value>, defaults: &[&str]) -> Vec<Value> {
+    // Preserve the existing active/installed order when no rows will be cut.
+    // Use the same encoded-byte accounting as bounded_rows below.
+    let fits = rows
+        .iter()
+        .try_fold(2usize, |bytes, row| {
+            let size = serde_json::to_vec(row).ok()?.len();
+            let total = bytes.saturating_add(size).saturating_add(1);
+            (total <= 180 * 1024).then_some(total)
+        })
+        .is_some();
+    if defaults.is_empty() || fits {
+        return rows;
+    }
+    let mut examples = Vec::with_capacity(defaults.len());
+    for publisher in defaults {
+        if let Some(index) = rows
+            .iter()
+            .position(|row| row.get("publisher_id").and_then(Value::as_str) == Some(*publisher))
+        {
+            examples.push(rows.remove(index));
+        }
+    }
+    examples.extend(rows);
+    examples
+}
+
+type Results = Vec<(&'static str, Result<FetchedCatalog, ()>)>;
+
+/// Where one refresh's catalog comes from. With the server flag on and a key
+/// pinned, the server document is fetched first (one anonymous GET); a
+/// refused or unreachable document falls back to the held cache, and only
+/// when neither verifies is GitHub contacted. With the flag off or no key
+/// pinned, no catalog request is made at all and GitHub answers as before.
+/// The fetchers are injected so tests can see which were called.
+async fn choose_catalog<S, SF, G, GF>(
+    dir: &Path,
+    environment: trace_commons_protocol::skills_catalog::Environment,
+    server_on: bool,
+    keys: &[[u8; 32]],
+    fetch_server: S,
+    fetch_github: G,
+) -> (
+    Option<trace_commons_protocol::skills_catalog::CatalogDocument>,
+    Results,
+)
+where
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<Vec<u8>, ()>>,
+    G: FnOnce() -> GF,
+    GF: std::future::Future<Output = Results>,
+{
+    if server_on && !keys.is_empty() {
+        // A refused or unreachable document is not a Skills error: the held
+        // cache, then GitHub, still answer.
+        let fetched = fetch_server().await.ok().and_then(|bytes| {
+            server_catalog::accept(dir, environment, keys, &bytes, Utc::now()).ok()
+        });
+        let document =
+            fetched.or_else(|| server_catalog::load_cached(dir, environment, keys, Utc::now()));
+        if let Some(document) = document {
+            let results = seed_results(&document);
+            return (Some(document), results);
+        }
+    }
+    (None, fetch_github().await)
+}
+
+/// Every seeded publisher's result from a server catalog. A publisher the
+/// catalog does not list is a failed check, which keeps its last metadata.
+fn seed_results(
+    document: &trace_commons_protocol::skills_catalog::CatalogDocument,
+) -> Vec<(&'static str, Result<FetchedCatalog, ()>)> {
+    publishers()
+        .into_iter()
+        .filter(|publisher| !publisher.repository.is_empty())
+        .map(|publisher| {
+            let result = server_catalog::seed_skills(document, &publisher)
+                .map(|skills| FetchedCatalog {
+                    skills,
+                    complete: true,
+                })
+                .ok_or(());
+            (publisher.id, result)
+        })
+        .collect()
+}
+
+fn regular_destination(dir: &Path) -> Result<PathBuf, ()> {
+    let metadata = std::fs::symlink_metadata(dir).map_err(|_| ())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(());
+    }
+    let path = dir.join(STATE_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => Err(()),
+        Ok(_) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(_) => Err(()),
+    }
+}
+
+fn load(dir: &Path) -> Result<PublicState, ()> {
+    let path = regular_destination(dir)?;
+    if !path.exists() {
+        return Ok(PublicState::default());
+    }
+    let file = crate::evidence_import::open_import_file(&path).map_err(|_| ())?;
+    if file.metadata().map_err(|_| ())?.len() > MAX_STATE_BYTES as u64 {
+        return Err(());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_STATE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(());
+    }
+    let state: PublicState = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    validate_state(&state)?;
+    Ok(state)
+}
+
+fn validate_state(state: &PublicState) -> Result<(), ()> {
+    if state.skills.len() > MAX_SKILLS * 3
+        || state.feed.len() > MAX_FEED
+        || state.history.len() > MAX_SKILLS * 3
+    {
+        return Err(());
+    }
+    let publishers = publishers();
+    for skill in &state.skills {
+        let publisher = publishers
+            .iter()
+            .find(|publisher| publisher.id == skill.publisher_id)
+            .ok_or(())?;
+        if publisher.repository.is_empty()
+            || skill.repository != publisher.repository
+            || !safe_skill_path(&skill.path, publisher.skills_root)
+            || !is_hex(&skill.revision, 40)
+            || !is_hex(&skill.sha256, 64)
+            || skill.id != format!("{}:{}", publisher.id, skill.path)
+            || skill.source_url != source_url(publisher, &skill.revision, &skill.path)
+            || skill.instructions_url != publisher.instructions_url
+            || skill.name.len() > 512
+            || skill.description.len() > 16 * 1024
+        {
+            return Err(());
+        }
+    }
+    for (id, hashes) in &state.history {
+        if !state.skills.iter().any(|skill| &skill.id == id)
+            || hashes.len() > 8
+            || hashes.iter().any(|hash| !is_hex(hash, 64))
+        {
+            return Err(());
+        }
+    }
+    if state
+        .followed
+        .iter()
+        .any(|id| !publishers.iter().any(|publisher| publisher.id == id))
+        || state
+            .publisher_states
+            .keys()
+            .any(|id| !publishers.iter().any(|publisher| publisher.id == id))
+        || state.feed.iter().any(|item| {
+            item.id.len() > 1024
+                || item.skill_id.len() > 512
+                || !publishers
+                    .iter()
+                    .any(|publisher| publisher.id == item.publisher_id)
+                || !matches!(item.kind.as_str(), "added" | "updated")
+        })
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn persist(dir: &Path, state: &PublicState) -> Result<(), ()> {
+    let path = regular_destination(dir)?;
+    let bytes = serde_json::to_vec(state).map_err(|_| ())?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(());
+    }
+    crate::config::write_atomic_0600(dir, &path, &bytes).map_err(|_| ())
+}
+
+fn is_hex(value: &str, count: usize) -> bool {
+    value.len() == count && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn safe_skill_path(path: &str, root: &str) -> bool {
+    path.len() <= 512
+        && path.starts_with(&format!("{root}/"))
+        && path.ends_with("/SKILL.md")
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+}
+
+fn skill_paths(tree: &Value, root: &str) -> Result<Vec<String>, ()> {
+    if tree.get("truncated").and_then(Value::as_bool) != Some(false) {
+        return Err(());
+    }
+    let nodes = tree.get("tree").and_then(Value::as_array).ok_or(())?;
+    let mut paths = Vec::new();
+    for node in nodes {
+        if node.get("type").and_then(Value::as_str) != Some("blob")
+            || !matches!(
+                node.get("mode").and_then(Value::as_str),
+                Some("100644" | "100755")
+            )
+        {
+            continue;
+        }
+        if let Some(path) = node
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| safe_skill_path(path, root))
+        {
+            paths.push(path.to_owned());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    if paths.len() > MAX_SKILLS {
+        return Err(());
+    }
+    Ok(paths)
+}
+
+fn source_url(publisher: &Publisher, revision: &str, path: &str) -> String {
+    format!(
+        "https://github.com/{}/blob/{revision}/{path}",
+        publisher.repository
+    )
+}
+
+async fn fetch_bytes(client: &reqwest::Client, url: String, limit: usize) -> Result<Vec<u8>, ()> {
+    // URLs are constructed solely from fixed publishers, validated commits and
+    // safe tree paths. No ambient API token/cookie or inherited proxy is used.
+    let mut response = client.get(url).send().await.map_err(|_| ())?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > limit as u64)
+    {
+        return Err(());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn resolve_revision(commit: &Value) -> Result<&str, ()> {
+    let object = commit.get("object").ok_or(())?;
+    if object.get("type").and_then(Value::as_str) != Some("commit") {
+        return Err(());
+    }
+    object
+        .get("sha")
+        .and_then(Value::as_str)
+        .filter(|sha| is_hex(sha, 40))
+        .ok_or(())
+}
+
+struct FetchedCatalog {
+    skills: Vec<CatalogSkill>,
+    complete: bool,
+}
+
+async fn fetch_publisher(
+    client: &reqwest::Client,
+    publisher: &Publisher,
+    allowed: &impl Fn() -> bool,
+) -> Result<FetchedCatalog, ()> {
+    fetch_publisher_with(publisher, allowed, |url, limit| {
+        fetch_bytes(client, url, limit)
+    })
+    .await
+}
+
+async fn fetch_publisher_with<F, Fut>(
+    publisher: &Publisher,
+    allowed: &impl Fn() -> bool,
+    mut fetch: F,
+) -> Result<FetchedCatalog, ()>
+where
+    F: FnMut(String, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, ()>>,
+{
+    if !allowed() {
+        return Err(());
+    }
+    let commit: Value = serde_json::from_slice(
+        &fetch(
+            format!(
+                "https://api.github.com/repos/{}/git/ref/heads/main",
+                publisher.repository
+            ),
+            64 * 1024,
+        )
+        .await?,
+    )
+    .map_err(|_| ())?;
+    let revision = resolve_revision(&commit)?;
+    if !allowed() {
+        return Err(());
+    }
+    let tree: Value = serde_json::from_slice(
+        &fetch(
+            format!(
+                "https://api.github.com/repos/{}/git/trees/{revision}?recursive=1",
+                publisher.repository
+            ),
+            MAX_TREE_BYTES,
+        )
+        .await?,
+    )
+    .map_err(|_| ())?;
+    let paths = skill_paths(&tree, publisher.skills_root)?;
+    let mut skills = Vec::new();
+    let mut total = 0usize;
+    let mut complete = true;
+    // Every request depends only on this fixed public catalog, never inventory.
+    // Check the live gate between requests, including within one publisher.
+    for path in paths {
+        if !allowed() {
+            return Err(());
+        }
+        let bytes = match fetch(
+            format!(
+                "https://raw.githubusercontent.com/{}/{revision}/{path}",
+                publisher.repository
+            ),
+            MAX_SKILL_BYTES,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(()) => {
+                complete = false;
+                continue;
+            }
+        };
+        total = total.saturating_add(bytes.len());
+        if total > MAX_STATE_BYTES {
+            complete = false;
+            break;
+        }
+        let Some((name, description)) = parse_skill_document(&bytes) else {
+            complete = false;
+            continue;
+        };
+        skills.push(CatalogSkill {
+            id: format!("{}:{path}", publisher.id),
+            publisher_id: publisher.id.into(),
+            name,
+            description,
+            repository: publisher.repository.into(),
+            source_url: source_url(publisher, revision, &path),
+            path,
+            revision: revision.into(),
+            sha256: hex::encode(Sha256::digest(&bytes)),
+            instructions_url: publisher.instructions_url.into(),
+        });
+    }
+    Ok(FetchedCatalog { skills, complete })
+}
+
+impl SkillsService {
+    fn state(&self, dir: &Path) -> Result<std::sync::MutexGuard<'_, Runtime>, ()> {
+        let mut runtime = self.runtime.lock().map_err(|_| ())?;
+        if !runtime.loaded {
+            match load(dir) {
+                Ok(public) => runtime.public = public,
+                Err(()) => runtime.error = Some(ERROR_CACHE),
+            }
+            runtime.loaded = true;
+        }
+        Ok(runtime)
+    }
+
+    fn start_refresh(self: &Arc<Self>, shared: &DaemonShared, force: bool) {
+        if !enabled(shared) {
+            return;
+        }
+        let dir = shared.store.dir().to_owned();
+        let Ok(mut runtime) = self.state(&dir) else {
+            return;
+        };
+        if runtime.refreshing || !skills_flag_on(shared) {
+            return;
+        }
+        let wait = if force {
+            REFRESH_DEBOUNCE
+        } else {
+            REFRESH_AFTER
+        };
+        if runtime
+            .last_attempt
+            .is_some_and(|last| last.elapsed() < wait)
+        {
+            return;
+        }
+        if !force
+            && runtime.last_attempt.is_none()
+            && runtime.public.checked_at.is_some_and(|at| {
+                Utc::now().signed_duration_since(at).num_seconds() < REFRESH_AFTER.as_secs() as i64
+            })
+        {
+            return;
+        }
+        runtime.last_attempt = Some(Instant::now());
+        runtime.refreshing = true;
+        drop(runtime);
+        // Test builds exercise the actual admission/throttle path while never
+        // contacting a publisher. Explicit live qualification calls fetch directly.
+        if cfg!(any(test, feature = "test-credential-store")) {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.refreshing = false;
+            }
+            return;
+        }
+        let service = Arc::clone(self);
+        let spawned = shared.spawn_detached(move |shared| async move {
+            let environment = shared.feature_flags.environment();
+            let keys = service.catalog_keys(&shared);
+            let live = &shared;
+            let fetch_server = move || async move {
+                match (
+                    server_catalog::client(true),
+                    crate::channel::skills_catalog_url(environment),
+                ) {
+                    (Ok(client), Ok(url)) => {
+                        tokio::time::timeout(REFRESH_TOTAL, server_catalog::download(&client, url))
+                            .await
+                            .unwrap_or(Err(()))
+                    }
+                    _ => Err(()),
+                }
+            };
+            let fetch_github = move || async move {
+                let client = reqwest::Client::builder()
+                    .https_only(true)
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(12))
+                    .user_agent("TraceCommons-Skills/1")
+                    .build();
+                let mut results = Vec::new();
+                if let Ok(client) = client {
+                    let work = async {
+                        for publisher in publishers()
+                            .iter()
+                            .filter(|publisher| !publisher.repository.is_empty())
+                        {
+                            if !enabled(live) {
+                                break;
+                            }
+                            let fetched =
+                                fetch_publisher(&client, publisher, &|| enabled(live)).await;
+                            results.push((publisher.id, fetched));
+                        }
+                    };
+                    let _ = tokio::time::timeout(REFRESH_TOTAL, work).await;
+                }
+                results
+            };
+            let (server, results) = choose_catalog(
+                &dir,
+                environment,
+                server_flag_on(&shared),
+                &keys,
+                fetch_server,
+                fetch_github,
+            )
+            .await;
+            if let Some(document) = server {
+                if let Ok(mut runtime) = service.runtime.lock() {
+                    if server_flag_on(&shared) {
+                        runtime.server = Some(document);
+                        runtime.server_loaded = true;
+                    }
+                }
+            }
+            service.finish_refresh(&shared, &dir, results);
+        });
+        if spawned.is_none() {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.refreshing = false;
+                runtime.last_attempt = None;
+            }
+        }
+    }
+
+    fn finish_refresh(
+        &self,
+        shared: &DaemonShared,
+        dir: &Path,
+        mut results: Vec<(&str, Result<FetchedCatalog, ()>)>,
+    ) {
+        let publish = enabled(shared);
+        let Ok(mut runtime) = self.runtime.lock() else {
+            return;
+        };
+        runtime.refreshing = false;
+        // A refresh admitted while enabled may finish after a live disable.
+        // Discard its feature results and leave the durable cache untouched.
+        if !publish || !skills_flag_on(shared) {
+            // Keep the attempt timestamp: disable/re-enable is not a throttle bypass.
+            return;
+        }
+        let now = Utc::now();
+        let mut failed = false;
+        let mut next = runtime.public.clone();
+        for publisher in publishers()
+            .iter()
+            .filter(|publisher| !publisher.repository.is_empty())
+        {
+            match results
+                .iter_mut()
+                .find(|(id, _)| id == &publisher.id)
+                .map(|(_, result)| result)
+            {
+                Some(Ok(fetched)) => {
+                    failed |= !fetched.complete;
+                    next.accept_fetched(
+                        publisher.id,
+                        FetchedCatalog {
+                            skills: std::mem::take(&mut fetched.skills),
+                            complete: fetched.complete,
+                        },
+                        now,
+                    );
+                }
+                _ => {
+                    next.failed(publisher.id);
+                    failed = true;
+                }
+            }
+        }
+        if !skills_flag_on(shared) {
+            return;
+        }
+        runtime.public = next;
+        runtime.refreshing = false;
+        runtime.error = if persist(dir, &runtime.public).is_err() {
+            Some(ERROR_CACHE)
+        } else if failed {
+            Some(ERROR_REFRESH)
+        } else {
+            None
+        };
+    }
+}
+
+/// Keep the default Home creators and explicit follows current. The feature,
+/// analysis, dry-run and six-hour throttle gates remain in the refresh path.
+pub(crate) fn maybe_refresh_public(shared: &DaemonShared) {
+    if !enabled(shared) {
+        return;
+    }
+    shared.insights_skills.start_refresh(shared, false);
+    suggestions::maybe_send(shared);
+}
+
+pub(crate) fn skills_flag_on(shared: &DaemonShared) -> bool {
+    !shared.dev_dry_run && shared.feature_flags.is_enabled(INSIGHTS_SKILLS_FLAG)
+}
+
+/// The server catalog replaces the GitHub fetch only under its own flag.
+fn server_flag_on(shared: &DaemonShared) -> bool {
+    skills_flag_on(shared)
+        && shared
+            .feature_flags
+            .is_enabled(server_catalog::SERVER_CATALOG_FLAG)
+}
+
+fn feature_enabled(shared: &DaemonShared) -> bool {
+    skills_flag_on(shared)
+}
+
+fn enabled(shared: &DaemonShared) -> bool {
+    feature_enabled(shared)
+        && shared
+            .settings
+            .lock()
+            .map(|settings| settings.insights_counter_pass)
+            .unwrap_or(false)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct InventoryPolicy {
+    projects: Vec<PathBuf>,
+    denied_roots: Vec<PathBuf>,
+    all_local_excluded: bool,
+}
+
+fn inventory_policy(shared: &DaemonShared) -> Result<InventoryPolicy, ()> {
+    let policy = shared.policy.lock().map_err(|_| ())?;
+    if policy.holds_every_send() {
+        return Ok(InventoryPolicy {
+            all_local_excluded: true,
+            ..InventoryPolicy::default()
+        });
+    }
+    let denied_roots = match super::insights_week::never_folders(&policy) {
+        super::insights_week::NeverFolders::Every => return Err(()),
+        super::insights_week::NeverFolders::These(keys) => {
+            // Negative rules must never be silently truncated.
+            if keys.len() > 4096 {
+                return Err(());
+            }
+            keys.iter()
+                // This bucket excludes sessions with no known project, not a
+                // filesystem location. Its Never rule still applies to usage.
+                .filter(|key| key.as_str() != super::policy::UNKNOWN_PROJECT_KEY)
+                .map(|key| {
+                    super::policy::display_path_for_key(key)
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_absolute())
+                        .ok_or(())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    // A transcript or upload queue entry cannot expand filesystem scope.
+    let mut keys: Vec<_> = policy.projects.keys().cloned().collect();
+    if let Some(grant) = &policy.automatic_grant {
+        keys.extend(grant.projects_on_disk.iter().cloned());
+    }
+    keys.sort();
+    keys.dedup();
+    let projects = keys
+        .into_iter()
+        .filter(|key| {
+            key != super::policy::UNKNOWN_PROJECT_KEY
+                && policy.resolve(key) != super::policy::ProjectMode::Ignore
+        })
+        .filter_map(|key| super::policy::display_path_for_key(&key).map(PathBuf::from))
+        .take(256)
+        .collect();
+    Ok(InventoryPolicy {
+        projects,
+        denied_roots,
+        all_local_excluded: false,
+    })
+}
+
+pub(crate) struct SnapshotScope {
+    flags: u64,
+    cleared: u64,
+    analysis: bool,
+    policy: super::policy::ProjectPolicy,
+}
+
+impl SnapshotScope {
+    pub(crate) fn capture(shared: &DaemonShared) -> Option<Self> {
+        // Each guard ends before acquiring the next daemon lock.
+        let flags = shared.feature_flags.generation();
+        let cleared = shared.insights_counter.clear_generation();
+        let analysis = shared.settings.lock().ok()?.insights_counter_pass;
+        let policy = shared.policy.lock().ok()?.clone();
+        Some(Self {
+            flags,
+            cleared,
+            analysis,
+            policy,
+        })
+    }
+
+    pub(crate) fn is_current(&self, shared: &DaemonShared) -> bool {
+        feature_enabled(shared)
+            && self.flags == shared.feature_flags.generation()
+            && self.cleared == shared.insights_counter.clear_generation()
+            && shared
+                .settings
+                .lock()
+                .is_ok_and(|settings| self.analysis == settings.insights_counter_pass)
+            && shared
+                .policy
+                .lock()
+                .is_ok_and(|policy| self.policy == *policy)
+    }
+}
+
+fn snapshot(shared: &DaemonShared) -> Value {
+    if !feature_enabled(shared) {
+        return json!({"enabled":false,"copy":copy()});
+    }
+    let Some(scope) = SnapshotScope::capture(shared) else {
+        return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-unavailable","copy":copy()});
+    };
+    let policy = match inventory_policy(shared) {
+        Ok(policy) => policy,
+        Err(()) => {
+            return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-unavailable","copy":copy()});
+        }
+    };
+    let cached = shared
+        .insights_skills
+        .state(shared.store.dir())
+        .ok()
+        .and_then(|runtime| {
+            runtime
+                .inventory
+                .as_ref()
+                .filter(|(at, roots, _)| {
+                    at.elapsed() < Duration::from_secs(300) && roots == &policy
+                })
+                .map(|(_, _, inventory)| inventory.clone())
+        });
+    let inventory = cached.unwrap_or_else(|| {
+        let extra = if cfg!(any(test, feature = "test-credential-store")) {
+            Vec::new()
+        } else {
+            crate::insights::skills::configured_global_roots()
+        };
+        let inventory = if policy.all_local_excluded {
+            Inventory {
+                details: Default::default(),
+                skills: Vec::new(),
+                partial: true,
+                coverage: vec![crate::insights::skills::ScanCoverage {
+                    location: "local".into(),
+                    status: crate::insights::skills::ScanStatus::PolicyExcluded,
+                }],
+            }
+        } else {
+            scan_inventory_with_policy(
+                &crate::source::home_dir(),
+                &policy.projects,
+                &extra,
+                &policy.denied_roots,
+            )
+        };
+        if let Ok(mut runtime) = shared.insights_skills.state(shared.store.dir()) {
+            if !skills_flag_on(shared) {
+                return inventory;
+            }
+            runtime.inventory_scanned_at = Some(Utc::now());
+            runtime.inventory = Some((Instant::now(), policy.clone(), inventory.clone()));
+        }
+        inventory
+    });
+    if inventory_policy(shared).ok().as_ref() != Some(&policy) {
+        return json!({"enabled":true,"readable":false,"reason":"insights-skills-policy-changed","copy":copy()});
+    }
+    let usage_response = super::insights_week::skills_usage(shared);
+    if usage_response.get("readable").and_then(Value::as_bool) == Some(false) {
+        return json!({"enabled":true,"readable":false,"reason":usage_response.get("reason"),"copy":copy()});
+    }
+    let mut usage = usage_response
+        .get("usage")
+        .cloned()
+        .unwrap_or_else(|| json!({"partial":true,"skills":[]}));
+    usage["enabled"] = usage_response
+        .get("enabled")
+        .cloned()
+        .unwrap_or(json!(false));
+    usage["coverage"] = Value::Array(
+        usage_response
+            .get("coverage")
+            .and_then(Value::as_object)
+            .map(|coverage| {
+                coverage
+                    .iter()
+                    .map(|(agent, status)| json!({"agent":agent,"status":status}))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    );
+    // Sampled before the Skills lock: it reads the settings lock.
+    let suggestions_available = suggestions::available(shared);
+    let Ok(mut runtime) = shared.insights_skills.state(shared.store.dir()) else {
+        return json!({"enabled":true,"readable":false,"reason":ERROR_CACHE,"copy":copy()});
+    };
+    if !skills_flag_on(shared) {
+        return json!({"enabled":false,"copy":copy()});
+    }
+    shared.insights_skills.load_server(shared, &mut runtime);
+    let runtime = runtime;
+    let now = Utc::now();
+    let server = current_server(shared, &runtime, now);
+    let server_publisher =
+        |id: &str| server.and_then(|document| document.publishers.iter().find(|p| p.id == id));
+    let publisher_states: Vec<_> = publishers().iter().map(|publisher| {
+        let state = runtime.public.publisher_states.get(publisher.id);
+        let status = if publisher.repository.is_empty() { "unavailable" } else { state.map_or("not_checked", |state| {
+            if state.status == "current" && state.checked_at.is_some_and(|at| now.signed_duration_since(at).num_seconds() >= REFRESH_AFTER.as_secs() as i64) { "unknown" } else { &state.status }
+        }) };
+        let mut row = json!({"publisher_id":publisher.id,"status":status,"checked_at":state.and_then(|state| state.checked_at)});
+        if let Some(seed) = server_publisher(publisher.id).filter(|p| p.repository == publisher.repository) {
+            row["signals"] = server_catalog::signals_row(&seed.signals);
+        }
+        row
+    }).collect();
+    let (installed, installed_partial) = bounded_rows(inventory.skills.iter(), 240 * 1024);
+    let (details, details_partial) = bounded_inventory_details(&inventory, &installed, 64 * 1024);
+    let (coverage, coverage_partial) = bounded_rows(inventory.coverage.iter(), 40 * 1024);
+    let defaults = DEFAULT_HOME_PUBLISHERS.as_slice();
+    // Recently active publishers, chosen from the verified document's
+    // public signals alone and before any row is sized, so every install
+    // holding this document is sent the same choice.
+    let active = server
+        .map(|document| active_publishers::selected(document, now))
+        .unwrap_or_default();
+    let active_skills: BTreeSet<(&str, &str)> = active
+        .iter()
+        .flat_map(|(_, skills)| skills.iter())
+        .map(|skill| (skill.repository.as_str(), skill.path.as_str()))
+        .collect();
+    let (catalog, catalog_partial) = bounded_rows(
+        reserve_home_creator_examples(
+            catalog_rows(&runtime.public, server, &inventory, &active_skills),
+            defaults,
+        ),
+        180 * 1024,
+    );
+    // A skill is named by the id of the row sent for it; a seed's row is
+    // matched by repository and path, as its signals are.
+    let active_rows = server.map(|_| {
+        let sent: BTreeMap<(&str, &str), (&str, &str)> = catalog
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    (row.get("repository")?.as_str()?, row.get("path")?.as_str()?),
+                    (row.get("id")?.as_str()?, row.get("publisher_id")?.as_str()?),
+                ))
+            })
+            .collect();
+        active_publishers::rows(&active, |skill| {
+            sent.get(&(skill.repository.as_str(), skill.path.as_str()))
+                .filter(|(_, publisher)| *publisher == skill.publisher_id)
+                .map(|(id, _)| (*id).to_string())
+        })
+    });
+    // Publishers beyond the fixed four: only those an emitted row names.
+    let mut catalog_publishers = serde_json::to_value(publishers())
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut publisher_states = publisher_states;
+    if let Some(document) = server {
+        let fixed: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+        let named: BTreeSet<&str> = catalog
+            .iter()
+            .filter_map(|row| row.get("publisher_id").and_then(Value::as_str))
+            .filter(|id| !fixed.contains(id))
+            .collect();
+        for publisher in document
+            .publishers
+            .iter()
+            .filter(|p| named.contains(p.id.as_str()))
+        {
+            catalog_publishers.push(json!({
+                "id": publisher.id, "name": publisher.name, "repository": publisher.repository,
+                "skills_root": publisher.skills_root.clone().unwrap_or_default(),
+                "instructions_url": publisher.instructions_url,
+                "url": publisher.url, "source_kind": publisher.source_kind,
+            }));
+            publisher_states.push(json!({
+                "publisher_id": publisher.id, "status": "current",
+                "checked_at": document.issued_at,
+                "signals": server_catalog::signals_row(&publisher.signals),
+            }));
+        }
+    }
+    let (updates, updates_partial) = bounded_rows(
+        updates_with_server(&inventory, &runtime.public, server, now),
+        64 * 1024,
+    );
+    // Both partitions contribute to Home; Following contains explicit choices
+    // only. Their metadata shares one budget, with a turn for each publisher.
+    let (feed, feed_partial, home_feed, home_feed_partial) =
+        bounded_home_news(&runtime.public, 48 * 1024);
+    bound_usage_rows(&mut usage, 96 * 1024);
+    let value = json!({
+        "enabled":true,"readable":true,"inventory":{"scanned_at":runtime.inventory_scanned_at,"skills":installed,"details":details,"coverage":coverage,"partial":inventory.partial || installed_partial || details_partial || coverage_partial || updates_partial},
+        "catalog":{"publishers":catalog_publishers,"skills":catalog,"partial":catalog_partial || runtime.public.publisher_states.values().any(|state| state.status != "current"),"checked_at":runtime.public.checked_at,"publisher_states":publisher_states,
+            "source": if server.is_some() { "server" } else { "github" },
+            "revision": server.map(|d| d.revision), "issued_at": server.map(|d| d.issued_at),
+            "expires_at": server.map(|d| d.expires_at), "total_skills": server.map(|d| d.skills.len()),
+            "active_publishers": active_rows},
+        "suggestions": suggestions::snapshot(suggestions_available, shared.store.dir(), &inventory, &runtime.public, server),
+        "followed_publishers":runtime.public.followed,"updates":updates,"feed":feed,"feed_partial":feed_partial,
+        "default_publishers":defaults,"home_feed":home_feed,"home_feed_partial":home_feed_partial,
+        "usage":usage,
+        "refreshing":runtime.refreshing,"error":runtime.error,"copy":copy(),
+    });
+    drop(runtime);
+    if !scope.is_current(shared) {
+        return json!({"enabled":feature_enabled(shared),"readable":false,"reason":"insights-skills-policy-changed","copy":copy()});
+    }
+    value
+}
+
+/// Only emit metadata belonging to an emitted installation. Serialize through
+/// the typed model so ephemeral canonical paths cannot cross IPC; account for
+/// escaped JSON keys as well as values in this independent response budget.
+fn bounded_inventory_details(
+    inventory: &Inventory,
+    installed: &[Value],
+    limit: usize,
+) -> (BTreeMap<String, Value>, bool) {
+    let mut result = BTreeMap::new();
+    let mut bytes = 2usize;
+    for id in installed
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+    {
+        let Some(details) = inventory.details.get(id) else {
+            continue;
+        };
+        let Ok(value) = serde_json::to_value(details) else {
+            return (result, true);
+        };
+        let Ok(encoded) = serde_json::to_vec(&value) else {
+            return (result, true);
+        };
+        let Ok(key) = serde_json::to_vec(id) else {
+            return (result, true);
+        };
+        bytes = bytes
+            .saturating_add(encoded.len())
+            .saturating_add(key.len())
+            .saturating_add(2);
+        if bytes > limit {
+            return (result, true);
+        }
+        result.insert(id.to_owned(), value);
+    }
+    (result, false)
+}
+
+/// Usage rows within `limit` encoded bytes. Rows left out make the usage
+/// partial, and belong to no one agent: the per-agent gaps are dropped
+/// with them, so a shell falls back to `partial` alone.
+fn bound_usage_rows(usage: &mut Value, limit: usize) {
+    if let Some(rows) = usage.get("skills").and_then(Value::as_array) {
+        let (rows, partial) = bounded_rows(rows, limit);
+        usage["skills"] = rows.into();
+        if partial {
+            usage["partial"] = true.into();
+            if let Some(usage) = usage.as_object_mut() {
+                usage.remove("partial_agents");
+            }
+        }
+    }
+}
+
+/// Keep discovery available after following a creator, without implicitly
+/// following the curated defaults. Select newest rows in publisher rounds so
+/// one creator's burst cannot exhaust the combined metadata budget first.
+fn bounded_home_news(state: &PublicState, limit: usize) -> (Vec<Value>, bool, Vec<Value>, bool) {
+    let mut candidates: Vec<_> = state
+        .feed
+        .iter()
+        .filter(|item| {
+            state.followed.contains(&item.publisher_id)
+                || DEFAULT_HOME_PUBLISHERS.contains(&item.publisher_id.as_str())
+        })
+        .collect();
+    candidates.sort_by(|left, right| feed_order(left, right));
+    let mut seen = BTreeSet::new();
+    let mut publishers: BTreeMap<&str, Vec<&FeedItem>> = BTreeMap::new();
+    for item in candidates {
+        if seen.insert(item.id.as_str()) {
+            publishers
+                .entry(item.publisher_id.as_str())
+                .or_default()
+                .push(item);
+        }
+    }
+    let mut publishers: Vec<_> = publishers.into_values().map(Vec::into_iter).collect();
+    let mut feed = Vec::new();
+    let mut home_feed = Vec::new();
+    let mut feed_partial = false;
+    let mut home_feed_partial = false;
+    // Include both arrays' brackets and each actual inter-row comma.
+    let mut bytes = 4usize;
+    loop {
+        let mut had_row = false;
+        for publisher in &mut publishers {
+            let Some(item) = publisher.next() else {
+                continue;
+            };
+            had_row = true;
+            let (rows, partial) = if state.followed.contains(&item.publisher_id) {
+                (&mut feed, &mut feed_partial)
+            } else {
+                (&mut home_feed, &mut home_feed_partial)
+            };
+            let Ok(value) = serde_json::to_value(item) else {
+                *partial = true;
+                continue;
+            };
+            let Ok(body) = serde_json::to_vec(&value) else {
+                *partial = true;
+                continue;
+            };
+            let row_bytes = body.len().saturating_add(usize::from(!rows.is_empty()));
+            if bytes.saturating_add(row_bytes) > limit {
+                *partial = true;
+                continue;
+            }
+            bytes += row_bytes;
+            rows.push((item, value));
+        }
+        if !had_row {
+            break;
+        }
+    }
+    // Selection is fair across publishers; presentation stays chronological.
+    feed.sort_by(|(left, _), (right, _)| feed_order(left, right));
+    home_feed.sort_by(|(left, _), (right, _)| feed_order(left, right));
+    (
+        feed.into_iter().map(|(_, value)| value).collect(),
+        feed_partial,
+        home_feed.into_iter().map(|(_, value)| value).collect(),
+        home_feed_partial,
+    )
+}
+
+fn feed_order(left: &FeedItem, right: &FeedItem) -> std::cmp::Ordering {
+    right
+        .observed_at
+        .cmp(&left.observed_at)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn bounded_rows<T: Serialize>(
+    rows: impl IntoIterator<Item = T>,
+    limit: usize,
+) -> (Vec<Value>, bool) {
+    let mut result = Vec::new();
+    let mut bytes = 2usize;
+    for row in rows {
+        let Ok(body) = serde_json::to_vec(&row) else {
+            return (result, true);
+        };
+        bytes = bytes.saturating_add(body.len()).saturating_add(1);
+        if bytes > limit {
+            return (result, true);
+        }
+        let Ok(value) = serde_json::from_slice(&body) else {
+            return (result, true);
+        };
+        result.push(value);
+    }
+    (result, false)
+}
+
+#[cfg(test)]
+fn updates(inventory: &Inventory, state: &PublicState, now: DateTime<Utc>) -> Vec<Value> {
+    updates_with_server(inventory, state, None, now)
+}
+
+/// A non-seeded server skill at the installed skill's source, as today's
+/// `CatalogSkill` with the server's earlier hashes as its history.
+fn server_match(
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    installed: &crate::insights::skills::InstalledSkill,
+) -> Option<(CatalogSkill, Vec<String>)> {
+    let source = installed.source.as_ref()?;
+    let document = server?;
+    let seeds: BTreeSet<&str> = publishers().iter().map(|p| p.id).collect();
+    let skill = document.skills.iter().find(|skill| {
+        skill.repository == source.repository
+            && skill.path == source.path
+            && !seeds.contains(skill.publisher_id.as_str())
+    })?;
+    Some((
+        CatalogSkill {
+            id: skill.id.clone(),
+            publisher_id: skill.publisher_id.clone(),
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            repository: skill.repository.clone(),
+            path: skill.path.clone(),
+            revision: skill.revision.clone(),
+            sha256: skill.sha256.clone(),
+            source_url: skill.source_url.clone(),
+            instructions_url: trace_commons_protocol::skills_catalog::repository_url(
+                &skill.repository,
+            ),
+        },
+        skill.previous_sha256.clone(),
+    ))
+}
+
+fn updates_with_server(
+    inventory: &Inventory,
+    state: &PublicState,
+    server: Option<&trace_commons_protocol::skills_catalog::CatalogDocument>,
+    now: DateTime<Utc>,
+) -> Vec<Value> {
+    inventory.skills.iter().map(|installed| {
+        if !state.skills.iter().any(|skill| installed.source.as_ref().is_some_and(|source| source.repository == skill.repository && source.path == skill.path)) {
+            if let Some((skill, history)) = server_match(server, installed) {
+                let status = serde_json::to_value(freshness(installed, &skill, &history)).unwrap_or(json!("unknown"));
+                return json!({"installed_id":installed.id,"status":status,"catalog_skill_id":skill.id});
+            }
+        }
+        let catalog = installed.source.as_ref().and_then(|source| state.skills.iter().find(|skill| source.repository == skill.repository && source.path == skill.path));
+        let status = catalog.map(|skill| {
+            let checked = state.publisher_states.get(&skill.publisher_id);
+            if checked.is_some_and(|state| state.status == "current" && state.checked_at.is_some_and(|at| now.signed_duration_since(at).num_seconds() < REFRESH_AFTER.as_secs() as i64)) {
+                serde_json::to_value(freshness(installed, skill, state.history.get(&skill.id).map(Vec::as_slice).unwrap_or(&[]))).unwrap_or(json!("unknown"))
+            } else { json!("unknown") }
+        }).unwrap_or_else(|| {
+            match installed.source.as_ref() {
+                None => json!("unknown_source"),
+                Some(source) if publishers().iter().any(|publisher| !publisher.repository.is_empty() && source.repository == publisher.repository && safe_skill_path(&source.path, publisher.skills_root)) => json!("not_checked"),
+                Some(_) => json!("unavailable"),
+            }
+        });
+        json!({"installed_id":installed.id,"status":status,"catalog_skill_id":catalog.map(|skill| &skill.id)})
+    }).collect()
+}
+
+mod active_publishers;
+mod detail;
+pub(crate) mod opencode;
+mod server_catalog;
+mod suggestions;
+
+pub(crate) async fn handle(shared: &DaemonShared, req: &Request) -> Response {
+    if req.params.get("session_ref").is_some() {
+        return super::run_blocking(|| opencode::detail(shared, req));
+    }
+    if req.params.get("skill_id").is_some() {
+        return super::run_blocking(|| detail::handle(shared, req));
+    }
+    let force = match req.params.get("refresh") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Response::err(req.id, ERR_BAD_PARAMS, "insights-skills-refresh-invalid"),
+    };
+    if force && feature_enabled(shared) {
+        if let Ok(mut runtime) = shared.insights_skills.runtime.lock() {
+            runtime.inventory = None;
+        }
+    }
+    let mut value = super::run_blocking(|| snapshot(shared));
+    if enabled(shared) {
+        shared.insights_skills.start_refresh(shared, force);
+        if let Ok(runtime) = shared.insights_skills.runtime.lock() {
+            value["refreshing"] = runtime.refreshing.into();
+        }
+    }
+    if !feature_enabled(shared) {
+        value = json!({"enabled":false,"copy":copy()});
+    }
+    Response::ok(req.id, value)
+}
+
+/// `insights_skills_suggestions {"opted_in": bool}`.
+pub(crate) fn handle_suggestions(shared: &DaemonShared, req: &Request) -> Response {
+    suggestions::handle_set(shared, req)
+}
+
+pub(crate) fn handle_follow(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(id) = req.params.get("publisher_id").and_then(Value::as_str) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "insights-skills-publisher-invalid");
+    };
+    let Some(followed) = req.params.get("followed").and_then(Value::as_bool) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "insights-skills-follow-invalid");
+    };
+    if !enabled(shared) {
+        return Response::ok(req.id, json!({"enabled":false,"copy":copy()}));
+    }
+    let service = &shared.insights_skills;
+    let Ok(mut runtime) = service.state(shared.store.dir()) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERROR_CACHE);
+    };
+    if !skills_flag_on(shared) {
+        return Response::ok(req.id, json!({"enabled":false,"copy":copy()}));
+    }
+    let mut next = runtime.public.clone();
+    if let Err(label) = next.follow(id, followed) {
+        return Response::err(req.id, ERR_BAD_PARAMS, label);
+    }
+    if !skills_flag_on(shared) {
+        return Response::ok(req.id, json!({"enabled":false,"copy":copy()}));
+    }
+    if persist(shared.store.dir(), &next).is_err() {
+        runtime.error = Some(ERROR_CACHE);
+        return Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            "insights-skills-follow-write-failed",
+        );
+    }
+    runtime.public = next;
+    if runtime.error == Some(ERROR_CACHE) {
+        runtime.error = None;
+    }
+    drop(runtime);
+    Response::ok(req.id, super::run_blocking(|| snapshot(shared)))
+}
+
+fn copy() -> Value {
+    serde_json::to_value(
+        crate::insights::service::ui_copy()
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("skills_"))
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap_or_else(|_| json!({}))
+}
+
+#[cfg(test)]
+mod tests;

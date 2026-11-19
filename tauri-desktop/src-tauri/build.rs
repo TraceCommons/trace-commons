@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 #[cfg(target_os = "macos")]
 use std::{env, path::PathBuf, process::Command};
 
@@ -47,7 +49,6 @@ const TAURI_COMMANDS: &[&str] = &[
     "scrubber_pattern_names",
     "enroll_with_invite",
     "set_consent_scopes",
-    "acknowledge_near_ai_notice",
     "grant_void_notice",
     "witness_capacity_notice",
     "acknowledge_grant_voids",

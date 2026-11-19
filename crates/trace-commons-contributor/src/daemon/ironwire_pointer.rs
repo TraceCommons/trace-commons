@@ -365,6 +365,7 @@ pub(crate) mod test_support {
         /// state of one without IronWire. A test asserting that state needs
         /// the lock as much as one setting a path, or a concurrent guard
         /// decides what it sees.
+        #[allow(unsafe_code)]
         pub(crate) fn none() -> Self {
             // A poisoned lock means some other test panicked while holding
             // it; both the override and the environment were still restored
@@ -372,6 +373,7 @@ pub(crate) mod test_support {
             let lock = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
             let previous_home = std::env::var_os(HOME_ENV);
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+            // SAFETY: `lock` holds `LOCK`, serializing `IRONWIRE_HOME` mutations across tests.
             unsafe { std::env::remove_var(HOME_ENV) };
             Self {
                 _lock: lock,
@@ -380,8 +382,10 @@ pub(crate) mod test_support {
         }
 
         /// `IRONWIRE_HOME` at `home`, and no pointer.
+        #[allow(unsafe_code)]
         pub(crate) fn home(home: &Path) -> Self {
             let guard = Self::none();
+            // SAFETY: `guard._lock` holds `LOCK`, serializing `IRONWIRE_HOME` mutations across tests.
             unsafe { std::env::set_var(HOME_ENV, home) };
             guard
         }
@@ -405,11 +409,18 @@ pub(crate) mod test_support {
     }
 
     impl Drop for IronWireAt {
+        #[allow(unsafe_code)]
         fn drop(&mut self) {
             *OVERRIDE.lock().unwrap_or_else(PoisonError::into_inner) = None;
             match self.previous_home.take() {
-                Some(v) => unsafe { std::env::set_var(HOME_ENV, v) },
-                None => unsafe { std::env::remove_var(HOME_ENV) },
+                Some(v) => {
+                    // SAFETY: `self._lock` holds `LOCK` until fields drop.
+                    unsafe { std::env::set_var(HOME_ENV, v) }
+                }
+                None => {
+                    // SAFETY: `self._lock` holds `LOCK` until fields drop.
+                    unsafe { std::env::remove_var(HOME_ENV) }
+                }
             }
         }
     }

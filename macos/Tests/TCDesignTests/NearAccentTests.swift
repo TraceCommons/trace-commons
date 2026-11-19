@@ -4,18 +4,21 @@ import XCTest
 /// The flat theme's accent is the NEAR AI design system's (owner,
 /// 2026-10-20: "Apply the Near AI primary theme accent color from the Parent
 /// Design System repo to the app, replacing the purple"), and purple stays
-/// for data. Read from the token JSON, as `FlatThemeContrastTests` reads it,
-/// because the generated tokens resolve for the classic theme under a test
-/// run.
+/// for data. Light turns the parent's hue (OKLCH 251) to macOS system blue's
+/// (257) at the same luminance, for more saturation at the same contrast
+/// (owner, 2026-11-12: "Keep hue 257"); Dark keeps the parent's hexes. Read
+/// from the token JSON, as `FlatThemeContrastTests` reads it, because the
+/// generated tokens resolve for the classic theme under a test run.
 final class NearAccentTests: XCTestCase {
     /// The parent's roles (near-ai-os-design-system, `tokens/near-ai.tokens.json`),
-    /// light then dark, and the tokens that carry each here.
+    /// light (turned to hue 257: the parent's are #035CA3, #024175 and
+    /// #0070C6) then dark, and the tokens that carry each here.
     static let roles: [(role: String, light: UInt32, dark: UInt32, tokens: [String])] = [
-        ("accent", 0x035CA3, 0x7EBCFF,
+        ("accent", 0x0558B6, 0x7EBCFF,
          ["controlSelected", "controlSelectedFloating", "toggleOn", "toggleOnSettings", "selection",
-          "menuSelection"]),
-        ("accent-text", 0x024175, 0xC6E1FF, ["purpleText", "linkText"]),
-        ("accent-soft", 0x0070C6, 0x0091FD, ["purpleSoft", "tabEmber"]),
+          "menuSelection", "menuHover", "toolbarExpanded"]),
+        ("accent-text", 0x023E83, 0xC6E1FF, ["purpleText", "linkText"]),
+        ("accent-soft", 0x056BDC, 0x0091FD, ["purpleSoft", "tabEmber", "mapOrbShared", "tintAccent", "tabEmberHalo"]),
     ]
 
     func test_theAccentIsTheNearAIAccent() throws {
@@ -29,6 +32,22 @@ final class NearAccentTests: XCTestCase {
         // Dark's light blue.
         XCTAssertEqual(try Self.hex("textOnAccent", theme: "flatLight"), 0xFFFFFF)
         XCTAssertEqual(try Self.hex("textOnAccent", theme: "flatDark"), 0x071A2E)
+    }
+
+    func test_everyAccentGradientStopUsesItsRole() throws {
+        let source = try Self.tokens()
+        for (token, light, dark) in [("ctaFill", "#0558b6", "#7ebcff"),
+                                     ("ctaSecondaryFill", "#03459c", "#6aa8eb"),
+                                     ("checkboxOnFill", "#0558b6", "#7ebcff")] {
+            for (theme, expected) in [("flatLight", light), ("flatDark", dark)] {
+                let stops = try Self.hexes("gradient", token, theme: theme, source: source)
+                XCTAssertFalse(stops.isEmpty)
+                XCTAssertTrue(stops.allSatisfy { $0.lowercased() == expected }, "\(theme) \(token)")
+            }
+        }
+        // First run is always dark; its soft blue intentionally keeps the parent hue.
+        XCTAssertEqual(try Self.hex("firstRunGlow", theme: "flatDark"), 0x0091FD)
+        XCTAssertEqual(try FlatThemeContrastTests.colour("tabEmberHalo", theme: "flatLight").alpha, 0.28)
     }
 
     /// A label on an accent fill clears 4.5:1; a glyph, a knob or a check

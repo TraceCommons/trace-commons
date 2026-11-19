@@ -15,6 +15,14 @@
 //! adds the structs it needs in its own module; structs that are reused
 //! across binaries migrate here.
 
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
+#[cfg(test)]
+pub(crate) fn env_mutation_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 pub mod client;
 pub mod error;
 pub mod format;

@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "1.0.7"
+version = "1.0.10"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -233,3 +233,10 @@ path = "tests/preflight.rs"
 [[test]]
 name = "version_channel"
 path = "tests/version_channel.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

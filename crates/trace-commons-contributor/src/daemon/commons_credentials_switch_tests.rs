@@ -275,3 +275,27 @@ fn a_re_enrollment_after_the_migration_began_refuses_the_switch() {
     );
     assert_eq!(live_device(&store), other.device_key_id);
 }
+
+#[test]
+fn identity_switch_resets_the_first_trace_observation() {
+    use crate::daemon::first_trace;
+
+    let (_dir, store, _legacy, cfg) = enrolled();
+    let first = chrono::Utc::now();
+    first_trace::observe_for_config(&store, &cfg, std::iter::once(first));
+    assert_eq!(first_trace::read(&store, Some(&cfg)), Some(first));
+    let legacy_snapshot = snapshot(&store, Kind::Device).unwrap();
+    let staged = stage_device_key(&store).unwrap();
+    let next = switched_config(&cfg, &staged);
+    switch_identity(
+        &store,
+        &legacy_snapshot,
+        &next,
+        &session("tcn1_nearai"),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    first_trace::observe_for_config(&store, &cfg, std::iter::once(chrono::Utc::now()));
+    assert_eq!(first_trace::read(&store, Some(&next)), None);
+    assert_eq!(first_trace::read(&store, Some(&cfg)), None);
+}

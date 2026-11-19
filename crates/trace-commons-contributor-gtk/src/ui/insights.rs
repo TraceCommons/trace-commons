@@ -26,10 +26,14 @@ use trace_commons_protocol::insights_cards::{InsightCardResult, InsightQuestionI
 
 #[path = "insights_analytics.rs"]
 mod analytics;
+#[path = "insights_benchmarks.rs"]
+mod benchmarks;
 #[path = "insights_evidence.rs"]
 mod evidence;
 #[path = "insights_live.rs"]
 mod live;
+#[path = "insights_usage.rs"]
+mod usage;
 
 /// A chooser belongs to the selection and view lifetime that opened it.
 #[derive(Clone)]
@@ -422,6 +426,7 @@ impl InsightsView {
         for tab in analytics::Tab::ALL {
             let page: gtk::Widget = match tab {
                 analytics::Tab::Overview => analytics.overview.clone().upcast(),
+                analytics::Tab::Benchmarks => analytics.benchmarks.root.clone().upcast(),
                 analytics::Tab::Patterns => analytics.patterns.clone().upcast(),
                 analytics::Tab::Sessions => analytics.sessions.clone().upcast(),
                 analytics::Tab::Analyze => analyze.clone().upcast(),
@@ -3302,5 +3307,92 @@ mod tests {
         assert!(view.flight.borrow().closed || view.flight.borrow().cancelled);
         assert_eq!(view.detail.text(), before);
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// The Overview fits the Monitor's 440 main pane with equal insets on
+    /// both sides: its cards ran to the pane's right edge, the By model /
+    /// By project / By tool switcher's buttons kept a libadwaita minimum
+    /// that made the column about 8 wider than its room.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_overview_fits_the_main_pane_with_equal_insets() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let pane = super::super::monitor::pane_layout::MAIN_WIDTH as i32;
+        let window = adw::ApplicationWindow::builder()
+            .default_width(pane)
+            .default_height(720)
+            .build();
+        let store = std::env::temp_dir().join(format!("tc-insights-fit-{}", uuid::Uuid::new_v4()));
+        let view = InsightsView::with_store(&window, Some(store.clone()));
+        let page = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&view.root)
+            .build();
+        window.set_content(Some(&page));
+        window.present();
+        let settle = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < end {
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        };
+        settle();
+        let overview: gtk::Widget = view.analytics.overview.clone().upcast();
+        let body = overview
+            .first_child()
+            .and_then(|viewport| viewport.first_child())
+            .expect("the Overview's column");
+        // Each widget in the column that needs more than the column has.
+        let mut all = vec![body.clone()];
+        let mut index = 0;
+        while index < all.len() {
+            let mut child = all[index].first_child();
+            while let Some(next) = child {
+                child = next.next_sibling();
+                all.push(next);
+            }
+            index += 1;
+        }
+        let room = pane - body.margin_start() - body.margin_end();
+        let wide: Vec<String> = all
+            .iter()
+            .filter(|widget| widget.is_mapped())
+            .filter_map(|widget| {
+                let least = widget.measure(gtk::Orientation::Horizontal, -1).0
+                    + widget.margin_start()
+                    + widget.margin_end();
+                (least > room).then(|| {
+                    format!(
+                        "{} {:?} needs {least}",
+                        widget.type_().name(),
+                        widget.css_classes()
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            wide.is_empty(),
+            "the Overview's column has {room} in a {pane} pane: {wide:?}"
+        );
+        let least = view.root.measure(gtk::Orientation::Horizontal, -1).0;
+        assert!(
+            least <= pane,
+            "Insights needs {least} wide, the pane is {pane}"
+        );
+        // Laid out at the pane's width, the column's insets are equal.
+        let bounds = body.compute_bounds(&page).expect("laid out");
+        let left = bounds.x();
+        let right = page.width() as f32 - bounds.x() - bounds.width();
+        assert!(
+            (left - right).abs() <= 0.5,
+            "the Overview's insets are {left} and {right} in a {} pane",
+            page.width()
+        );
+        window.close();
+        let _ = std::fs::remove_dir_all(&store);
     }
 }

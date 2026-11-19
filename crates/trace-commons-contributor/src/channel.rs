@@ -126,6 +126,12 @@ mod values {
     pub const IRONWIRE_READS_POINTER: bool = true;
 
     pub const SYSTEMD_UNIT_NAME: &str = "trace-commons-contributor.service";
+
+    pub const SERVICE_INSTALL_COMMAND: &str = "curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh | sh && \"$HOME/.local/bin/near-ai\" daemon install && systemctl --user daemon-reload && systemctl --user enable trace-commons-contributor.service && systemctl --user restart trace-commons-contributor.service";
+    pub const SERVICE_STATUS_COMMAND: &str =
+        "systemctl --user status trace-commons-contributor.service";
+    pub const SERVICE_INSTALL_GUIDE_URL: &str = "https://docs.tracecommons.ai/cli/quickstart/";
+    pub const HOST_CLI: &str = "\"$HOME/.local/bin/near-ai\"";
 }
 
 #[cfg(feature = "near-ai-staging")]
@@ -184,6 +190,15 @@ mod values {
     /// Its own unit, so a staging daemon runs beside a production one on
     /// the same Linux machine and installing one never replaces the other.
     pub const SYSTEMD_UNIT_NAME: &str = "trace-commons-contributor-staging.service";
+
+    /// The installer's `--staging`, the staging command and the staging unit,
+    /// so a staging build never shows production's command.
+    pub const SERVICE_INSTALL_COMMAND: &str = "curl -fsSL https://raw.githubusercontent.com/TraceCommons/trace-commons/main/scripts/install.sh | sh -s -- --staging && \"$HOME/.local/bin/near-ai-staging\" daemon install && systemctl --user daemon-reload && systemctl --user enable trace-commons-contributor-staging.service && systemctl --user restart trace-commons-contributor-staging.service";
+    pub const SERVICE_STATUS_COMMAND: &str =
+        "systemctl --user status trace-commons-contributor-staging.service";
+    /// Staging has no docs site; its installer points testers here.
+    pub const SERVICE_INSTALL_GUIDE_URL: &str = "https://github.com/TraceCommons/trace-commons/blob/main/docs/operator/staging-tester-guide.md";
+    pub const HOST_CLI: &str = "\"$HOME/.local/bin/near-ai-staging\"";
 }
 
 /// `production` or `staging`.
@@ -257,8 +272,6 @@ pub const NEAR_AI_INFERENCE_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 /// registry). Also the base IronWire is given, so the key sent here is the
 /// key IronWire already sends here.
 pub const NEAR_AI_ATTESTATION_GATEWAY: &str = values::NEAR_AI_INFERENCE_BASE;
-/// The client-side NEAR AI privacy filter's default base.
-pub const NEAR_AI_PRIVACY_FILTER_BASE: &str = values::NEAR_AI_INFERENCE_BASE;
 /// NEAR AI's console: the billing dashboard.
 pub const NEAR_AI_DASHBOARD_ORIGIN: &str = values::NEAR_AI_DASHBOARD_ORIGIN;
 /// The NEP-413 recipient NEAR AI expects in a NEAR wallet sign-in.
@@ -316,6 +329,26 @@ pub const IRONWIRE_READS_POINTER: bool = values::IRONWIRE_READS_POINTER;
 /// The systemd user unit `daemon install` writes on Linux.
 pub const SYSTEMD_UNIT_NAME: &str = values::SYSTEMD_UNIT_NAME;
 
+/// The one command the "background service" dialogs show (and copy; no shell
+/// ever runs it) to install, enable and start the host daemon on Linux:
+/// `scripts/install.sh` installs only the CLI, so the command goes on to
+/// `daemon install` (writes [`SYSTEMD_UNIT_NAME`]), `daemon-reload`, `enable`
+/// and `restart`. `restart`, not `enable --now`, so running it again over an
+/// older daemon that is still running replaces it ("Update the background
+/// service"). The CLI's absolute path, because the installer's directory may
+/// not be on `PATH` yet. A fixed string: never built from settings or IPC.
+/// See `daemon::service`.
+pub const SERVICE_INSTALL_COMMAND: &str = values::SERVICE_INSTALL_COMMAND;
+/// What the "didn't start" line tells the person to run. Fixed, like
+/// [`SERVICE_INSTALL_COMMAND`].
+pub const SERVICE_STATUS_COMMAND: &str = values::SERVICE_STATUS_COMMAND;
+/// "Open install guide".
+pub const SERVICE_INSTALL_GUIDE_URL: &str = values::SERVICE_INSTALL_GUIDE_URL;
+/// The CLI the installer puts on the host, as [`SERVICE_INSTALL_COMMAND`]
+/// runs it: by absolute path, double-quoted so `$HOME` expands. See
+/// `daemon::service::host_folder_command`.
+pub const HOST_CLI: &str = values::HOST_CLI;
+
 /// What `--version` adds after the build identity: the channel, so the
 /// macOS bundle scripts can check the bundled CLI against the bundle's
 /// Info.plist before signing (spec 4.3).
@@ -333,7 +366,6 @@ pub const HOST_VALUES: &[&str] = &[
     NEAR_AI_API_ORIGIN,
     NEAR_AI_INFERENCE_BASE,
     NEAR_AI_ATTESTATION_GATEWAY,
-    NEAR_AI_PRIVACY_FILTER_BASE,
     NEAR_AI_DASHBOARD_ORIGIN,
     NEAR_AI_WALLET_RECIPIENT,
     #[cfg(feature = "near-ai-staging")]
@@ -461,6 +493,31 @@ pub fn refuse_other_channel_origin(url: &str) -> Result<(), OtherChannelOrigin> 
         }
     }
     Ok(())
+}
+
+/// Fixed anonymous Skills catalog document, beside the feature feed in the
+/// same bucket. Every install fetches the same whole object.
+pub fn skills_catalog_url(
+    environment: trace_commons_protocol::feature_flags::Environment,
+) -> anyhow::Result<&'static str> {
+    use trace_commons_protocol::feature_flags::Environment;
+    #[cfg(not(feature = "near-ai-staging"))]
+    match environment {
+        Environment::Production => {
+            Ok("https://storage.googleapis.com/tracecommons-flatpak/skills-catalog/production.json")
+        }
+        _ => anyhow::bail!("feature-environment-channel-mismatch"),
+    }
+    #[cfg(feature = "near-ai-staging")]
+    match environment {
+        Environment::Staging => Ok(
+            "https://storage.googleapis.com/tc-staging-updates-20261022/skills-catalog/staging.json",
+        ),
+        Environment::Testing => Ok(
+            "https://storage.googleapis.com/tc-staging-updates-20261022/skills-catalog/testing.json",
+        ),
+        _ => anyhow::bail!("feature-environment-channel-mismatch"),
+    }
 }
 
 /// Fixed anonymous feature feed; feature environments never select service identity.

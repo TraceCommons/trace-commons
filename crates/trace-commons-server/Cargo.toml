@@ -187,6 +187,13 @@ path = "src/bin/trace-commons-witness.rs"
 name = "trace-commons-witness-list"
 path = "src/bin/trace-commons-witness-list.rs"
 
+# Crawl public skill sources into PostgreSQL (V160) and export the unsigned
+# Skills catalog payload the owner signs and publishes. Runbook:
+# docs/operator/skills-catalog.md.
+[[bin]]
+name = "trace-commons-skills-catalog"
+path = "src/bin/trace-commons-skills-catalog.rs"
+
 # The staging NEAR AI pin re-sign tool: observes NEAR AI staging's enclave
 # measurements and signs the pin set a staging app trusts. Operators run it;
 # nothing ships it. `observe` also needs `near-attestation-collateral` to
@@ -349,6 +356,10 @@ path = "tests/trace_session_withdrawal_pg.rs"
 [[test]]
 name = "usage_events_pg"
 path = "tests/usage_events_pg.rs"
+
+[[test]]
+name = "skills_catalog_pg"
+path = "tests/skills_catalog_pg.rs"
 [[test]]
 name = "upload_principal_ownership_pg"
 path = "tests/upload_principal_ownership_pg.rs"
@@ -367,3 +378,10 @@ path = "tests/witness_evidence_pg.rs"
 [[test]]
 name = "r1_pipeline_measurement"
 path = "tests/r1_pipeline_measurement.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "forbid"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

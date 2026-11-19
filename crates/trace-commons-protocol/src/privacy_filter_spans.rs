@@ -31,9 +31,39 @@ pub(crate) struct ClassifySpan {
     pub(crate) category: String,
     pub(crate) start: usize,
     pub(crate) end: usize,
-    #[serde(default)]
+    // Preserve an absent score without changing the in-process span API.
+    // NaN is a private sentinel, never emitted as a confidence value.
+    #[serde(default = "unavailable_classifier_score")]
     pub(crate) score: f64,
 }
+pub(crate) fn unavailable_classifier_score() -> f64 {
+    f64::NAN
+}
+
+fn confidence_millionths(score: f64) -> Option<u32> {
+    (score.is_finite() && (0.0..=1.0).contains(&score))
+        .then(|| (score * 1_000_000.0).round() as u32)
+}
+
+/// Whether a span's codepoint offsets `[start, end)` lie inside a text of
+/// `codepoints` codepoints.
+///
+/// The one range rule. `apply_spans` refuses a span that breaks it, and the
+/// NEAR AI adapter refuses an answer that breaks it before the answer can be
+/// cached, so nothing a cache holds can be refused when it is applied.
+pub(crate) fn span_fits(start: usize, end: usize, codepoints: usize) -> bool {
+    start <= end && end <= codepoints
+}
+
+/// Whether every span fits `text` by [`span_fits`].
+#[cfg(feature = "near-ai-privacy-filter")]
+pub(crate) fn spans_fit(text: &str, spans: &[ClassifySpan]) -> bool {
+    let codepoints = text.chars().count();
+    spans
+        .iter()
+        .all(|span| span_fits(span.start, span.end, codepoints))
+}
+
 pub(crate) fn apply_spans(
     backend: &'static str,
     text: &str,
@@ -55,8 +85,11 @@ pub(crate) fn apply_spans(
     // span (matches sidecar accounting). Offsets are converted from
     // codepoint indices to byte offsets here.
     let mut byte_spans: Vec<ClassifySpan> = Vec::with_capacity(spans.len());
+    let mut findings = Vec::with_capacity(spans.len());
     for span in spans {
-        if span.start > span.end || span.end >= boundaries.len() {
+        // Defense in depth: an answer from the NEAR AI cache has already
+        // passed this rule, but every backend's spans meet it here too.
+        if !span_fits(span.start, span.end, boundaries.len() - 1) {
             return Err(TraceContributionError::RedactionFailed {
                 reason: format!("{backend} privacy classifier returned out-of-range span"),
             });
@@ -65,9 +98,19 @@ pub(crate) fn apply_spans(
             category: span.category.clone(),
             start: boundaries[span.start],
             end: boundaries[span.end],
-            score: span.score,
+            // Missing scores previously defaulted to zero. Keep the same
+            // replacement-category selection while retaining absence below.
+            score: if span.score.is_nan() { 0.0 } else { span.score },
         });
         let label = safe_privacy_filter_label(Some(&span.category), &mut report);
+        findings.push(crate::private_edit_map::PrivatePrivacyFinding {
+            original: crate::token_distribution::ByteSpan {
+                start: boundaries[span.start] as u64,
+                end: boundaries[span.end] as u64,
+            },
+            category: label.clone(),
+            confidence_millionths: confidence_millionths(span.score),
+        });
         *by_label.entry(label.clone()).or_insert(0u32) += 1;
         report.increment(format!("privacy_filter:{label}"));
         if label.eq_ignore_ascii_case("secret") {
@@ -130,6 +173,7 @@ pub(crate) fn apply_spans(
                     .into_bytes(),
                 })
                 .collect(),
+            findings,
         )),
         redacted_text,
         summary: SafePrivacyFilterSummary {
@@ -325,6 +369,116 @@ mod tests {
             score,
         }
     }
+    #[test]
+    fn private_findings_preserve_raw_overlap_categories_and_confidence() {
+        let result = apply_spans(
+            "test",
+            "abcdefghij",
+            &[
+                span("private_email", 1, 5, 0.4),
+                span("private_phone", 3, 7, 0.973834),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
+        let edits = result.private_edits.unwrap();
+        assert_eq!(edits.0.len(), 1);
+        assert_eq!(edits.1.len(), 2);
+        assert_eq!(
+            edits.1[0].original,
+            crate::token_distribution::ByteSpan { start: 1, end: 5 }
+        );
+        assert_eq!(edits.1[0].category, "private_email");
+        assert_eq!(edits.1[0].confidence_millionths, Some(400_000));
+        assert_eq!(
+            edits.1[1].original,
+            crate::token_distribution::ByteSpan { start: 3, end: 7 }
+        );
+        assert_eq!(edits.1[1].category, "private_phone");
+        assert_eq!(edits.1[1].confidence_millionths, Some(973_834));
+        assert_eq!(format!("{:?}", edits.1[1]), "<private privacy finding>");
+    }
+
+    #[test]
+    fn private_findings_use_utf8_bytes_after_window_codepoint_offsets() {
+        let result = apply_windowed_spans(
+            "test",
+            "é😀Alice",
+            &[(2, vec![span("private_person", 0, 5, 0.5)])],
+        )
+        .unwrap()
+        .unwrap();
+        let edits = result.private_edits.unwrap();
+        assert_eq!(
+            edits.1[0].original,
+            crate::token_distribution::ByteSpan { start: 6, end: 11 }
+        );
+        assert_eq!(edits.0[0].original, edits.1[0].original);
+    }
+
+    #[test]
+    fn missing_and_invalid_confidence_is_unavailable_but_zero_is_preserved() {
+        let missing: ClassifySpan =
+            serde_json::from_str(r#"{"category":"private_person","start":0,"end":5}"#).unwrap();
+        assert!(missing.score.is_nan());
+        let result = apply_spans("test", "Alice", &[missing]).unwrap().unwrap();
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
+        for score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+            let result = apply_spans("test", "Alice", &[span("private_person", 0, 5, score)])
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                result.private_edits.unwrap().1[0].confidence_millionths,
+                None
+            );
+        }
+        assert_eq!(confidence_millionths(0.0), Some(0));
+        assert_eq!(confidence_millionths(1.0), Some(1_000_000));
+    }
+
+    #[test]
+    fn missing_confidence_keeps_legacy_overlap_replacement_selection() {
+        let spans: Vec<ClassifySpan> = serde_json::from_str(
+            r#"[{"category":"private_email","start":1,"end":5},
+                {"category":"private_phone","start":3,"end":7,"score":0.9}]"#,
+        )
+        .unwrap();
+        let result = apply_spans("test", "abcdefghij", &spans).unwrap().unwrap();
+        assert_eq!(result.redacted_text, "a[REDACTED:private_phone]hij");
+        assert_eq!(
+            result.private_edits.unwrap().1[0].confidence_millionths,
+            None
+        );
+    }
+
+    #[test]
+    fn private_findings_are_allowlisted_and_never_serialized() {
+        let result = apply_spans(
+            "test",
+            "Alice",
+            &[span("untrusted-sensitive-category", 0, 5, 0.973834)],
+        )
+        .unwrap()
+        .unwrap();
+        let private = result.private_edits.as_ref().unwrap();
+        assert_eq!(private.1[0].category, "unknown");
+        assert_eq!(format!("{private:?}"), "<private redaction map>");
+        let serialized = serde_json::to_string(&result).unwrap();
+        for excluded in [
+            "private_edits",
+            "confidence_millionths",
+            "973834",
+            "untrusted-sensitive-category",
+            "Alice",
+        ] {
+            assert!(!serialized.contains(excluded));
+        }
+    }
+
     #[test]
     fn replaces_single_span() {
         let text = "email me at alice@example.com please";

@@ -450,28 +450,32 @@ public struct GlassThreePane<Main: View, Map: View, Inspector: View>: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .allowsHitTesting(false)
             .overlay {
-                GlassDividerHandle(
-                    onHover: { inside in overDivider = inside },
-                    onDrag: { translation in
-                        let start = dragStart ?? main
-                        dragStart = start
-                        dragMain = GlassPaneLayout.draggedMain(
-                            from: start, by: translation, windowWidth: windowWidth,
-                            showsInspector: presented.inspector)
-                    },
-                    onEnd: { translation in
-                        // Only a drag that moved ends one: a bare click
-                        // never writes the width it happens to see.
-                        guard let start = dragStart else { return }
-                        let kept = GlassPaneLayout.draggedMain(
-                            from: start, by: translation, windowWidth: windowWidth,
-                            showsInspector: presented.inspector)
-                        host.main = kept
-                        dragStart = nil
-                        dragMain = nil
-                        keep(main: kept, windowWidth: windowWidth)
-                    })
-                    .padding(.trailing, -GlassPaneLayout.dividerReach)
+                // A rasterized capture cannot draw the handle's NSView, and
+                // nothing drags there (`GlassMaterial.paintsForCapture`).
+                if !GlassMaterial.paintsForCapture {
+                    GlassDividerHandle(
+                        onHover: { inside in overDivider = inside },
+                        onDrag: { translation in
+                            let start = dragStart ?? main
+                            dragStart = start
+                            dragMain = GlassPaneLayout.draggedMain(
+                                from: start, by: translation, windowWidth: windowWidth,
+                                showsInspector: presented.inspector)
+                        },
+                        onEnd: { translation in
+                            // Only a drag that moved ends one: a bare click
+                            // never writes the width it happens to see.
+                            guard let start = dragStart else { return }
+                            let kept = GlassPaneLayout.draggedMain(
+                                from: start, by: translation, windowWidth: windowWidth,
+                                showsInspector: presented.inspector)
+                            host.main = kept
+                            dragStart = nil
+                            dragMain = nil
+                            keep(main: kept, windowWidth: windowWidth)
+                        })
+                        .padding(.trailing, -GlassPaneLayout.dividerReach)
+                }
             }
             // A divider that goes while pointed at (the map hidden) drops
             // its grip.

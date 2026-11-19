@@ -466,7 +466,6 @@ mod tests {
             user_subject: "subject".into(),
             device_key_id: "device".into(),
             consent_scopes: vec![],
-            pii_filter: None,
             allowed_hosts: None,
             display_handle: None,
             public_bio: None,
@@ -895,6 +894,13 @@ mod refusal_label_set_tests {
             },
             WitnessTrustError::WitnessTimeout,
             WitnessTrustError::WitnessUnreachable,
+            WitnessTrustError::WitnessClassifierUnavailable,
+            WitnessTrustError::WitnessRedactionFailed,
+            WitnessTrustError::WitnessTraceTooLargeForReview {
+                windows_needed: 1800,
+                windows_allowed: 208,
+            },
+            WitnessTrustError::WitnessTextUnclassifiable,
         ];
         assert_eq!(
             every.len(),

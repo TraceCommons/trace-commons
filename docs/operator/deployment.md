@@ -1357,6 +1357,26 @@ sudo logrotate --debug /etc/logrotate.d/tracecommons   # dry run
 
 It uses `copytruncate` deliberately; see the comments in that file.
 
+### V159: immutable reviewed privacy versions
+
+V159 adds `pipeline_review_rechecks`, protected by FORCE RLS and append-only
+triggers. Runtime grants are `SELECT, INSERT` through `trace_ingest_runtime`.
+Review assessments gain an exact candidate ID/hash binding. The existing
+attempt-artifact staging table accepts `review-recheck` so failed publication
+and withdrawal use the existing cleanup path.
+
+Apply V159 before deploying the server that exposes pipeline rechecks. It keeps
+the original `privacy_pass_*` record unchanged. Database guards refuse unbound
+Review assessments and approvals derived from the old pass once a candidate exists,
+including attempts by older binaries. A rollback must therefore leave those
+runs held for a compatible reviewer/worker; do not remove candidates or clear
+pass columns to make an older binary proceed.
+
+Rechecks call the configured classifier with the bounded manual-review profile;
+they do not approve content, change credit rules or deploy themselves. See
+[Recheck a held trace](./privacy-review-recheck.md) for operator steps, external
+processing, evidence requirements and the separate indexing/credit checks.
+
 ## Identifying what is deployed
 
 Every binary carries the commit it was built from, and both services report it

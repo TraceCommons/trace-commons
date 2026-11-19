@@ -417,6 +417,8 @@ extension DaemonData {
         public static let privacyFilterTransientExhausted = "privacy-filter-transient-exhausted"
         public static let witnessTimeout = "witness_timeout"
         public static let witnessUnreachable = "witness_unreachable"
+        public static let witnessClassifierUnavailable = "witness_classifier_unavailable"
+        public static let witnessRedactionFailed = "witness_redaction_failed"
         public static let witnessAttestationUnavailable = "witness_attestation_unavailable"
         public static let witnessCollateralUnavailable = "witness_collateral_unavailable"
         public static let witnessNotTrusted = "witness-not-trusted"
@@ -430,6 +432,8 @@ extension DaemonData {
             secondLookReviewRequired,
             witnessTimeout,
             witnessUnreachable,
+            witnessClassifierUnavailable,
+            witnessRedactionFailed,
             witnessAttestationUnavailable,
             witnessCollateralUnavailable,
             witnessNotTrusted,
@@ -461,6 +465,9 @@ extension DaemonData {
         /// Explicit CLI setup completion for the current enrollment. Absent
         /// on older daemons, which retain shell-local completion behavior.
         public let setupComplete: Bool?
+        /// Oldest trace observed under this enrollment, owned durably by the
+        /// daemon. Missing/null cannot establish graph age on older daemons.
+        public let firstTraceAt: Date?
         /// Opaque account binding; present whenever the daemon can derive a
         /// scope from its store, signed in or not. Not proof of sign-in: read
         /// `loggedIn` for that.
@@ -558,6 +565,7 @@ extension DaemonData {
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
             case setupComplete = "setup_complete"
+            case firstTraceAt = "first_trace_at"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
             case consentHold = "consent_hold"

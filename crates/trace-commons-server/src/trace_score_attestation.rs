@@ -462,6 +462,7 @@ mod tests {
     // names would flake.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[allow(unsafe_code)]
     fn clear_env() {
         for name in [
             TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM_ENV,
@@ -469,6 +470,7 @@ mod tests {
             TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KID_ENV,
             TRACE_COMMONS_INGEST_ATTESTATION_TTL_SECONDS_ENV,
         ] {
+            // SAFETY: callers hold ENV_LOCK across all env mutations in this module.
             unsafe {
                 std::env::remove_var(name);
             }
@@ -641,10 +643,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn from_env_errors_on_partial_configuration() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_env();
         let keypair = generate_test_keypair();
+        // SAFETY: `_guard` holds ENV_LOCK across all env mutations in this module.
         unsafe {
             std::env::set_var(
                 TRACE_COMMONS_INGEST_ATTESTATION_SIGNING_KEY_PEM_ENV,

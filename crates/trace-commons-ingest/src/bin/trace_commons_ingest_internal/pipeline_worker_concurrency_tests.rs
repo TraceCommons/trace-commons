@@ -66,14 +66,17 @@ fn the_worker_concurrency_is_one_to_sixteen_and_refuses_anything_else() {
 /// The env reader refuses startup the same way, and config-status reports
 /// the configured value.
 #[test]
+#[allow(unsafe_code)]
 fn an_invalid_worker_concurrency_variable_refuses_startup() {
     // SAFETY: env mutation in tests is OK here -- this variable is read
     // only by `parse_pipeline_worker_concurrency_from_env`, which nothing
     // else in this suite calls.
     unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY, "0") };
     let refused = parse_pipeline_worker_concurrency_from_env();
+    // SAFETY: see above.
     unsafe { std::env::set_var(TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY, "3") };
     let accepted = parse_pipeline_worker_concurrency_from_env();
+    // SAFETY: see above.
     unsafe { std::env::remove_var(TRACE_COMMONS_PIPELINE_WORKER_CONCURRENCY) };
     let unset = parse_pipeline_worker_concurrency_from_env();
     assert_eq!(unset.unwrap(), 1);

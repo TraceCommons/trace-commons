@@ -89,6 +89,7 @@ struct Entry {
 }
 
 impl Drop for Entry {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         // SAFETY: zero bytes are valid UTF-8, so the String stays valid.
         wipe(unsafe { self.token.as_bytes_mut() });

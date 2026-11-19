@@ -31,7 +31,7 @@
 
 use trace_commons_contributor::config::{CONTRIBUTOR_CONFIG_SCHEMA_VERSION, ContributorConfig};
 use trace_commons_contributor::envelope::{
-    build_raw_contribution, build_redactor_with, redact_to_envelope,
+    build_raw_contribution, build_redactor, redact_to_envelope,
 };
 use trace_commons_contributor::source::{TraceSource, claude_code::ClaudeCodeSource};
 
@@ -768,7 +768,6 @@ fn audit_cfg() -> ContributorConfig {
         user_subject: "local-audit".into(),
         device_key_id: "sha256:00".into(),
         consent_scopes: vec!["debugging_evaluation".into()],
-        pii_filter: None,
         allowed_hosts: None,
         display_handle: None,
         public_bio: None,
@@ -834,7 +833,7 @@ async fn audit_real_sessions_for_key_leakage() {
             }
         };
         let raw = build_raw_contribution(&t, &cfg, chrono::Utc::now());
-        let redactor = build_redactor_with(&cfg, t.cwd.as_deref(), None).expect("redactor");
+        let redactor = build_redactor(t.cwd.as_deref()).expect("redactor");
         let envelope = match redact_to_envelope(&redactor, raw).await {
             Ok(e) => e,
             Err(_) => {

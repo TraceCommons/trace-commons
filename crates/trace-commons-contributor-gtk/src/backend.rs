@@ -25,20 +25,36 @@ use trace_commons_contributor::daemon::settings::SourceDeclaration;
 /// How the shell reaches the daemon.
 pub enum Backend {
     /// A daemon was already running -- almost always the systemd user unit.
-    /// Every call is one request over the control socket.
-    Attached { store: ConfigStore },
+    /// Every call is one request over `socket`: the state directory's
+    /// control socket, or, from a Flatpak sandbox, the host daemon's host
+    /// link (`daemon::host_link`).
+    Attached { socket: std::path::PathBuf },
     /// Nothing held the lock, so this process took it and runs the loop
     /// itself. Calls are answered in-process.
     Hosting(Box<Hosting>),
+    /// `TRACE_COMMONS_SAMPLE` named a recorded set: no daemon, no state
+    /// directory, no lock, and every answer read from the recordings the
+    /// macOS app draws from (see `crate::sample`). Debug builds only; a
+    /// release build has no such variant.
+    #[cfg(debug_assertions)]
+    Sample(crate::sample::SampleBackend),
 }
 
 pub struct Hosting {
     rt: tokio::runtime::Runtime,
     shared: Arc<DaemonShared>,
-    /// Kept alive for the life of the process: dropping it would release
-    /// the exclusive lock while the loop is still mutating the queue.
-    _embedded: daemon::EmbeddedDaemon,
+    /// The supervise loop, so [`Backend::stop`] can wait for its pass to
+    /// end before the lock is released.
+    supervisor: tokio::task::JoinHandle<()>,
+    /// Kept alive until [`Backend::stop`] (or the end of the process):
+    /// dropping it would release the exclusive lock while the loop is still
+    /// mutating the queue.
+    embedded: daemon::EmbeddedDaemon,
 }
+
+/// How long [`Backend::stop`] waits for the loop's pass, then for the
+/// runtime's tasks.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The label this shell reports when the contributor has not said which
 /// session folders to watch.
@@ -142,9 +158,78 @@ impl Backend {
     /// to a daemon this shell did not start would be a different decision
     /// than the one made here.
     pub fn open(dir: std::path::PathBuf) -> Result<Self> {
+        #[cfg(debug_assertions)]
+        {
+            Self::open_or_sample(dir, std::env::var(crate::sample::SAMPLE_ENV).ok())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Self::open_daemon(dir)
+        }
+    }
+
+    /// The sample `sample` names, before anything else is touched -- the
+    /// state directory, a running daemon, the lock -- or else the daemon.
+    #[cfg(debug_assertions)]
+    fn open_or_sample(dir: std::path::PathBuf, sample: Option<String>) -> Result<Self> {
+        match crate::sample::SampleBackend::from_value(sample.as_deref()) {
+            Some(sample) => Ok(Backend::Sample(sample)),
+            None => Self::open_daemon(dir),
+        }
+    }
+
+    /// The daemon path: a host daemon from a sandbox ([`Backend::open_with`]),
+    /// else attach to or start this state directory's daemon.
+    fn open_daemon(dir: std::path::PathBuf) -> Result<Self> {
+        Self::open_with(
+            dir,
+            daemon::host_link::runs_sandboxed(),
+            daemon::host_link::socket_path(),
+        )
+    }
+
+    /// [`Backend::open`] with the sandbox fact and the host link's path
+    /// given, so the preference order is testable off Linux.
+    ///
+    /// Inside a Flatpak sandbox, a host daemon -- listening, or installed and
+    /// down -- comes first: the sandbox cannot open a host terminal, a daemon
+    /// in it stops when the window closes, and a second daemon there would
+    /// watch the same sessions.
+    /// Without one, the path below runs exactly as outside a sandbox. See
+    /// `docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`.
+    pub fn open_with(
+        dir: std::path::PathBuf,
+        sandboxed: bool,
+        host_socket: Option<std::path::PathBuf>,
+    ) -> Result<Self> {
+        Self::open_at(dir, sandboxed, host_socket, None)
+    }
+
+    /// [`Backend::open_with`], with the place a hosted daemon takes
+    /// `watcher.lock` and serves the host link given (`None`: from the
+    /// environment), so a test can see that lock without touching the real
+    /// runtime directory.
+    pub fn open_at(
+        dir: std::path::PathBuf,
+        sandboxed: bool,
+        host_socket: Option<std::path::PathBuf>,
+        site: Option<daemon::HostLinkSite>,
+    ) -> Result<Self> {
+        let host = || match daemon::host_link::route(
+            sandboxed,
+            host_socket.as_deref(),
+            daemon::host_link::probe,
+        ) {
+            daemon::host_link::Route::Host(socket) => Some(Backend::Attached { socket }),
+            daemon::host_link::Route::Local => None,
+        };
+        if let Some(attached) = host() {
+            return Ok(attached);
+        }
         let store = ConfigStore::open(dir.clone())?;
+        let local = store.daemon_path(trace_commons_contributor::config::DAEMON_SOCK_FILE);
         if daemon::client::is_running(&store) {
-            return Ok(Backend::Attached { store });
+            return Ok(Backend::Attached { socket: local });
         }
         let settings = daemon::settings::DaemonSettings::load(&store)?;
         if !daemon::settings::roots_declared(&settings) {
@@ -158,29 +243,74 @@ impl Backend {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        match rt.block_on(daemon::start_embedded(store)) {
+        match rt.block_on(daemon::start_embedded_at(store, site)) {
             Ok(embedded) => {
                 let shared = Arc::clone(&embedded.shared);
                 let loop_shared = Arc::clone(&shared);
-                rt.spawn(async move {
+                let supervisor = rt.spawn(async move {
                     let _ = daemon::run_supervisor(loop_shared, false).await;
                 });
                 Ok(Backend::Hosting(Box::new(Hosting {
                     rt,
                     shared,
-                    _embedded: embedded,
+                    supervisor,
+                    embedded,
                 })))
             }
             // Somebody took the lock in between. That is not an error: it is
-            // the other half of the arbitration.
-            Err(_) => Ok(Backend::Attached {
-                store: ConfigStore::open(dir)?,
-            }),
+            // the other half of the arbitration. The somebody may hold this
+            // state directory's lock, or only the watcher lock: the host
+            // daemon (from a sandbox), or a daemon in the sandbox (from the
+            // host).
+            Err(_) => Ok(Self::attach_after_lost_start(
+                local,
+                host_socket.as_deref(),
+                sandboxed,
+            )),
+        }
+    }
+
+    /// Where to attach after this process lost the start to another daemon:
+    /// whichever socket answers, else this state directory's socket, which
+    /// shows the window's existing not-running state.
+    pub fn attach_after_lost_start(
+        local: std::path::PathBuf,
+        host_socket: Option<&std::path::Path>,
+        sandboxed: bool,
+    ) -> Self {
+        // In a sandbox, the host part comes first, as in `open_with`.
+        if let daemon::host_link::Route::Host(socket) =
+            daemon::host_link::route(sandboxed, host_socket, daemon::host_link::probe)
+        {
+            return Backend::Attached { socket };
+        }
+        if daemon::client::is_running_at(&local) {
+            return Backend::Attached { socket: local };
+        }
+        // On the host: a daemon that holds the watcher lock but not this
+        // state directory's lock serves the host link, so reach it there.
+        // A daemon in the sandbox serves no host link and nothing here can
+        // reach it; the local socket then gives the window its existing
+        // not-running state.
+        match host_socket {
+            Some(socket) if daemon::client::is_running_at(socket) => Backend::Attached {
+                socket: socket.to_path_buf(),
+            },
+            _ => Backend::Attached { socket: local },
         }
     }
 
     pub fn hosts_the_loop(&self) -> bool {
         matches!(self, Backend::Hosting(_))
+    }
+
+    /// The recorded set this backend answers from, if it is a sample.
+    pub fn sample_set(&self) -> Option<&'static str> {
+        match self {
+            #[cfg(debug_assertions)]
+            Backend::Sample(sample) => Some(sample.set()),
+            _ => None,
+        }
     }
 
     /// One request, one result. Blocking: callers run this off the GTK
@@ -189,8 +319,8 @@ impl Backend {
     /// round trip.
     pub fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
         let response = match self {
-            Backend::Attached { store } => {
-                match daemon::client::try_call(store, method, &params)? {
+            Backend::Attached { socket } => {
+                match daemon::client::try_call_at(socket, method, &params)? {
                     Some(r) => r,
                     // The daemon was there when we attached and is not now.
                     // A fixed label, and the window's own not-running state
@@ -199,6 +329,11 @@ impl Backend {
                 }
             }
             Backend::Hosting(h) => daemon::ipc::handle_local(&h.shared, method, params),
+            #[cfg(debug_assertions)]
+            Backend::Sample(sample) => {
+                let _ = params;
+                return sample.call(method);
+            }
         };
         response_result(response)
     }
@@ -253,6 +388,10 @@ impl Backend {
                 let summary = serde_json::from_value(serde_json::to_value(&summary)?)?;
                 Ok((summary, Some(body)))
             }
+            // No transcript is recorded, and none is made up here: the
+            // preview is refused, as an unrecorded method is.
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => Err(anyhow!(crate::sample::ERR_SAMPLE_UNRECORDED)),
         }
     }
 
@@ -261,14 +400,94 @@ impl Backend {
     /// see [`DaemonEvent`] -- and never a payload the shell would have to
     /// trust as current state; the shell re-reads state itself, exactly as
     /// `resync_required` requires it to be able to do anyway.
+    /// Stop the daemon this window runs, if it runs one, and release its
+    /// locks -- the state directory's and the watcher lock -- so the
+    /// background service can take over. The order is the C ABI's
+    /// (`tc_daemon_stop`): ask the loop to stop, wait (bounded) for its pass
+    /// to end, then close, so nothing writes after the lock is gone. An
+    /// attached backend has nothing to stop.
+    ///
+    /// Whether the locks are released: `false` when the runtime did not end
+    /// within [`STOP_WAIT`]. The locks then stay held until it does, and the
+    /// caller must not expect another daemon to take them yet. Blocking (up
+    /// to twice `STOP_WAIT`); the worker thread calls it, never GTK's.
+    pub fn stop(self) -> bool {
+        let Backend::Hosting(hosting) = self else {
+            return true;
+        };
+        let Hosting {
+            rt,
+            shared,
+            mut supervisor,
+            embedded,
+        } = *hosting;
+        shared
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        shared.shutdown_signal.notify_one();
+        let ended = rt.block_on(async {
+            tokio::time::timeout(STOP_WAIT, &mut supervisor)
+                .await
+                .is_ok()
+        });
+        if !ended {
+            supervisor.abort();
+        }
+        drop(shared);
+        // Every task, blocking work included, ends before the locks go.
+        release_after_shutdown(rt, move || embedded.close(), STOP_WAIT)
+    }
+
+    /// The socket an attached window talks to; `None` while hosting, and
+    /// on a sample.
+    pub fn attached_socket(&self) -> Option<&std::path::Path> {
+        match self {
+            Backend::Attached { socket } => Some(socket),
+            Backend::Hosting(_) => None,
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => None,
+        }
+    }
+
+    /// A subscription over a socket named directly.
+    pub fn events_at(socket: &std::path::Path) -> Result<Box<dyn EventStream>> {
+        Ok(Box::new(SocketEvents::open(socket)?))
+    }
+
     pub fn events(&self) -> Result<Box<dyn EventStream>> {
         match self {
-            Backend::Attached { store } => Ok(Box::new(SocketEvents::open(store)?)),
+            Backend::Attached { socket } => Ok(Box::new(SocketEvents::open(socket)?)),
             Backend::Hosting(h) => Ok(Box::new(BroadcastEvents {
                 rx: h.shared.events.subscribe(),
             })),
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => Ok(Box::new(crate::sample::NoEvents)),
         }
     }
+}
+
+/// Shut `rt` down, then `release`, on a thread of their own. Whether both
+/// finished within `bound`.
+///
+/// Dropping a runtime waits for every task on it, `spawn_blocking` work
+/// included (tokio's blocking pool shuts down with no timeout on drop), so
+/// `release` -- which lets go of the daemon's locks -- never runs while
+/// something of the old daemon can still write. `shutdown_timeout` gave no
+/// such promise: past its bound it returned with blocking work still
+/// running. When the bound passes first, this returns `false` and the
+/// thread finishes the release whenever the runtime does.
+pub(crate) fn release_after_shutdown(
+    rt: tokio::runtime::Runtime,
+    release: impl FnOnce() + Send + 'static,
+    bound: std::time::Duration,
+) -> bool {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        drop(rt);
+        release();
+        let _ = done.send(());
+    });
+    finished.recv_timeout(bound).is_ok()
 }
 
 /// A daemon answer that was an error: its fixed label, and whatever
@@ -517,12 +736,10 @@ struct SocketEvents {
 }
 
 impl SocketEvents {
-    fn open(store: &ConfigStore) -> Result<Self> {
+    fn open(socket: &std::path::Path) -> Result<Self> {
         use std::io::Write;
-        use trace_commons_contributor::config::DAEMON_SOCK_FILE;
 
-        let mut stream =
-            std::os::unix::net::UnixStream::connect(store.daemon_path(DAEMON_SOCK_FILE))?;
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
         stream.write_all(b"{\"id\":1,\"method\":\"subscribe\",\"params\":{}}\n")?;
         stream.flush().ok();
         Ok(Self {
@@ -626,6 +843,161 @@ mod roots_tests {
             message, ERR_ROOTS_NOT_DECLARED,
             "the label has to be exactly the one the other two shells route on"
         );
+    }
+
+    /// The host link's socket in a scratch runtime directory, and the
+    /// state directory a sandboxed window would have.
+    fn host_link_fixture(tag: &str) -> (Scratch, Scratch, std::path::PathBuf) {
+        let state = Scratch::new(&format!("{tag}s"));
+        let run = Scratch::new(&format!("{tag}r"));
+        let sock = run
+            .path()
+            .join(trace_commons_contributor::daemon::host_link::HOST_LINK_SOCK_FILE);
+        (state, run, sock)
+    }
+
+    fn attached_socket(backend: &Backend) -> &std::path::Path {
+        match backend {
+            Backend::Attached { socket } => socket,
+            Backend::Hosting(_) => panic!("expected to attach, not to host"),
+            #[cfg(debug_assertions)]
+            Backend::Sample(_) => panic!("expected to attach, not a sample"),
+        }
+    }
+
+    #[test]
+    fn in_a_sandbox_a_listening_host_daemon_is_attached_before_anything_else() {
+        // Undeclared roots in the sandbox's own state directory: the
+        // in-sandbox path would refuse. The host daemon comes first.
+        let (state, _run, sock) = host_link_fixture("hl1");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
+            .expect("attached to the host daemon");
+        assert_eq!(attached_socket(&backend), sock);
+        assert!(!backend.hosts_the_loop());
+    }
+
+    #[test]
+    fn in_a_sandbox_a_stopped_host_daemon_is_attached_not_replaced() {
+        // The socket file a stopped host daemon leaves. A second daemon in
+        // the sandbox would watch the same sessions; the window's existing
+        // not-running state reports this instead.
+        let (state, _run, sock) = host_link_fixture("hl2");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        // The systemd unit's marker: the host part is installed.
+        std::fs::write(
+            sock.with_file_name(
+                trace_commons_contributor::daemon::host_link::HOST_UNIT_MARKER_FILE,
+            ),
+            b"",
+        )
+        .unwrap();
+        let backend = Backend::open_with(state.path().to_path_buf(), true, Some(sock.clone()))
+            .expect("attached, not an error that would end the process");
+        assert_eq!(attached_socket(&backend), sock);
+        assert_eq!(
+            backend
+                .call("status", serde_json::json!({}))
+                .unwrap_err()
+                .to_string(),
+            "daemon-not-running"
+        );
+    }
+
+    #[test]
+    fn in_a_sandbox_a_socket_some_other_host_daemon_left_is_not_a_host_part() {
+        // A one-off `daemon run` that crashed, with no unit marker: the
+        // window runs its own daemon, here refused only on its roots.
+        let (state, _run, sock) = host_link_fixture("hl6");
+        drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+        let message = match Backend::open_with(state.path().to_path_buf(), true, Some(sock)) {
+            Ok(_) => panic!("no unit marker: the in-sandbox path"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn a_lost_start_on_the_host_attaches_to_a_listening_host_link() {
+        // The window on the host lost the start to a daemon that took the
+        // watcher lock and serves the host link but not this state
+        // directory's socket.
+        let (state, _run, sock) = host_link_fixture("hl7");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let local = state.path().join("daemon.sock");
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), sock);
+
+        // This state directory's own daemon, when it answers, comes first.
+        let _own = std::os::unix::net::UnixListener::bind(&local).unwrap();
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), local);
+    }
+
+    #[test]
+    fn a_lost_start_with_nothing_reachable_shows_not_running() {
+        // A daemon in the Flatpak sandbox holds the watcher lock and serves
+        // no host link: nothing here can reach it.
+        let (state, _run, sock) = host_link_fixture("hl8");
+        let local = state.path().join("daemon.sock");
+        let backend = Backend::attach_after_lost_start(local.clone(), Some(&sock), false);
+        assert_eq!(attached_socket(&backend), local);
+        assert_eq!(
+            backend
+                .call("status", serde_json::json!({}))
+                .unwrap_err()
+                .to_string(),
+            "daemon-not-running"
+        );
+    }
+
+    #[test]
+    fn in_a_sandbox_without_a_host_part_the_window_runs_as_today() {
+        let (state, _run, sock) = host_link_fixture("hl3");
+        let message = match Backend::open_with(state.path().to_path_buf(), true, Some(sock)) {
+            Ok(_) => panic!("no host part: the in-sandbox path refuses undeclared roots"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+
+        let message = match Backend::open_with(state.path().to_path_buf(), true, None) {
+            Ok(_) => panic!("no runtime directory: the in-sandbox path"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn outside_a_sandbox_the_host_link_is_ignored() {
+        let (state, _run, sock) = host_link_fixture("hl4");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let message = match Backend::open_with(state.path().to_path_buf(), false, Some(sock)) {
+            Ok(_) => panic!("outside a sandbox the order is unchanged"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(message, ERR_ROOTS_NOT_DECLARED);
+    }
+
+    #[test]
+    fn calls_attached_over_the_host_link_reach_the_host_daemon() {
+        use std::io::{BufRead, BufReader, Write};
+        let (state, _run, sock) = host_link_fixture("hl5");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let backend =
+            Backend::open_with(state.path().to_path_buf(), true, Some(sock)).expect("attached");
+        // The probe in `open_with` connected once; answer the next one.
+        let _probe = listener.accept().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            (&stream)
+                .write_all(b"{\"id\":1,\"result\":{\"from\":\"host\"}}\n")
+                .unwrap();
+        });
+        let value = backend.call("status", serde_json::json!({})).unwrap();
+        server.join().unwrap();
+        assert_eq!(value["from"], "host");
     }
 
     #[test]
@@ -885,6 +1257,133 @@ mod roots_tests {
             "nothing else held the lock, so this shell should be hosting"
         );
     }
+
+    /// A stop whose runtime still has blocking work after the bound must
+    /// not release the lock under it: the release waits for the runtime to
+    /// end, and the stop reports that it did not finish.
+    #[test]
+    fn the_lock_is_released_only_after_every_runtime_task_has_ended() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&str>::new()));
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        {
+            let order = std::sync::Arc::clone(&order);
+            let started = std::sync::Arc::clone(&started);
+            rt.spawn_blocking(move || {
+                started.wait();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                order.lock().unwrap().push("blocking-ended");
+            });
+        }
+        started.wait();
+        let released = std::sync::Arc::clone(&order);
+        let finished = release_after_shutdown(
+            rt,
+            move || released.lock().unwrap().push("released"),
+            std::time::Duration::from_millis(50),
+        );
+        assert!(!finished, "the stop must report that it did not finish");
+        assert!(
+            order.lock().unwrap().is_empty(),
+            "released while blocking work still ran"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while order.lock().unwrap().len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "never released");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(*order.lock().unwrap(), ["blocking-ended", "released"]);
+    }
+
+    #[test]
+    fn a_runtime_that_ends_in_time_is_released_at_once() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&released);
+        assert!(release_after_shutdown(
+            rt,
+            move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+            std::time::Duration::from_secs(5),
+        ));
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The switch-over to the background service stops the daemon this
+    /// window runs, and only after that may another start on the same
+    /// state directory: the lock is released, not leaked.
+    #[test]
+    fn stopping_a_hosted_daemon_releases_its_lock_for_the_next_one() {
+        use trace_commons_contributor::config::DAEMON_LOCK_FILE;
+        let dir = Scratch::new("stop-host");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        let backend = Backend::open(dir.path().to_path_buf()).expect("hosts");
+        assert!(backend.hosts_the_loop());
+        let lock_path = ConfigStore::open(dir.path().to_path_buf())
+            .unwrap()
+            .daemon_path(DAEMON_LOCK_FILE);
+        backend.stop();
+        if let Ok(lock) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            assert!(lock.try_lock().is_ok(), "the stopped daemon kept its lock");
+        }
+        let again = Backend::open(dir.path().to_path_buf()).expect("hosts again");
+        assert!(again.hosts_the_loop());
+        again.stop();
+    }
+
+    /// The cross-sandbox lock too: a daemon this window hosts on the
+    /// platform default state directory holds `watcher.lock` in the runtime
+    /// directory, and stopping it releases that lock for the next daemon --
+    /// the background service, after a switch-over.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_hosted_daemon_releases_the_watcher_lock_for_the_next_one() {
+        let dir = Scratch::new("stop-watcher");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        // A short path: the host link's socket is bound in here.
+        let run = std::path::PathBuf::from(format!("/tmp/tc-wl-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&run).unwrap();
+        let run = Scratch(run);
+        let site = daemon::HostLinkSite {
+            runtime: run.path().join("rt"),
+            platform_default: dir.path().to_path_buf(),
+            sandboxed: false,
+            host_unit: false,
+        };
+        let watcher = site.runtime.join(daemon::host_link::WATCHER_LOCK_FILE);
+        let held = |path: &std::path::Path| -> bool {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("watcher.lock exists");
+            matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+        };
+
+        let backend = Backend::open_at(dir.path().to_path_buf(), false, None, Some(site.clone()))
+            .expect("hosts");
+        assert!(backend.hosts_the_loop());
+        assert!(held(&watcher), "a hosted daemon holds watcher.lock");
+        assert!(backend.stop(), "the stop finished");
+        assert!(!held(&watcher), "the stopped daemon kept watcher.lock");
+
+        let next = Backend::open_at(dir.path().to_path_buf(), false, None, Some(site))
+            .expect("the next daemon starts");
+        assert!(next.hosts_the_loop());
+        assert!(held(&watcher), "the next daemon holds watcher.lock");
+        assert!(next.stop());
+        assert!(!held(&watcher));
+    }
 }
 
 /// Join bounded UTF-8 pages only while both the body and envelope anchors hold.
@@ -997,5 +1496,120 @@ mod native_witness_body_tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(debug_assertions)]
+mod sample_tests {
+    use super::*;
+
+    fn untouched_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tc-gtk-sample-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn a_named_sample_opens_without_touching_the_state_directory() {
+        let dir = untouched_dir();
+        let backend = Backend::open_or_sample(dir.clone(), Some("heldSessions".into())).unwrap();
+        assert_eq!(backend.sample_set(), Some("heldSessions"));
+        assert!(!backend.hosts_the_loop(), "a sample hosts no loop");
+        assert!(!dir.exists(), "the sample created {}", dir.display());
+        let status = backend.call("status", serde_json::json!({})).unwrap();
+        assert!(status.is_object());
+        let refused = backend
+            .call("set_settings", serde_json::json!({"x": 1}))
+            .unwrap_err();
+        assert_eq!(
+            DaemonFailure::from_error(refused).label,
+            crate::sample::ERR_SAMPLE_UNRECORDED
+        );
+        assert_eq!(
+            backend
+                .preview("00000000-0000-0000-0000-000000000000")
+                .unwrap_err()
+                .to_string(),
+            crate::sample::ERR_SAMPLE_UNRECORDED
+        );
+        assert!(backend.events().unwrap().next().is_none());
+        assert!(backend.search_original("x", "y").is_none());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn an_unrecognised_or_empty_name_is_the_default_set() {
+        for value in ["", "noSuchSet"] {
+            let backend = Backend::open_or_sample(untouched_dir(), Some(value.into())).unwrap();
+            assert_eq!(
+                backend.sample_set(),
+                Some(crate::sample::DEFAULT_SET),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_variable_opens_the_daemon_path() {
+        // The daemon path's first act is to refuse undeclared roots, so a
+        // fresh directory shows the daemon path was taken, not the sample.
+        let dir = untouched_dir();
+        let error = Backend::open_or_sample(dir.clone(), None)
+            .err()
+            .expect("not a sample");
+        assert_eq!(error.to_string(), ERR_ROOTS_NOT_DECLARED);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The sample is impossible in a release build: the variable's name is
+    /// spelled only in `sample.rs`, whose declaration, like every reference
+    /// to the module and the variant, is under `cfg(debug_assertions)`.
+    #[test]
+    fn the_sample_is_compiled_only_into_debug_builds() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let lib = std::fs::read_to_string(src.join("lib.rs")).unwrap();
+        assert!(lib.contains("#[cfg(debug_assertions)]\npub mod sample;"));
+        let mut stack = vec![src.clone()];
+        let mut spelled = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                if text.contains(concat!("TRACE_COMMONS_", "SAMPLE\"")) {
+                    spelled.push(path.strip_prefix(&src).unwrap().display().to_string());
+                }
+                // Every line naming the module or the variant sits under the
+                // gate, directly or in a gated block or item. A gated test
+                // module is gated whole, so its lines are not read.
+                let production = text.split(concat!("mod sample", "_tests")).next().unwrap();
+                let lines: Vec<&str> = production.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    let code = line.trim_start();
+                    if code.starts_with("//") || path.ends_with("sample.rs") {
+                        continue;
+                    }
+                    if code.contains("::sample::")
+                        || code.contains("Backend::Sample")
+                        || code.starts_with("Sample(")
+                    {
+                        let gated = lines[..i]
+                            .iter()
+                            .rev()
+                            .take(12)
+                            .any(|l| l.contains("cfg(debug_assertions)"));
+                        assert!(
+                            gated,
+                            "{}:{} is not under cfg(debug_assertions)",
+                            path.display(),
+                            i + 1
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(spelled, vec!["sample.rs".to_string()]);
     }
 }

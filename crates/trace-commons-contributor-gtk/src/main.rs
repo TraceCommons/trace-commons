@@ -58,12 +58,6 @@ fn main() -> anyhow::Result<()> {
     let start_page = std::env::args()
         .position(|a| a == "--start-page")
         .and_then(|i| std::env::args().nth(i + 1));
-    // The main window's stack and onboarding's steps are different things:
-    // `--start-page` moves the former, and onboarding is a modal with its own
-    // pages that had no way to be opened past its first screen.
-    let onboarding_page = std::env::args()
-        .position(|a| a == "--onboarding-page")
-        .and_then(|i| std::env::args().nth(i + 1));
     // A state directory can be named explicitly, mostly so a container run
     // does not touch a real one.
     let dir = match std::env::args().position(|a| a == "--state-dir") {
@@ -73,6 +67,16 @@ fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("--state-dir needs a directory"))
             .map(Some)?,
         None => None,
+    };
+    // On sample data (debug builds only) nothing reads the contributor's
+    // own state: the window's direct `ConfigStore` reads go to a throwaway
+    // directory unless one was named.
+    #[cfg(debug_assertions)]
+    let dir = match dir {
+        None if trace_commons_contributor_gtk::sample::requested() => {
+            Some(std::env::temp_dir().join(format!("trace-commons-sample-{}", std::process::id())))
+        }
+        dir => dir,
     };
     // The daemon's `missions_enabled` switch, read once from its settings
     // file before any window, tray or accelerator exists: all of them list
@@ -119,7 +123,6 @@ fn main() -> anyhow::Result<()> {
         search_term,
         preview_tab,
         start_page,
-        onboarding_page,
         show_toast,
     });
 
@@ -167,10 +170,17 @@ fn on_sigterm(quit: impl Fn() + 'static) -> gtk::glib::SourceId {
 }
 
 fn local_start(drivers: &Drivers) -> bool {
-    drivers.start_page.as_deref() == Some("insights")
-        || (!drivers.exit_after_realize
-            && drivers.start_page.is_none()
-            && drivers.onboarding_page.is_none())
+    // A sample launch (debug builds only) opens the contribution window on
+    // the recorded set, never the local Insights window, which reads this
+    // machine's own sessions.
+    #[cfg(debug_assertions)]
+    if trace_commons_contributor_gtk::sample::requested() {
+        return false;
+    }
+    // Realize smoke drivers exercise the connected shell (Worker and
+    // desktop integration), including when its selected page is Insights.
+    !drivers.exit_after_realize
+        && (drivers.start_page.as_deref() == Some("insights") || drivers.start_page.is_none())
 }
 
 fn connect_local_startup(
@@ -242,7 +252,6 @@ struct Drivers {
     search_term: Option<String>,
     preview_tab: Option<String>,
     start_page: Option<String>,
-    onboarding_page: Option<String>,
     show_toast: bool,
 }
 
@@ -336,13 +345,69 @@ fn finish_start(
                     gtk::glib::ControlFlow::Break
                 });
             }
-            ui::roots::present(application, dir, move || {
-                // Re-entered rather than continuing inline: the declaration
-                // is on disk now, so this is an ordinary start, and the
-                // second refusal that cannot happen would still be handled
-                // the same way if it did.
-                start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
-            });
+            let headless = drivers.exit_after_realize || drivers.start_page.is_some();
+            let ask_roots = {
+                let application = application.clone();
+                let drivers = drivers.clone();
+                let startup = startup.clone();
+                move || {
+                    let reentry = reentry.clone();
+                    let ask_dir = ask_dir.clone();
+                    let drivers = drivers.clone();
+                    let startup = startup.clone();
+                    ui::roots::present(&application, ask_dir.clone(), move || {
+                        // Re-entered rather than continuing inline: the
+                        // declaration is on disk now, so this is an ordinary
+                        // start, and the second refusal that cannot happen
+                        // would still be handled the same way if it did.
+                        start_or_ask(&reentry, ask_dir.clone(), drivers.clone(), startup.clone());
+                    });
+                }
+            };
+            if !trace_commons_contributor_gtk::service::first_setup_asks(
+                cfg!(target_os = "linux"),
+                headless,
+            ) {
+                ask_roots();
+                return;
+            }
+            // First setup: one step for the background service, only when it
+            // is not running (owner-approved flow, 2026-11-17). Running, it
+            // is a fresh start that attaches to it; "Not now", the folders.
+            let local = dir.join(trace_commons_contributor::config::DAEMON_SOCK_FILE);
+            let host: std::rc::Rc<dyn ui::service_dialog::ServiceHost> =
+                std::rc::Rc::new(ui::service_dialog::FirstSetupHost { local });
+            let application = application.clone();
+            let ask_with = host.clone();
+            // No window is open while the service is classified off-thread:
+            // hold the application until the dialog or the folders screen
+            // is up, or its run loop would end here.
+            let hold = application.hold();
+            host.state(Box::new(move |state| {
+                let _hold = hold;
+                let prompt = trace_commons_contributor_gtk::service::prompt(
+                    trace_commons_contributor_gtk::service::Trigger::FirstSetup,
+                    state,
+                    ui::service_dialog::dismissed(),
+                );
+                let Some(dialog) = prompt else {
+                    ask_roots();
+                    return;
+                };
+                let restart = application.clone();
+                ui::service_dialog::present(
+                    None,
+                    Some(&application),
+                    dialog,
+                    ask_with,
+                    move |ended| match ended {
+                        ui::service_dialog::Ended::Running => {
+                            start_or_ask(&restart, dir.clone(), drivers.clone(), startup.clone())
+                        }
+                        ui::service_dialog::Ended::NotNow => ask_roots(),
+                    },
+                );
+            }));
             return;
         }
         Err(error) => {
@@ -361,18 +426,9 @@ fn finish_start(
     // application that contributes a trace without a person pressing
     // Contribute in the preview sheet.
     if let Some(page) = drivers.start_page.clone() {
-        app.stack.set_visible_child_name(&page);
-    }
-    if let Some(page) = drivers.onboarding_page.clone() {
-        let app = app.clone();
-        // After the status handler has had its chance to present onboarding
-        // itself, so this replaces that window rather than racing it.
-        gtk::glib::timeout_add_seconds_local(2, move || {
-            if !ui::onboarding::present_at_page(&app, &page) {
-                eprintln!("trace-commons-shell: unknown --onboarding-page {page}");
-            }
-            gtk::glib::ControlFlow::Break
-        });
+        if !app.open_screen(&page) {
+            eprintln!("trace-commons-shell: unknown --start-page {page}");
+        }
     }
     if drivers.open_preview {
         let app = app.clone();
@@ -489,7 +545,6 @@ mod insights_startup_tests {
             search_term: None,
             preview_tab: None,
             start_page: None,
-            onboarding_page: None,
             show_toast: false,
         })
     }
@@ -502,6 +557,21 @@ mod insights_startup_tests {
         std::rc::Rc::get_mut(&mut d).unwrap().start_page = Some("insights".into());
         assert!(local_start(&d));
     }
+    #[test]
+    fn insights_realize_driver_preserves_connected_desktop_startup() {
+        let mut d = drivers();
+        let d = std::rc::Rc::get_mut(&mut d).unwrap();
+        d.exit_after_realize = true;
+        assert!(!local_start(d));
+        d.start_page = Some("insights".into());
+        assert!(
+            !local_start(d),
+            "the screenshot must still exercise the connected shell"
+        );
+        d.exit_after_realize = false;
+        assert!(local_start(d), "ordinary Insights stays account-free");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]

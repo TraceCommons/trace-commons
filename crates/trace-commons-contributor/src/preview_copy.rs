@@ -173,7 +173,9 @@ pub fn monitor_failure_line(label: &str) -> Option<&'static str> {
         crate::daemon::preview::REASON_WITNESS_REVIEW_REQUIRED => Some(MONITOR_NEEDS_PRIVACY_CHECK),
         crate::daemon::preview::REASON_PREVIEW_TIMED_OUT
         | "witness_timeout"
-        | "witness_unreachable" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
+        | "witness_unreachable"
+        | "witness_classifier_unavailable"
+        | "witness_redaction_failed" => Some(MONITOR_PRIVACY_CHECK_NO_ANSWER),
         _ => None,
     }
 }
@@ -345,6 +347,9 @@ pub struct MonitorTreeCopy {
     /// show: the folders, their Submit, and their Automatic switch (owner,
     /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
     pub column_folders: &'static str,
+    /// `column_folders` on every computer but a Mac. Approved by the owner
+    /// 2026-11-18.
+    pub column_folders_computer: &'static str,
     pub column_submit: &'static str,
     pub column_automatic: &'static str,
     /// The session row menu's one item, and its confirmation.
@@ -646,6 +651,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             automatic_count: "Every folder sends on its own, except folders set to Ask or Never. \
                 {count} of {total} folders automatic.",
             column_folders: "Folders on this Mac",
+            // Approved by the owner 2026-11-18.
+            column_folders_computer: "Folders on this computer",
             column_submit: "Submit",
             column_automatic: "Auto",
             dismiss_session: "Dismiss trace",
@@ -1188,6 +1195,9 @@ pub struct MonitorFlowMapCopy {
     /// The legend's item for the lock on each coin: a tool's memory files
     /// are never collected. DRAFT, NEEDS APPROVAL.
     pub legend_memory: &'static str,
+    /// `legend_memory` on every computer but a Mac. Approved by the owner
+    /// 2026-11-17.
+    pub legend_memory_computer: &'static str,
     /// The trace's card, at the foot of the Traces map and at the top of
     /// the Traces tab, while a trace is contributed or kept and after one
     /// is dismissed (owner, 2026-10-19): what is happening to it, the
@@ -1199,11 +1209,17 @@ pub struct MonitorFlowMapCopy {
     pub transfer_dismissed: &'static str,
     pub transfer_trace: &'static str,
     pub memory_stays: &'static str,
+    /// `memory_stays` on every computer but a Mac. Approved by the owner
+    /// 2026-11-17.
+    pub memory_stays_computer: &'static str,
     pub transfer_contribute_note: &'static str,
     /// The contribute note on a batch card for traces from several tools:
     /// it names no one tool (owner, 2026-10-20).
     pub transfer_contribute_note_mixed: &'static str,
     pub transfer_keep_note: &'static str,
+    /// `transfer_keep_note` on every computer but a Mac. Approved by the
+    /// owner 2026-11-17.
+    pub transfer_keep_note_computer: &'static str,
     pub transfer_dismiss_note: &'static str,
     /// A batch card's count, when one submit sends several traces at once
     /// (owner, 2026-10-19: one card for the batch, not a stack of them).
@@ -1222,6 +1238,10 @@ pub struct MonitorFlowMapCopy {
     pub collected: &'static str,
     pub kept_here_one: &'static str,
     pub kept_here: &'static str,
+    /// `kept_here_one` and `kept_here` on every computer but a Mac.
+    /// Approved by the owner 2026-11-17.
+    pub kept_here_one_computer: &'static str,
+    pub kept_here_computer: &'static str,
     /// The Traces map's style switch in Settings, General (owner,
     /// 2026-10-19): on, a contribution flies by rocket from a launch pad
     /// to a space station; off, this Mac is a laptop and the library an
@@ -1755,15 +1775,18 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tools_heading: "Tools",
             coin_waiting: "{count} waiting",
             legend_memory: "Memory stays on this Mac",
+            legend_memory_computer: "Memory stays on this computer",
             transfer_contributing: "Contributing",
             transfer_keeping: "Keeping",
             transfer_dismissed: "Dismissed",
             transfer_trace: "Trace",
             memory_stays: "Memory files stay on this Mac.",
+            memory_stays_computer: "Memory files stay on this computer.",
             transfer_contribute_note: "What {tool} read from its memory is part of the trace, \
                 and is scrubbed with it before it leaves.",
             transfer_contribute_note_mixed: "Each tool's memory is scrubbed before it's sent.",
             transfer_keep_note: "The trace stays on this Mac with its memory. Nothing is sent.",
+            transfer_keep_note_computer: "The trace stays on this computer with its memory. Nothing is sent.",
             transfer_dismiss_note: "Removed from the traces waiting for you. Nothing was sent.",
             transfer_traces: "{count} traces",
             memory_claude_code: "CLAUDE.md, memory/",
@@ -1774,6 +1797,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             collected: "Collected {count} of {total}",
             kept_here_one: "Kept on this Mac",
             kept_here: "{count} kept on this Mac",
+            kept_here_one_computer: "Kept on this computer",
+            kept_here_computer: "{count} kept on this computer",
             style_title: "Traces map",
             style_toggle: "Rocket mode",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P231).
@@ -2027,6 +2052,8 @@ mod tests {
             crate::daemon::preview::REASON_PREVIEW_TIMED_OUT,
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
         ] {
             assert_eq!(
                 monitor_failure_line(label),
@@ -2340,6 +2367,59 @@ mod tests {
                     .any(|(_, word)| word.contains(&format!("{{{name}}}"))),
                 "{{{name}}} is documented but no string carries it"
             );
+        }
+    }
+
+    /// The Traces tree's folder column title names the Mac; every other
+    /// computer has its own words, approved by the owner 2026-11-18. The
+    /// Mac's own title is unchanged, and the export carries both.
+    #[test]
+    fn the_folder_column_has_a_computer_variant() {
+        let tree = monitor_traces_copy().tree;
+        assert_eq!(tree.column_folders, "Folders on this Mac");
+        assert_eq!(tree.column_folders_computer, "Folders on this computer");
+        assert!(!tree.column_folders_computer.contains("Mac"));
+        let json = serde_json::to_value(monitor_traces_copy()).expect("the words serialize");
+        assert_eq!(
+            json["tree"]["column_folders_computer"],
+            "Folders on this computer"
+        );
+    }
+
+    /// The map's words that name the Mac have a variant for every other
+    /// computer, in the owner's approved words (2026-11-17), and the Mac's
+    /// own are unchanged.
+    #[test]
+    fn the_maps_mac_words_have_a_computer_variant() {
+        let map = monitor_screens_copy().flow_map;
+        assert_eq!(map.legend_memory, "Memory stays on this Mac");
+        assert_eq!(map.memory_stays, "Memory files stay on this Mac.");
+        assert_eq!(
+            map.transfer_keep_note,
+            "The trace stays on this Mac with its memory. Nothing is sent."
+        );
+        assert_eq!(map.kept_here_one, "Kept on this Mac");
+        assert_eq!(map.kept_here, "{count} kept on this Mac");
+
+        assert_eq!(map.legend_memory_computer, "Memory stays on this computer");
+        assert_eq!(
+            map.memory_stays_computer,
+            "Memory files stay on this computer."
+        );
+        assert_eq!(
+            map.transfer_keep_note_computer,
+            "The trace stays on this computer with its memory. Nothing is sent."
+        );
+        assert_eq!(map.kept_here_one_computer, "Kept on this computer");
+        assert_eq!(map.kept_here_computer, "{count} kept on this computer");
+        for line in [
+            map.legend_memory_computer,
+            map.memory_stays_computer,
+            map.transfer_keep_note_computer,
+            map.kept_here_one_computer,
+            map.kept_here_computer,
+        ] {
+            assert!(!line.contains("Mac"), "{line}");
         }
     }
 

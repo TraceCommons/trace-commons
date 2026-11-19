@@ -18,7 +18,9 @@
 # `trace-commons-contributor-sources/src/source/mod.rs`) -- without an explicit
 # filesystem permission, and the whole point of Flatpak confinement is that
 # it must not get a blanket grant of `home` to do it. So `finish-args` below
-# names exactly those two directories, read-only, and nothing wider. The
+# names exactly those two directories, read-only, and nothing wider (the one
+# other filesystem grant is the host link's runtime directory, which holds a
+# socket, a lock file and a marker file, no session data; see its entry). The
 # design spec's wording for why -- "Trace Commons needs to read your Claude
 # Code and Codex trace files. It asks for access to those folders only."
 # -- is pinned in `src/copy.rs` as `FLATPAK_SESSION_ROOTS_EXPLANATION`,
@@ -33,12 +35,17 @@
 # the tarball distribution the design spec also asks for has no such limit,
 # because it is not confined.
 app-id: ai.tracecommons.Contributor
+# GNOME 51 since 2026-11-18 (owner: "Newest supported"; 48 is end-of-life
+# on Flathub since 2026-03-24); it was 48, and 46 before that. The
+# runtime branch is named again in release-apps.yml's linux-flatpak job,
+# which installs exactly this Platform and Sdk branch, and
+# release_pipeline.rs holds the two together.
 runtime: org.gnome.Platform
-runtime-version: '46'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 # No sdk-extensions entry for rust-stable here anymore. The first real
-# release run (app-v0.1.0, run 31959830328) proved org.gnome.Sdk//46
-# resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
+# release run (app-v0.1.0, run 31959830328, then on runtime 46) proved
+# org.gnome.Sdk//46 resolves that extension at //23.08, which ships rustc 1.81.0 -- and even
 # the newer //24.08 branch only reaches 1.89.0, still 7 minors short of this
 # crate's rust-version = "1.96" floor. The build is network-sandboxed, so
 # rustup cannot fetch a newer toolchain at build time either. The
@@ -50,9 +57,28 @@ command: trace-commons-shell
 finish-args:
   # GTK 4 display access. Wayland first, X11 as the fallback the runtime
   # itself recommends; no direct device access is needed.
+  #
+  # These two also carry KWin's blur behind the glass panes
+  # (`ui::glass_backdrop`), which needs no grant of its own:
+  # - Wayland: org_kde_kwin_blur_manager is an ordinary global on the
+  #   compositor socket this grants, read through a second registry on
+  #   GTK's own connection. Not checked: whether KWin hides it from a
+  #   client Flatpak tags with wp_security_context_v1. If it does, the
+  #   global is absent and the window stays painted, the fail-safe.
+  # - X11 (only when there is no Wayland): a second, pure-Rust X connection
+  #   to the same DISPLAY, authorised by the XAUTHORITY Flatpak sets up for
+  #   GTK's own.
+  # No D-Bus name is needed: the grant is read from what the compositor
+  # offers, never from KWin's effects interface.
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+  # The daemon runs inside this sandbox and talks to the Trace Commons
+  # server (enrollment, uploads) and to NEAR AI (inference). Without network
+  # access it can do neither. This is the only network grant; the session
+  # roots below stay read-only, so what the daemon may send is still bounded
+  # by what it may read.
+  - --share=network
   # Talks to org.freedesktop.Notifications (libnotify), the
   # org.freedesktop.portal.* surfaces (background, and file-chooser if
   # onboarding ever needs one), and org.kde.StatusNotifierWatcher for the
@@ -87,6 +113,21 @@ finish-args:
   # per-app location with no extra permission needed).
   - --filesystem=~/.claude/projects:ro
   - --filesystem=~/.codex/sessions:ro
+  # Host-daemon mode. When the contributor daemon is installed on the host
+  # (the CLI installer plus its systemd user unit), it serves a second socket,
+  # the host link, at $XDG_RUNTIME_DIR/trace-commons/daemon.sock, and this
+  # window attaches to it instead of running a daemon in the sandbox: the
+  # sandbox cannot open a host terminal, and a daemon in it stops watching
+  # when the window closes. The directory
+  # holds that socket, a lock file (watcher.lock) that keeps a host daemon
+  # and an in-sandbox one from watching the same sessions, and the empty
+  # host-unit marker the systemd unit's daemon writes -- never the host
+  # state directory, which holds the device key. `:create` lets a window
+  # started before the daemon see the socket when it arrives; the daemon
+  # tightens the directory to 0700 and checks each peer's uid. Production
+  # channel only: a staging build's directory is trace-commons-staging. See
+  # docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md.
+  - --filesystem=xdg-run/trace-commons:create
 
 modules:
   - name: trace-commons-shell
@@ -134,11 +175,11 @@ modules:
       - install -Dm755 target/release/trace-commons-shell /app/bin/trace-commons-shell
       - install -Dm755 target/release/near-ai /app/bin/near-ai
       - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.desktop /app/share/applications/ai.tracecommons.Contributor.desktop
-      # The icon the desktop entry has always named and nothing has ever
-      # installed. Scalable SVG rather than a raster ladder: the file is
-      # generated from crates/trace-commons-mark, and hicolor/scalable means
-      # Linux needs no rasterizer on this path at all.
-      - install -Dm644 assets/mark/mark-light.svg /app/share/icons/hicolor/scalable/apps/ai.tracecommons.Contributor.svg
+      # The icon the desktop entry names: the NEAR AI tile, as the Mac's app
+      # icon draws it. Scalable SVG rather than a raster ladder: the file is
+      # generated from crates/trace-commons-mark (near.rs), and
+      # hicolor/scalable means Linux needs no rasterizer on this path at all.
+      - install -Dm644 assets/mark/near-app.svg /app/share/icons/hicolor/scalable/apps/ai.tracecommons.Contributor.svg
       # AppStream metainfo. GNOME Software and KDE Discover index this file,
       # not the desktop entry, and will not show the application without it.
       - install -Dm644 crates/trace-commons-contributor-gtk/flatpak/ai.tracecommons.Contributor.metainfo.xml /app/share/metainfo/ai.tracecommons.Contributor.metainfo.xml

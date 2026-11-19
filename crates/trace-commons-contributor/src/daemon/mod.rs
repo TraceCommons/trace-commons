@@ -59,10 +59,12 @@ pub(crate) mod credential_store {
 }
 pub mod eligibility;
 pub mod enroll;
+pub(crate) mod first_trace;
 pub mod grant_terms;
 pub mod harness;
 pub mod health;
 pub mod history;
+pub mod host_link;
 pub mod inference_connection;
 pub mod inference_map;
 pub mod insights_analyze;
@@ -73,6 +75,7 @@ pub mod insights_glance;
 pub mod insights_model_answers;
 pub(crate) mod insights_route_tally;
 pub mod insights_sessions;
+pub(crate) mod insights_skills;
 pub mod insights_submitted;
 pub mod insights_week;
 mod insights_week_work;
@@ -116,6 +119,7 @@ pub mod public_run;
 pub mod queue;
 pub mod referral;
 pub mod second_look;
+pub mod service;
 pub mod settings;
 pub mod settlement_estimate;
 pub mod settlement_scan;
@@ -138,6 +142,7 @@ pub mod watcher;
 #[cfg(windows)]
 pub mod win_pipe;
 pub mod withdraw;
+mod witness_retry;
 pub(crate) mod witness_worker;
 
 use std::sync::Arc;
@@ -266,11 +271,42 @@ pub struct EmbeddedDaemon {
     lock_path: std::path::PathBuf,
     lock: std::fs::File,
     server: tokio::task::JoinHandle<Result<()>>,
+    /// The watcher lock in the runtime directory, and the host-link server
+    /// when this daemon is the host part. See `host_link`.
+    #[cfg(unix)]
+    host_link: Option<HostLinkRuntime>,
     /// The bounded preview pool. Started here rather than inside
     /// `DaemonShared` because each worker holds an `Arc<DaemonShared>`
     /// through its runner, and a pool the shared state owned would keep
     /// that state alive for the life of the process.
     preview_workers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// What `start_embedded` holds for the host link.
+#[cfg(unix)]
+struct HostLinkRuntime {
+    /// Dropped last in `close`: releasing it lets another daemon watch.
+    _claim: host_link::Claim,
+    server: Option<tokio::task::JoinHandle<()>>,
+    /// The host-link socket this daemon bound, removed when it stops. "The
+    /// host part is installed" is the unit's marker file, not this socket,
+    /// so no daemon leaves its socket behind (`host_link`).
+    socket: Option<std::path::PathBuf>,
+}
+
+/// Stops serving the host link however the daemon ends, including a start
+/// that fails after the claim: a dropped `JoinHandle` alone would leave the
+/// task serving.
+#[cfg(unix)]
+impl Drop for HostLinkRuntime {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.abort();
+        }
+        if let Some(socket) = self.socket.take() {
+            let _ = std::fs::remove_file(socket);
+        }
+    }
 }
 
 impl EmbeddedDaemon {
@@ -295,6 +331,10 @@ impl EmbeddedDaemon {
             worker.abort();
         }
         let _ = self.shared.store.remove_daemon_file(DAEMON_SOCK_FILE);
+        // Stops the host link and removes its socket. The systemd unit's
+        // "installed" marker, if this is the unit, stays (`host_link`).
+        #[cfg(unix)]
+        drop(self.host_link);
         drop(self.lock);
         let _ = std::fs::remove_file(&self.lock_path);
     }
@@ -412,9 +452,40 @@ pub(crate) fn record_identity_once(store: &ConfigStore) -> bool {
 }
 
 pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
+    start_embedded_at(store, None).await
+}
+
+/// Where a daemon takes `watcher.lock` and serves the host link, named by
+/// the caller rather than read from the environment and the platform's
+/// default state directory. For an embedder's tests: a shell's own test
+/// cannot set `XDG_RUNTIME_DIR` without `unsafe`, and the real path is
+/// Linux only. See `host_link::claim` for what each field decides.
+#[derive(Debug, Clone)]
+pub struct HostLinkSite {
+    /// The runtime directory (`$XDG_RUNTIME_DIR/<state-dir-name>`).
+    pub runtime: std::path::PathBuf,
+    /// The state directory that counts as the platform default; a daemon on
+    /// any other takes no lock and serves no link.
+    pub platform_default: std::path::PathBuf,
+    pub sandboxed: bool,
+    /// Whether the daemon plays the systemd user unit's (writes the marker).
+    pub host_unit: bool,
+}
+
+/// [`start_embedded`], with the host link's place given (`None`: from the
+/// environment, as `start_embedded`).
+pub async fn start_embedded_at(
+    store: ConfigStore,
+    site: Option<HostLinkSite>,
+) -> Result<EmbeddedDaemon> {
+    #[cfg(not(unix))]
+    let _ = site;
     // K2 (#1173): a dev dry run never opens the real state directory for
     // writing -- not even its lock file.
     let store = dev_dry_run_store(store)?;
+    // The retired client-side NEAR AI second scan: an old setting naming it
+    // is ignored (local scrubbing only) and said once, before the first tick.
+    crate::retired_second_scan::log_if_configured(&store);
     let lock_path = store.daemon_path(DAEMON_LOCK_FILE);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -434,6 +505,9 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // still serving the socket.
         return Err(anyhow::Error::new(StartFailure::AlreadyRunning));
     }
+    // Holding the lock, drop the retired plaintext credential from disk
+    // rather than leave it until some unrelated settings save.
+    crate::retired_second_scan::drop_retired_credential(&store);
 
     // A verified update parked by an earlier check is applied here, at the
     // daemon's natural start, rather than swapped underneath a running
@@ -491,6 +565,13 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         // throwaway runtime that path builds, and would die with it.
         shared.adopt_runtime();
         shared.adopt_self();
+        // The watcher lock, taken after `daemon.lock` and inside this block
+        // so a refusal releases both, and before the socket is bound so a
+        // refused start leaves no socket file behind. Linux only: elsewhere
+        // there is no Flatpak and no `XDG_RUNTIME_DIR`.
+        #[cfg(unix)]
+        let host_link = start_host_link(&shared, site.as_ref())?;
+
         // The two transports are the same protocol over different plumbing: a
         // unix socket guarded by its 0700 state directory, or a Windows named
         // pipe guarded by its DACL. See `win_pipe` for why the Windows side
@@ -519,17 +600,22 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
         #[cfg(windows)]
         let server = tokio::spawn(async move { win_pipe::serve(listener, serve_shared).await });
 
-        Ok::<_, anyhow::Error>((shared, server, preview_workers))
+        #[cfg(not(unix))]
+        let host_link = ();
+        Ok::<_, anyhow::Error>((shared, server, preview_workers, host_link))
     }
     .await;
 
     match started {
-        Ok((shared, server, preview_workers)) => Ok(EmbeddedDaemon {
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        Ok((shared, server, preview_workers, host_link)) => Ok(EmbeddedDaemon {
             private_inference_shutdown: PrivateInferenceShutdown(Arc::downgrade(&shared)),
             shared,
             lock_path,
             lock,
             server,
+            #[cfg(unix)]
+            host_link,
             preview_workers,
         }),
         Err(e) => {
@@ -542,6 +628,135 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
             Err(e)
         }
     }
+}
+
+/// What a start refused on the watcher lock says. `StartFailure::AlreadyRunning`
+/// underneath keeps the FFI label; its own words name the state directory's
+/// lock, which is not the one held here.
+///
+/// DRAFT, NEEDS APPROVAL (2026-11-17).
+#[cfg(unix)]
+const WATCHER_HELD_TEXT: &str = "another trace-commons-contributor daemon on this login already watches \
+     the session folders, in the Flatpak sandbox or on the host";
+
+/// Claim the runtime directory and, on the host, serve the host link.
+///
+/// Refuses the start with [`StartFailure::AlreadyRunning`] when another
+/// daemon on this login holds the watcher lock -- the Flatpak window hosting
+/// one in its sandbox, or the host part -- with [`WATCHER_HELD_TEXT`] as its
+/// words. Refuses it with an unnamed error when the watcher lock itself is
+/// unusable (`host_link::ClaimError::LockUnusable`): running unarbitrated
+/// could watch beside a daemon in the sandbox. Anything else that goes wrong
+/// here costs only the host link, never the daemon.
+#[cfg(unix)]
+fn start_host_link(
+    shared: &Arc<ipc::DaemonShared>,
+    site: Option<&HostLinkSite>,
+) -> Result<Option<HostLinkRuntime>> {
+    if let Some(site) = site {
+        return start_host_link_with(
+            shared,
+            &site.platform_default,
+            Some(site.runtime.clone()),
+            site.sandboxed,
+            site.host_unit,
+        );
+    }
+    #[cfg(test)]
+    if let Some(test) = host_link_test_runtime(shared.store.dir()) {
+        return start_host_link_with(
+            shared,
+            shared.store.dir(),
+            Some(test.runtime),
+            test.sandboxed,
+            test.unit,
+        );
+    }
+    if !cfg!(target_os = "linux") {
+        return Ok(None);
+    }
+    let Ok(platform_default) = crate::config::platform_default_dir() else {
+        return Ok(None);
+    };
+    start_host_link_with(
+        shared,
+        &platform_default,
+        host_link::runtime_dir(),
+        host_link::runs_sandboxed(),
+        host_link::runs_as_host_unit(),
+    )
+}
+
+/// Test-only runtime directories, by state directory, so a test can start a
+/// real embedded daemon as the host part (or as a sandboxed one) without
+/// touching the real `XDG_RUNTIME_DIR` or the real default state directory.
+#[cfg(all(test, unix))]
+#[derive(Clone)]
+struct HostLinkTestRuntime {
+    runtime: std::path::PathBuf,
+    sandboxed: bool,
+    /// Whether the daemon plays the systemd user unit's.
+    unit: bool,
+}
+
+#[cfg(all(test, unix))]
+fn host_link_test_runtimes()
+-> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HostLinkTestRuntime>> {
+    static RUNTIMES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, HostLinkTestRuntime>>,
+    > = std::sync::OnceLock::new();
+    RUNTIMES.get_or_init(Default::default)
+}
+
+#[cfg(all(test, unix))]
+fn host_link_test_runtime(dir: &std::path::Path) -> Option<HostLinkTestRuntime> {
+    host_link_test_runtimes().lock().unwrap().get(dir).cloned()
+}
+
+#[cfg(unix)]
+fn start_host_link_with(
+    shared: &Arc<ipc::DaemonShared>,
+    platform_default: &std::path::Path,
+    runtime: Option<std::path::PathBuf>,
+    sandboxed: bool,
+    host_unit: bool,
+) -> Result<Option<HostLinkRuntime>> {
+    let claim = match host_link::claim(
+        shared.store.dir(),
+        platform_default,
+        runtime,
+        sandboxed,
+        host_unit,
+    ) {
+        Ok(Some(claim)) => claim,
+        Ok(None) => return Ok(None),
+        Err(host_link::ClaimError::WatcherHeld) => {
+            return Err(anyhow::Error::new(StartFailure::AlreadyRunning).context(WATCHER_HELD_TEXT));
+        }
+        // Not "already running": nobody else may be. Refused rather than run
+        // unarbitrated beside a daemon in the sandbox; the FFI reports the
+        // generic start failure for an error it cannot name.
+        Err(host_link::ClaimError::LockUnusable) => {
+            // DRAFT, NEEDS APPROVAL (2026-11-17).
+            anyhow::bail!("the watcher lock in the runtime directory is unusable");
+        }
+    };
+    let (server, socket) = match claim.socket.as_deref().map(host_link::bind) {
+        Some(Ok(listener)) => (
+            Some(tokio::spawn(host_link::serve(listener, Arc::clone(shared)))),
+            claim.socket.clone(),
+        ),
+        Some(Err(_)) => {
+            tracing::warn!("host link could not be bound");
+            (None, None)
+        }
+        None => (None, None),
+    };
+    Ok(Some(HostLinkRuntime {
+        _claim: claim,
+        server,
+        socket,
+    }))
 }
 
 /// Run the periodic watch/upload/digest/history pass to completion -- i.e.,
@@ -850,10 +1065,10 @@ async fn run_tick(shared: &Arc<ipc::DaemonShared>, dry_run: bool, state: &mut Ti
     // Ahead of the watcher, so an armed project's re-offers are re-approved
     // in this same pass, and outside the `!dry_run` block below: it sends
     // nothing, so pause, quiesce and dry-run do not hold it back (see
-    // `settle_near_ai_notice`).
+    // `release_retired_notice_holds`).
     guards
-        .run(shared, "near-ai-notice", async {
-            settle_near_ai_notice(shared, now);
+        .run(shared, "retired-notice-holds", async {
+            release_retired_notice_holds(shared, now);
         })
         .await;
     // Once per process, and ahead of the watcher for the same reason: a
@@ -1038,41 +1253,31 @@ fn upload_wake_deadline(
 /// See [`upload_wake_deadline`].
 const UPLOAD_WAKE_MARGIN: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Once the NEAR AI notice is acknowledged, by any route, undo what its gate
-/// did while it was closed: clear the gate's health label and re-offer every
-/// session the gate refused.
+/// The refusal reason the retired NEAR AI first-use notice put on a queue
+/// entry while it waited for an acknowledgement. Nothing raises it any more,
+/// but a queue file an older build wrote can still hold entries refused for
+/// it, and nothing else would ever move them again.
+const RETIRED_NOTICE_REASON: &str = "near-ai-notice-not-acknowledged";
+
+/// Re-offer every entry the retired NEAR AI first-use notice refused.
 ///
-/// The notice can be acknowledged outside the app: the CLI shows it and
-/// writes the same marker. Only the app's acknowledge handler used to do
-/// this, so a CLI acknowledgement opened the gate and left those sessions
-/// refused for good, and left the label raised. The label ranks first in
-/// `health::precedence`, so it hid every lower-ranked problem in the banner
-/// and kept `blocks_expiry()` true until something was approved by hand.
+/// The client-side second scan, and the notice that gated it, are retired:
+/// traces upload with local scrubbing only. An entry refused for the notice
+/// was refused for timing, not for anything about the session, so it goes
+/// back to `Pending` -- not to approved. Whether it is sent is decided
+/// afresh by the contributor or by a standing grant, through the ordinary
+/// approval path; this releases a hold, it authorises nothing.
 ///
-/// Called by the acknowledge handler and on every daemon tick, so the route
-/// to the acknowledgement does not decide the outcome. Idempotent: with
-/// nothing refused for the gate and the label already clear it changes
-/// nothing.
-///
-/// Deliberately not held back by pause, quiesce, or dry-run. It is
-/// bookkeeping and sends nothing -- a re-offer comes back `Pending`, and
-/// uploading stays behind those gates in `drain_approved` -- so a paused,
-/// quiesced, or dry-run daemon reaches the same queue state as a running
-/// one. The tick loop calls it outside the `!dry_run` block for that reason.
-pub(crate) fn settle_near_ai_notice(
+/// Called on every daemon tick. Idempotent: with nothing refused for the
+/// reason it changes nothing. It is bookkeeping and sends nothing, so pause,
+/// quiesce and dry-run do not hold it back. Keep it until no queue written
+/// by a build with the notice can still be on a contributor's machine.
+pub(crate) fn release_retired_notice_holds(
     shared: &ipc::DaemonShared,
     now: chrono::DateTime<Utc>,
 ) -> queue::ReofferOutcome {
-    if !shared.store.near_ai_notice_shown() {
-        return queue::ReofferOutcome::default();
-    }
-    shared
-        .health
-        .lock()
-        .expect("health lock")
-        .resolve(health::LABEL_NEAR_AI_NOTICE_PENDING);
     let mut q = shared.queue.lock().expect("queue lock");
-    let outcome = q.reoffer_refused_for_reason(health::LABEL_NEAR_AI_NOTICE_PENDING, now);
+    let outcome = q.reoffer_refused_for_reason(RETIRED_NOTICE_REASON, now);
     if outcome.changed() {
         if q.save(&shared.store).is_err() {
             // The re-offer is held in memory and persists with the next
@@ -1495,10 +1700,6 @@ async fn drain_approved(
     if account_allowance_held(shared, &cfg, now) {
         return Ok(());
     }
-    let near_ai = {
-        let s = shared.settings.lock().expect("settings lock");
-        s.near_ai.clone()
-    };
     let source_roots = shared.source_roots_with_routing();
     // These options are envelope-determining and are NOT covered by
     // `preview::input_fingerprint`, which fingerprints the config. They are
@@ -1516,7 +1717,6 @@ async fn drain_approved(
     // `build_preview` honour it -- preferably both.
     let opts = crate::submit::SubmitOptions {
         dry_run: false,
-        pii_filter: cfg.pii_filter.clone(),
         no_reasoning: false,
         machine_readable: true,
         unenrolled_preview: false,
@@ -1535,7 +1735,7 @@ async fn drain_approved(
     // See `run_blocking`'s doc.
     let store =
         run_blocking(|| crate::config::ConfigStore::open(shared.store.dir().to_path_buf()))?;
-    let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts, near_ai))?;
+    let mut ctx = run_blocking(|| crate::submit::SubmitContext::new(&store, &cfg, &opts))?;
     // The pass makes no witness call of its own (the witness worker does,
     // see `witness_worker`); declared background all the same, so any call
     // reached through this context is turned away first by a witness that
@@ -1728,7 +1928,7 @@ async fn drain_approved(
         // `Failed`. `Refused` carries no rule-3 label today, but the two
         // arms are read alike below for admission refusals, so they are
         // here too: one call, which neither arm can lose.
-        if let uploader::UploadDecision::Refused { reason_label }
+        if let uploader::UploadDecision::Refused { reason_label, .. }
         | uploader::UploadDecision::Failed { reason_label } = &decision
         {
             cancel_account_admission_on_refusal(shared, reason_label);
@@ -1941,7 +2141,10 @@ fn apply_upload_decision(
                 let _ = q.upsert(fresh, max);
             }
         }
-        uploader::UploadDecision::Refused { reason_label } => {
+        uploader::UploadDecision::Refused {
+            reason_label,
+            review_limits,
+        } => {
             // Decision 1: a refusal for an admission reason is evidence
             // about the entry, and the entry stops claiming otherwise.
             // Every other refusal label says nothing about
@@ -1962,6 +2165,9 @@ fn apply_upload_decision(
                 queue::QueueState::Refused,
                 Some(reason_label),
             );
+            // Kept only for a session too large to review; cleared for
+            // every other refusal.
+            q.note_review_limits(entry.entry_id, review_limits);
             // A no-op unless the refusal was a caught panic, which a
             // newer build offers again.
             q.note_refusal_version(entry.entry_id, env!("CARGO_PKG_VERSION"));
@@ -2112,30 +2318,20 @@ fn apply_upload_decision(
                         Some(reason_label),
                     );
                 } else {
-                    // Ingest's `Retry-After` says nothing about the
-                    // witness, so it does not stretch a witness wait.
-                    let hint = match kind {
-                        TransientUpload::Witness => None,
-                        _ => unavailable_retry_after,
+                    let random = crate::retry_jitter::random_u64();
+                    let wait = if kind == TransientUpload::Witness {
+                        witness_retry::retry_wait(failures, random)
+                    } else {
+                        transient_upload_retry_wait(failures, unavailable_retry_after, random)
                     };
-                    q.record_attempt(
-                        entry.entry_id,
-                        Some(
-                            observed_at
-                                + transient_upload_retry_wait(
-                                    failures,
-                                    hint,
-                                    crate::retry_jitter::random_u64(),
-                                ),
-                        ),
-                    );
+                    q.record_attempt(entry.entry_id, Some(observed_at + wait));
                     q.set_state(
                         entry.entry_id,
                         queue::QueueState::Approved,
                         Some(reason_label),
                     );
                 }
-                if matches!(kind, TransientUpload::Outage | TransientUpload::Witness) {
+                if kind == TransientUpload::Outage {
                     applied.outage = true;
                 }
             } else {
@@ -2150,15 +2346,11 @@ fn apply_upload_decision(
         uploader::UploadDecision::WitnessSaturated { retry_after_secs } => {
             // Nothing was judged, so nothing is refused: the entry keeps
             // its approval and is not claimable again until the witness
-            // has had the time it asked for, doubling while it stays
-            // busy. Never a per-session attempt limit, for the reason
-            // the transient classifier retry has none.
-            let attempt = q
-                .get(entry.entry_id)
-                .map(|e| e.attempts.saturating_add(1))
-                .unwrap_or(1);
+            // has had the time it asked for. Prior failures of this trace
+            // must not multiply a server-wide capacity delay. There is no
+            // per-session attempt limit: saturation judged nothing.
             let observed_at = observed_at();
-            let until = observed_at + witness_capacity_retry_delay(retry_after_secs, attempt);
+            let until = observed_at + witness_capacity_retry_delay(retry_after_secs);
             q.record_attempt(
                 entry.entry_id,
                 Some(until + witness_capacity_jitter(entry.entry_id, retry_after_secs)),
@@ -2177,8 +2369,7 @@ fn apply_upload_decision(
             // passed. No per-session attempt limit, for the reason the
             // witness capacity retry has none. A server `429` records an
             // attempt; this daemon's own burst guard (`Paced`) does not,
-            // since it sent nothing, and the witness and classifier
-            // backoffs grow with `attempts`.
+            // since it sent nothing, and classifier backoff grows with attempts.
             let hint = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
             // A server `429` hint is a floor with a random extra on top,
             // so contributors told the same wait do not return together.
@@ -2282,14 +2473,10 @@ fn sync_witness_capacity_health(shared: &ipc::DaemonShared, now: chrono::DateTim
     }
 }
 
-/// How long to leave a saturated witness alone after the `attempts`-th time
-/// it refused: its own `Retry-After`, doubling per consecutive refusal and
-/// capped at an hour. The witness's delay is the floor, never shortened.
-fn witness_capacity_retry_delay(retry_after_secs: u32, attempts: u32) -> chrono::Duration {
-    let base = i64::from(retry_after_secs.max(1));
-    let exponent = attempts.saturating_sub(1).min(7);
-    let cap = i64::from(crate::witness::transport::MAX_WITNESS_RETRY_AFTER_SECS).max(base);
-    chrono::Duration::seconds((base * (1_i64 << exponent)).min(cap))
+/// The witness's explicit capacity delay, independent of a trace's retry
+/// history. The transport already bounds this server-controlled hint.
+fn witness_capacity_retry_delay(retry_after_secs: u32) -> chrono::Duration {
+    chrono::Duration::seconds(i64::from(retry_after_secs.max(1)))
 }
 
 /// A per-session spread of up to half the witness's delay, so every
@@ -2358,9 +2545,9 @@ enum TransientUpload {
     /// holds the lease. About this entry only, so the pass goes on.
     Lease,
     /// The witness did not answer in time or could not be reached
-    /// (`submit::witness_failure_is_transient`). One witness serves every
-    /// session, so the pass stops at the first, as a `submit` batch does
-    /// (`submit::WITNESS_BATCH_STOP_LABELS`). It has no budget: the entry
+    /// (`submit::witness_failure_is_transient`). This entry backs off; the
+    /// worker detects correlated failures before pausing other traces.
+    /// It has no budget: the entry
     /// keeps its approval and is retried at most an hour apart for as long
     /// as the witness cannot review (owner, 2026-11-12).
     Witness,
@@ -2592,10 +2779,16 @@ pub fn credential_store_self_check() -> i32 {
 /// trace the contributor sent by hand waited behind all of it, at that many
 /// per poll. The contributor is waiting on theirs; the backlog is not.
 fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
+    approved.sort_by(compare_send_priority);
+    approved
+}
+
+/// Shared by the producer and worker so queued jobs cannot defeat fairness.
+fn compare_send_priority(
+    left: &queue::QueueEntry,
+    right: &queue::QueueEntry,
+) -> std::cmp::Ordering {
     let age = |entry: &queue::QueueEntry| {
-        // Match discovery's conversation start where available. The durable
-        // source-write time survives re-offers; the observation is a fallback
-        // for queue files written before that provenance was recorded.
         entry
             .shape
             .as_ref()
@@ -2603,24 +2796,31 @@ fn send_order(mut approved: Vec<queue::QueueEntry>) -> Vec<queue::QueueEntry> {
             .or(entry.last_modified_at)
             .or(entry.observed_modified_at)
     };
-    approved.sort_by(|left, right| {
-        left.approved_unattended
-            .cmp(&right.approved_unattended)
-            .then_with(|| {
-                if !left.approved_unattended {
-                    // Stable sort preserves the person's existing queue order.
-                    return std::cmp::Ordering::Equal;
-                }
-                let left_age = age(left);
-                let right_age = age(right);
-                (left_age.is_none(), left_age, left.entry_id).cmp(&(
-                    right_age.is_none(),
-                    right_age,
-                    right.entry_id,
-                ))
-            })
-    });
-    approved
+    left.approved_unattended
+        .cmp(&right.approved_unattended)
+        .then_with(|| {
+            if !left.approved_unattended {
+                return std::cmp::Ordering::Equal;
+            }
+            // A retry is an attempted entry still waiting on its deadline.
+            // `attempts` alone never resets, so a reapproved or pinned trace
+            // would otherwise sort behind fresh work for good.
+            let retry = |e: &queue::QueueEntry| e.attempts > 0 && e.retry_after.is_some();
+            retry(left)
+                .cmp(&retry(right))
+                .then_with(|| {
+                    if retry(left) && retry(right) {
+                        left.retry_after.cmp(&right.retry_after)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .then_with(|| {
+                    let l = age(left);
+                    let r = age(right);
+                    (l.is_none(), l, left.entry_id).cmp(&(r.is_none(), r, right.entry_id))
+                })
+        })
 }
 
 /// Every source's sessions, listed once per upload pass and looked up by
@@ -4254,7 +4454,6 @@ mod tests {
                     user_subject: "alice".into(),
                     device_key_id: device.device_key_id,
                     consent_scopes: vec!["debugging_evaluation".into()],
-                    pii_filter: Some("near-ai".into()),
                     allowed_hosts: Some("127.0.0.1".into()),
                     display_handle: None,
                     public_bio: None,
@@ -4298,13 +4497,15 @@ mod tests {
                 settings.codex_source = Some(settings::SourceDeclaration::Watch {
                     path: dir.path().join("codex"),
                 });
-                settings.near_ai = Some(crate::envelope::NearAiSettings {
-                    api_key: "test-key".into(),
-                    base_url: Some(classifier),
-                    model: None,
-                });
             }
-            shared.store.ensure_near_ai_notice_shown().unwrap();
+            // A classifier attached to this test's own transcript directory
+            // (unique per test: it is under its temp dir), standing in for an
+            // environment-attached filter, so the transient-failure paths
+            // below have something to fail.
+            crate::envelope::test_filter_hook::attach_http_classifier_for_cwd(
+                project_cwd.clone(),
+                classifier,
+            );
             let project_key = policy::project_key_for(Some(&project_cwd));
             assert_ne!(project_key, policy::UNKNOWN_PROJECT_KEY);
             shared
@@ -4432,9 +4633,8 @@ mod tests {
                                 }
                                 let raw = serde_json::from_value(request["raw_contribution"].clone())
                                     .unwrap();
-                                let cfg = crate::commands::unenrolled_preview_config();
                                 let redactor =
-                                    crate::envelope::build_redactor_with(&cfg, None, None).unwrap();
+                                    crate::envelope::build_redactor(None).unwrap();
                                 let mut envelope =
                                     crate::envelope::redact_to_envelope(&redactor, raw)
                                         .await
@@ -5180,16 +5380,9 @@ mod tests {
         assert_eq!(entry_id, e.entry_id);
     }
 
-    /// Reviewed as Medium on #1009. The CLI writes the same notice marker the
-    /// app's acknowledge does, without going through the handler that
-    /// re-offers. The upload pass now re-offers whenever the gate is open, so
-    /// the route to the acknowledgment does not decide whether the refused
-    /// sessions come back.
-    /// A queue with one entry refused at the NEAR AI notice gate, the
-    /// gate's health label raised, and the notice then acknowledged the way
-    /// the CLI does it: the marker and nothing else.
-    fn cli_acknowledged_notice_fixture() -> (tempfile::TempDir, Arc<ipc::DaemonShared>, uuid::Uuid)
-    {
+    /// A queue an older build wrote, with one entry refused at the retired
+    /// NEAR AI notice gate. No marker exists: the notice was never shown.
+    fn retired_notice_hold_fixture() -> (tempfile::TempDir, Arc<ipc::DaemonShared>, uuid::Uuid) {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
         let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
@@ -5197,7 +5390,7 @@ mod tests {
             let mut q = shared.queue.lock().expect("queue lock");
             let e = queue::QueueEntry {
                 entry_id: uuid::Uuid::new_v4(),
-                session_hash: "sha256:cliack-settle".to_string(),
+                session_hash: "sha256:retired-notice".to_string(),
                 ..Default::default()
             };
             let id = e.entry_id;
@@ -5205,137 +5398,51 @@ mod tests {
             q.set_state(
                 id,
                 queue::QueueState::Refused,
-                Some(health::LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
+                Some(RETIRED_NOTICE_REASON.to_string()),
             );
             id
         };
-        shared.health.lock().expect("health lock").fail(
-            health::LABEL_NEAR_AI_NOTICE_PENDING,
-            at("2026-08-08T12:00:00Z"),
-        );
-        shared.store.ensure_near_ai_notice_shown().unwrap();
         (dir, shared, id)
     }
 
-    /// Reviewed as Low on #1009 (item 1). The app's acknowledge handler
-    /// clears the gate's health label; a CLI acknowledgement did not. Left
-    /// set, it ranks first in `precedence()`, hides every lower-ranked
-    /// problem in the banner, and keeps `blocks_expiry()` true until
-    /// something is approved by hand.
+    /// The hold is released with no acknowledgement and no marker, and the
+    /// entry comes back to waiting -- not approved: releasing a hold must not
+    /// itself authorise an upload.
     #[test]
-    fn a_cli_acknowledgement_clears_the_notice_health_label() {
-        let (_dir, shared, _id) = cli_acknowledged_notice_fixture();
+    fn a_retired_notice_hold_is_released_without_any_acknowledgement() {
+        let (_dir, shared, id) = retired_notice_hold_fixture();
+        assert!(!shared.store.dir().join("near-ai-notice-shown").exists());
 
-        settle_near_ai_notice(&shared, at("2026-08-08T13:00:00Z"));
+        let outcome = release_retired_notice_holds(&shared, at("2026-08-08T13:00:00Z"));
 
-        let h = shared.health.lock().expect("health lock").clone();
-        assert_ne!(
-            h.last_error_label.as_deref(),
-            Some(health::LABEL_NEAR_AI_NOTICE_PENDING),
-            "the gate is open, so its label must not stay raised"
+        assert_eq!(outcome.reoffered, 1);
+        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
+        assert_eq!(e.entry_id, id);
+        assert_eq!(e.state, queue::QueueState::Pending);
+        assert!(!e.approved_unattended);
+        assert!(
+            !shared.store.dir().join("near-ai-notice-shown").exists(),
+            "releasing the hold records no acknowledgement"
         );
-        assert!(!h.blocks_expiry());
     }
 
-    /// Reviewed as Low on #1009 (item 2). Re-offering is bookkeeping and
-    /// sends nothing, so pause and quiesce must not hold it back. (Dry-run
-    /// is covered by where the loop calls this: outside the `!dry_run`
-    /// block, ahead of the watcher.)
+    /// Bookkeeping that sends nothing: pause and quiesce do not hold it back,
+    /// and a second run changes nothing.
     #[test]
-    fn a_paused_or_quiesced_daemon_still_re_offers_and_clears_the_label() {
+    fn releasing_retired_notice_holds_ignores_pause_and_is_idempotent() {
         for hold in ["paused", "quiesced"] {
-            let (_dir, shared, id) = cli_acknowledged_notice_fixture();
+            let (_dir, shared, id) = retired_notice_hold_fixture();
             match hold {
                 "paused" => shared.state.lock().unwrap().paused = true,
                 _ => shared.quiesced.store(true, Ordering::Relaxed),
             }
-
-            let outcome = settle_near_ai_notice(&shared, at("2026-08-08T13:00:00Z"));
-
-            assert_eq!(
-                outcome.reoffered, 1,
-                "{hold}: the refused session came back"
-            );
+            let first = release_retired_notice_holds(&shared, at("2026-08-08T13:00:00Z"));
+            assert_eq!(first.reoffered, 1, "{hold}");
             let e = shared.queue.lock().expect("queue lock").all()[0].clone();
-            assert_eq!(e.entry_id, id);
-            assert_eq!(e.state, queue::QueueState::Pending, "{hold}");
-            assert_ne!(
-                shared.health.lock().unwrap().last_error_label.as_deref(),
-                Some(health::LABEL_NEAR_AI_NOTICE_PENDING),
-                "{hold}: label cleared"
-            );
+            assert_eq!((e.entry_id, e.state), (id, queue::QueueState::Pending));
+            let second = release_retired_notice_holds(&shared, at("2026-08-08T13:01:00Z"));
+            assert!(!second.changed(), "{hold}: nothing left to release");
         }
-    }
-
-    /// Nothing moves, and the label stays, while the notice is still
-    /// unacknowledged.
-    #[test]
-    fn nothing_settles_before_the_notice_is_acknowledged() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
-        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
-        {
-            let mut q = shared.queue.lock().expect("queue lock");
-            let e = queue::QueueEntry {
-                entry_id: uuid::Uuid::new_v4(),
-                session_hash: "sha256:not-yet".to_string(),
-                ..Default::default()
-            };
-            let id = e.entry_id;
-            q.upsert(e, 100).unwrap();
-            q.set_state(
-                id,
-                queue::QueueState::Refused,
-                Some(health::LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
-            );
-        }
-        shared.health.lock().unwrap().fail(
-            health::LABEL_NEAR_AI_NOTICE_PENDING,
-            at("2026-08-08T12:00:00Z"),
-        );
-
-        let outcome = settle_near_ai_notice(&shared, at("2026-08-08T13:00:00Z"));
-
-        assert!(!outcome.changed());
-        assert_eq!(
-            shared.queue.lock().unwrap().all()[0].state,
-            queue::QueueState::Refused
-        );
-        assert_eq!(
-            shared.health.lock().unwrap().last_error_label.as_deref(),
-            Some(health::LABEL_NEAR_AI_NOTICE_PENDING)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_notice_acknowledged_outside_the_app_still_re_offers() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
-        let shared = Arc::new(ipc::DaemonShared::load(store).unwrap());
-        let id = {
-            let mut q = shared.queue.lock().expect("queue lock");
-            let e = queue::QueueEntry {
-                entry_id: uuid::Uuid::new_v4(),
-                session_hash: "sha256:cliack".to_string(),
-                ..Default::default()
-            };
-            let id = e.entry_id;
-            q.upsert(e, 100).unwrap();
-            q.set_state(
-                id,
-                queue::QueueState::Refused,
-                Some(health::LABEL_NEAR_AI_NOTICE_PENDING.to_string()),
-            );
-            id
-        };
-        // What the CLI does: the marker, and nothing else.
-        shared.store.ensure_near_ai_notice_shown().unwrap();
-
-        settle_near_ai_notice(&shared, at("2026-08-08T13:00:00Z"));
-
-        let e = shared.queue.lock().expect("queue lock").all()[0].clone();
-        assert_eq!(e.entry_id, id);
-        assert_eq!(e.state, queue::QueueState::Pending);
     }
 
     #[tokio::test]
@@ -5436,6 +5543,10 @@ mod tests {
         // answered either way.
         assert!(h.uploads.load(Ordering::SeqCst) <= 1);
         assert!(entry.retry_after.unwrap() >= now + UPLOAD_HUNG_RETRY);
+        // The deadline paces the entry even though a hang records no retry
+        // label: a fresh trace that hung must not be claimed again at once.
+        assert!(!entry.ready_for_upload(now + chrono::Duration::seconds(1)));
+        assert!(entry.ready_for_upload(entry.retry_after.unwrap()));
         assert_eq!(
             entry.attempts, 0,
             "a hang is not counted against the session"
@@ -6745,10 +6856,10 @@ mod tests {
 
     /// A witness that cannot be reached judged nothing. The session keeps
     /// its approval and is tried again on the transient-upload backoff,
-    /// never refused, and the pass stops there: one witness serves every
-    /// session, so the next would meet the same wall.
+    /// never refused. Two distinct failures are not enough evidence to
+    /// stop other traces; the shared circuit requires three.
     #[tokio::test]
-    async fn an_unreachable_witness_is_retried_and_stops_the_pass() {
+    async fn isolated_witness_failures_back_off_each_trace_without_stopping_the_pass() {
         let h = TransientRetryHarness::build_with(true, true).await;
         h.add_session(
             "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
@@ -6767,9 +6878,182 @@ mod tests {
             .iter()
             .filter(|e| e.reason_label.as_deref() == Some("witness_unreachable"))
             .collect();
-        assert_eq!(tried.len(), 1, "the pass stopped at the first: {entries:?}");
+        assert_eq!(
+            tried.len(),
+            2,
+            "each trace gets an independent attempt: {entries:?}"
+        );
         assert!(tried[0].retry_after.is_some());
         assert_eq!(tried[0].transient_upload_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn one_failed_witness_trace_does_not_starve_a_healthy_trace() {
+        let h = TransientRetryHarness::with_witness().await;
+        h.add_session(
+            "9f9f9f9f-9f9f-9f9f-9f9f-9f9f9f9f9f9f",
+            "a different approved trace, mail alice.smith@example.org",
+        )
+        .await;
+        h.witness_unavailable.store(true, Ordering::SeqCst);
+        h.witness_delay_ms.store(100, Ordering::SeqCst);
+        let now = TransientRetryHarness::now();
+        drain_approved_once_for_test(&h.shared, now).await.unwrap();
+        wait_until(std::time::Duration::from_secs(10), || {
+            h.witness_calls.lock().unwrap().len() == 1
+        })
+        .await;
+        // The first request captured the error. Every later trace succeeds.
+        h.witness_unavailable.store(false, Ordering::SeqCst);
+        assert!(settle_witness_worker_for_test(&h.shared).await);
+        let entries = h.entries();
+        assert_eq!(h.witness_calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.holds_witness_certificate())
+                .count(),
+            1
+        );
+        let failed = entries
+            .iter()
+            .find(|e| !e.holds_witness_certificate())
+            .unwrap();
+        assert_eq!(failed.state, queue::QueueState::Approved);
+        assert_eq!(failed.transient_upload_failures, 1);
+        assert!(failed.retry_after.unwrap() > now);
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+        // Only the independently certified trace uploads on the next pass.
+        drain_approved_once_for_test(&h.shared, now + chrono::Duration::seconds(2))
+            .await
+            .unwrap();
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.entries()
+                .iter()
+                .filter(|e| e.state == queue::QueueState::Approved)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_automatic_traces_precede_retries_but_manual_approvals_come_first() {
+        let now = Utc::now();
+        let entry = |n, attempts, manual: bool, wait| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: !manual,
+            retry_after: Some(now + chrono::Duration::seconds(wait)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 17, false, -10),
+            entry(2, 0, false, 0),
+            entry(3, 17, true, 0),
+            entry(4, 2, false, -100),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![3, 2, 4, 1]
+        );
+    }
+
+    /// The transient witness labels are mapped by name in five places, and
+    /// the sets differ on purpose. This table is the one statement of what
+    /// each place does with each label; a label added to
+    /// `submit::WITNESS_TRANSIENT_LABELS` fails here until it has a row.
+    #[test]
+    fn every_transient_witness_label_has_an_answer_at_every_site() {
+        use trace_commons_protocol::witness_blocked::WitnessBlockedLabel as B;
+        // (label, witness-blocked report, stops a CLI batch, monitor line)
+        let table: [(&str, Option<B>, bool, bool); 6] = [
+            ("witness_timeout", Some(B::TimedOut), true, true),
+            ("witness_unreachable", Some(B::Unreachable), true, true),
+            (
+                "witness_classifier_unavailable",
+                Some(B::Unreachable),
+                true,
+                true,
+            ),
+            ("witness_redaction_failed", Some(B::Unreachable), true, true),
+            // The quote fetch is the first request to the witness.
+            (
+                "witness_attestation_unavailable",
+                Some(B::Unreachable),
+                false,
+                false,
+            ),
+            // The collateral is Intel's, fetched by ingest: not the witness.
+            ("witness_collateral_unavailable", None, false, false),
+        ];
+        let mut labels: Vec<&str> = table.iter().map(|row| row.0).collect();
+        labels.sort_unstable();
+        let mut expected = crate::submit::WITNESS_TRANSIENT_LABELS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(labels, expected, "one row per transient witness label");
+
+        let unreachable = crate::witness_copy::witness_copy()
+            .review
+            .failed_unreachable;
+        for (label, blocked, stops, monitor) in table {
+            let failed = uploader::UploadDecision::Failed {
+                reason_label: label.to_string(),
+            };
+            assert_eq!(uploader::witness_blocked_label(&failed), blocked, "{label}");
+            assert_eq!(
+                crate::submit::WITNESS_BATCH_STOP_LABELS.contains(&label),
+                stops,
+                "{label}"
+            );
+            assert_eq!(
+                crate::preview_copy::monitor_failure_line(label).is_some(),
+                monitor,
+                "{label}"
+            );
+            assert_eq!(
+                crate::witness_copy::witness_refusal_line(Some(label)),
+                unreachable,
+                "{label}"
+            );
+            assert!(
+                queue::REASONS_NEEDING_A_PERSON.contains(&label),
+                "{label} must hold for a person once its budget is spent"
+            );
+        }
+    }
+
+    /// `attempts` never resets, so it cannot say whether an entry is waiting
+    /// on a retry now. An automatic trace whose earlier attempts were cleared
+    /// by a fresh approval or a pinned review (no `retry_after`) is fresh work
+    /// again, and must not sort behind every newer automatic trace for good.
+    #[test]
+    fn an_attempted_trace_with_no_pending_retry_sorts_as_fresh_work() {
+        let now = Utc::now();
+        let entry = |n, attempts, retry_after: Option<i64>, age: i64| queue::QueueEntry {
+            entry_id: uuid::Uuid::from_u128(n),
+            attempts,
+            approved_unattended: true,
+            retry_after: retry_after.map(|wait| now + chrono::Duration::seconds(wait)),
+            last_modified_at: Some(now - chrono::Duration::seconds(age)),
+            ..Default::default()
+        };
+        let entries = send_order(vec![
+            entry(1, 0, None, 10),
+            // Reapproved after a 429: attempts kept, retry cleared, oldest.
+            entry(2, 3, None, 100),
+            entry(3, 2, Some(-50), 1000),
+        ]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.entry_id.as_u128())
+                .collect::<Vec<_>>(),
+            vec![2, 1, 3]
+        );
     }
 
     /// A witness that is up but cannot do its job right now (`503
@@ -6858,6 +7142,8 @@ mod tests {
         for fetch in [
             "witness_timeout",
             "witness_unreachable",
+            "witness_classifier_unavailable",
+            "witness_redaction_failed",
             "witness_attestation_unavailable",
             "witness_collateral_unavailable",
         ] {
@@ -6935,6 +7221,22 @@ mod tests {
             .find(|row| row.entry_id == Some(entry_id))
             .unwrap_or_else(|| panic!("the session is still listed: {rows:?}"));
         assert_eq!(row.state, past_sessions::PastSessionState::Approved);
+    }
+
+    #[tokio::test]
+    async fn saturation_respects_the_server_delay_independently_of_prior_trace_failures() {
+        let h = TransientRetryHarness::with_witness().await;
+        let id = h.entry().entry_id;
+        for _ in 0..17 {
+            h.shared.queue.lock().unwrap().record_attempt(id, None);
+        }
+        *h.witness_saturated.lock().unwrap() = Some("45");
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let entry = h.entry();
+        assert_eq!(entry.state, queue::QueueState::Approved);
+        assert!(entry.retry_after.unwrap() >= now + chrono::Duration::seconds(45));
+        assert!(entry.retry_after.unwrap() < now + chrono::Duration::seconds(70));
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage
@@ -7257,7 +7559,6 @@ mod tests {
                 user_subject: "alice".to_string(),
                 device_key_id: "sha256:aa".to_string(),
                 consent_scopes: vec!["debugging_evaluation".to_string()],
-                pii_filter: None,
                 allowed_hosts: Some("127.0.0.1".to_string()),
                 display_handle: Some("quiet-otter".to_string()),
                 public_bio: None,
@@ -7346,6 +7647,263 @@ mod tests {
              runtime that path builds"
         );
         embedded.close();
+    }
+
+    /// A daemon started as the host part, in a scratch runtime directory.
+    #[cfg(unix)]
+    fn host_link_store(
+        sandboxed: bool,
+        unit: bool,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::config::ConfigStore,
+        std::path::PathBuf,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let runtime = run.path().join("tc");
+        if sandboxed {
+            std::fs::create_dir(&runtime).unwrap();
+        }
+        let store = crate::config::ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        host_link_test_runtimes().lock().unwrap().insert(
+            store.dir().to_path_buf(),
+            HostLinkTestRuntime {
+                runtime: runtime.clone(),
+                sandboxed,
+                unit,
+            },
+        );
+        (dir, run, store, runtime)
+    }
+
+    #[cfg(unix)]
+    fn store_dir_text(dir: &tempfile::TempDir) -> &str {
+        dir.path().to_str().unwrap()
+    }
+
+    /// Ask `status` over a socket named directly, off the runtime thread.
+    #[cfg(unix)]
+    async fn status_at(sock: &std::path::Path) -> Option<ipc::Response> {
+        let sock = sock.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            client::try_call_at(&sock, "status", &serde_json::json!({}))
+        })
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    /// `close` aborts the serving task; the listener closes when the runtime
+    /// next retires it, which needs this task to yield. A process that ends
+    /// after `close` (`daemon run`) gets there at once.
+    #[cfg(unix)]
+    async fn until_not_listening(sock: &std::path::Path) {
+        for _ in 0..200 {
+            if !client::is_running_at(sock) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_unit_answers_over_the_host_link_and_leaves_its_marker() {
+        let (_dir, _run, store, runtime) = host_link_store(false, true);
+        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
+        let embedded = start_embedded(store.clone()).await.unwrap();
+
+        let answer = status_at(&sock).await.expect("the host link answered");
+        assert!(answer.error.is_none(), "{:?}", answer.error);
+        assert!(answer.result.is_some());
+
+        embedded.close();
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+        until_not_listening(&sock).await;
+        assert!(runtime.join(host_link::HOST_UNIT_MARKER_FILE).is_file());
+        assert_eq!(
+            host_link::probe(&sock),
+            host_link::LinkState::Down,
+            "a stopped host unit leaves its marker, so a sandboxed window \
+             attaches to it rather than starting a second daemon"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn any_other_host_daemon_serves_the_link_and_leaves_nothing() {
+        // A one-off `daemon run`, or a GTK window on the host hosting its
+        // own: it serves the host link while it runs, and when it stops a
+        // sandboxed window must fall back to its own daemon.
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
+        let sock = runtime.join(host_link::HOST_LINK_SOCK_FILE);
+        let embedded = start_embedded(store.clone()).await.unwrap();
+        assert!(status_at(&sock).await.is_some(), "the host link answered");
+        assert!(!runtime.join(host_link::HOST_UNIT_MARKER_FILE).exists());
+
+        embedded.close();
+        until_not_listening(&sock).await;
+        assert!(
+            std::fs::symlink_metadata(&sock).is_err(),
+            "a daemon that is not the unit removes its host-link socket"
+        );
+        assert_eq!(host_link::probe(&sock), host_link::LinkState::Absent);
+        assert_eq!(
+            host_link::route(true, Some(&sock), host_link::probe),
+            host_link::Route::Local
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_host_link_answers_nobody_its_peer_check_refuses() {
+        let (_dir, _run, store, _runtime) = host_link_store(false, false);
+        let embedded = start_embedded(store).await.unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let sock = scratch.path().join("refusing.sock");
+        let listener = host_link::bind(&sock).unwrap();
+        let own = ironwire_pointer::current_uid().unwrap();
+        let server = tokio::spawn(host_link::serve_as(
+            listener,
+            Arc::clone(&embedded.shared),
+            own.wrapping_add(1),
+        ));
+
+        let reply = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream = std::os::unix::net::UnixStream::connect(&sock).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let _ = stream.write_all(b"{\"id\":1,\"method\":\"status\",\"params\":{}}\n");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).map(|_| buf)
+        })
+        .await
+        .unwrap();
+        server.abort();
+        embedded.close();
+        // Refused means closed with nothing written. On Linux, closing a
+        // unix socket whose request was never read resets the peer instead
+        // of ending its stream; that is the same refusal. A timeout is not.
+        match reply {
+            Ok(answer) => assert_eq!(answer, Vec::<u8>::new(), "a refused peer gets no answer"),
+            Err(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset,
+                "closed, not timed out: {e}"
+            ),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_refused_on_the_watcher_lock_says_so() {
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
+        std::fs::create_dir(&runtime).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runtime.join(host_link::WATCHER_LOCK_FILE))
+            .unwrap();
+        held.try_lock().unwrap();
+        let err = match start_embedded(store).await {
+            Ok(_) => panic!("another daemon on this login watches"),
+            Err(e) => e,
+        };
+        // The FFI label stays `already-running`; the words say which lock.
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::AlreadyRunning)
+        );
+        assert_eq!(
+            err.to_string(),
+            "another trace-commons-contributor daemon on this login already watches \
+             the session folders, in the Flatpak sandbox or on the host"
+        );
+        assert!(!format!("{err:#}").contains(store_dir_text(&_dir)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_watcher_lock_refuses_the_start_as_unusable() {
+        let (_dir, run, store, runtime) = host_link_store(false, false);
+        std::fs::create_dir(&runtime).unwrap();
+        let target = run.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, runtime.join(host_link::WATCHER_LOCK_FILE)).unwrap();
+        let err = match start_embedded(store.clone()).await {
+            Ok(_) => panic!("an unusable watcher lock must not run unarbitrated"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            None,
+            "not `already running`: nobody else may be"
+        );
+        assert!(!target.exists());
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_start_refused_on_the_watcher_lock_leaves_nothing_behind() {
+        let (_dir, _run, store, runtime) = host_link_store(false, false);
+        std::fs::create_dir(&runtime).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(runtime.join(host_link::WATCHER_LOCK_FILE))
+            .unwrap();
+        held.try_lock().unwrap();
+
+        let err = match start_embedded(store.clone()).await {
+            Ok(_) => panic!("another daemon on this login watches"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.downcast_ref::<StartFailure>(),
+            Some(&StartFailure::AlreadyRunning)
+        );
+        assert!(!store.daemon_path(DAEMON_SOCK_FILE).exists());
+        assert!(!store.daemon_path(DAEMON_LOCK_FILE).exists());
+        assert!(!runtime.join(host_link::HOST_LINK_SOCK_FILE).exists());
+
+        drop(held);
+        start_embedded(store).await.unwrap().close();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sandboxed_daemon_holds_the_watcher_lock_and_serves_no_host_link() {
+        let (_dir, _run, store, runtime) = host_link_store(true, false);
+        let embedded = start_embedded(store).await.unwrap();
+        assert!(!runtime.join(host_link::HOST_LINK_SOCK_FILE).exists());
+
+        let host = tempfile::tempdir().unwrap();
+        assert_eq!(
+            host_link::claim(
+                host.path(),
+                host.path(),
+                Some(runtime.clone()),
+                false,
+                false
+            )
+            .unwrap_err(),
+            host_link::ClaimError::WatcherHeld,
+            "the host part must not start while the sandbox watches"
+        );
+        embedded.close();
+        assert!(
+            host_link::claim(host.path(), host.path(), Some(runtime), false, false)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]
@@ -7459,7 +8017,6 @@ mod tests {
                 user_subject: "alice".into(),
                 device_key_id: device.device_key_id,
                 consent_scopes: vec!["debugging_evaluation".into()],
-                pii_filter: None,
                 allowed_hosts: Some("127.0.0.1".into()),
                 display_handle: None,
                 public_bio: None,

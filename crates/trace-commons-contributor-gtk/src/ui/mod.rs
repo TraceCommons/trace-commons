@@ -6,29 +6,62 @@
 //! application tells a contributor to install a shell extension.
 
 pub(crate) mod account_change;
+pub mod appearance;
+pub mod armed_mark;
 pub mod balance;
 pub mod community_brand;
+pub(crate) mod consent_settings;
 pub mod credential;
 mod css_contract;
+mod first_run;
+mod first_run_marker_check;
+mod first_run_screens;
+mod first_run_stage;
+mod first_run_stage_paint;
+mod first_run_stage_view;
+mod first_run_terms;
+mod first_run_tools;
+pub mod folder_handoff;
 pub mod funding;
+pub mod glass_backdrop;
+pub mod glass_feedback;
+pub mod glass_motion;
+pub mod hero_art;
+pub mod hero_card;
 pub mod history;
+pub(crate) mod history_detail;
+pub mod home;
 pub mod insights;
 pub mod legacy_move;
+mod lift;
 mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
+pub mod monitor;
+pub mod omarchy;
 pub mod onboarding;
-mod onboarding_nearai;
-mod onboarding_wallet;
+mod payout_link;
+pub mod popover_stack;
 pub mod preview;
 pub mod private_inference;
+pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
+pub(crate) mod sent_training;
+pub mod service_dialog;
 pub mod settings;
 pub(crate) mod shortcuts;
+mod stage;
 pub mod style;
 mod terminal_choice;
+pub(crate) mod terms_hold;
+pub mod tool_tile;
 pub mod update;
+pub mod wrap_row;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../../tests/support/consent_fixture.rs"]
+pub(crate) mod consent_fixture;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -45,54 +78,14 @@ use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
 
-/// The header bar's height, from §5.1's Linux column. Set as a size request
-/// rather than in CSS because `AdwHeaderBar` derives its height from the
-/// tallest thing packed into it, and the mark and the switcher are both
-/// shorter than the bar the design draws.
-const HEADER_HEIGHT: i32 = 46;
-
 /// The reading column, shared by every screen in this window so the header's
 /// switcher, the health banner and the queue's cards all sit on the same two
 /// vertical lines.
 const COLUMN_MAX: i32 = 840;
 const COLUMN_TIGHTEN: i32 = 680;
 
-/// The six screens, in the order the switcher shows them, with the icon
-/// each one carries. One list, so the stack pages and the switcher items
-/// cannot drift apart.
-///
-/// **Every icon name here must stay symbolic.** GTK recolours a symbolic
-/// icon from its node's `color`, which is what lets style.css mute an
-/// unselected item's icon and turn the selected one green without this code
-/// setting anything. A full-colour icon ignores `color` and renders as-is,
-/// so swapping one in would silently leave that item's icon un-recoloured
-/// while the others kept working -- a difference that shows up in a
-/// screenshot months later and in no diff at all.
-///
-/// The model-calls item's label is read from the shared copy module and
-/// never retyped: the word this surface may not say is "private", and the
-/// only way three shells keep saying the same true thing is by reading one
-/// definition. The stack name below it is internal and is read by nobody.
-///
-/// This is the list that is always shown. The mission-drafts screen is
-/// appended by [`screens`] only while the daemon's `missions_enabled` switch
-/// is on, so the switcher, the tray menu and the accelerators, which all read
-/// [`screens`], hide it together.
-pub(crate) const BASE_SCREENS: [(&str, &str, &str); 5] = [
-    ("insights", "Insights", "view-statistics-symbolic"),
-    ("queue", "Queue", "view-list-symbolic"),
-    ("history", "History", "document-open-recent-symbolic"),
-    (
-        PRIVATE_INFERENCE_SCREEN,
-        copy::PRIVATE_INFERENCE_DESTINATION,
-        "network-transmit-receive-symbolic",
-    ),
-    ("settings", "Settings", "emblem-system-symbolic"),
-];
-
-/// The stack name of the local mission-draft inbox.
-pub(crate) const MISSION_DRAFTS_SCREEN: (&str, &str, &str) =
-    ("mission-drafts", "Mission drafts", "document-edit-symbolic");
+/// Settings, which is its own window and no tab.
+pub(crate) const SETTINGS_SCREEN: &str = "settings";
 
 /// Whether this process shows missions: the daemon's `missions_enabled`
 /// setting, read once at startup by `main` and fixed for the process. Off
@@ -133,29 +126,26 @@ pub fn peek_state_dir() -> std::path::PathBuf {
     }
 }
 
-/// The screens in switcher order for a given switch position.
-pub(crate) fn screens_with(missions: bool) -> Vec<(&'static str, &'static str, &'static str)> {
-    let mut screens = BASE_SCREENS.to_vec();
-    if missions {
-        screens.push(MISSION_DRAFTS_SCREEN);
-    }
-    screens
-}
-
-/// The screens this process shows. The one list the switcher, the tray menu
-/// and the accelerators all read.
-pub(crate) fn screens() -> Vec<(&'static str, &'static str, &'static str)> {
-    screens_with(missions_shown())
+/// The window's tabs, in the strip's order, as `(name, label)`: Home,
+/// Inference, Traces, Insights, labelled from the core's shell table
+/// (`monitor::tabs::Tab`). The one list the tab strip, the tray menu and
+/// the accelerators all read, so the digit a contributor presses is the
+/// position they see.
+///
+/// History, Mission drafts and Settings are not in it: History and Mission
+/// drafts are sub-pages behind the breadcrumb, and Settings is its own
+/// window. Each still opens by its old name (`App::open_screen`).
+pub(crate) fn screens() -> Vec<(&'static str, &'static str)> {
+    monitor::tabs::Tab::ALL
+        .into_iter()
+        .map(|tab| (tab.name(), tab.title()))
+        .collect()
 }
 
 /// The stack's name for the model-calls screen. Named once because the
 /// tray and every other shortcut into it has to spell it identically, and
 /// `set_visible_child_name` on a name no page carries is a silent no-op.
 pub const PRIVATE_INFERENCE_SCREEN: &str = "private-inference";
-
-/// The switcher's icon, §5.1 item 1. Set in pixels rather than by an icon
-/// size so it matches the label it sits beside at every text scale.
-const SWITCHER_ICON: i32 = 13;
 
 type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 
@@ -165,13 +155,16 @@ type Callback = Box<dyn FnOnce(&Rc<App>, Outcome)>;
 /// response. Nothing here is computed from a duration this process picked --
 /// see `docs/contributor-daemon-ipc-v1_1.md` on the approval hold.
 pub struct PendingUndo {
-    /// Every entry this approval covers. A row's Submit holds exactly one; a
-    /// project group's Submit all holds every entry `approve` reported
-    /// approved, which is why Undo must cancel each of them rather than
-    /// assuming there is only ever one.
+    /// The entries this approval is shown to cover: one for a row's Submit,
+    /// the sendable rows this window saw for a folder's Submit all. The
+    /// inspector lists them; Undo does not read them for a folder, which it
+    /// cancels by `project_id` (`queue::undo_cancel_params`).
     pub entry_ids: Vec<String>,
     pub project_label: String,
-    /// When this window offered the undo, which is what the bar's "held 41s"
+    /// The folder whose Submit all this is; `None` for one trace's Submit.
+    /// The inspector's demand tells the two apart (`monitor::demand`).
+    pub folder: Option<String>,
+    /// When this window offered the undo, which is what the bar's "Approved 41s ago"
     /// counts up from. It counts *up* on purpose: the app cannot see the
     /// watcher's sweep, so a countdown would be a promise it cannot keep.
     pub approved_at: chrono::DateTime<chrono::Utc>,
@@ -189,7 +182,10 @@ pub struct App {
     pub tray: crate::tray::TrayState,
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
-    pub stack: adw::ViewStack,
+    /// The three-pane Monitor shell: the tabs, the map pane and the
+    /// inspector pane. Which screen is showing is its state, and
+    /// [`App::open_screen`] is the one way anything else moves it.
+    pub shell: monitor::Shell,
 
     /// `admission_evidence_required`, as `get_settings` last answered it.
     ///
@@ -203,6 +199,7 @@ pub struct App {
     /// attestation.
     pub evidence_admitted: std::cell::Cell<bool>,
 
+    pub home: home::HomeView,
     pub queue: queue::QueueView,
     pub history: history::HistoryView,
     /// The model-calls screen. Its own destination rather than a card on
@@ -233,15 +230,13 @@ pub struct App {
     /// health banner rather than in it: the health slot carries one label,
     /// and a void must neither hide an outage nor be hidden by one.
     void_notices: gtk::Box,
+    /// The account's notices: the legacy invite move and its notice.
+    account_notices: gtk::Box,
     /// The move to a NEAR AI account for a device that joined with an
     /// invite: its state, and the dismissible offer card that sits first in
     /// the notices column (Settings holds the other set of controls).
     pub legacy_move: legacy_move::MoveState,
     pub legacy_card: legacy_move::Controls,
-    /// The count on the switcher's Queue item. Hidden at zero rather than
-    /// drawn as a "0": an empty badge is a decoration, and the queue's own
-    /// empty state already says the true thing.
-    queue_badge: gtk::Label,
 
     callbacks: RefCell<HashMap<u64, Callback>>,
     pub entries: RefCell<Vec<QueueEntry>>,
@@ -256,12 +251,35 @@ pub struct App {
     /// day the rule changes an arm.
     pub projects: RefCell<Vec<crate::model::Project>>,
     pub status: RefCell<Option<Status>>,
+    /// The last `list_history` page, for the Traces graph and an opened
+    /// History row's details. `None` while unread or after a failed read,
+    /// which the graph draws as a dash, never as nothing shared.
+    pub history_records: RefCell<Option<Vec<crate::model::HistoryRecord>>>,
+    /// The entry this window last kept, and the one it last dismissed, for
+    /// the Traces map's transfer cards (`monitor::transfers::Feed`), as the
+    /// Mac's `TracesStore.lastKept` and `lastDismissed`. Set only after the
+    /// daemon answered. This shell has no keep action yet, so `last_kept`
+    /// stays `None` until one sets it.
+    pub last_kept: RefCell<Option<String>>,
+    pub last_dismissed: RefCell<Option<String>>,
     /// The week band's three figures. Read here rather than passed down from
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
     pub rollup: RefCell<HistoryRollup>,
+    /// The last `history_rollup` read that worked, as Home reads it (a
+    /// count it did not give stays unknown); `None` before the first answer
+    /// and after a failed read, so the summary never shows a stale figure.
+    pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
+    /// The commons' statement of what pending credit waits on, from the
+    /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
+    pub credit_condition: RefCell<Option<String>>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
+    /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
+    pub undo_writing: RefCell<std::collections::HashSet<queue::UndoIdentity>>,
+    /// The folder whose Submit all is waiting on the daemon's answer, as
+    /// the Mac's `TracesStore.submittingFolder`: a demand on the inspector.
+    pub submitting_folder: RefCell<Option<String>>,
     /// The handle for the once-a-second tick that moves the undo bar's
     /// elapsed figure, held so a second approval can stop the first one's
     /// timer instead of leaving it running. Approving is a loop -- the sheet
@@ -325,6 +343,9 @@ pub struct App {
     /// screen they just switched to.
     pub history_location: RefCell<crate::queue_folders::Location>,
     quit_confirmed: Cell<bool>,
+    /// The folders screen was shown for the daemon this window is attached
+    /// to; cleared when the backend is replaced.
+    folders_asked: Cell<bool>,
 }
 
 /// How long a scroll must sit still before `preview_visible` is sent.
@@ -335,71 +356,35 @@ pub struct App {
 /// tune it further -- see the design's "Priority" section.
 const SCROLL_SETTLE_DEBOUNCE_MS: u64 = 250;
 
+/// How often a Flatpak window attached to the host daemon checks that the
+/// host part is still there.
+const FALLBACK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl App {
     pub fn build(application: &adw::Application, worker: Worker) -> Rc<Self> {
         // Before any widget is built, so nothing is ever drawn in the
         // theme's palette and then repainted in this one.
         style::install();
 
+        // No default size here: the shell sets it from the panes it opens
+        // with (`monitor::Shell::new`).
         let window = adw::ApplicationWindow::builder()
             .application(application)
             .title(copy::APP_NAME)
-            .default_width(980)
-            .default_height(720)
             .build();
 
         window.set_widget_name("contributions-window");
-        let stack = adw::ViewStack::new();
+        let home = home::HomeView::new(missions_shown());
         let queue = queue::QueueView::new();
         let history = history::HistoryView::new();
         let private_inference = private_inference::PrivateInferenceView::new();
         let settings = settings::SettingsView::new();
         let update = update::UpdateView::new();
 
-        // Pages and switcher items are built from the same list, in the same
-        // order, so a screen cannot be renamed in one place and not the
-        // other.
         let insights = insights::InsightsView::new(&window);
         // Not constructed while missions are hidden; the code stays.
         let mission_drafts =
             missions_shown().then(|| mission_drafts::MissionDraftsView::new(&window));
-        let mut pages: Vec<&gtk::Box> = vec![
-            &insights.root,
-            &queue.root,
-            &history.root,
-            &private_inference.root,
-            &settings.root,
-        ];
-        if let Some(view) = &mission_drafts {
-            pages.push(&view.root);
-        }
-        debug_assert_eq!(pages.len(), screens().len());
-        for ((name, label, icon_name), page) in screens().into_iter().zip(pages) {
-            stack
-                .add_titled(page, Some(name), label)
-                .set_icon_name(Some(icon_name));
-        }
-
-        // This window is entered by the explicit Contributions action.
-        stack.set_visible_child_name("queue");
-        let queue_badge = gtk::Label::builder().visible(false).build();
-        queue_badge.add_css_class("tc-count-badge");
-        queue_badge.set_valign(gtk::Align::Center);
-
-        // The bar's own close button is left to `AdwHeaderBar`'s window
-        // controls rather than hand-built. The design draws a 24px round
-        // `x` on a faint wash, which is exactly what GNOME's own decoration
-        // already is -- and a hand-built one would lose the window menu, the
-        // keyboard path to it, and whatever button layout the contributor
-        // has chosen in their desktop settings.
-        let header = adw::HeaderBar::builder()
-            .title_widget(&view_switcher(&stack, &queue_badge))
-            .build();
-        header.add_css_class("tc-header");
-        header.set_size_request(-1, HEADER_HEIGHT);
-        // The mark, drawn from its own geometry rather than shipped as an
-        // asset. 20px is the header-bar size the design spec names.
-        header.pack_start(&mark::framed(20));
 
         let health_label = gtk::Label::builder()
             .wrap(true)
@@ -425,11 +410,9 @@ impl App {
         health_banner.append(&health_button);
         health_banner.add_css_class("tc-banner");
 
-        // The banner sits above the stack rather than inside the queue, so a
-        // contributor reading History or Settings still learns that
-        // contributions are held up. The design draws it on the queue
-        // because the queue is the only screen it drew; putting it here says
-        // the same thing on every screen and never says it twice.
+        // The banner is a notice over the Traces tab and its History page,
+        // as on the Mac (`monitor::notices`). Settings is its own window now
+        // and does not carry it.
         //
         // It is clamped to the same column as the screens below it, which is
         // the only reason this is a clamp and not a bare margin: an
@@ -446,17 +429,13 @@ impl App {
             .margin_end(style::space::XL)
             .build();
 
-        // Every void notice, in the same column as the health banner and for
-        // the same reason: a void changes what the contributor agreed to,
-        // and they learn it on whichever screen they are reading.
+        // Every consent notice about folders (grant voids, arming
+        // rewordings, a gate hold), in the same column as the health banner
+        // and over the same tabs, as on the Mac (`monitor::notices`).
         let void_notices = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(style::space::M)
             .build();
-        // The offer card is built once and kept first in the column, so a
-        // refresh never replaces a half-pasted invite.
-        let legacy_card = legacy_move::Controls::new(true);
-        void_notices.append(&legacy_card.root);
         let void_column = adw::Clamp::builder()
             .maximum_size(COLUMN_MAX)
             .tightening_threshold(COLUMN_TIGHTEN)
@@ -466,18 +445,79 @@ impl App {
             .margin_start(style::space::XL)
             .margin_end(style::space::XL)
             .build();
+        // The account's notices, the legacy invite move and its notice, are
+        // about the account rather than a tab, and are shown over every tab
+        // as on the Mac. The offer card is built once and kept first in the
+        // column, so a refresh never replaces a half-pasted invite.
+        let account_notices = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(style::space::M)
+            .build();
+        let legacy_card = legacy_move::Controls::new(true);
+        account_notices.append(&legacy_card.root);
+        let account_column = adw::Clamp::builder()
+            .maximum_size(COLUMN_MAX)
+            .tightening_threshold(COLUMN_TIGHTEN)
+            .child(&account_notices)
+            .visible(false)
+            .margin_top(style::space::L)
+            .margin_start(style::space::XL)
+            .margin_end(style::space::XL)
+            .build();
 
-        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.add_css_class("tc-root");
-        content.append(&header);
-        content.append(&update.root);
-        content.append(&banner_column);
-        content.append(&void_column);
-        content.append(&stack);
-        stack.set_vexpand(true);
+        // There is no header bar: the main pane's toolbar row is the title
+        // bar, with the desktop's own window controls in it
+        // (`monitor::shell`). The update banner, the health banner and the
+        // notices column that sat above the stack are popover notices laid
+        // over the tab now, in the Mac's stack.
+        let shell = monitor::Shell::new(
+            &window,
+            monitor::Pages {
+                home: &home.root,
+                inference: &private_inference.root,
+                traces: &queue.root,
+                history: &history.root,
+                insights: &insights.root,
+                mission_drafts: mission_drafts.as_ref().map(|view| &view.root),
+                settings: &settings.root,
+                notices: vec![
+                    // The front first, as the Mac stacks them
+                    // (`monitor::notices::Notice::ALL`).
+                    (
+                        monitor::notices::Notice::Undo,
+                        queue.undo_notice.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Health,
+                        banner_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Consent,
+                        void_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::ArmingOffer,
+                        queue.arming_notice.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::PrivateAiOffer,
+                        queue.private_inference_notice.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Account,
+                        account_column.clone().upcast(),
+                    ),
+                    (
+                        monitor::notices::Notice::Update,
+                        update.root.clone().upcast(),
+                    ),
+                ],
+            },
+            missions_shown(),
+        );
 
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&content));
+        toasts.set_child(Some(&shell.root));
         window.set_content(Some(&toasts));
 
         let app = Rc::new(Self {
@@ -485,8 +525,9 @@ impl App {
             tray: crate::tray::TrayState::default(),
             window,
             toasts,
-            stack,
+            shell,
             evidence_admitted: std::cell::Cell::new(false),
+            home,
             queue,
             history,
             private_inference,
@@ -496,16 +537,23 @@ impl App {
             health_label,
             health_button,
             void_notices,
+            account_notices,
             legacy_move: legacy_move::MoveState::default(),
             legacy_card,
-            queue_badge,
             callbacks: RefCell::new(HashMap::new()),
             entries: RefCell::new(Vec::new()),
             projects: RefCell::new(Vec::new()),
             status: RefCell::new(None),
+            history_records: RefCell::new(None),
+            last_kept: RefCell::new(None),
+            last_dismissed: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
+            summary_rollup: RefCell::new(None),
+            credit_condition: RefCell::new(None),
             undo: RefCell::new(None),
+            undo_writing: RefCell::new(Default::default()),
+            submitting_folder: RefCell::new(None),
             undo_tick: RefCell::new(None),
             previews: RefCell::new(HashMap::new()),
             previews_too_large: RefCell::new(HashMap::new()),
@@ -518,14 +566,19 @@ impl App {
             queue_location: RefCell::new(crate::queue_folders::Location::Root),
             history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
+            folders_asked: Cell::new(false),
         });
 
+        app.home.bind(&app);
         insights.bind_app(&app);
+        monitor::shell::wire(&app);
         app.wire_result_pump();
         app.wire_event_pump();
         app.wire_quit();
         app.wire_health_action();
         app.wire_tray();
+        app.wire_service_fallback();
+        app.wire_folder_refresh();
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -629,6 +682,9 @@ impl App {
                     // sweep still belongs -- it runs once per resync, not
                     // once per card resolved.
                     "resync_required" => {
+                        // The daemon may have restarted, counting its
+                        // managed revisions afresh.
+                        managed_sessions::backend_changed(&app.private_inference.managed_revision);
                         app.refresh();
                         app.poll_outstanding_previews();
                     }
@@ -694,12 +750,53 @@ impl App {
     /// including plain GNOME) never reaches this at all.
     fn wire_tray(self: &Rc<Self>) {
         let rx = crate::tray::spawn(self.tray.clone());
+        // The icon is drawn in the desktop's ink; draw it again when that
+        // flips. The tray lives as long as the process, as the window does.
+        let tray = self.tray.clone();
+        adw::StyleManager::default()
+            .connect_dark_notify(move |_| tray.redraw(self::mark::current_scheme()));
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             while let Ok(request) = rx.recv().await {
                 apply_tray_request(&app, request);
             }
         });
+    }
+
+    /// Draw the tray icon from a status reply, or from its absence: a
+    /// status that did not answer or could not be read is unavailable,
+    /// never the last state as current (`MenuBarStripInputs.of`).
+    fn render_tray(self: &Rc<Self>, status: Option<&Status>) {
+        use crate::tray_icon as icon;
+        let available = status.is_some();
+        let (condition, badge, nudge) = match status {
+            Some(status) => (
+                icon::condition(
+                    status.decisions_owed,
+                    status.unhealthy(),
+                    status.paused,
+                    true,
+                    false,
+                    true,
+                ),
+                icon::badge(status.decisions_owed),
+                status.nudge.as_ref(),
+            ),
+            None => (
+                icon::condition(None, false, false, false, false, true),
+                None,
+                None,
+            ),
+        };
+        let words = icon::mark_words(nudge, available, badge, condition)
+            .map(|words| words.tooltip.as_str())
+            .unwrap_or_default();
+        let strip = icon::Strip {
+            condition,
+            badge,
+            mark: icon::lit_mark(nudge, available),
+        };
+        self.tray.show(strip, self::mark::current_scheme(), words);
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
@@ -730,6 +827,121 @@ impl App {
             Box::new(move |app, outcome| {
                 if let Outcome::Call(result) = outcome {
                     callback(app, result)
+                }
+            }),
+        );
+    }
+
+    /// In a Flatpak attached to the host daemon: when the host part is gone
+    /// (uninstalled, or the login's runtime directory cleared), quietly go
+    /// back to running the daemon in the sandbox. Private AI then shows its
+    /// unavailable line again. Nothing is shown about it.
+    fn wire_service_fallback(self: &Rc<Self>) {
+        if !trace_commons_contributor::daemon::host_link::runs_sandboxed() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let busy = Rc::new(Cell::new(false));
+        let failed = Rc::new(Cell::new(false));
+        glib::timeout_add_local(FALLBACK_INTERVAL, move || {
+            let Some(app) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if busy.get() {
+                return glib::ControlFlow::Continue;
+            }
+            let link = trace_commons_contributor::daemon::host_link::socket_path()
+                .map(|sock| trace_commons_contributor::daemon::host_link::probe(&sock))
+                .unwrap_or(trace_commons_contributor::daemon::host_link::LinkState::Absent);
+            if link != trace_commons_contributor::daemon::host_link::LinkState::Absent {
+                failed.set(false);
+            }
+            if crate::service::falls_back(app.worker.via_host_link(), link, failed.get()) {
+                busy.set(true);
+                let busy = Rc::clone(&busy);
+                let failed = Rc::clone(&failed);
+                app.reopen(false, move |app| {
+                    busy.set(false);
+                    // Still on the host link: the sandbox could not start
+                    // its own daemon (no folders declared there). Quiet
+                    // until the link changes.
+                    failed.set(app.worker.via_host_link());
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Read the folder rows again whenever the window comes to the front,
+    /// as the Mac reads its state again when the app becomes active: a
+    /// folder declared from a terminal changes the daemon without a word to
+    /// this window, which otherwise showed the old folders until a relaunch.
+    fn wire_folder_refresh(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.window.connect_is_active_notify(move |window| {
+            if let Some(app) = weak.upgrade()
+                && window.is_active()
+            {
+                settings::refresh_folders(&app);
+            }
+        });
+    }
+
+    /// Show the folders screen when the attached daemon has none declared
+    /// (`service::asks_for_folders`). Sign-in and enrollment stay with first
+    /// run, which asks the same question at its own Tools step.
+    fn ask_for_folders_if_needed(self: &Rc<Self>, settings: &serde_json::Value) {
+        // Camera runs, as `onboarding::present_if_needed`.
+        if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
+            return;
+        }
+        if crate::service::asks_for_folders(
+            self.worker.hosts_the_loop(),
+            settings,
+            self.folders_asked.get(),
+            onboarding::automatic_window_open(),
+        ) {
+            self.folders_asked.set(true);
+            roots::present_connected(self);
+        }
+    }
+
+    /// Classify the background service from this window's backend.
+    pub fn service_state<F>(self: &Rc<Self>, callback: F)
+    where
+        F: FnOnce(&Rc<App>, trace_commons_contributor::daemon::service::ServiceState) + 'static,
+    {
+        let id = self.worker.service_state();
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::ServiceState(state) = outcome {
+                    callback(app, state)
+                }
+            }),
+        );
+    }
+
+    /// Replace the backend (`worker::Job::Reopen`), then read everything
+    /// again from the daemon now in use. `callback` runs either way.
+    pub fn reopen<F>(self: &Rc<Self>, restart_unit: bool, callback: F)
+    where
+        F: FnOnce(&Rc<App>) + 'static,
+    {
+        let id = self.worker.reopen(restart_unit);
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::Reopened { attachment, .. } = outcome {
+                    app.worker.set_attachment(attachment);
+                    // Another daemon, with revisions and folders of its own.
+                    managed_sessions::backend_changed(&app.private_inference.managed_revision);
+                    app.folders_asked.set(false);
+                    // Whatever happened, the daemon may have changed: the
+                    // same "look again" as `resync_required`.
+                    app.refresh();
+                    app.poll_outstanding_previews();
+                    callback(app);
                 }
             }),
         );
@@ -771,7 +983,15 @@ impl App {
     /// to any event.
     pub fn refresh(self: &Rc<Self>) {
         self.call("status", serde_json::json!({}), |app, result| {
-            if let Ok(Ok(status)) = result.map(serde_json::from_value::<Status>) {
+            // The Traces map's gate reads its own fields of the same reply,
+            // each unread one closed rather than defaulted.
+            app.shell.map.set_status(result.as_ref().ok());
+            app.shell.map.render(app);
+            let result = result.map(serde_json::from_value::<Status>);
+            app.home
+                .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+            app.render_tray(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+            if let Ok(Ok(status)) = result {
                 app.render_health(&status);
                 app.render_grant_voids(&status);
                 settings::render_status(app, &status);
@@ -784,9 +1004,15 @@ impl App {
                 // Both halves of "does this device need onboarding" are the
                 // daemon's to answer, so the question is asked here rather
                 // than at window construction, where neither is known yet.
+                // The same answer narrows the tab strip: before onboarding
+                // Home and Traces are not shown (`monitor::tabs`).
+                app.shell
+                    .set_requires_onboarding(onboarding::requires_onboarding(&status));
                 onboarding::present_if_needed(app, &status);
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
+            } else {
+                consent_settings::note_status_failed(app);
             }
         });
         // Asked alongside the queue, not with `list_projects`, because this
@@ -805,8 +1031,16 @@ impl App {
         // re-ask on the next launch, which is the nagging the marker exists
         // to prevent.
         self.call("get_settings", serde_json::json!({}), |app, result| {
-            let Ok(Ok(settings)) = result.map(serde_json::from_value::<crate::model::Settings>)
-            else {
+            if let Ok(raw) = result.as_ref() {
+                app.ask_for_folders_if_needed(raw);
+            }
+            let read = result.map(serde_json::from_value::<crate::model::Settings>);
+            // The map's tools are unknown, never unset, without this read.
+            app.shell
+                .map
+                .set_settings(read.as_ref().ok().and_then(|r| r.as_ref().ok()).cloned());
+            let Ok(Ok(settings)) = read else {
+                app.shell.map.render(app);
                 return;
             };
             // The certificate-held section's reading, from the same read.
@@ -821,7 +1055,11 @@ impl App {
         // Only `contributable_count` is read from here: the folder's total
         // stays the rows on screen.
         self.call("list_projects", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_projects_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let projects: Vec<crate::model::Project> =
                 serde_json::from_value(value.get("projects").cloned().unwrap_or_default())
                     .unwrap_or_default();
@@ -829,13 +1067,25 @@ impl App {
             queue::render(app);
         });
         self.call("list_pending", serde_json::json!({}), |app, result| {
-            let Ok(value) = result else { return };
+            app.shell.map.set_pending_read(result.is_ok());
+            let Ok(value) = result else {
+                app.shell.map.render(app);
+                return;
+            };
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
+        });
+        // Where each tool's sessions go, for the Traces map's commons gate:
+        // only a route the core names, for a tool it says is watched, ever
+        // draws a flow.
+        self.call("tool_destinations", serde_json::json!({}), |app, result| {
+            app.shell.map.set_destinations(result.as_ref().ok());
+            app.shell.map.render(app);
+            app.shell.inspector.render_summary(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -861,12 +1111,34 @@ impl App {
         // band is filled in whether or not History has ever been opened;
         // `history_rollup` is a read of counters the daemon already holds.
         self.call("history_rollup", serde_json::json!({}), |app, result| {
-            if let Ok(Ok(rollup)) = result.map(serde_json::from_value::<HistoryRollup>) {
+            let home_rollup = result.as_ref().ok().and_then(|value| {
+                serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
+            });
+            app.home.render_rollup(home_rollup.as_ref());
+            *app.summary_rollup.borrow_mut() = home_rollup;
+            app.shell.inspector.render_summary(app);
+            let result = result.map(serde_json::from_value::<HistoryRollup>);
+            if let Ok(Ok(rollup)) = result {
                 *app.rollup.borrow_mut() = rollup;
                 queue::render(app);
             }
         });
+        // What pending credit waits on, for the summary's pending line
+        // (D6): the same read the Mac's Home store makes. The daemon
+        // caches the answer, so a refresh does not reach the commons each
+        // time.
+        self.call(
+            "commons_credit_summary",
+            serde_json::json!({}),
+            |app, result| {
+                *app.credit_condition.borrow_mut() = result
+                    .ok()
+                    .and_then(|value| monitor::summary::pending_condition(&value));
+                app.shell.inspector.render_summary(app);
+            },
+        );
         history::refresh(self);
+        home::refresh(self);
         private_inference::refresh(self);
         settings::refresh(self);
     }
@@ -1081,32 +1353,40 @@ impl App {
     /// acknowledged would say something stopped that this window has no
     /// record of anymore.
     fn render_grant_voids(self: &Rc<Self>, status: &Status) {
-        // Every card but the offer, which is built once.
-        let mut child = self.void_notices.first_child();
+        while let Some(card) = self.void_notices.first_child() {
+            self.void_notices.remove(&card);
+        }
+        // Every account card but the offer, which is built once.
+        let mut child = self.account_notices.first_child();
         while let Some(card) = child {
             child = card.next_sibling();
             if card != self.legacy_card.root {
-                self.void_notices.remove(&card);
+                self.account_notices.remove(&card);
             }
         }
         let offer_shown = legacy_move::repaint_for(self, status);
         let notices = status.grant_void_notices();
         // The switch-on notices share the column: a folder whose arming was
-        // reworded (K5), and armed folders the gate is holding. So does the
-        // legacy invite migration notice: it changes what the contributor's
-        // sessions go under, and they are told on whichever screen they are
-        // reading (the consent spec requires it in every shell).
+        // reworded (K5), and armed folders the gate is holding.
         let rewordings = status.arming_rewording_notices();
         let held = status.gate_held_notice();
+        let terms = terms_hold::notice_words(status.terms_hold);
+        // The legacy invite migration notice is the account's: it changes
+        // what the contributor's sessions go under, and they are told on
+        // whichever screen they are reading (the consent spec requires it in
+        // every shell).
         let migration = status.legacy_migration_notice();
         if let Some(column) = self.void_notices.parent() {
             column.set_visible(
-                !notices.is_empty()
-                    || !rewordings.is_empty()
-                    || held.is_some()
-                    || migration.is_some()
-                    || offer_shown,
+                terms.is_some() || !notices.is_empty() || !rewordings.is_empty() || held.is_some(),
             );
+        }
+        if let Some(column) = self.account_notices.parent() {
+            column.set_visible(migration.is_some() || offer_shown);
+        }
+        // First: until the terms are accepted again, nothing uploads.
+        if let Some(words) = &terms {
+            self.void_notices.append(&terms_hold::card(self, words));
         }
         for card in notices {
             self.void_notices.append(&self.grant_void_card(&card));
@@ -1118,7 +1398,7 @@ impl App {
             self.void_notices.append(&self.gate_held_card(&held));
         }
         if let Some(notice) = &migration {
-            self.void_notices
+            self.account_notices
                 .append(&self.legacy_migration_card(notice));
         }
     }
@@ -1480,10 +1760,17 @@ impl App {
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             if let Ok(crate::notify::Action::Review) = rx.recv().await {
-                app.stack.set_visible_child_name("queue");
+                app.open_screen("queue");
                 app.window.present();
             }
         });
+    }
+
+    /// Opens a screen by name: a tab, a sub-page behind the breadcrumb, or
+    /// the Settings window. The one way anything outside the shell moves
+    /// what the window shows; a name nothing carries moves nothing.
+    pub fn open_screen(self: &Rc<Self>, name: &str) -> bool {
+        self.shell.open(self, name)
     }
 
     pub fn toast(self: &Rc<Self>, text: &str) {
@@ -1510,10 +1797,11 @@ impl App {
         if !label.is_empty() && shield == crate::shield::Shield::Attention {
             label.push_str(&format!(" {}", style::Tone::Attention.glyph()));
         }
-        self.queue_badge.set_label(&label);
-        self.queue_badge.set_visible(!label.is_empty());
+        self.shell.traces_badge.set_label(&label);
+        self.shell.describe_traces_badge(decisions_owed);
+        self.shell.traces_badge.set_visible(!label.is_empty());
         // The core's words for an unknown count, as the other shells say it.
-        self.queue_badge.set_tooltip_text(
+        self.shell.traces_badge.set_tooltip_text(
             decisions_owed
                 .is_none()
                 .then(|| trace_commons_contributor::preview_copy::decisions_owed_text(None))
@@ -1522,9 +1810,9 @@ impl App {
         // A colour is never the only carrier: the glyph above is what
         // survives greyscale, and this is what makes it findable.
         if shield == crate::shield::Shield::Attention {
-            self.queue_badge.add_css_class("tc-attention");
+            self.shell.traces_badge.add_css_class("tc-attention");
         } else {
-            self.queue_badge.remove_css_class("tc-attention");
+            self.shell.traces_badge.remove_css_class("tc-attention");
         }
     }
 
@@ -1533,9 +1821,9 @@ impl App {
     ///
     /// This is the single place both the queue row's Submit and the project
     /// group's Submit all reach the toast, so the two controls cannot drift
-    /// in how they read the same response. `entry_ids` is the set the undo
-    /// bar's `Undo` must cancel: one id for a row, every entry a project
-    /// call approved for a group.
+    /// in how they read the same response. `entry_ids` is what the undo
+    /// card lists: one id for a row, the sendable rows seen for a group.
+    /// Undo cancels a row by its id and a group by its `project_id`.
     ///
     /// `offer_undo` is only called when the daemon returned a `hold_until`:
     /// `approve > 0` with no `hold_until` means the hold is configured off,
@@ -1546,6 +1834,7 @@ impl App {
         approve: &ApproveResult,
         entry_ids: Vec<String>,
         project_label: &str,
+        folder: Option<String>,
     ) {
         let skipped: Vec<&str> = approve
             .skipped
@@ -1583,7 +1872,7 @@ impl App {
         // half of the same rule here.
         if approve.offers_undo() {
             if let Some(hold_until) = approve.hold_until {
-                self.offer_undo(entry_ids, project_label, hold_until);
+                self.offer_undo(entry_ids, project_label, folder, hold_until);
             }
         }
     }
@@ -1602,11 +1891,13 @@ impl App {
         self: &Rc<Self>,
         entry_ids: Vec<String>,
         project_label: &str,
+        folder: Option<String>,
         hold_until: chrono::DateTime<chrono::Utc>,
     ) {
         *self.undo.borrow_mut() = Some(PendingUndo {
             entry_ids,
             project_label: project_label.to_string(),
+            folder,
             approved_at: chrono::Utc::now(),
             hold_until,
         });
@@ -1651,6 +1942,14 @@ impl App {
         }
     }
 
+    /// The daemon dismissed `entry_id`: the Traces map shows its card. The
+    /// map looks it up now, while the entries still list it.
+    pub fn note_dismissed(self: &Rc<Self>, entry_id: &str) {
+        *self.last_kept.borrow_mut() = None;
+        *self.last_dismissed.borrow_mut() = Some(entry_id.to_string());
+        self.shell.map.render(self);
+    }
+
     /// Withdraw the undo bar without cancelling: the hold simply runs out.
     pub fn dismiss_undo(self: &Rc<Self>) {
         self.stop_undo_tick();
@@ -1659,8 +1958,6 @@ impl App {
     }
 }
 
-/// The segmented view switcher, §5.1's Linux column.
-///
 /// Carry out one [`crate::tray::TrayRequest`].
 ///
 /// A free function rather than the body of `wire_tray`'s loop because the
@@ -1675,86 +1972,14 @@ impl App {
 pub(crate) fn apply_tray_request(app: &Rc<App>, request: crate::tray::TrayRequest) {
     match request {
         crate::tray::TrayRequest::Open(screen) => {
-            app.stack.set_visible_child_name(screen);
+            app.open_screen(screen);
         }
         crate::tray::TrayRequest::StopAnsweringModelCalls => {
-            app.stack.set_visible_child_name(PRIVATE_INFERENCE_SCREEN);
+            app.open_screen(PRIVATE_INFERENCE_SCREEN);
             private_inference::turn_off(app);
         }
     }
     app.window.present();
-}
-
-/// Hand-built rather than an `AdwViewSwitcher` because the design puts a
-/// count badge inside one item, and `AdwViewSwitcher` builds its own buttons
-/// from the stack pages' titles and icons with nowhere to put one.
-///
-/// The stack, not this widget, is the source of truth for which screen is
-/// showing: the tray and every notification action set the stack directly,
-/// so the items follow it rather than the other way round.
-fn view_switcher(stack: &adw::ViewStack, queue_badge: &gtk::Label) -> gtk::Box {
-    let track = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(0)
-        .valign(gtk::Align::Center)
-        .build();
-    track.add_css_class("tc-switcher");
-
-    let mut items: Vec<(&'static str, gtk::ToggleButton)> = Vec::new();
-    for (index, (name, label, icon_name)) in screens().into_iter().enumerate() {
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, style::space::XXS);
-        // A real `GtkImage`, not a glyph: §6.6 turns the selected item's icon
-        // green while its label stays ink, and style.css matches that on the
-        // `image` node rather than on a class this code would have to
-        // remember to set.
-        let icon = gtk::Image::from_icon_name(icon_name);
-        icon.set_pixel_size(SWITCHER_ICON);
-        content.append(&icon);
-        content.append(&gtk::Label::new(Some(label)));
-        if name == "queue" {
-            content.append(queue_badge);
-        }
-        let item = gtk::ToggleButton::builder().child(&content).build();
-        item.add_css_class("tc-tab");
-        // `flat` drops Adwaita's own button face, so the track underneath is
-        // what the unselected items sit on.
-        item.add_css_class("flat");
-        // How the accelerator is discovered. The chord and nothing else: the
-        // item's own label is right beside it, and the text is GTK's --
-        // `accelerator_get_label` in the contributor's keyboard and language
-        // -- so no word of this is authored in this shell. A shortcuts
-        // window would need section and group titles nobody has written,
-        // which is the reason it is not one.
-        item.set_tooltip_text(shortcuts::screen_accel_label(index).as_deref());
-        if let Some((_, first)) = items.first() {
-            item.set_group(Some(first));
-        }
-        let stack = stack.clone();
-        item.connect_toggled(move |item| {
-            if item.is_active() {
-                stack.set_visible_child_name(name);
-            }
-        });
-        track.append(&item);
-        items.push((name, item));
-    }
-
-    let followers = items.clone();
-    stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
-        let Some(showing) = stack.visible_child_name() else {
-            return;
-        };
-        for (name, item) in &followers {
-            if *name == showing.as_str() {
-                item.set_active(true);
-            }
-        }
-    });
-    if let Some((_, first)) = items.first() {
-        first.set_active(true);
-    }
-
-    track
 }
 
 /// Replace `parent`'s children with K11 disclosure rows. Machine values --
@@ -2161,65 +2386,72 @@ mod card_preview_tests {
 mod screen_tests {
     use super::*;
 
-    /// The switcher's items and the stack's pages are built by zipping
-    /// `SCREENS` with `pages`, so a screen missing from one of the two would
-    /// simply never be reachable rather than fail to compile. Both are
-    /// fixed-size arrays of the same length for that reason; this pins the
-    /// length itself, so the next screen has to grow both.
+    /// The tab strip, the tray menu and the accelerators all read
+    /// `screens()`: the four tabs, Home first, in the Mac's order.
     #[test]
-    fn every_screen_has_a_page() {
-        assert_eq!(screens_with(false).len(), 5);
-        assert_eq!(screens_with(true).len(), 6);
-        for (name, label, icon) in screens_with(true) {
-            assert!(!name.is_empty(), "a screen needs a stack name");
-            assert!(!label.is_empty(), "a screen needs a switcher label");
-            assert!(
-                icon.ends_with("-symbolic"),
-                "{icon} must be symbolic to recolour"
-            );
+    fn the_screens_are_the_four_tabs_in_the_strips_order() {
+        let names: Vec<_> = screens().iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            ["home", PRIVATE_INFERENCE_SCREEN, "queue", "insights"]
+        );
+        for (name, label) in screens() {
+            assert!(!name.is_empty(), "a tab needs a name");
+            assert!(!label.is_empty(), "a tab needs a label");
         }
     }
 
-    /// The label is read from the shared copy module, never retyped here.
+    /// Every tab label is the core's word, never one retyped here.
     #[test]
-    fn the_private_ai_screen_takes_its_label_from_the_shared_copy() {
-        let (name, label, _) = screens_with(false)
-            .into_iter()
-            .find(|(name, _, _)| *name == PRIVATE_INFERENCE_SCREEN)
-            .expect("the Private AI screen is one of the switcher's items");
-        assert_eq!(name, "private-inference");
-        assert_eq!(label, copy::PRIVATE_INFERENCE_DESTINATION);
-    }
-
-    #[test]
-    fn the_mission_drafts_screen_takes_its_label_from_shared_copy() {
-        let (_, label, _) = screens_with(true)
-            .into_iter()
-            .find(|(name, _, _)| *name == "mission-drafts")
-            .expect("the local mission inbox is one of the switcher's items");
+    fn the_tab_labels_come_from_the_shared_copy() {
+        let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
+        let labels: Vec<_> = screens().iter().map(|(_, label)| *label).collect();
+        assert_eq!(labels[0], shell.tab_home);
+        assert_eq!(labels[1], shell.tab_inference);
+        assert_eq!(labels[2], shell.tab_traces);
         assert_eq!(
-            label,
-            trace_commons_contributor::mission_draft_service::ui_copy()["title"]
+            labels[3],
+            trace_commons_contributor::insights::service::ui_copy()["title"]
         );
+        // The tab and the tray's model-calls rows name one destination.
+        assert_eq!(shell.tab_inference, copy::PRIVATE_INFERENCE_DESTINATION);
     }
 
-    /// Missions are hidden by default: no mission-drafts entry in the list
-    /// every navigation surface derives from, and the on position restores
-    /// it last, so no other accelerator renumbers.
+    /// The screens that left the strip still open by the names the tray,
+    /// the notification action, `--start-page` and the in-window links
+    /// spell: History and Mission drafts behind the breadcrumb, Settings in
+    /// its own window.
     #[test]
-    fn the_mission_drafts_screen_is_listed_only_while_missions_are_shown() {
+    fn the_screens_that_left_the_strip_still_open_by_name() {
+        use monitor::tabs::{HomePage, Location, Route, Tab, TracesPage, route};
+        let from = Location::default();
+        assert_eq!(route(SETTINGS_SCREEN, from, false), Some(Route::Settings));
+        match route("history", from, false) {
+            Some(Route::Show(to)) => {
+                assert_eq!((to.tab, to.traces_page), (Tab::Traces, TracesPage::History));
+            }
+            other => panic!("history did not land: {other:?}"),
+        }
+        match route("mission-drafts", from, true) {
+            Some(Route::Show(to)) => {
+                assert_eq!((to.tab, to.home_page), (Tab::Home, HomePage::MissionDrafts));
+            }
+            other => panic!("mission drafts did not land: {other:?}"),
+        }
+        // Hidden missions: the name lands on Home's overview, and no tab,
+        // tray row or accelerator lists it either way.
         assert!(!missions_shown(), "the process default is off");
-        assert!(
-            screens()
-                .iter()
-                .all(|(name, _, _)| *name != "mission-drafts"),
-            "a hidden mission screen must not be listed"
+        assert_eq!(
+            route("mission-drafts", from, false),
+            Some(Route::Show(from))
         );
-        let off = screens_with(false);
-        let on = screens_with(true);
-        assert!(off.iter().all(|(name, _, _)| *name != "mission-drafts"));
-        assert_eq!(on.last().map(|s| s.0), Some("mission-drafts"));
-        assert_eq!(&on[..on.len() - 1], &off[..]);
+        assert!(screens().iter().all(|(name, _)| *name != "mission-drafts"));
+        for (name, _) in screens() {
+            assert!(
+                matches!(route(name, from, false), Some(Route::Show(_))),
+                "{name} is listed but opens nothing"
+            );
+        }
     }
 
     /// The startup read: only a boolean `true` under `missions_enabled`
@@ -2246,7 +2478,7 @@ mod screen_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// No switcher label may PROMISE privacy.
+    /// No tab label may PROMISE privacy.
     ///
     /// The product name is stripped first, the same way the shared sweep in
     /// `private_inference_copy` strips it: the destination is called
@@ -2254,23 +2486,16 @@ mod screen_tests {
     /// has never meant the destination cannot see you -- while no sentence
     /// may claim a call is private, because each one still goes on to
     /// whoever was configured to answer it.
-    ///
-    /// This guard is a second statement of a rule that lives in the shared
-    /// crate, and it drifted from it the moment the name changed: the sweep
-    /// was narrowed and this was not, so the rename failed here alone. It is
-    /// kept because a shell hardcoding a label is a thing only a shell test
-    /// can catch -- but it now strips the same way, so the two cannot
-    /// disagree about what the rule is.
     #[test]
     fn no_switcher_label_promises_privacy() {
-        for (_, label, _) in screens_with(true) {
+        for (_, label) in screens() {
             let lowered = label
                 .replace(copy::PRIVATE_INFERENCE_DESTINATION, "")
                 .to_ascii_lowercase();
             for forbidden in ["private", "secure", "proxy", "backend"] {
                 assert!(
                     !lowered.contains(forbidden),
-                    "switcher label {label:?} must not say {forbidden:?}"
+                    "tab label {label:?} must not say {forbidden:?}"
                 );
             }
         }

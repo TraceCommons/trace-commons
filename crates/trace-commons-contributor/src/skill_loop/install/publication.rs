@@ -86,6 +86,7 @@ fn write_new_private_file(path: &Path, body: &[u8]) -> Result<(), SkillInstallEr
         .map_err(|_| SkillInstallError::WriteFailed)
 }
 
+#[allow(unsafe_code)]
 fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), SkillInstallError> {
     #[cfg(target_os = "macos")]
     {
@@ -93,6 +94,7 @@ fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), 
         use std::os::raw::{c_char, c_int, c_uint};
         use std::os::unix::ffi::OsStrExt;
 
+        // SAFETY: `renamex_np` matches Darwin's `<stdio.h>` libc declaration.
         unsafe extern "C" {
             fn renamex_np(old: *const c_char, new: *const c_char, flags: c_uint) -> c_int;
         }
@@ -102,6 +104,7 @@ fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), 
         let destination = CString::new(destination.as_os_str().as_bytes())
             .map_err(|_| SkillInstallError::WriteFailed)?;
         // RENAME_EXCL prevents replacement of any existing target pathname.
+        // SAFETY: `source` and `destination` are valid NUL-terminated CStrings alive across the call.
         let result = unsafe { renamex_np(source.as_ptr(), destination.as_ptr(), 0x0000_0004) };
         rename_result(result)
     }
@@ -111,6 +114,7 @@ fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), 
         use std::os::raw::{c_char, c_int, c_uint};
         use std::os::unix::ffi::OsStrExt;
 
+        // SAFETY: `renameat2` matches glibc/musl `<stdio.h>` declaration.
         unsafe extern "C" {
             fn renameat2(
                 old_dir_fd: c_int,
@@ -126,6 +130,8 @@ fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), 
         let destination = CString::new(destination.as_os_str().as_bytes())
             .map_err(|_| SkillInstallError::WriteFailed)?;
         // AT_FDCWD and RENAME_NOREPLACE. Unsupported kernels fail closed.
+        // SAFETY: `source` and `destination` are valid NUL-terminated CStrings alive across the call,
+        // and `-100` (`AT_FDCWD`) resolves relative paths against the current working directory.
         let result = unsafe {
             renameat2(
                 -100,
@@ -146,15 +152,23 @@ fn exclusive_publish_directory(source: &Path, destination: &Path) -> Result<(), 
         use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
         let mut source = source.as_os_str().encode_wide().collect::<Vec<_>>();
+        if source.contains(&0) {
+            return Err(SkillInstallError::WriteFailed);
+        }
         source.push(0);
         let mut destination = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+        if destination.contains(&0) {
+            return Err(SkillInstallError::WriteFailed);
+        }
         destination.push(0);
         // Zero flags excludes MOVEFILE_REPLACE_EXISTING, making publication
         // fail closed whenever the reviewed target pathname already exists.
+        // SAFETY: `source` and `destination` are NUL-terminated UTF-16 buffers with no interior NULs.
         let moved = unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), 0) };
         if moved != 0 {
             return Ok(());
         }
+        // SAFETY: `GetLastError` reads the calling thread's Win32 error slot without pointer arguments.
         match unsafe { GetLastError() } {
             ERROR_ALREADY_EXISTS | ERROR_FILE_EXISTS => Err(SkillInstallError::Occupied),
             _ => Err(SkillInstallError::WriteFailed),

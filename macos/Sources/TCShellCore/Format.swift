@@ -15,8 +15,9 @@ public enum Format {
         shared.when(date, relativeTo: Date())
     }
 
-    /// `when` against a given "now", so a test can freeze the reference.
-    static func when(_ date: Date, relativeTo now: Date) -> String {
+    /// `when` against a given "now", so a test or a render can freeze the
+    /// reference.
+    public static func when(_ date: Date, relativeTo now: Date) -> String {
         shared.when(date, relativeTo: now)
     }
 

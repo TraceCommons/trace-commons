@@ -48,6 +48,7 @@
 //! client's own token, the client's token is right and
 //! [`tests::palette_matches_client_tokens`] is what should have caught it.
 
+pub mod near;
 pub mod raster;
 
 /// The mark's coordinate space. Every number in this module is in these units
@@ -358,6 +359,12 @@ pub fn all_exports() -> Vec<Export> {
             contents: template_svg(scheme.ink(), 1024),
         });
     }
+    // The Linux app icon: the NEAR AI tile, which the Flatpak installs as
+    // `hicolor/scalable/apps/ai.tracecommons.Contributor.svg`.
+    out.push(Export {
+        relative_path: "near-app.svg",
+        contents: near::app_icon_svg(512),
+    });
     out
 }
 
@@ -585,9 +592,9 @@ mod tests {
     /// both the export tool and the drift check, so a duplicate path here would
     /// silently drop a packaging surface.
     #[test]
-    fn exports_are_four_distinct_non_empty_documents() {
+    fn exports_are_five_distinct_non_empty_documents() {
         let exports = all_exports();
-        assert_eq!(exports.len(), 4);
+        assert_eq!(exports.len(), 5);
         let mut paths: Vec<&str> = exports.iter().map(|e| e.relative_path).collect();
         paths.sort_unstable();
         assert_eq!(
@@ -597,9 +604,15 @@ mod tests {
                 "mark-light.svg",
                 "mark-template-dark.svg",
                 "mark-template-light.svg",
+                "near-app.svg",
             ]
         );
-        for export in &exports {
+        let near = exports
+            .iter()
+            .find(|e| e.relative_path == "near-app.svg")
+            .expect("the Linux app icon is exported");
+        assert_eq!(near.contents, near::app_icon_svg(512));
+        for export in exports.iter().filter(|e| e.relative_path != "near-app.svg") {
             assert!(!export.contents.is_empty(), "{}", export.relative_path);
             assert!(
                 export.contents.starts_with("<svg") && export.contents.ends_with("</svg>"),

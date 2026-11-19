@@ -63,6 +63,13 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             // `managed_model_catalogue`'s `favorites` and writes them with
             // `managed_model_favorite_set`.
             "managed_favorite_models",
+            // A count of each declaration's writes. The Linux Tools screen
+            // reads it to tell that a folder declared from a terminal landed
+            // for a tool already watched; the Mac declares from its own
+            // window and reads the reply.
+            "source_revisions", "source_revisions.claude_source", "source_revisions.codex_source",
+            "source_revisions.gemini_source", "source_revisions.cline_source",
+            "source_revisions.opencode_source", "source_revisions.trajectory_source",
         ]
         // Staging builds only: where the signed NEAR AI pin set stands, and
         // the last attestation outcome under it (owner decision S16):

@@ -46,7 +46,8 @@ final class MonitorTracesCopyExportTests: XCTestCase {
         XCTAssertEqual(
             copy.line(for: .daemon(code: "unavailable", message: "witness-review-required")), copy.needsPrivacyCheck)
         XCTAssertEqual(copy.line(for: .notApproved(reasonLabel: "witness-review-required")), copy.needsPrivacyCheck)
-        for label in ["preview-timed-out", "witness_timeout", "witness_unreachable"] {
+        for label in ["preview-timed-out", "witness_timeout", "witness_unreachable",
+                      "witness_classifier_unavailable", "witness_redaction_failed"] {
             XCTAssertEqual(copy.line(for: .daemon(code: "unavailable", message: label)), copy.privacyCheckNoAnswer, label)
             XCTAssertEqual(copy.line(for: .notApproved(reasonLabel: label)), copy.privacyCheckNoAnswer, label)
         }

@@ -37,6 +37,9 @@ type NfdsT = std::ffi::c_ulong;
 #[cfg(not(target_os = "linux"))]
 type NfdsT = std::ffi::c_uint;
 
+// SAFETY: declarations of POSIX functions with their C signatures; every
+// call site below documents why it is sound.
+#[allow(unsafe_code)]
 unsafe extern "C" {
     fn fork() -> c_int;
     fn getpid() -> c_int;
@@ -61,6 +64,7 @@ pub(super) struct OwnerLink {
 /// Arrange for `command`'s process to start a watchdog before it execs.
 /// The returned link must outlive the spawn, and is what keeps the worker
 /// alive: dropping it ends the worker too.
+#[allow(unsafe_code)]
 pub(super) fn arm(command: &mut tokio::process::Command) -> std::io::Result<OwnerLink> {
     // Both ends are close-on-exec, so the worker never holds either.
     let (read, write) = std::io::pipe()?;
@@ -85,6 +89,7 @@ pub(super) fn arm(command: &mut tokio::process::Command) -> std::io::Result<Owne
 }
 
 /// The watchdog. Never returns.
+#[allow(unsafe_code)]
 fn watch(worker: c_int, read_fd: c_int) -> ! {
     // SAFETY: async-signal-safe calls only (see `arm`). The watchdog never
     // execs, so close-on-exec does not apply: it closes every inherited
