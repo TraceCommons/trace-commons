@@ -781,9 +781,14 @@ impl Rail {
                 let revealer = revealer.clone();
                 let keyboard = Rc::clone(&keyboard);
                 let (slide, open_row) = (slide.clone(), open_row.clone());
+                // Bumped by every open and close, so a close's hide that a
+                // reopening overtook leaves the rail shown.
+                let moves = Rc::new(Cell::new(0u64));
                 #[cfg(all(target_os = "linux", feature = "layer-shell"))]
                 let window = window.clone();
                 Box::new(move |open, done| {
+                    let this_move = moves.get() + 1;
+                    moves.set(this_move);
                     if open {
                         revealer.set_reveal_child(true);
                     }
@@ -806,10 +811,13 @@ impl Rail {
                             0
                         };
                         let revealer = revealer.clone();
+                        let moves = Rc::clone(&moves);
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(duration + 16),
                             move || {
-                                revealer.set_reveal_child(false);
+                                if moves.get() == this_move {
+                                    revealer.set_reveal_child(false);
+                                }
                                 done();
                             },
                         );

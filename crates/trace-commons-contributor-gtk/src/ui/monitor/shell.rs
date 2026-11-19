@@ -2788,6 +2788,8 @@ mod tests {
 
         // A newer card in front of it slides in too, over the Health card,
         // which fades where it is beneath it rather than going at once.
+        // Something to draw: an empty card leaves no frame to fade.
+        card(Notice::Undo).append(&gtk::Label::new(Some("2")));
         card(Notice::Undo).set_visible(true);
         let undo = slide(shell, Notice::Undo);
         // The plate the Health card now makes peeks out on the spring.
@@ -2825,6 +2827,7 @@ mod tests {
         // That close faded the Undo card out beneath it too.
         card(Notice::Undo).set_visible(true);
         pump_until(|| slide(shell, Notice::Undo).offset() == 0.0 && undo.covered_opacity() == 0.0);
+        assert!(undo.last_drawn().is_some(), "the Undo card was never drawn");
         card(Notice::Undo).set_visible(false);
         // The stack follows at once; the fade then runs on the clock.
         assert!(

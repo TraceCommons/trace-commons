@@ -951,7 +951,16 @@ pub fn scroll_into_view(
         let Some(row) = row.upgrade() else {
             return glib::ControlFlow::Break;
         };
-        let Some(content) = scroller.child() else {
+        // The content's own coordinates: a viewport GTK added around it
+        // scrolls with the view, so its child is what holds the rows.
+        let Some(content) =
+            scroller
+                .child()
+                .and_then(|child| match child.downcast_ref::<gtk::Viewport>() {
+                    Some(viewport) => viewport.child(),
+                    None => Some(child),
+                })
+        else {
             return glib::ControlFlow::Break;
         };
         let Some(bounds) = row.compute_bounds(&content) else {

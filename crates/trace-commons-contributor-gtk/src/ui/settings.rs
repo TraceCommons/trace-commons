@@ -1016,9 +1016,7 @@ pub fn wire(app: &Rc<App>) {
     app.settings
         .credit_icon_switch
         .connect_state_set(move |_, wanted| {
-            let mut prefs = crate::home_cards::HomePrefs::load();
-            prefs.animates_credit_icon = wanted;
-            prefs.save();
+            arrival.home.set_animates_credit_icon(wanted);
             arrival.credit_arrival.set_enabled(wanted);
             gtk::glib::Propagation::Proceed
         });
