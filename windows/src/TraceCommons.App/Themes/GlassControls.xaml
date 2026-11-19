@@ -155,28 +155,6 @@
                         </Grid>
                     </Grid>
                 </ControlTemplate>
-                                    </Thumb.Template>
-                                </Thumb>
-                            </Grid>
-                            <ContentPresenter x:Name="OffContentPresenter"
-                                              Grid.Column="2"
-                                              Opacity="0"
-                                              VerticalAlignment="Center"
-                                              IsHitTestVisible="False"
-                                              Content="{TemplateBinding OffContent}"
-                                              ContentTemplate="{TemplateBinding OffContentTemplate}"
-                                              Foreground="{TemplateBinding Foreground}" />
-                            <ContentPresenter x:Name="OnContentPresenter"
-                                              Grid.Column="2"
-                                              Opacity="0"
-                                              VerticalAlignment="Center"
-                                              IsHitTestVisible="False"
-                                              Content="{TemplateBinding OnContent}"
-                                              ContentTemplate="{TemplateBinding OnContentTemplate}"
-                                              Foreground="{TemplateBinding Foreground}" />
-                        </Grid>
-                    </Grid>
-                </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
