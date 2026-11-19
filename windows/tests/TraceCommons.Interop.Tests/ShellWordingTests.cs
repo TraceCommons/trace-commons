@@ -87,8 +87,10 @@ public class ShellWordingTests
             // ContributorSettingsViewModel is the file the settings-screen
             // guard already watches for the witness row specifically; the rest
             // of its wording is unmoved. Four of its sentences moved into
-            // WatchCopy.cs, which is why this entry ratcheted down.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 10 },
+            // WatchCopy.cs, which is why this entry ratcheted down. Lowered
+            // from 10 (2026-11-19): the Watching timing card's notification
+            // owner line and range notice went with the card.
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 7 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
@@ -113,7 +115,9 @@ public class ShellWordingTests
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            { "TraceCommons.App/Controls/SettingsView.xaml", 10 },
+            // Lowered from 10 (2026-11-19): the Watching timing card and its
+            // five sentences are gone, as on the Mac.
+            { "TraceCommons.App/Controls/SettingsView.xaml", 5 },
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
             // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
             // button's hand-written accessible name, which also spelled the

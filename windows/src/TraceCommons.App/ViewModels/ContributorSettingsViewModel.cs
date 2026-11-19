@@ -24,11 +24,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private bool _startAtLogin;
     private bool _startupSupported = true;
     private bool _connected;
-    private double _quiescenceMinutes;
-    private double _approvalHoldSeconds;
-    private double _digestHours;
     private long _queueTtlDays;
-    private bool _localNotifications;
     private string _notice = string.Empty;
 
     /// <summary>
@@ -1333,39 +1329,8 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public bool HasNoAuditEntries => AuditEntries.Count == 0;
 
-    public double QuiescenceMinutes
-    {
-        get => _quiescenceMinutes;
-        private set => Set(ref _quiescenceMinutes, value);
-    }
-
-    public double ApprovalHoldSeconds
-    {
-        get => _approvalHoldSeconds;
-        private set
-        {
-            if (Set(ref _approvalHoldSeconds, value))
-            {
-                Raise(nameof(HasNoUndoWindow));
-            }
-        }
-    }
-
-    public bool HasNoUndoWindow => ApprovalHoldSeconds == 0;
-
-    public double DigestHours
-    {
-        get => _digestHours;
-        private set => Set(ref _digestHours, value);
-    }
-
     public string QueueExpiryText =>
         $"Undecided traces are dropped after {_queueTtlDays} days. Dropped means never sent.";
-
-    // DRAFT, NEEDS APPROVAL (2026-11-04).
-    public string NotificationOwnerText => _localNotifications
-        ? "Notifications are shown by the background service."
-        : "Notifications are rendered by this app.";
 
     public async Task LoadAsync()
     {
@@ -1571,70 +1536,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         return null;
     }
 
-    public async Task SaveBehaviorAsync(BehaviorSetting setting, double displayedValue)
-    {
-        if (!IsLoaded || IsBusy)
-        {
-            return;
-        }
-
-        string payload;
-        try
-        {
-            payload = BehaviorSettingsRequest.Serialize(setting, displayedValue);
-        }
-        catch (ArgumentOutOfRangeException)
-        {
-            Notice = "That value is outside the supported range.";
-            return;
-        }
-
-        IsBusy = true;
-        try
-        {
-            SetDisplayedBehavior(setting, displayedValue);
-            DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.SetSettings, payload)
-                .ConfigureAwait(true);
-            DaemonSettingsSnapshot? settings = response.ResultAs<DaemonSettingsSnapshot>();
-            if (response.IsError || settings is null)
-            {
-                Notice = WriteFailedNotice;
-                DaemonResponse current = await _host
-                    .CallAsync(DaemonProtocol.Methods.GetSettings)
-                    .ConfigureAwait(true);
-                FillSettings(current.ResultAs<DaemonSettingsSnapshot>());
-            }
-            else
-            {
-                FillSettings(settings);
-                Notice = string.Empty;
-            }
-        }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
-
-    private void SetDisplayedBehavior(BehaviorSetting setting, double value)
-    {
-        switch (setting)
-        {
-            case BehaviorSetting.QuiescenceMinutes:
-                QuiescenceMinutes = value;
-                break;
-            case BehaviorSetting.ApprovalHoldSeconds:
-                ApprovalHoldSeconds = value;
-                break;
-            case BehaviorSetting.DigestHours:
-                DigestHours = value;
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(setting));
-        }
-    }
-
     /// <summary>
     /// One session-source row. The satisfied tone tracks the same mode word
     /// the sentence does, so the tick and the words cannot disagree.
@@ -1673,13 +1574,8 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
         AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
 
-        QuiescenceMinutes = settings.QuiescenceSeconds / 60.0;
-        ApprovalHoldSeconds = settings.ApprovalHoldSeconds;
-        DigestHours = settings.DigestIntervalSeconds / 3600.0;
         _queueTtlDays = settings.QueueTtlDays;
-        _localNotifications = settings.LocalNotifications;
         Raise(nameof(QueueExpiryText));
-        Raise(nameof(NotificationOwnerText));
     }
 
     private void FillConsent(ConsentOptionsPayload? options, IReadOnlyCollection<string> granted)

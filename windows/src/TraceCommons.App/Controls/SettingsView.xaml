@@ -3,9 +3,10 @@
     The complete device Settings screen, plus the public profile from section
     5.6 of the design spec.
 
-    Every value comes from the daemon or the operating system. Timing edits
-    send one set_settings key at a time, project changes use opaque project
-    ids, and the local audit log contains fixed labels only.
+    Every value comes from the daemon or the operating system. Project
+    changes use opaque project ids, and the local audit log contains fixed
+    labels only. Watching shows only the watcher card, as the Mac's
+    WatchingSection does; the timing card is gone (owner, 2026-11-19).
 
     Two surfaces, not two states of one. Off the roster this is a single
     control that grants nothing and opens a consent dialog; on it, it is a
@@ -251,52 +252,6 @@
                 <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyWatching" Spacing="12">
                 <ContentControl IsTabStop="False" x:Name="WatcherHost" HorizontalContentAlignment="Stretch" />
-                <Border Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcHairlineBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="14,12">
-                    <StackPanel Spacing="10">
-                        <NumberBox x:Name="QuiescenceMinutes"
-                                   Header="Quiet time before a trace counts as finished (minutes)"
-                                   Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
-                                   Minimum="1"
-                                   Maximum="240"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <NumberBox x:Name="ApprovalHoldSeconds"
-                                   Header="How long you can take something back (seconds after approval)"
-                                   Value="{x:Bind Settings.ApprovalHoldSeconds, Mode=OneWay}"
-                                   Minimum="0"
-                                   Maximum="300"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="No undo window. Approving sends on the next pass."
-                                   Visibility="{x:Bind Settings.HasNoUndoWindow, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <NumberBox x:Name="DigestHours"
-                                   Header="How often you can be interrupted (hours between notifications, at most)"
-                                   Value="{x:Bind Settings.DigestHours, Mode=OneWay}"
-                                   Minimum="1"
-                                   Maximum="24"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="{x:Bind Settings.NotificationOwnerText, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="These govern the background watcher, not this window, and take effect as soon as they are changed. The same values are readable and settable from the command line."
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </Border>
-
                 </StackPanel>
                 <TextBlock x:Name="RuleTools" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyTools" Spacing="12">
