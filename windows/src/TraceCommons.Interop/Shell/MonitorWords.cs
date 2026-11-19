@@ -103,6 +103,12 @@ public static class MonitorWords
     private static readonly Lazy<string?> TracesWordsJson = new(() =>
         NativeMethods.TakeOwnedString(NativeMethods.tc_monitor_traces_copy_json()));
 
+    /// <summary>
+    /// A folder's mode change the daemon refused (<c>settings.project_mode_failed</c>,
+    /// AppModel.swift:4749-4754): the line the arming offer shows after a refusal.
+    /// </summary>
+    public static string ProjectModeFailed => WordAt(ShellWordsJson.Value, "settings", "project_mode_failed");
+
     private static string QueueWord(string key) => WordAt(ShellWordsJson.Value, "queue", key);
 
     private static string TracesWord(string key) => WordAt(TracesWordsJson.Value, null, key);

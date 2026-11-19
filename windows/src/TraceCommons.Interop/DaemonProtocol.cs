@@ -694,6 +694,14 @@ public sealed class DaemonStatus
     [JsonPropertyName("tenant_id")]
     public string? TenantId { get; set; }
 
+    /// <summary>
+    /// Whose account the daemon's account-scoped answers belong to: an
+    /// opaque hash (<c>status.account_scope</c>), never shown. A change is an
+    /// account boundary (<see cref="AccountGeneration"/>).
+    /// </summary>
+    [JsonPropertyName("account_scope")]
+    public string? AccountScope { get; set; }
+
     [JsonPropertyName("logged_in")]
     public bool LoggedIn { get; set; }
 

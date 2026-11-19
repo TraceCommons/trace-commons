@@ -55,7 +55,6 @@ public class ShellWordingTests
             // than in a view model so a machine that cannot build WinUI can
             // still test it -- which is precisely why the same sentences are
             // written a second time in the GTK and macOS shells today.
-            { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
             { "TraceCommons.Interop/HealthCopy.cs", 6 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },

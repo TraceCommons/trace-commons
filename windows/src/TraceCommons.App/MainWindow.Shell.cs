@@ -141,6 +141,7 @@ public sealed partial class MainWindow
         ToolbarCapsule.SizeChanged += (_, _) => UpdateTitleBarRegions();
         AppWindow.Changed += OnAppWindowChanged;
         _clockGate.Changed += OnClocksChanged;
+        InitArmingMotion();
 
         ViewModel.PropertyChanged += OnShellViewModelChanged;
         ViewModel.LegacyOffer.PropertyChanged += (_, _) => RefreshNotices();
@@ -1062,13 +1063,16 @@ public sealed partial class MainWindow
         card.Visibility = Visibility.Visible;
         card.IsHitTestVisible = false;
         Canvas.SetZIndex(card, 0);
-        Animate(card, "Opacity", NoticeMotion.FadeOut, () =>
+        // An armed offer leaves on its own spring (ArmingOfferMotion.exit,
+        // ArmingOfferMotion.swift:37-39); every other card on the stack's.
+        bool armedExit = card == ArmingOfferCard && ArmingExitPending();
+        Animate(card, "Opacity", armedExit ? ArmingOfferMotion.ExitOpacity : NoticeMotion.FadeOut, () =>
         {
             if (_outgoingCard == card)
             {
                 FinishOutgoing();
             }
-        });
+        }, armedExit ? ArmingOfferMotion.ExitSettling : NoticeMotion.SpringSettling);
     }
 
     /// <summary>Ends the outgoing card's fade: collapsed, whole again for its next turn in front.</summary>
@@ -1118,18 +1122,20 @@ public sealed partial class MainWindow
     /// from it 60 times a second; the compositor draws it at the display's
     /// rate. <paramref name="completed"/> runs when it ends or is stopped.
     /// </summary>
-    private static void Animate(FrameworkElement card, string property, Func<double, double> curve, Action? completed)
+    private static void Animate(
+        FrameworkElement card, string property, Func<double, double> curve, Action? completed,
+        double settling = NoticeMotion.SpringSettling)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
         Compositor compositor = visual.Compositor;
         ScalarKeyFrameAnimation animation = compositor.CreateScalarKeyFrameAnimation();
         CompositionEasingFunction linear = compositor.CreateLinearEasingFunction();
-        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(curve, NoticeMotion.SpringSettling))
+        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(curve, settling))
         {
             animation.InsertKeyFrame((float)fraction, (float)value, linear);
         }
 
-        animation.Duration = TimeSpan.FromSeconds(NoticeMotion.SpringSettling);
+        animation.Duration = TimeSpan.FromSeconds(settling);
         CompositionScopedBatch batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
         visual.StartAnimation(property, animation);
         batch.End();

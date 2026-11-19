@@ -91,7 +91,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private QueueGroupViewModel? _openFolder;
     private HealthCopy? _health;
     private HealthNavigationTarget _healthNavigation;
-    private ArmingOffer? _armingOffer;
+    /// <summary>The account consent writes are settled against (checklist L2).</summary>
+    private readonly AccountGeneration _account = new();
     private HealthCopy? _witness;
     private GateHeldNotice? _gateHeld;
     private HistoryRollup _rollup = new();
@@ -163,6 +164,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // remaining count and retires the bar when the daemon's hold runs
         // out; it does not rebuild the bar, so a pointer already resting on
         // Undo does not have the button pulled out from under it.
+        // The arming offer's two answers, settled against the press that sent
+        // them (AppModel.swift:2219-2258). The card leaves only on a confirmed
+        // reply; the refresh re-reads the projects and the offer.
+        Arming = new ArmingOfferFlow(
+            (method, payload) => _host.CallAsync(method, payload),
+            () => RefreshAsync(),
+            span => Task.Delay(span),
+            () => MonitorWords.ProjectModeFailed);
+        Arming.Changed += RaiseArming;
+
         _undoTick = _host.Dispatcher.CreateTimer();
         _undoTick.Interval = TimeSpan.FromSeconds(1);
         _undoTick.Tick += (_, _) => OnUndoTick();
@@ -564,43 +575,80 @@ public sealed class MainViewModel : INotifyPropertyChanged
     // being a dismissal this window forgets. This holds whichever offer
     // arrived and renders it; it never decides one for itself.
 
-    /// <summary>Whether there is a project worth offering to arm.</summary>
-    public bool HasArmingOffer => _armingOffer is not null;
+    /// <summary>The offer's card and its answers (<see cref="ArmingOfferFlow"/>).</summary>
+    public ArmingOfferFlow Arming { get; }
+
+    private ArmingOffer? _armingCopyFor;
+    private ProjectArmingCopy? _armingCopy;
+
+    /// <summary>
+    /// The core's words for the offer on screen, decoded once per offer
+    /// (<c>tc_arming_offer_copy_json</c>). Null draws no card: arming is not
+    /// offered in words this shell wrote (ProjectArmingCopy.swift:13-15).
+    /// </summary>
+    private ProjectArmingCopy? ArmingCopy
+    {
+        get
+        {
+            if (!Equals(_armingCopyFor, Arming.Offer))
+            {
+                _armingCopyFor = Arming.Offer;
+                _armingCopy = Arming.Offer is { } offer ? ProjectArmingCopy.For(offer) : null;
+            }
+
+            return _armingCopy;
+        }
+    }
+
+    /// <summary>Whether there is a project worth offering to arm, in the core's words.</summary>
+    public bool HasArmingOffer => Arming.Offer is not null && ArmingCopy is not null;
 
     /// <summary>The evidence line, stated above the question.</summary>
-    public string ArmingOfferEvidence =>
-        _armingOffer is { } offer
-            ? ArmingOfferCopy.Evidence(offer.ProjectLabel, offer.ContributedCount)
-            : string.Empty;
+    public string ArmingOfferEvidence => ArmingCopy?.Evidence ?? string.Empty;
 
-    public string ArmingOfferQuestion =>
-        _armingOffer is { } offer ? ArmingOfferCopy.Question(offer.ProjectLabel) : string.Empty;
+    public string ArmingOfferQuestion => ArmingCopy?.Question ?? string.Empty;
 
-    public string ArmingOfferConfirm => ArmingOfferCopy.Confirm;
+    /// <summary>What arming does, the card's details (ArmingOfferPopover, MonitorNotices.swift:891-892).</summary>
+    public string ArmingOfferBody => ArmingCopy?.Body ?? string.Empty;
 
-    public string ArmingOfferDecline => ArmingOfferCopy.Decline;
+    public string ArmingOfferConfirm => ArmingCopy?.Confirm ?? string.Empty;
+
+    public string ArmingOfferDecline => ArmingCopy?.Decline ?? string.Empty;
+
+    /// <summary>Enable is pressed once (ArmingOfferMotion.swift:31-34).</summary>
+    public bool ArmingOfferEnableEnabled => !Arming.EnableLocked;
+
+    public bool ArmingOfferDeclineEnabled => !Arming.DeclineLocked;
+
+    /// <summary>The core's line after a refused Enable; empty otherwise.</summary>
+    public string ArmingOfferRefusal => Arming.Refusal;
+
+    public bool HasArmingOfferRefusal => Arming.Refusal.Length > 0;
 
     /// <summary>
-    /// The offered project's opaque id, for the two calls the buttons make.
-    /// Empty when there is no offer, which the window treats as "do nothing"
-    /// rather than as a project to act on.
+    /// The offered project's opaque id, for the inspector's demand key.
+    /// Empty when there is no offer.
     /// </summary>
-    public string ArmingOfferProjectId => _armingOffer?.ProjectId ?? string.Empty;
+    public string ArmingOfferProjectId => Arming.Offer?.ProjectId ?? string.Empty;
 
     /// <summary>
-    /// Stores whichever offer the daemon last reported, or clears it.
+    /// Stores whichever offer the daemon last reported, or clears it. The
+    /// card someone pressed stays until its own exit (offerAfterRefresh).
     /// </summary>
-    public void SetArmingOffer(ArmingOffer? offer)
+    public void SetArmingOffer(ArmingOffer? offer) => Arming.OnRefreshed(offer);
+
+    private void RaiseArming()
     {
-        if (Equals(_armingOffer, offer))
-        {
-            return;
-        }
-
-        _armingOffer = offer;
         Raise(nameof(HasArmingOffer));
         Raise(nameof(ArmingOfferEvidence));
         Raise(nameof(ArmingOfferQuestion));
+        Raise(nameof(ArmingOfferBody));
+        Raise(nameof(ArmingOfferConfirm));
+        Raise(nameof(ArmingOfferDecline));
+        Raise(nameof(ArmingOfferEnableEnabled));
+        Raise(nameof(ArmingOfferDeclineEnabled));
+        Raise(nameof(ArmingOfferRefusal));
+        Raise(nameof(HasArmingOfferRefusal));
         Raise(nameof(ArmingOfferProjectId));
     }
 
@@ -1654,6 +1702,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // seeing until something says otherwise.
             if (!status.IsError && status.ResultAs<DaemonStatus>() is { } parsedStatus)
             {
+                // A status naming another account is a boundary: replies to
+                // consent presses made before it are not applied (L2).
+                if (_account.Observe(parsedStatus.AccountScope))
+                {
+                    Arming.AccountBoundary();
+                }
+
                 SetPaused(parsedStatus.Paused);
                 // The witness banner first: SetHealth steps the bare
                 // witness-saturated line aside for it, so it has to see this
