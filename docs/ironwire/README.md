@@ -1,38 +1,10 @@
 # IronWire
 
-IronWire is the loopback inference proxy the contributor daemon runs in-process
-for Private AI. Its library crates live in this repository as
-`crates/ironwire_*`, and this directory holds their design documents.
+IronWire lives upstream at [nearai/ironwire](https://github.com/nearai/ironwire)
+(copyright NEAR AI, dual-licensed `MIT OR Apache-2.0`).
 
-## Where it came from
-
-The crates and these documents were imported on 2026-11-10 as a single
-squashed snapshot of [nearai/ironwire](https://github.com/nearai/ironwire) at
-`b234896acd44e1c2216f98d2de82361b9a0a5796`, the revision the contributor
-pinned at the time. This repository is now their source of truth; changes land
-here as ordinary pull requests, and nearai/ironwire is no longer pinned or
-synced. Per-line history before the import is in that repository.
-
-One upstream change that was never merged there is also carried here:
-nearai/ironwire#78 (bound Vertex gateway support for Claude Desktop Code),
-applied at its head `eeab5a61ae658842946f03c857f1f50345dd9487` as its diff
-against its merge base `be23667`, without that pull request's CI change.
-
-Not imported: the `ironwire` command-line binary, its macOS app, packaging,
-release scripts and CI. Links to those point at the upstream revision above.
-
-## License
-
-The ironwire_* crates are licensed MIT OR Apache-2.0, copyright NEAR AI. Each
-crate directory carries both license texts (`LICENSE-MIT`, `LICENSE-APACHE`)
-from the upstream repository.
-
-## Documents
-
-- [AGENTS.md](AGENTS.md) -- working rules for IronWire code (code comments
-  cite its numbered rules).
-- [DESIGN.md](DESIGN.md), [TRUST.md](TRUST.md), [PROTOCOL.md](PROTOCOL.md),
-  [TRANSLATION.md](TRANSLATION.md), [PRIVACY.md](PRIVACY.md),
-  [EMBEDDING.md](EMBEDDING.md), [UPDATES.md](UPDATES.md),
-  [PACKAGING.md](PACKAGING.md), [SCALE.md](SCALE.md),
-  [CRITIQUE.md](CRITIQUE.md), [ROADMAP.md](ROADMAP.md).
+`trace-commons-contributor` depends on `ironwire_proxy`, `ironwire_agents`, and
+`ironwire_catalog` as pinned git dependencies at revision
+`b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6`, shared with
+[nearai/nearai-red-sandbox](https://github.com/nearai/nearai-red-sandbox). Keep
+the two repositories on the same revision and bump them together.
