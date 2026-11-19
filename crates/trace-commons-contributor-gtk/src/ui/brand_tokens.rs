@@ -713,6 +713,10 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
         pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
         pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#ffffff", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#000000", 0.24);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.92);
     }
     /// The dark scheme.
     pub mod dark {
@@ -740,5 +744,42 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
         pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
         pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#071a2e", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#ffffff", 0.38);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#071a2e", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.15);
     }
+}
+
+/// The Mac's motion: `GlassTokens.Motion`'s durations in seconds, the
+/// token curve, and `GlassMotion`'s springs as (duration, bounce).
+pub mod motion {
+    /// `motion.fast`.
+    pub const FAST: f64 = 0.15;
+    /// `motion.standard`.
+    pub const STANDARD: f64 = 0.22;
+    /// `motion.slow`.
+    pub const SLOW: f64 = 0.3;
+    /// `motion.reveal`.
+    pub const REVEAL: f64 = 0.18;
+    /// `motion.slide`.
+    pub const SLIDE: f64 = 0.25;
+    /// `motion.spin`.
+    pub const SPIN: f64 = 0.8;
+    /// `motion.pulse`.
+    pub const PULSE: f64 = 1.6;
+    /// `GlassMotion.curve`'s control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The same curve as a CSS timing function.
+    pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+    /// `GlassMotion.spatial`: `.spring(duration:bounce:)`.
+    pub const SPATIAL: (f64, f64) = (0.9, 0.04);
+    /// `GlassMotion.expressive`: `.spring(duration:bounce:)`.
+    pub const EXPRESSIVE: (f64, f64) = (0.78, 0.32);
+    /// `size.modalScrimBlur`: the blur behind a modal, in points.
+    pub const MODAL_SCRIM_BLUR: f64 = 8.0;
+    /// `modalScrim`'s black, light: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_LIGHT: f64 = 0.25;
+    /// `modalScrim`'s black, dark: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_DARK: f64 = 0.4;
 }

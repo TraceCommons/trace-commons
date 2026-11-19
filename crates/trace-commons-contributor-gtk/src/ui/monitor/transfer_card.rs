@@ -173,6 +173,7 @@ pub fn card(
 
     if let Some(note) = note {
         let details = gtk::Expander::new(Some(screens.shell.notice_details));
+        super::super::glass_motion::expander(&details);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
         // The tool's memory files, and that they stay on this computer,
         // above the note, for one tool's trace (`TraceTransferCard`).
