@@ -48,6 +48,11 @@
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
   </ItemGroup>
 
+  <!-- The first-run stage painter (W8), drawn offscreen without XAML. -->
+  <ItemGroup>
+    <Compile Include="../../src/TraceCommons.App/FirstRun/FirstRunStagePainter.cs" Link="FirstRunStagePainter.cs" />
+  </ItemGroup>
+
   <!-- The Mac's own renders the Windows draws are compared with. -->
   <ItemGroup>
     <None Include="Fixtures/*.png" CopyToOutputDirectory="PreserveNewest" />
