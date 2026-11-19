@@ -55,6 +55,13 @@ public readonly record struct NearAiBalance(
 public static class NearAiBalanceSurface
 {
     /// <summary>
+    /// <c>near_ai_balance</c>'s parameters: past the daemon's cache when
+    /// <paramref name="fresh"/>, as the Mac reads it after a spending switch
+    /// (DaemonClient.swift:631, AppModel.swift:1093).
+    /// </summary>
+    public static string ReadParams(bool fresh) => fresh ? "{\"fresh\":true}" : "{}";
+
+    /// <summary>
     /// What the daemon reported, or <see cref="NearAiBalance.Unreported"/>
     /// when the answer could not be read.
     /// </summary>
