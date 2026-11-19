@@ -224,9 +224,9 @@ public class SampleDaemonTests
         Assert.True(sampleReturn < start.IndexOf("new TcDaemon(", StringComparison.Ordinal));
 
         string call = Between(host, "public async Task<DaemonResponse> CallAsync(", "public async Task<IReadOnlyList<QueueEntry>> ListPendingAsync(");
-        Assert.True(
-            call.IndexOf("_sample is SampleDaemon", StringComparison.Ordinal)
-            < call.IndexOf("TcDaemon? daemon = _daemon;", StringComparison.Ordinal));
+        int sampleCall = call.IndexOf("_sample is SampleDaemon", StringComparison.Ordinal);
+        Assert.True(sampleCall >= 0, "CallAsync has no sample branch");
+        Assert.True(sampleCall < call.IndexOf("TcDaemon? daemon = _daemon;", StringComparison.Ordinal));
 
         foreach (string file in new[] { "TraceCommons.App/DaemonHost.cs", "TraceCommons.App/MainWindow.xaml.cs" })
         {
@@ -234,19 +234,113 @@ public class SampleDaemonTests
             AssertOnlyInsideDebug(file, text, new[] { "_sample", "IsSample", "SampleDaemon" });
         }
 
+        // Program.IsSampleLaunch is a constant false outside Debug (see
+        // ASampleLaunchWritesNothingOutsideItsWindow); only its Debug body
+        // names the client.
+        AssertOnlyInsideDebug("TraceCommons.App/Program.cs", ShellSource("TraceCommons.App/Program.cs"), new[] { "SampleDaemon" });
+
         // Nothing else in either shell project names the sample client.
         foreach (string path in Directory.EnumerateFiles(ShellSourceRoot, "*.txt", SearchOption.AllDirectories))
         {
             string rel = Path.GetRelativePath(ShellSourceRoot, path).Replace('\\', '/');
             if (rel is "TraceCommons.Interop/SampleDaemon.cs.txt"
                 or "TraceCommons.App/DaemonHost.cs.txt"
-                or "TraceCommons.App/MainWindow.xaml.cs.txt")
+                or "TraceCommons.App/MainWindow.xaml.cs.txt"
+                or "TraceCommons.App/Program.cs.txt")
             {
                 continue;
             }
 
             Assert.DoesNotContain("SampleDaemon", File.ReadAllText(path), StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public void ASampleIsRequestedExactlyWhenTheVariableIsSet()
+    {
+        Assert.False(SampleDaemon.IsRequested((string?)null));
+        foreach (string value in new[] { "", "normalDay", "coreDown", "NormalDay", "anything" })
+        {
+            Assert.True(SampleDaemon.IsRequested(value), value);
+            Assert.NotNull(SampleDaemon.FromValue(value, Root, _ => { }));
+        }
+    }
+
+    /// <summary>
+    /// A sample launch changes nothing on this machine outside its window:
+    /// it never claims the single-instance key (so it never redirects into a
+    /// running app), never points the URL scheme at itself, never offers or
+    /// writes run at login, and never writes the witness files.
+    /// </summary>
+    /// <remarks>
+    /// These sites are in the WinUI project, which cannot be built or run
+    /// here, so this checks the wiring in the source: each write is reached
+    /// only past a <c>Program.IsSampleLaunch</c> check, and that check is a
+    /// constant false outside Debug. The behaviour is checked on the Windows
+    /// test box by <c>win-capture-samples.ps1</c>, which snapshots the URL
+    /// scheme, the Run value and the state directories around every sample
+    /// launch and fails on any change, and launches one set twice to see two
+    /// windows rather than a redirect.
+    /// </remarks>
+    [Fact]
+    public void ASampleLaunchWritesNothingOutsideItsWindow()
+    {
+        string program = ShellSource("TraceCommons.App/Program.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        string flag = Between(program, "internal static bool IsSampleLaunch =>", ";\n#endif");
+        Assert.Contains("#if DEBUG", flag, StringComparison.Ordinal);
+        Assert.Contains("SampleDaemon.IsRequested();", flag, StringComparison.Ordinal);
+        Assert.EndsWith("#else\n        false", flag.TrimEnd(), StringComparison.Ordinal);
+
+        AssertGuarded(program, "private static int Main(", "AppInstance.FindOrRegisterForKey(", "if (!IsSampleLaunch)");
+        AssertGuarded(
+            ShellSource("TraceCommons.App/App.xaml.cs"),
+            "protected override void OnLaunched(", "UrlSchemeRegistration.EnsureRegistered();", "if (!Program.IsSampleLaunch)");
+
+        string startup = ShellSource("TraceCommons.App/StartupRegistration.cs");
+        AssertGuarded(startup, "GetStateAsync()", "RunAtLogin.IsEnabled", "if (Program.IsSampleLaunch)");
+        AssertGuarded(startup, "GetStateAsync()", "StartupTask.GetAsync(", "if (Program.IsSampleLaunch)");
+        AssertGuarded(startup, "SetEnabledAsync(bool enabled)", "RunAtLogin.Set(", "if (Program.IsSampleLaunch)");
+        AssertGuarded(startup, "SetEnabledAsync(bool enabled)", "StartupTask.GetAsync(", "if (Program.IsSampleLaunch)");
+
+        string settings = ShellSource("TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs");
+        AssertGuarded(settings, "public async Task ConfigureWitnessAsync()", "WitnessSurface.Configure(", "|| Program.IsSampleLaunch)");
+        AssertGuarded(settings, "public async Task ClearWitnessAsync()", "WitnessSurface.Clear(", "|| Program.IsSampleLaunch)");
+
+        // No other caller reaches those writes around the guards.
+        foreach (string path in Directory.EnumerateFiles(Path.Combine(ShellSourceRoot, "TraceCommons.App"), "*.txt", SearchOption.AllDirectories))
+        {
+            string rel = Path.GetRelativePath(ShellSourceRoot, path).Replace('\\', '/');
+            string text = Code(File.ReadAllText(path));
+            foreach ((string write, string owner) in new[]
+            {
+                ("FindOrRegisterForKey(", "TraceCommons.App/Program.cs.txt"),
+                ("UrlSchemeRegistration.EnsureRegistered(", "TraceCommons.App/App.xaml.cs.txt"),
+                ("RunAtLogin.Set(", "TraceCommons.App/StartupRegistration.cs.txt"),
+                ("WitnessSurface.Configure(", "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs.txt"),
+                ("WitnessSurface.Clear(", "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs.txt"),
+            })
+            {
+                if (rel != owner)
+                {
+                    Assert.DoesNotContain(write, text, StringComparison.Ordinal);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="guard"/> appears in the member starting at
+    /// <paramref name="member"/>, before <paramref name="write"/>.
+    /// </summary>
+    private static void AssertGuarded(string source, string member, string write, string guard)
+    {
+        string code = Code(source);
+        int start = code.IndexOf(member, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{member} not found");
+        int writeAt = code.IndexOf(write, start, StringComparison.Ordinal);
+        Assert.True(writeAt > start, $"{member} no longer reaches {write}");
+        int guardAt = code.IndexOf(guard, start, StringComparison.Ordinal);
+        Assert.True(guardAt > start && guardAt < writeAt, $"{member} reaches {write} without {guard}");
     }
 
     /// <summary>

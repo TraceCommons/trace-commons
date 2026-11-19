@@ -39,8 +39,12 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         // Packaged installs use manifest registration; this helper only
-        // registers the scheme for unpackaged installs.
-        UrlSchemeRegistration.EnsureRegistered();
+        // registers the scheme for unpackaged installs. A recorded-sample
+        // launch never points the scheme at itself.
+        if (!Program.IsSampleLaunch)
+        {
+            UrlSchemeRegistration.EnsureRegistered();
+        }
 
         var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
         string? protocolUri = activation.Kind == ExtendedActivationKind.Protocol

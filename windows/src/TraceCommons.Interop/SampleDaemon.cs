@@ -17,7 +17,9 @@
 // recording to drift.
 //
 // What it never does: start or attach to a daemon, open the state directory,
-// take the lock, enroll, upload or write anything. A method is answered only
+// take the lock, enroll, upload or write anything. The app's own writes to
+// this machine (the single-instance key, the URL scheme, run at login, the
+// witness files) are refused in sample mode too; see Program.IsSampleLaunch. A method is answered only
 // when its set, or the shared/ set the macOS app uses for the four writes whose
 // reply never depends on the set (approve, keep, undo_keep, set_project_mode),
 // holds a recording of it. Every other method is refused with one fixed label.
@@ -133,6 +135,17 @@ public sealed class SampleDaemon
 
         return new SampleDaemon(chosen.Set, root);
     }
+
+    /// <summary>
+    /// Whether this launch reads recorded samples: <c>TRACE_COMMONS_SAMPLE</c>
+    /// is set, to anything. The app asks this before a window or host exists
+    /// (single-instancing, the URL scheme), and every answer agrees with
+    /// <see cref="FromEnvironment"/>.
+    /// </summary>
+    public static bool IsRequested() => IsRequested(Environment.GetEnvironmentVariable(EnvironmentVariable));
+
+    /// <summary><see cref="IsRequested()"/> for a given value.</summary>
+    public static bool IsRequested(string? value) => Choose(value) is not null;
 
     /// <summary>This launch's sample, from the environment; null over the daemon.</summary>
     public static SampleDaemon? FromEnvironment() => FromValue(
