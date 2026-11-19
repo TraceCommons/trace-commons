@@ -410,6 +410,12 @@ public static class TracesTreeRows
         heldForSecondLook || heldByManualScrubCheck || returnedFromKeep;
 
     /// <summary>
+    /// The same, from the daemon's reason label: second-look review, Manual
+    /// Scrub check, or back from Keep (DaemonDataModels.swift:324-328, :412-414).
+    /// </summary>
+    public static bool IsHeld(string? reasonLabel) => reasonLabel is "second-look-review-required" or "scrub-check-manual" or "returned-from-keep";
+
+    /// <summary>
     /// A trace's sub line (:1031-1056): its size, then its state: held, the
     /// core's ineligible sentence, trimmed to fit, the attestation sentence,
     /// else waiting.
@@ -459,6 +465,26 @@ public static class TracesTreeRows
             TreeAttestationTone.Clear => TreeFlag.On,
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// The selection's tool, what the graph counts and the binoculars focus
+    /// (MonitorWindowView.swift:711-724): a trace's own tool, declared first;
+    /// a folder's tool on the map, else its traces' majority; null otherwise.
+    /// </summary>
+    public static string? ToolOf(TreeSelection? selection, TracesTree tree)
+    {
+        switch (selection)
+        {
+            case TreeSelection.Session s when tree.AllSessions.FirstOrDefault(e => e.EntryId == s.EntryId) is { } entry:
+                return MapTools.Known(entry.DeclaredSource ?? entry.Source) ? entry.DeclaredSource ?? entry.Source
+                    : MapTools.Known(entry.Source) ? entry.Source : null;
+            case TreeSelection.Folder f when tree.Folders.FirstOrDefault(x => x.Id == f.ProjectId) is { } folder:
+                return tree.Tools.FirstOrDefault(t => t.Folders.Any(x => x.Id == folder.Id))?.Id
+                    ?? TracesTree.MajorityTool(folder.Sessions);
+            default:
+                return null;
+        }
     }
 
     private static int IndexOf(IReadOnlyList<TreeSelection> rows, TreeSelection current)

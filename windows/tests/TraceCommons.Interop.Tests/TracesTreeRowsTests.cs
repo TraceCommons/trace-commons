@@ -238,6 +238,12 @@ public class TracesTreeRowsTests
         Assert.True(TracesTreeRows.IsHeld(false, true, false));
         Assert.True(TracesTreeRows.IsHeld(false, false, true));
         Assert.False(TracesTreeRows.IsHeld(false, false, false));
+        Assert.True(TracesTreeRows.IsHeld("second-look-review-required"));
+        Assert.True(TracesTreeRows.IsHeld("scrub-check-manual"));
+        Assert.True(TracesTreeRows.IsHeld("returned-from-keep"));
+        Assert.False(TracesTreeRows.IsHeld("kept-on-this-mac"));
+        Assert.False(TracesTreeRows.IsHeld("witness-risk-review-required"));
+        Assert.False(TracesTreeRows.IsHeld(null));
         Assert.Equal(TreeFlag.Ask, TracesTreeRows.Flag(true, false, TreeAttestationTone.Clear));
         Assert.Equal(TreeFlag.Ask, TracesTreeRows.Flag(false, true, TreeAttestationTone.Clear));
         Assert.Equal(TreeFlag.Ask, TracesTreeRows.Flag(false, false, TreeAttestationTone.Attention));
@@ -389,6 +395,27 @@ public class TracesTreeRowsTests
         Assert.Equal("Order of waiting traces", TreeOrderWords.Label);
         Assert.Equal("Oldest first", TreeOrderWords.Queue);
         Assert.Equal("Your order", TreeOrderWords.Arranged);
+    }
+
+    [Fact]
+    public async Task TheSelectionsToolIsATracesOwnOrItsFoldersOnTheMap()
+    {
+        // MonitorWindowView.swift:715-724.
+        TracesTree tree = await Tree("busyQueue");
+        TracesTree.FolderNode folder = tree.Folders.First(f => f.Sessions.Count > 0);
+        MapEntry entry = folder.Sessions[0];
+        string expected = entry.DeclaredSource is { } d && MapTools.Known(d) ? d : entry.Source;
+        Assert.Equal(expected, TracesTreeRows.ToolOf(new TreeSelection.Session(entry.EntryId), tree));
+        string? onMap = tree.Tools.FirstOrDefault(t => t.Folders.Any(x => x.Id == folder.Id))?.Id;
+        Assert.NotNull(onMap);
+        Assert.Equal(onMap, TracesTreeRows.ToolOf(new TreeSelection.Folder(folder.Id), tree));
+        Assert.Null(TracesTreeRows.ToolOf(null, tree));
+        Assert.Null(TracesTreeRows.ToolOf(new TreeSelection.Session("gone"), tree));
+        // A declared tool wins over the adapter that read it.
+        var t = new TracesTree(Array.Empty<TracesTree.ToolNode>(), Array.Empty<TracesTree.FolderNode>(),
+            new[] { new TracesTree.FolderNode("p", "P", MapModes.Ask, new[] { new MapEntry("e", MapTools.ClaudeCode, MapTools.Codex, "p", "P", null, null) }) });
+        Assert.Equal(MapTools.Codex, TracesTreeRows.ToolOf(new TreeSelection.Session("e"), t));
+        Assert.Equal(MapTools.Codex, TracesTreeRows.ToolOf(new TreeSelection.Folder("p"), t));
     }
 
     [Fact]

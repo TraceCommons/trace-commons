@@ -1644,7 +1644,7 @@ def render_windows(tokens: dict) -> str:
 # folder-initial ink (`GlassToolTile`, tileFolderInk).
 WINDOWS_MAP_COLOURS = MAP_COLOURS + ["ink", "tileFolder", "dataShared", "dataKept",
                                      "graphFocusOn", "graphFocusIdle", "graphFocusOff",
-                                     "tileFolderInk"]
+                                     "tileFolderInk", "selection", "rowHover", "textOnAccent"]
 
 
 def cs_float(value) -> str:

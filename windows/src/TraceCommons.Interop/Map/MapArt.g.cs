@@ -59,6 +59,9 @@ public static partial class MapArt
         ["graphFocusIdle"] = new MapRgba(60, 60, 66, 1.0),
         ["graphFocusOff"] = new MapRgba(161, 161, 166, 1.0),
         ["tileFolderInk"] = new MapRgba(44, 138, 55, 1.0),
+        ["selection"] = new MapRgba(5, 88, 182, 1.0),
+        ["rowHover"] = new MapRgba(0, 0, 0, 0.04),
+        ["textOnAccent"] = new MapRgba(255, 255, 255, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };
@@ -102,6 +105,9 @@ public static partial class MapArt
         ["graphFocusIdle"] = new MapRgba(214, 214, 220, 1.0),
         ["graphFocusOff"] = new MapRgba(107, 107, 112, 1.0),
         ["tileFolderInk"] = new MapRgba(139, 226, 139, 1.0),
+        ["selection"] = new MapRgba(126, 188, 255, 1.0),
+        ["rowHover"] = new MapRgba(255, 255, 255, 0.05),
+        ["textOnAccent"] = new MapRgba(7, 26, 46, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };

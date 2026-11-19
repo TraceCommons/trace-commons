@@ -380,6 +380,12 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// <summary>Human-readable size, binary units to match what Explorer shows.</summary>
     public string SizeText => FormatBytes(_entry.SizeBytes);
 
+    /// <summary>The size the daemon reported, for the Traces tree's sub line.</summary>
+    public long SizeBytes => _entry.SizeBytes;
+
+    /// <summary>The daemon's reason label as sent, for the Traces tree's holds (TracesTreeRows.IsHeld).</summary>
+    public string? ReasonCode => _entry.ReasonLabel;
+
     /// <summary>
     /// What this one card actually covers, and -- the half the contract makes
     /// mandatory -- whether any of it was left out to fit. See
