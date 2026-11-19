@@ -490,6 +490,26 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             inked,
             "dark={dark}: no word pixel near the selection's ink, best {closest:.2}:1"
         );
+        // The row's switch: its knob reads on the selection, at the 3:1 a
+        // control needs.
+        let selection = glass_colour(dark, "tc_glass_control_selected");
+        let switch = with_class(&row, "tc-tree-switch");
+        assert!(
+            !switch.is_empty(),
+            "dark={dark}: the selected folder row has its switch"
+        );
+        let knob = switch[0].first_child().expect("the switch's knob");
+        let at = bounds(&knob, app.window.upcast_ref());
+        let middle = (
+            (at.x() + at.width() / 2.0) as i32,
+            (at.y() + at.height() / 2.0) as i32,
+        );
+        let drawn = window_pixels(&app.window, &[middle])[0];
+        let ratio = contrast(drawn, selection);
+        assert!(
+            ratio >= 3.0,
+            "dark={dark}: the knob {drawn:?} at {ratio:.2}:1 on the selection"
+        );
     }
     manager.set_color_scheme(adw::ColorScheme::Default);
     app.window.close();

@@ -1124,6 +1124,20 @@ switch.tc-tree-switch > slider {
   margin: 0;
 }
 
+/* The switch on a selected row: its knob in the selection's ink (the
+   Mac's knob on, `textOnAccent`, is that ink), on and off, and its track
+   on in the control-on-selection fill, so neither vanishes into the
+   selection (Omarchy: a white knob on the selection measured 2.52:1). */
+.tc-tree-row-selected switch.tc-tree-switch > slider {
+  background-color: @tc_glass_selected_ink;
+  background-image: none;
+  box-shadow: none;
+}
+
+.tc-tree-row-selected switch.tc-tree-switch:checked {
+  background-color: @tc_glass_control_on_selection;
+}
+
 .tc-tree-menu-current {
   font-weight: 600;
 }
