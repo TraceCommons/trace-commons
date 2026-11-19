@@ -136,7 +136,10 @@ public static class MonitorWindowGrowth
         MonitorPaneLayout before = MonitorPaneLayout.For(clientWidth, old.Map, old.Inspector, main);
         double kept = before.Main;
         double wanted = MonitorPaneLayout.WindowWidth(clientWidth, old, next, kept, mapWidth);
-        double outerWidth = outer.Width + MonitorPaneLayout.ToPhysical(wanted, scale) - MonitorPaneLayout.ToPhysical(clientWidth, scale);
+        // The change, not each width, in whole physical pixels: rounding the
+        // two widths up separately added a pixel on every open and close at
+        // a fractional scale.
+        double outerWidth = outer.Width + Math.Round((wanted - clientWidth) * scale, MidpointRounding.AwayFromZero);
         LayoutRect frame = MonitorPaneLayout.WindowFrame(outer, outerWidth, workArea);
         double clientAfter = wanted - (outerWidth - frame.Width) / scale;
         MonitorPaneLayout after = MonitorPaneLayout.For(clientAfter, next.Map, next.Inspector, kept);
@@ -216,6 +219,16 @@ public static class TitleBarRegions
     public static double InsetDips(double physicalInset, double scale, double previousDips) =>
         IsPositive(scale) && double.IsFinite(physicalInset) && physicalInset >= 0 ? physicalInset / scale : previousDips;
 
+    /// <summary>
+    /// When a size change may read the caption inset and lay the title bar
+    /// out: never while minimised, and not inside the event that restores a
+    /// minimised window, whose inset is transient (RightInset -8 at 100
+    /// percent, 29 at 125 percent on the test box, against 144 and 180), so it
+    /// is read once the restore has been dispatched.
+    /// </summary>
+    public static TitleBarRead WhenToRead(bool wasMinimised, bool minimised) =>
+        minimised ? TitleBarRead.Skip : wasMinimised ? TitleBarRead.AfterDispatch : TitleBarRead.Now;
+
     /// <summary>Whether a rasterization scale can convert between units.</summary>
     public static bool IsUsableScale(double scale) => IsPositive(scale);
 
@@ -245,4 +258,12 @@ public static class TitleBarRegions
 
         return rects;
     }
+}
+
+/// <summary>When the title bar's inset and regions are read (<see cref="TitleBarRegions.WhenToRead"/>).</summary>
+public enum TitleBarRead
+{
+    Now,
+    AfterDispatch,
+    Skip,
 }

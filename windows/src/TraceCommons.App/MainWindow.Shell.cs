@@ -84,6 +84,9 @@ public sealed partial class MainWindow
 
     private bool _seeded;
 
+    /// <summary>Whether the window was minimised at its last change.</summary>
+    private bool _minimised;
+
     private void InitializeShell()
     {
         Title = MonitorWords.AppName;
@@ -430,7 +433,13 @@ public sealed partial class MainWindow
         MovePanes(wanted);
     }
 
-    private double Scale => Content?.XamlRoot?.RasterizationScale ?? 1.0;
+    /// <summary>
+    /// The window's monitor scale, from Win32 (<see cref="MonitorScale"/>):
+    /// XamlRoot.RasterizationScale reads 1.0 until the first layout, so at 125
+    /// percent the first launch was sized as if at 100 (test box, 2026-11-19:
+    /// 745 by 615 physical pixels at 120 DPI).
+    /// </summary>
+    private double Scale => MonitorScale.For(AppWindow);
 
     /// <summary>
     /// The width the panes are laid out in, from the window, never from
@@ -628,22 +637,36 @@ public sealed partial class MainWindow
 
     private void OnAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
-        if (args.DidPresenterChange || args.DidSizeChange)
+        if (!args.DidPresenterChange && !args.DidSizeChange)
         {
-            bool minimised = sender.Presenter is OverlappedPresenter presenter
-                && presenter.State == OverlappedPresenterState.Minimized;
-            _clockGate.SetMinimised(minimised);
+            return;
         }
 
-        if (args.DidSizeChange)
+        bool wasMinimised = _minimised;
+        _minimised = sender.Presenter is OverlappedPresenter presenter
+            && presenter.State == OverlappedPresenterState.Minimized;
+        _clockGate.SetMinimised(_minimised);
+        if (!args.DidSizeChange)
         {
-            UpdateTitleBarRegions();
-            // PaneRow's own SizeChanged does not fire once its fixed columns
-            // are wider than the window: the window's size is what changed.
-            if (!(sender.Presenter is OverlappedPresenter shown && shown.State == OverlappedPresenterState.Minimized))
-            {
+            return;
+        }
+
+        // The title bar and the panes follow the window's size. PaneRow's own
+        // SizeChanged does not fire once its fixed columns are wider than the
+        // window, and the caption inset is transient inside the restore.
+        switch (TitleBarRegions.WhenToRead(wasMinimised, _minimised))
+        {
+            case TitleBarRead.Now:
+                UpdateTitleBarRegions();
                 LayoutPanes();
-            }
+                break;
+            case TitleBarRead.AfterDispatch:
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+                {
+                    UpdateTitleBarRegions();
+                    LayoutPanes();
+                });
+                break;
         }
     }
 

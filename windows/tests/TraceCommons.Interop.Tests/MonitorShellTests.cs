@@ -331,6 +331,31 @@ public class MonitorShellTests
         Assert.Equal(outer, close.Frame);
     }
 
+    [Theory]
+    [InlineData(1.0, 440)]
+    [InlineData(1.25, 550)]
+    [InlineData(1.5, 660)]
+    public void OpeningAndClosingTheInspectorAgainAndAgainLeavesTheWindowItsWidth(double scale, int clientPx)
+    {
+        // Each close is planned from the client the open actually gave
+        // (929 px at 125 percent is 743.2, not 743). Rounded up on every move,
+        // the window grew one pixel per open and close (test box, 2026-11-19:
+        // 552, 553, 554, 555 at 125 percent).
+        var outer = new LayoutRect(100, 40, clientPx + 16, 700);
+        var work = new LayoutRect(0, 0, 3840, 2100);
+        LayoutRect frame = outer;
+        for (int i = 0; i < 4; i++)
+        {
+            double client = (frame.Width - 16) / scale;
+            PaneMove open = MonitorWindowGrowth.Plan(frame, client, work, scale, new PaneVisibility(false, false), new PaneVisibility(false, true), 440, 440, true);
+            double openClient = (open.Frame.Width - 16) / scale;
+            PaneMove close = MonitorWindowGrowth.Plan(open.Frame, openClient, work, scale, new PaneVisibility(false, true), new PaneVisibility(false, false), 440, 440, true);
+            frame = close.Frame;
+        }
+
+        Assert.Equal(outer, frame);
+    }
+
     [Fact]
     public void AtTheRightEdgeTheWindowSlidesLeftOnItsOwnMonitor()
     {
@@ -388,6 +413,18 @@ public class MonitorShellTests
         Assert.Equal(110.4, TitleBarRegions.InsetDips(138, 0, 110.4), 9);
         Assert.Equal(110.4, TitleBarRegions.InsetDips(138, double.NaN, 110.4), 9);
         Assert.Equal(144, TitleBarRegions.InsetDips(double.PositiveInfinity, 1.0, 144));
+    }
+
+    [Fact]
+    public void TheTitleBarIsReadAfterARestoreNotInsideItAndNeverWhileMinimised()
+    {
+        // At 125 percent the restore reported RightInset 29 (not 180): read
+        // then, the toolbar slid under the caption buttons and a click on the
+        // inspector toggle maximised the window (test box, 2026-11-19).
+        Assert.Equal(TitleBarRead.Now, TitleBarRegions.WhenToRead(wasMinimised: false, minimised: false));
+        Assert.Equal(TitleBarRead.AfterDispatch, TitleBarRegions.WhenToRead(wasMinimised: true, minimised: false));
+        Assert.Equal(TitleBarRead.Skip, TitleBarRegions.WhenToRead(wasMinimised: false, minimised: true));
+        Assert.Equal(TitleBarRead.Skip, TitleBarRegions.WhenToRead(wasMinimised: true, minimised: true));
     }
 
     [Fact]
