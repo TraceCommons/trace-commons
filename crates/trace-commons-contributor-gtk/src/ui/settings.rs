@@ -836,7 +836,8 @@ impl SettingsView {
 
 /// Settings' credit-arrival card: the core's heading, the switch and the
 /// line under it (`GeneralSection.creditIconAnimationCard`), on unless the
-/// person turned it off.
+/// person turned it off. The switch and the line are the Linux words,
+/// naming the taskbar and tray where the Mac names the Dock and menu bar.
 pub(crate) fn credit_icon_card() -> (gtk::Box, GlassSwitch) {
     let words = &monitor_screens_copy().home_history;
     let card = style::card(gtk::Orientation::Vertical, space::S);
@@ -848,7 +849,7 @@ pub(crate) fn credit_icon_card() -> (gtk::Box, GlassSwitch) {
     card.append(&heading);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
     let label = gtk::Label::builder()
-        .label(words.credit_icon_animation_toggle)
+        .label(words.credit_icon_animation_toggle_linux)
         .xalign(0.0)
         .hexpand(true)
         .wrap(true)
@@ -860,12 +861,12 @@ pub(crate) fn credit_icon_card() -> (gtk::Box, GlassSwitch) {
     switch.set_halign(gtk::Align::End);
     switch.set_valign(gtk::Align::Center);
     switch.update_property(&[gtk::accessible::Property::Label(
-        words.credit_icon_animation_toggle,
+        words.credit_icon_animation_toggle_linux,
     )]);
     row.append(&label);
     row.append(&switch);
     card.append(&row);
-    style::append_meta(&card, words.credit_icon_animation_caption);
+    style::append_meta(&card, words.credit_icon_animation_caption_linux);
     (card, switch)
 }
 
@@ -4736,8 +4737,9 @@ mod tests {
     }
 
     /// The credit-arrival card is the Mac's `creditIconAnimationCard` in the
-    /// core's words, verbatim (title, switch and its accessible name,
-    /// caption), on before the person turns it off.
+    /// core's words, verbatim: the Mac's heading, and the Linux switch and
+    /// caption (the switch also its accessible name), naming the taskbar
+    /// and tray; on before the person turns it off.
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_the_credit_arrival_card_has_the_shared_words() {
@@ -4759,18 +4761,27 @@ mod tests {
         }
         for words in [
             home.credit_icon_animation_title,
-            home.credit_icon_animation_toggle,
-            home.credit_icon_animation_caption,
+            home.credit_icon_animation_toggle_linux,
+            home.credit_icon_animation_caption_linux,
         ] {
             assert!(
                 texts.iter().any(|t| t == words),
                 "{words:?} not in {texts:?}"
             );
         }
+        for words in [
+            home.credit_icon_animation_toggle,
+            home.credit_icon_animation_caption,
+        ] {
+            assert!(
+                !texts.iter().any(|t| t == words),
+                "the Mac's {words:?} in {texts:?}"
+            );
+        }
     }
 
-    /// The card's words are the Mac's, ported key for key from the core at
-    /// origin/main (#2197), never new English.
+    /// The card's heading is the Mac's key, from the core, never new
+    /// English; the Mac's own switch words stay the Dock's.
     #[test]
     fn the_credit_arrival_words_are_the_macs_keys() {
         let home = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
@@ -4783,60 +4794,47 @@ mod tests {
             home.credit_icon_animation_caption,
             "Burst gold coins on the Dock and menu bar icons when credits arrive."
         );
-        assert!(include_str!("settings.rs").contains("words.credit_icon_animation_toggle"));
+        assert!(include_str!("settings.rs").contains("words.credit_icon_animation_title"));
     }
 
-    /// The Linux words for the credit switch (taskbar and tray) are in the
-    /// core as a DRAFT and not shown until the owner approves them: no
-    /// shell source reads them, and the card keeps the Mac's.
+    /// The credit switch shows the Linux words the owner approved on
+    /// 2026-11-19, verbatim from the core, as its label, accessible name
+    /// and caption, and not the Mac's Dock and menu-bar words.
     #[test]
-    fn the_linux_credit_words_are_a_draft_not_yet_shown() {
-        let draft = [
-            concat!("credit_icon_animation_", "toggle_linux"),
-            concat!("credit_icon_animation_", "caption_linux"),
-        ];
-        let home = serde_json::to_value(
-            trace_commons_contributor::preview_copy::monitor_screens_copy().home_history,
-        )
-        .unwrap();
-        for key in draft {
-            let words = home[key].as_str().unwrap_or_else(|| panic!("no {key}"));
-            assert!(
-                words.contains("taskbar") && words.contains("tray"),
-                "{words}"
-            );
-            assert!(
-                !words.contains("Dock") && !words.contains("menu bar"),
-                "{words}"
-            );
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut stack = vec![root.join("src")];
-        let mut read = 0;
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    read += 1;
-                    let source = std::fs::read_to_string(&path).unwrap();
-                    for key in draft {
-                        assert!(
-                            !source.contains(key),
-                            "{} shows the draft {key}",
-                            path.display()
-                        );
-                    }
-                }
-            }
-        }
-        assert!(read > 50, "the shell's sources were not read");
-        let macos = root.join("../../macos/Sources");
-        let swift =
-            std::fs::read_to_string(macos.join("TCShellCore/MonitorTracesCopy.swift")).unwrap();
-        for key in draft {
-            assert!(!swift.contains(key), "the Mac decodes the draft {key}");
+    fn the_credit_switch_shows_the_approved_linux_words() {
+        let home = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
+        assert_eq!(
+            home.credit_icon_animation_toggle_linux,
+            "Animate taskbar and tray icons"
+        );
+        assert_eq!(
+            home.credit_icon_animation_caption_linux,
+            "Burst gold coins on the tray icon and flag the taskbar when credits arrive."
+        );
+        let source = include_str!("settings.rs");
+        let body = source
+            .split("pub(crate) fn credit_icon_card()")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("credit_icon_card");
+        assert_eq!(
+            body.matches("words.credit_icon_animation_toggle_linux")
+                .count(),
+            2,
+            "the switch's label and accessible name"
+        );
+        assert_eq!(
+            body.matches("words.credit_icon_animation_caption_linux")
+                .count(),
+            1,
+            "the caption"
+        );
+        for mac in [
+            "words.credit_icon_animation_toggle,",
+            "words.credit_icon_animation_toggle)",
+            "words.credit_icon_animation_caption)",
+        ] {
+            assert!(!body.contains(mac), "the card still reads {mac}");
         }
     }
 

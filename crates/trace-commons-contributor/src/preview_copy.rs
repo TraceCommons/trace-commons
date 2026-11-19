@@ -1509,9 +1509,8 @@ pub struct MonitorHomeHistoryCopy {
     pub credit_icon_animation_toggle: &'static str,
     pub credit_icon_animation_caption: &'static str,
     /// The Linux app's words for the same switch, naming the taskbar and
-    /// tray where the Mac names the Dock and menu bar (owner, 2026-11-19).
-    /// DRAFT, NEEDS APPROVAL: no shell shows them yet; the Linux card keeps
-    /// the Mac's words until the owner approves these.
+    /// tray where the Mac names the Dock and menu bar. The Linux card shows
+    /// these in place of the Mac's toggle and caption.
     pub credit_icon_animation_toggle_linux: &'static str,
     pub credit_icon_animation_caption_linux: &'static str,
     /// The contribution list card's eyebrow and heading.
@@ -1865,7 +1864,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             credit_icon_animation_title: "Credit arrivals",
             credit_icon_animation_toggle: "Animate Dock and menu bar icons",
             credit_icon_animation_caption: "Burst gold coins on the Dock and menu bar icons when credits arrive.",
+            // Owner-approved 2026-11-19.
             credit_icon_animation_toggle_linux: "Animate taskbar and tray icons",
+            // Owner-approved 2026-11-19.
             credit_icon_animation_caption_linux: "Burst gold coins on the tray icon and flag the taskbar when credits arrive.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
