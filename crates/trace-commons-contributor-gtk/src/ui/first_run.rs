@@ -2520,12 +2520,26 @@ mod window_tests {
             }
         }
         assert!(names.len() >= 7, "every step's page: {names:?}");
+        // The column every step is given (`first_run_screens::column`).
+        let column = stack
+            .ancestor(adw::Clamp::static_type())
+            .and_downcast::<adw::Clamp>()
+            .expect("the steps' column")
+            .maximum_size();
         for name in &names {
             stack.set_visible_child_name(name);
             settle(&context);
             assert_eq!(window.width(), WINDOW.0, "{name}: the window grew");
+            // No step needs more than its column, so none is cut off at
+            // the window's edge now that a step cannot widen the window.
+            let page = stack.child_by_name(name).expect("the page");
+            let (least, _, _, _) = page.measure(gtk::Orientation::Horizontal, -1);
+            assert!(
+                least <= column,
+                "{name} needs {least}, its column is {column}"
+            );
             let (least, _, _, _) = window.measure(gtk::Orientation::Horizontal, -1);
-            assert!(least <= WINDOW_LEAST.0, "{name} needs {least}");
+            assert!(least <= WINDOW_LEAST.0, "{name}: the window needs {least}");
         }
         window.close();
         let _ = std::fs::remove_dir_all(&dir);

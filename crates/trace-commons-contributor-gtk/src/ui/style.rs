@@ -150,7 +150,8 @@ pub mod brand_tokens;
 /// and 4.26:1 on the dark ground, so it fails the 4.5:1 body-text floor at
 /// both ends. `tc_ink_tertiary` therefore carries the nearest accessible
 /// twin on the same hue and saturation (`#6D7269` / `#878D81`, 4.58:1 and
-/// 4.55:1 on their grounds), which keeps the three-step ink ramp the spec
+/// 4.55:1 on their grounds; light is `#6A6F66` since the grounds became the
+/// Monitor's, 4.64:1 on its pane `#F2F3F6`), which keeps the three-step ink ramp the spec
 /// asks for without putting sub-threshold type on a screen. It must not be
 /// used on the inset surface, where the dark twin measures 4.05:1; small
 /// type inside a manifest strip stays on `tc_muted`.
@@ -166,7 +167,7 @@ const LIGHT_TOKENS: &str = r#"
 @define-color tc_selected  rgba(0, 0, 0, 0.07);   /* surface.selected */
 @define-color tc_ink       #20241F;   /* ink.primary */
 @define-color tc_muted     #5C635B;   /* ink.secondary */
-@define-color tc_ink_tertiary #6D7269;   /* ink.tertiary, contrast-corrected */
+@define-color tc_ink_tertiary #6A6F66;   /* ink.tertiary, contrast-corrected */
 @define-color tc_line      #D9DFDC;   /* hairline */
 @define-color tc_line_divider #DDDFD8;   /* hairline.divider */
 
@@ -1517,6 +1518,22 @@ mod tests {
                 None => assert_eq!(chosen.contrast, 1.0, "dark={dark}"),
             }
             assert_eq!(best.is_some(), dark, "dark={dark}: {best:?}");
+        }
+    }
+
+    /// The shell's own inks on the grounds every window and sheet now
+    /// draws on (the Monitor's pane, card and well): primary and
+    /// secondary on all three, tertiary on the pane and the card (never
+    /// the inset, as its note says).
+    #[test]
+    fn the_shells_inks_clear_4_5_on_the_monitors_grounds() {
+        let mut text = on_every_ground(&["tc_ink", "tc_muted"]);
+        text.extend([
+            ("tc_ink_tertiary", "tc_bg"),
+            ("tc_ink_tertiary", "tc_surface"),
+        ]);
+        for dark in [false, true] {
+            assert_eq!(check(dark, &text, 4.5), Vec::<String>::new());
         }
     }
 
