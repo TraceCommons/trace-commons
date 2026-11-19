@@ -216,7 +216,10 @@ impl Plates {
             return;
         }
         imp.driver.finish();
-        if !self.is_mapped() || !glass_motion::animations_enabled() {
+        // The plates are hidden while none peek out, so whether the stack
+        // is on screen is their parent's to say.
+        let shown = self.parent().is_some_and(|stack| stack.is_mapped());
+        if !shown || !glass_motion::animations_enabled() {
             imp.at.set(None);
             self.set_visible(behind > 0);
             self.queue_resize();

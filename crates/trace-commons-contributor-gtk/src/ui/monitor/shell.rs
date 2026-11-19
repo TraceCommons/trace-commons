@@ -2460,15 +2460,23 @@ mod tests {
         assert!(over.get(), "the lift did not overshoot on its spring");
 
         // Dragged right past Insights' middle: Traces takes its place.
-        let width = f64::from(button(Tab::Traces).width());
+        let width = f64::from(lift(Tab::Traces).width());
         assert!(
             !ordering.follow(Tab::Traces, &button(Tab::Traces), 3.0),
             "moved at 3 points"
         );
         assert!(ordering.follow(Tab::Traces, &button(Tab::Traces), width * 0.6));
+        let diagnosis = (
+            width,
+            f64::from(button(Tab::Traces).width()),
+            lift(Tab::Traces).drag(),
+            ordering.drag.borrow().origin,
+            ordering.drag.borrow().start_x,
+        );
         assert_eq!(
             tabs::current_order(),
-            vec![Tab::Home, Tab::Inference, Tab::Insights, Tab::Traces]
+            vec![Tab::Home, Tab::Inference, Tab::Insights, Tab::Traces],
+            "{diagnosis:?}"
         );
         assert_eq!(
             shell.state.prefs.borrow().tab_order.stored(),
@@ -2538,9 +2546,18 @@ mod tests {
         settings.set_gtk_enable_animations(false);
         shell.pick_tab(Tab::Home);
         assert!(shell.ember_glide.borrow().from.is_none(), "no glide");
-        pump();
+        // The next frame draws it on Home, with nothing between.
+        let drawn_between = Cell::new(false);
+        pump_until(|| {
+            let at = shell.ember_glide.borrow().drawn.expect("drawn");
+            if at.0 > home.0 + 1.0 && at.0 < rest.0 - 1.0 {
+                drawn_between.set(true);
+            }
+            (at.0 - home.0).abs() < 0.5
+        });
         let at = shell.ember_glide.borrow().drawn.expect("drawn");
         assert!((at.0 - home.0).abs() < 0.5, "{at:?}");
+        assert!(!drawn_between.get(), "{at:?}");
         settings.set_gtk_enable_animations(true);
     }
 
