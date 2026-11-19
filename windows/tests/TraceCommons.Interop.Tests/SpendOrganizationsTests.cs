@@ -207,4 +207,22 @@ public sealed class SpendOrganizationsTests
         await model.RefreshAsync();
         Assert.False(model.IsShown);
     }
+
+    // Not now does nothing while a credential action is in flight
+    // (AppModel.swift:1104, !credentialBusy).
+    [Fact]
+    public async Task NotNowWaitsForACredentialAction()
+    {
+        var daemon = new Daemon();
+        daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }));
+        bool busy = true;
+        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, () => busy);
+        await model.RefreshAsync();
+        await model.DismissAsync();
+        Assert.DoesNotContain(daemon.Calls, c => c.Method == SpendOrganizationPromptModel.SelectMethod);
+        Assert.True(model.IsShown);
+        busy = false;
+        await model.DismissAsync();
+        Assert.Contains(daemon.Calls, c => c.Method == SpendOrganizationPromptModel.SelectMethod);
+    }
 }

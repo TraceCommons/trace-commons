@@ -27,7 +27,8 @@ public sealed partial class PrivateInferenceView
         PrivateAIGuide.ClosedPath(_host.ShellStateDirectory));
 
     public SpendOrganizationPromptModel SpendPrompt => _spendPrompt ??=
-        new SpendOrganizationPromptModel((m, p) => _host.CallAsync(m, p), () => _host.ConnectionGeneration);
+        new SpendOrganizationPromptModel(
+            (m, p) => _host.CallAsync(m, p), () => _host.ConnectionGeneration, () => !ViewModel.ControlsEnabled);
 
     private InferenceLedgerModel CreateLedger()
     {
