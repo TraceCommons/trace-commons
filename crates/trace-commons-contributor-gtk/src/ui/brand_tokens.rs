@@ -112,6 +112,9 @@ pub const INSIGHTS_LIGHT_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #dbdee4; }
 .tc-insights stackswitcher button:checked { background: #0558b6; color: #ffffff; }
 .tc-insights .caption, .tc-insights .dim-label { color: #3c3c43; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #e8e9ec; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #f6f6f7; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #f8f8f9; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
@@ -131,9 +134,595 @@ pub const INSIGHTS_DARK_CSS: &str = r#"
 .tc-insights stackswitcher button:hover { background: #3b3d47; }
 .tc-insights stackswitcher button:checked { background: #7ebcff; color: #071a2e; }
 .tc-insights .caption, .tc-insights .dim-label { color: #d8d9e0; opacity: 1; }
+window.tc-glass-window:backdrop .tc-insights { background: #15192a; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: #121628; }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: #0f121d; }
 .tc-insights { font-size: 1em; font-weight: 400; }
 .tc-insights .title-2 { font-size: 1.15385em; font-weight: 600; }
 .tc-insights .title-3 { font-size: 2em; font-weight: 700; }
 .tc-insights .heading { font-size: 1em; font-weight: 600; }
 .tc-insights .caption { font-size: 0.846154em; font-weight: 400; }
 "#;
+
+/// The painted Monitor window's tiers, type roles and inks, light scheme.
+pub const GLASS_LIGHT_CSS: &str = r#"
+@define-color tc_glass_pane #f2f3f6;
+@define-color tc_glass_card #fafafb;
+@define-color tc_glass_card_quiet #f8f9fa;
+@define-color tc_glass_well #dbdde3;
+@define-color tc_glass_control #fbfbfc;
+@define-color tc_glass_control_selected #0558b6;
+@define-color tc_glass_popover #f6f6f9;
+@define-color tc_glass_menu #f6f6f8;
+@define-color tc_glass_node_card #fdfdfe;
+@define-color tc_glass_pane_inactive #e8e9ec;
+@define-color tc_glass_card_inactive #f6f6f7;
+@define-color tc_glass_card_quiet_inactive #f4f4f6;
+@define-color tc_glass_well_inactive #d8dae0;
+@define-color tc_glass_control_inactive #f8f8f9;
+@define-color tc_glass_control_selected_inactive #0558b6;
+@define-color tc_glass_popover_inactive #f5f5f7;
+@define-color tc_glass_menu_inactive #f4f4f6;
+@define-color tc_glass_node_card_inactive #fbfbfc;
+@define-color tc_glass_scene #e6eaf1;
+@define-color tc_glass_ink #1d1d1f;
+@define-color tc_glass_ink_secondary #3c3c43;
+@define-color tc_glass_selected_ink #ffffff;
+@define-color tc_glass_toolbar_glyph #1d1d1f;
+@define-color tc_glass_toolbar_glyph_hidden #8a8a90;
+@define-color tc_glass_toolbar_expanded #0558b6;
+@define-color tc_glass_control_hover #dbdee4;
+@define-color tc_glass_row_hover #e8e9ec;
+@define-color tc_glass_tab_ember #056bdc;
+@define-color tc_glass_rule #d5d6d8;
+@define-color tc_glass_tab_ember_halo rgba(5, 107, 220, 0.28);
+@define-color tc_glass_rule_inactive #cccdd0;
+@define-color tc_glass_edge_high_contrast rgba(29, 29, 31, 0.55);
+@define-color tc_glass_graph_focus_on #1f6fd1;
+@define-color tc_glass_graph_focus_idle #3c3c42;
+@define-color tc_glass_graph_focus_off #a1a1a6;
+@define-color tc_glass_range_fill rgba(0, 0, 0, 0.07);
+@define-color tc_glass_status_on_text #0b4628;
+@define-color tc_glass_status_ask_text #573403;
+@define-color tc_glass_ink_tertiary #3d3d43;
+@define-color tc_glass_status_ask #a8690f;
+@define-color tc_glass_status_on #1a8f4c;
+@define-color tc_glass_status_off #8a8a90;
+@define-color tc_glass_tile_folder #e6e6ea;
+@define-color tc_glass_edge_rail_handle rgba(29, 29, 31, 0.28);
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 14px 30px rgba(0, 0, 0, 0.12); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+/// The painted Monitor window's tiers, type roles and inks, dark scheme.
+pub const GLASS_DARK_CSS: &str = r#"
+@define-color tc_glass_pane #171b2d;
+@define-color tc_glass_card #14182a;
+@define-color tc_glass_card_quiet #14182a;
+@define-color tc_glass_well #0e111d;
+@define-color tc_glass_control #10131f;
+@define-color tc_glass_control_selected #7ebcff;
+@define-color tc_glass_popover #0d1124;
+@define-color tc_glass_menu #0d1124;
+@define-color tc_glass_node_card #0d1124;
+@define-color tc_glass_pane_inactive #15192a;
+@define-color tc_glass_card_inactive #121628;
+@define-color tc_glass_card_quiet_inactive #131728;
+@define-color tc_glass_well_inactive #0d0f1c;
+@define-color tc_glass_control_inactive #0f121d;
+@define-color tc_glass_control_selected_inactive #7ebcff;
+@define-color tc_glass_popover_inactive #0d1123;
+@define-color tc_glass_menu_inactive #0d1123;
+@define-color tc_glass_node_card_inactive #0d1123;
+@define-color tc_glass_scene #070a1a;
+@define-color tc_glass_ink #f2f3f8;
+@define-color tc_glass_ink_secondary #d8d9e0;
+@define-color tc_glass_selected_ink #071a2e;
+@define-color tc_glass_toolbar_glyph #e6e6ec;
+@define-color tc_glass_toolbar_glyph_hidden #83838c;
+@define-color tc_glass_toolbar_expanded #7ebcff;
+@define-color tc_glass_control_hover #3b3d47;
+@define-color tc_glass_row_hover #232638;
+@define-color tc_glass_tab_ember #0091fd;
+@define-color tc_glass_rule #333646;
+@define-color tc_glass_tab_ember_halo rgba(0, 145, 253, 0.31);
+@define-color tc_glass_rule_inactive #313544;
+@define-color tc_glass_edge_high_contrast rgba(242, 242, 244, 0.4);
+@define-color tc_glass_graph_focus_on #4da3ff;
+@define-color tc_glass_graph_focus_idle #d6d6dc;
+@define-color tc_glass_graph_focus_off #6b6b70;
+@define-color tc_glass_range_fill rgba(255, 255, 255, 0.07);
+@define-color tc_glass_status_on_text #acedbc;
+@define-color tc_glass_status_ask_text #ffd585;
+@define-color tc_glass_ink_tertiary #cfd0d8;
+@define-color tc_glass_status_ask #ffc75c;
+@define-color tc_glass_status_on #30d158;
+@define-color tc_glass_status_off #a9a9b0;
+@define-color tc_glass_tile_folder #2a2a2c;
+@define-color tc_glass_edge_rail_handle rgba(255, 255, 255, 0.28);
+.tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
+.tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
+.tc-glass-well { background-color: @tc_glass_well; border-radius: 999px; box-shadow: none; }
+.tc-glass-control { background-color: @tc_glass_control; border-radius: 999px; box-shadow: none; }
+.tc-glass-control-selected { background-color: @tc_glass_control_selected; border-radius: 999px; box-shadow: none; }
+.tc-glass-popover { background-color: @tc_glass_popover; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-menu { background-color: @tc_glass_menu; border-radius: 14px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-glass-node-card { background-color: @tc_glass_node_card; border-radius: 16px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-glass-window:backdrop .tc-glass-pane { background-color: @tc_glass_pane_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card { background-color: @tc_glass_card_inactive; }
+window.tc-glass-window:backdrop .tc-glass-card-quiet { background-color: @tc_glass_card_quiet_inactive; }
+window.tc-glass-window:backdrop .tc-glass-well { background-color: @tc_glass_well_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control { background-color: @tc_glass_control_inactive; }
+window.tc-glass-window:backdrop .tc-glass-control-selected { background-color: @tc_glass_control_selected_inactive; }
+window.tc-glass-window:backdrop .tc-glass-popover { background-color: @tc_glass_popover_inactive; }
+window.tc-glass-window:backdrop .tc-glass-menu { background-color: @tc_glass_menu_inactive; }
+window.tc-glass-window:backdrop .tc-glass-node-card { background-color: @tc_glass_node_card_inactive; }
+window.tc-high-contrast .tc-glass-pane { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-popover { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-menu { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+window.tc-high-contrast .tc-glass-node-card { box-shadow: inset 0 0 0 1px @tc_glass_edge_high_contrast, 0px 18px 36px rgba(2, 3, 10, 0.6); }
+.tc-type-micro { font-size: 0.769231em; font-weight: 700; line-height: 1.3; }
+.tc-type-eyebrow { font-size: 0.769231em; font-weight: 700; line-height: 1.4; letter-spacing: 0.8px; }
+.tc-type-caption { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; }
+.tc-type-label { font-size: 0.923077em; font-weight: 500; line-height: 1.33333; }
+.tc-type-body { font-size: 1em; font-weight: 400; line-height: 1.38462; }
+.tc-type-body-strong { font-size: 1em; font-weight: 600; line-height: 1.38462; }
+.tc-type-title { font-size: 1.15385em; font-weight: 600; line-height: 1.33333; }
+.tc-type-heading { font-size: 1.30769em; font-weight: 600; line-height: 1.29412; }
+.tc-type-display { font-size: 1.69231em; font-weight: 700; line-height: 1.27273; letter-spacing: -0.22px; }
+.tc-type-number { font-size: 2em; font-weight: 700; line-height: 1.30769; font-feature-settings: "tnum"; }
+.tc-type-mono { font-size: 0.846154em; font-weight: 400; line-height: 1.45455; font-family: monospace; }
+"#;
+/// The translucent window's colours over the painted ones, light scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_LIGHT_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(229, 232, 237, 0.7491);
+@define-color tc_glass_pane_inactive rgba(217, 220, 225, 0.7592);
+@define-color tc_glass_card rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected rgba(5, 88, 182, 1);
+@define-color tc_glass_card_inactive rgba(255, 255, 255, 0.6);
+@define-color tc_glass_card_quiet_inactive rgba(255, 255, 255, 0.5);
+@define-color tc_glass_well_inactive rgba(138, 147, 165, 0.28);
+@define-color tc_glass_control_inactive rgba(255, 255, 255, 0.7);
+@define-color tc_glass_control_selected_inactive rgba(5, 88, 182, 1);
+@define-color tc_glass_rule rgba(0, 0, 0, 0.12);
+@define-color tc_glass_rule_inactive rgba(0, 0, 0, 0.12);
+@define-color tc_glass_control_hover rgba(213, 216, 223, 0.784);
+@define-color tc_glass_row_hover rgba(0, 0, 0, 0.04);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, light scheme.
+pub const INSIGHTS_LIGHT_BLUR_CSS: &str = r#"
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(255, 255, 255, 0.6); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(255, 255, 255, 0.7); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(209, 213, 220, 0.712); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(213, 216, 223, 0.784); }
+"#;
+/// The translucent window's colours over the painted ones, dark scheme,
+/// loaded after them while KDE blur is granted (`ui::glass_backdrop`).
+pub const GLASS_DARK_BLUR_CSS: &str = r#"
+@define-color tc_glass_scene transparent;
+@define-color tc_glass_pane rgba(20, 23, 38, 0.745);
+@define-color tc_glass_pane_inactive rgba(18, 21, 36, 0.7807);
+@define-color tc_glass_card rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected rgba(126, 188, 255, 1);
+@define-color tc_glass_card_inactive rgba(13, 17, 36, 0.35);
+@define-color tc_glass_card_quiet_inactive rgba(13, 17, 36, 0.28);
+@define-color tc_glass_well_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_inactive rgba(0, 0, 0, 0.3);
+@define-color tc_glass_control_selected_inactive rgba(126, 188, 255, 1);
+@define-color tc_glass_rule rgba(255, 255, 255, 0.12);
+@define-color tc_glass_rule_inactive rgba(255, 255, 255, 0.12);
+@define-color tc_glass_control_hover rgba(108, 108, 108, 0.426);
+@define-color tc_glass_row_hover rgba(255, 255, 255, 0.05);
+window.tc-glass-window.csd, window.tc-glass-window.csd:backdrop { outline: none; box-shadow: 0 0 14px 5px transparent; }
+window.tc-glass-window.maximized, window.tc-glass-window.fullscreen { box-shadow: none; }
+window.tc-glass-window.tiled, window.tc-glass-window.tiled-top, window.tc-glass-window.tiled-right, window.tc-glass-window.tiled-bottom, window.tc-glass-window.tiled-left { box-shadow: 0 0 0 20px transparent; }
+"#;
+/// Insights over the translucent pane, dark scheme.
+pub const INSIGHTS_DARK_BLUR_CSS: &str = r#"
+window.tc-glass-window .tc-insights { background: transparent; }
+window.tc-glass-window .tc-insights .tc-insights-card, window.tc-glass-window .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window:backdrop .tc-insights { background: transparent; }
+window.tc-glass-window:backdrop .tc-insights .tc-insights-card, window.tc-glass-window:backdrop .tc-insights button.tc-insights-summary { background: rgba(13, 17, 36, 0.35); }
+window.tc-glass-window:backdrop .tc-insights stackswitcher { background: rgba(0, 0, 0, 0.3); }
+window.tc-glass-window .tc-insights button.tc-insights-card:hover, window.tc-glass-window .tc-insights button.tc-insights-summary:hover { background: rgba(255, 255, 255, 0.08); }
+window.tc-glass-window .tc-insights stackswitcher button:hover { background: rgba(108, 108, 108, 0.426); }
+"#;
+
+/// Radii, spacing and sizes of the glass system, as the flat theme draws them.
+pub mod glass {
+    pub mod radius {
+        pub const PANE: i32 = 20;
+        pub const CARD: i32 = 16;
+        pub const CARD_QUIET: i32 = 14;
+        pub const CONTROL: i32 = 11;
+        pub const TILE: i32 = 6;
+        pub const CHECKBOX: i32 = 5;
+        pub const PILL: i32 = 999;
+        pub const MENU_PANEL: i32 = 16;
+        pub const MENU_STATE_PILL: i32 = 22;
+    }
+    pub mod space {
+        pub const S1: i32 = 2;
+        pub const S2: i32 = 4;
+        pub const S3: i32 = 6;
+        pub const S4: i32 = 8;
+        pub const S5: i32 = 10;
+        pub const S6: i32 = 12;
+        pub const S7: i32 = 14;
+        pub const S8: i32 = 16;
+        pub const S9: i32 = 20;
+        pub const S10: i32 = 24;
+        pub const PANE_GAP: i32 = 10;
+        pub const WINDOW_PADDING: i32 = 0;
+        pub const WINDOW_CONTROLS_INSET: i32 = 30;
+        pub const WINDOW_CONTROLS_WIDTH: i32 = 78;
+        pub const PANE_PADDING: i32 = 12;
+        pub const INSPECTOR_PADDING_HORIZONTAL: i32 = 16;
+        pub const INSPECTOR_PADDING_VERTICAL: i32 = 18;
+        pub const TREE_INSET: i32 = 8;
+        pub const MAP_OVERLAY_INSET: i32 = 14;
+        pub const CARD_PADDING_VERTICAL: i32 = 12;
+        pub const CARD_PADDING_HORIZONTAL: i32 = 14;
+        pub const CARD_GAP: i32 = 10;
+        pub const INLINE_GAP: i32 = 6;
+        pub const MODAL_INSET_TOP: i32 = 52;
+        pub const MODAL_INSET: i32 = 28;
+        pub const EDGE_RAIL_INSET: i32 = 12;
+        pub const EDGE_RAIL_GAP: i32 = 16;
+    }
+    /// The graph's inks: shared and kept dots, and the bar labels.
+    pub mod data {
+        /// `dataShared`, light.
+        pub const SHARED_LIGHT: &str = "#7A2CF5";
+        /// `dataKept`, light.
+        pub const KEPT_LIGHT: &str = "#2F6BC4";
+        /// `statusOff`, light.
+        pub const LABEL_LIGHT: &str = "#8A8A90";
+        /// `textPrimary`, light.
+        pub const TEXT_PRIMARY_LIGHT: &str = "#1D1D1F";
+        /// `dataShared`, dark.
+        pub const SHARED_DARK: &str = "#8A3DFF";
+        /// `dataKept`, dark.
+        pub const KEPT_DARK: &str = "#3A7BD5";
+        /// `statusOff`, dark.
+        pub const LABEL_DARK: &str = "#A9A9B0";
+        /// `textPrimary`, dark.
+        pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
+    }
+    /// The tab strip's ember line and its halo, as colour and alpha.
+    pub mod tabs {
+        /// `tabEmber`, light.
+        pub const EMBER_LIGHT: &str = "#056BDC";
+        /// `tabEmberHalo`, light.
+        pub const HALO_LIGHT: (&str, f64) = ("#056BDC", 0.28);
+        /// `tabEmber`, dark.
+        pub const EMBER_DARK: &str = "#0091FD";
+        /// `tabEmberHalo`, dark.
+        pub const HALO_DARK: (&str, f64) = ("#0091FD", 0.31);
+    }
+    /// Status dot inks: on, ask, off and outside.
+    pub mod status {
+        /// `statusOn`, light.
+        pub const ON_LIGHT: &str = "#1A8F4C";
+        /// `statusAsk`, light.
+        pub const ASK_LIGHT: &str = "#A8690F";
+        /// `statusOff`, light.
+        pub const OFF_LIGHT: &str = "#8A8A90";
+        /// `statusOutside`, light.
+        pub const OUTSIDE_LIGHT: &str = "#D0342C";
+        /// `statusOn`, dark.
+        pub const ON_DARK: &str = "#30D158";
+        /// `statusAsk`, dark.
+        pub const ASK_DARK: &str = "#FFC75C";
+        /// `statusOff`, dark.
+        pub const OFF_DARK: &str = "#A9A9B0";
+        /// `statusOutside`, dark.
+        pub const OUTSIDE_DARK: &str = "#FF6B6B";
+    }
+    pub mod size {
+        pub const EDGE_RAIL_WIDTH: i32 = 56;
+        pub const EDGE_RAIL_TILE: i32 = 44;
+        pub const EDGE_RAIL_RULE_WIDTH: i32 = 28;
+        pub const EDGE_RAIL_PEEK_WIDTH: i32 = 380;
+        pub const EDGE_RAIL_OPEN_HEIGHT: i32 = 680;
+        pub const EDGE_RAIL_ZONE_WIDTH: i32 = 4;
+        pub const EDGE_RAIL_ZONE_HEIGHT: i32 = 240;
+        pub const EDGE_RAIL_HANDLE_WIDTH: i32 = 3;
+        pub const EDGE_RAIL_HANDLE_HEIGHT: i32 = 72;
+        pub const LIST_ROW: i32 = 40;
+    }
+    pub mod motion {
+        /// `motion.slide`, in milliseconds.
+        pub const SLIDE_MS: u32 = 250;
+    }
+}
+
+/// Home's hero cards, as the Mac's flat theme draws them: each ground's
+/// CSS angle and stops (offset, hex), the ink and pill on every ground, and
+/// the pixel graphic's three blues per scheme.
+pub mod hero {
+    pub type Ground = (i32, &'static [(f64, &'static str)]);
+    pub const HERO_CAMPAIGN_CARD: Ground = (120, &[(0.0, "#081538"), (1.0, "#081538")]);
+    pub const HERO_MISSIONS: Ground = (120, &[(0.0, "#07152f"), (1.0, "#07152f")]);
+    pub const HERO_INSIGHTS: Ground = (120, &[(0.0, "#0a2546"), (1.0, "#0a2546")]);
+    pub const HERO_INK: &str = "#ffffff";
+    pub const HERO_BUTTON_FILL: &str = "#ffffff";
+    pub const HERO_BUTTON_INK: &str = "#16161a";
+    /// The pixel graphic's blues, light scheme.
+    pub const TINTS_LIGHT: [&str; 3] = ["#2f6bc4", "#2a78d6", "#9fdcff"];
+    /// The pixel graphic's blues, dark scheme.
+    pub const TINTS_DARK: [&str; 3] = ["#3a7bd5", "#0091fd", "#e2f6ff"];
+}
+
+/// The Mac's tool tiles, spinner, skeleton and refresh turn, as the flat
+/// theme draws them: sizes in points, times in seconds, the motion curve's
+/// control points, and per scheme the colours the map module lacks.
+pub mod tile {
+    pub type Rgba = (&'static str, f64);
+    pub const TOOL_TILE: f64 = 22.0;
+    pub const TOOL_TILE_LARGE: f64 = 30.0;
+    pub const TOOL_LOGO: f64 = 15.0;
+    pub const TOOL_LOGO_LARGE: f64 = 20.0;
+    pub const SPINNER: f64 = 12.0;
+    pub const SPINNER_STROKE: f64 = 1.5;
+    pub const SKELETON_HEIGHT: f64 = 12.0;
+    pub const RADIUS_TILE: f64 = 6.0;
+    pub const RADIUS_CONTROL: f64 = 11.0;
+    pub const SPIN: f64 = 0.8;
+    pub const PULSE: f64 = 1.6;
+    pub const EASE_X1: f64 = 0.2;
+    pub const EASE_Y1: f64 = 0.8;
+    pub const EASE_X2: f64 = 0.2;
+    pub const EASE_Y2: f64 = 1.0;
+    pub const SKELETON_DIM: f64 = 0.5;
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const TILE_FOLDER: Rgba = ("#e6e6ea", 1.0);
+        pub const TILE_FOLDER_INK: Rgba = ("#2c8a37", 1.0);
+        pub const INK: Rgba = ("#000000", 1.0);
+        pub const HAIRLINE: Rgba = ("#000000", 0.08);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const TILE_FOLDER: Rgba = ("#2a2a2c", 1.0);
+        pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);
+        pub const INK: Rgba = ("#ffffff", 1.0);
+        pub const HAIRLINE: Rgba = ("#ffffff", 0.08);
+    }
+}
+
+/// The Mac's toolbar glyphs, as SVG, exported from `Glyphs.swift`'s path data.
+pub mod glyph {
+    pub const VIEW_MENU: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M1,2h12M1,6h12M1,10h12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>"#;
+    pub const GRAPH: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM0.5,7.5h13M4,7.5v4M8,7.5v4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const MAP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M0.5,2.5l4-2,5,2,4-2v9l-4,2-5-2-4,2zM4.5,0.5v9M9.5,2.5v9" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const INSPECTOR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 12" width="14" height="12"><path d="M2.5,0.5H11.5A2,2,0,0,1,13.5,2.5V9.5A2,2,0,0,1,11.5,11.5H2.5A2,2,0,0,1,0.5,9.5V2.5A2,2,0,0,1,2.5,0.5ZM9,0.5v11" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>"#;
+    pub const GEAR: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15"><path d="M19.47,10.14L21.9,10.59L21.9,13.41L19.47,13.86L18.6,15.97L20,18L18,20L15.97,18.6L13.86,19.47L13.41,21.9L10.59,21.9L10.14,19.47L8.03,18.6L6,20L4,18L5.4,15.97L4.53,13.86L2.1,13.41L2.1,10.59L4.53,10.14L5.4,8.03L4,6L6,4L8.03,5.4L10.14,4.53L10.59,2.1L13.41,2.1L13.86,4.53L15.97,5.4L18,4L20,6L18.6,8.03ZM15.2,12A3.2,3.2,0,1,1,8.8,12A3.2,3.2,0,1,1,15.2,12Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>"#;
+    pub const CHEVRON_DOWN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="10" height="10"><path d="M4,6.5l4,4,4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13"><path d="M3,7a2,2,0,0,1,2-2h4l2,2h8a2,2,0,0,1,2,2v9a2,2,0,0,1-2,2H5a2,2,0,0,1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>"#;
+    pub const KEBAB: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 14" width="4" height="14"><path d="M3.6,2A1.6,1.6,0,1,1,0.4,2A1.6,1.6,0,1,1,3.6,2ZM3.6,7A1.6,1.6,0,1,1,0.4,7A1.6,1.6,0,1,1,3.6,7ZM3.6,12A1.6,1.6,0,1,1,0.4,12A1.6,1.6,0,1,1,3.6,12Z" fill="currentColor"/></svg>"#;
+    /// Every glyph by its name in `GlassGlyph`.
+    pub const ALL: &[(&str, &str)] = &[
+        ("viewMenu", VIEW_MENU),
+        ("graph", GRAPH),
+        ("map", MAP),
+        ("inspector", INSPECTOR),
+        ("gear", GEAR),
+        ("chevronDown", CHEVRON_DOWN),
+        ("folder", FOLDER),
+        ("kebab", KEBAB),
+    ];
+}
+
+/// The tool logos and the NEAR AI mark, exported from `GlassLogoPaths.swift`
+/// and `GlassBrandMark.swift`: SVG path data in each one's own viewBox
+/// (x, y, width, height).
+pub mod logo {
+    pub const CLAUDE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const CLAUDE: &[&str] = &[
+        "M4.709,15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0,11.784l.055-.352.48-.321.686.06,1.52.103,2.278.158,1.652.097,2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686,1.908,1.476,2.491,1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97,2.97,0,01-.104-.729L6.283.134,6.696,0l.996.134.42.364.62,1.414,1.002,2.229,1.555,3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286,1.851-.559,2.903-.364,1.942h.212l.243-.242.985-1.306,1.652-2.064.73-.82.85-.904.547-.431h1.033l.76,1.129-.34,1.166-1.064,1.347-.881,1.142-1.264,1.7-.79,1.36.073.11.188-.02,2.856-.606,1.543-.28,1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061,1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093,1.068,2.006,1.81,2.509,2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649,2.345,3.521.122,1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674,7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434,1.967-2.18,2.945-1.726,1.845-.414.164-.717-.37.067-.662.401-.589,2.388-3.036,1.44-1.882.93-1.086-.006-.158h-.055L4.132,18.56l-1.13.146-.487-.456.061-.746.231-.243,1.908-1.312-.006.006z",
+    ];
+    pub const CODEX_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const CODEX: &[&str] = &[
+        "M8.086.457a6.105,6.105,0,013.046-.415c1.333.153,2.521.72,3.564,1.7a.117.117,0,00.107.029c1.408-.346,2.762-.224,4.061.366l.063.03.154.076c1.357.703,2.33,1.77,2.918,3.198.278.679.418,1.388.421,2.126a5.655,5.655,0,01-.18,1.631.167.167,0,00.04.155,5.982,5.982,0,011.578,2.891c.385,1.901-.01,3.615-1.183,5.14l-.182.22a6.063,6.063,0,01-2.934,1.851.162.162,0,00-.108.102c-.255.736-.511,1.364-.987,1.992-1.199,1.582-2.962,2.462-4.948,2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145,0,00-.14-.032c-.518.167-1.04.191-1.604.185a5.924,5.924,0,01-2.595-.622,6.058,6.058,0,01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74,7.74,0,01-.495-1.283,6.11,6.11,0,01-.017-3.064.166.166,0,00.008-.074.115.115,0,00-.037-.064,5.958,5.958,0,01-1.38-2.202,5.196,5.196,0,01-.333-1.589,6.915,6.915,0,01.188-2.132c.45-1.484,1.309-2.648,2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129,0,00.087-.087A6.016,6.016,0,015.635,2.31C6.315,1.464,7.132.846,8.086.457zm-.804,7.85a.848.848,0,00-1.473.842l1.694,2.965-1.688,2.848a.849.849,0,001.46.864l1.94-3.272a.849.849,0,00.007-.854l-1.94-3.393zm5.446,6.24a.849.849,0,000,1.695h4.848a.849.849,0,000-1.696h-4.848z",
+    ];
+    pub const ANTIGRAVITY_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const ANTIGRAVITY: &[&str] = &[
+        "M20.616,10.835a14.147,14.147,0,01-4.45-3.001,14.111,14.111,0,01-3.678-6.452.503.503,0,00-.975,0,14.134,14.134,0,01-3.679,6.452,14.155,14.155,0,01-4.45,3.001c-.65.28-1.318.505-2.002.678a.502.502,0,000,.975c.684.172,1.35.397,2.002.677a14.147,14.147,0,014.45,3.001,14.112,14.112,0,013.679,6.453.502.502,0,00.975,0c.172-.685.397-1.351.677-2.003a14.145,14.145,0,013.001-4.45,14.113,14.113,0,016.453-3.678.503.503,0,000-.975,13.245,13.245,0,01-2.003-.678z",
+    ];
+    pub const OPEN_CODE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
+    pub const OPEN_CODE: &[&str] = &["M16,6H8v12h8V6zm4,16H4V2h16v20z"];
+    pub const THEIA_VIEW_BOX: [f64; 4] = [0.0, 0.0, 64.0, 64.0];
+    pub const THEIA: &[&str] = &[
+        "M49.047,17.058A14.95,14.95,0,0,1,64,32.011c0,8.256-6.692,14.953-14.953,14.953h-32.96c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h7.68c1.173,0,2.128-.955,2.128-2.134s-.955-2.134-2.128-2.134h-1.7c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h5.122c1.185-.003,2.104-.97,2.134-2.134,0-1.18-.955-2.134-2.134-2.134H9.255c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h13.227c1.185-.003,2.104-.97,2.133-2.134,0-1.18-.955-2.134-2.134-2.134H19.5c-1.18,0-2.134-.955-2.134-2.134s.955-2.2,2.134-2.2zm-2.4,4.982c-4.6,0-8.306,3.72-8.306,8.306v3.323a8.3,8.3,0,0,0,8.306,8.306c4.586,0,8.306-3.714,8.306-8.306v-3.323a8.31,8.31,0,0,0-8.306-8.306zm2.837,7.853a2.01,2.01,0,0,1,2.005,2.005v.257a2.01,2.01,0,0,1-2.005,2.005H43.26a2.01,2.01,0,0,1-2.005-2.005V31.9a2.01,2.01,0,0,1,2.005-2.005zm-40.1,12.803a2,2,0,0,1,2.005,2.005v.257c0,1.106-.894,2.005-2.005,2.005h-7.38A2.01,2.01,0,0,1,0,44.959v-.257c0-1.112.9-2.005,2.005-2.005z",
+        "M12.802,17.092c1.106,0,2,.9,2,2.005v.263a2,2,0,0,1-2,2h-8.24c-1.106,0-2.005-.894-2.005-2v-.263a2.01,2.01,0,0,1,2.005-2.005z",
+        "M15.36,34.162a2.01,2.01,0,0,1,2.005,2.005v.257a2.01,2.01,0,0,1-2.005,2.005h-4.524a2.01,2.01,0,0,1-2.005-2.005v-.257a2.01,2.01,0,0,1,2.005-2.005z",
+    ];
+    pub const BRAND_MARK_VIEW_BOX: [f64; 4] = [82.96, 82.13, 234.08, 231.72];
+    pub const BRAND_MARK: &str = "M292.106,82.1357C283.445,82.1357,275.379,86.5848,270.847,93.9047L221.912,165.811C220.318,168.188,220.971,171.382,223.353,172.96C225.292,174.234,227.866,174.082,229.633,172.58L277.799,131.227C278.605,130.504,279.834,130.581,280.545,131.379C280.872,131.74,281.044,132.216,281.044,132.691V262.169C281.044,263.233,280.18,264.089,279.085,264.089C278.509,264.089,277.952,263.842,277.587,263.404L132.014,90.8817C127.271,85.3489,120.318,82.1548,112.982,82.1357H107.893C94.1229,82.1357,82.9648,93.1822,82.9648,106.814V289.167C82.9648,302.799,94.1229,313.846,107.893,313.846C116.554,313.846,124.62,309.397,129.153,302.077L178.087,230.17C179.681,227.793,179.028,224.599,176.646,223.021C174.707,221.747,172.133,221.899,170.366,223.401L122.2,264.754C121.394,265.477,120.165,265.401,119.454,264.602C119.128,264.241,118.955,263.766,118.955,263.29V133.775C118.955,132.71,119.819,131.854,120.914,131.854C121.49,131.854,122.047,132.102,122.412,132.539L267.966,305.1C272.709,310.632,279.662,313.827,286.998,313.846H292.087C305.857,313.846,317.034,302.799,317.034,289.167V106.833C317.034,93.2012,305.876,82.1548,292.106,82.1548V82.1357Z";
+}
+
+/// The Traces map's colours, as the Mac's flat theme draws them: a hex
+/// colour and its alpha.
+pub mod map {
+    pub type Rgba = (&'static str, f64);
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const MAP_ORB_SHARED: Rgba = ("#056bdc", 1.0);
+        pub const MAP_ORB_KEPT: Rgba = ("#cf5320", 1.0);
+        pub const PURPLE_SOFT: Rgba = ("#056bdc", 1.0);
+        pub const BLUE: Rgba = ("#2f6bc4", 1.0);
+        pub const STATUS_OFF: Rgba = ("#8a8a90", 1.0);
+        pub const STATUS_ON: Rgba = ("#1a8f4c", 1.0);
+        pub const STATUS_ON_TEXT: Rgba = ("#0b4628", 1.0);
+        pub const STATUS_ASK: Rgba = ("#a8690f", 1.0);
+        pub const STATUS_OUTSIDE: Rgba = ("#d0342c", 1.0);
+        pub const MAP_NODE_OFF: Rgba = ("#c4c9d2", 1.0);
+        pub const MAP_CREDENTIAL_ON: Rgba = ("#27a06b", 1.0);
+        pub const MAP_RULE_AUTO_FILL: Rgba = ("#d7f1e2", 1.0);
+        pub const MAP_RULE_ASK_FILL: Rgba = ("#f6ead0", 1.0);
+        pub const MAP_RULE_IGNORE_FILL: Rgba = ("#e4e4e7", 1.0);
+        pub const MAP_RULE_UNSET_FILL: Rgba = ("#ededf0", 1.0);
+        pub const PANE_OPAQUE: Rgba = ("#f2f3f6", 1.0);
+        pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const MAP_FIELD_INNER: Rgba = ("#ffffff", 0.1);
+        pub const MAP_FIELD_OUTER: Rgba = ("#ffffff", 0.22);
+        pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
+        pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const PURPLE_TEXT: Rgba = ("#023e83", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
+        pub const TOOL_THEIA: Rgba = ("#6152e0", 1.0);
+        pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);
+        pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const MAP_ORB_SHARED: Rgba = ("#0091fd", 1.0);
+        pub const MAP_ORB_KEPT: Rgba = ("#d95926", 1.0);
+        pub const PURPLE_SOFT: Rgba = ("#0091fd", 1.0);
+        pub const BLUE: Rgba = ("#3a7bd5", 1.0);
+        pub const STATUS_OFF: Rgba = ("#a9a9b0", 1.0);
+        pub const STATUS_ON: Rgba = ("#30d158", 1.0);
+        pub const STATUS_ON_TEXT: Rgba = ("#acedbc", 1.0);
+        pub const STATUS_ASK: Rgba = ("#ffc75c", 1.0);
+        pub const STATUS_OUTSIDE: Rgba = ("#ff6b6b", 1.0);
+        pub const MAP_NODE_OFF: Rgba = ("#5d5d63", 1.0);
+        pub const MAP_CREDENTIAL_ON: Rgba = ("#2c7a5b", 1.0);
+        pub const MAP_RULE_AUTO_FILL: Rgba = ("#12321f", 1.0);
+        pub const MAP_RULE_ASK_FILL: Rgba = ("#2b2412", 1.0);
+        pub const MAP_RULE_IGNORE_FILL: Rgba = ("#3a3a3e", 1.0);
+        pub const MAP_RULE_UNSET_FILL: Rgba = ("#2a2a2c", 1.0);
+        pub const PANE_OPAQUE: Rgba = ("#0d1124", 1.0);
+        pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const MAP_FIELD_INNER: Rgba = ("#070a1a", 0.15);
+        pub const MAP_FIELD_OUTER: Rgba = ("#070a1a", 0.32);
+        pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
+        pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const PURPLE_TEXT: Rgba = ("#c6e1ff", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
+        pub const TOOL_THEIA: Rgba = ("#9d93ff", 1.0);
+        pub const HERO_CAMPAIGN_DEEP: Rgba = ("#0057b0", 1.0);
+        pub const HERO_CAMPAIGN_BRIGHT: Rgba = ("#0091fd", 1.0);
+    }
+}
+
+/// The first run's stage colours, as the Mac's flat theme draws them: a
+/// hex colour and its alpha; and the motion curve's control points.
+pub mod first_run {
+    pub type Rgba = (&'static str, f64);
+    /// The token ease's cubic Bezier control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The light scheme.
+    pub mod light {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#e6eaf1", 1.0);
+        pub const SCENE_WARM: Rgba = ("#f6f7fa", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0070c6", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#9fdcff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#ffffff", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#1d2a4a", 0.14);
+        pub const FIRST_RUN_RULE: Rgba = ("#000000", 0.16);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#8a93a5", 0.28);
+        pub const TEXT_PRIMARY: Rgba = ("#1d1d1f", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#3c3c43", 1.0);
+        pub const TEXT_TERTIARY: Rgba = ("#3d3d43", 1.0);
+        pub const TOOL_CLAUDE: Rgba = ("#c2603e", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#3a3a3c", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#3a68d8", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
+        pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
+        pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+    }
+    /// The dark scheme.
+    pub mod dark {
+        use super::Rgba;
+        pub const SCENE_BASE: Rgba = ("#070a1a", 1.0);
+        pub const SCENE_WARM: Rgba = ("#11152b", 1.0);
+        pub const FIRST_RUN_GLOW: Rgba = ("#0091fd", 1.0);
+        pub const FIRST_RUN_BEAM: Rgba = ("#49c2ff", 1.0);
+        pub const FIRST_RUN_BEAM_CORE: Rgba = ("#e2f6ff", 1.0);
+        pub const FIRST_RUN_CARD: Rgba = ("#171c33", 0.78);
+        pub const FIRST_RUN_CARD_SOLID: Rgba = ("#1a2039", 1.0);
+        pub const FIRST_RUN_TILE: Rgba = ("#1b2140", 1.0);
+        pub const FIRST_RUN_TILE_SHADOW: Rgba = ("#02030a", 0.5);
+        pub const FIRST_RUN_RULE: Rgba = ("#ffffff", 0.18);
+        pub const FIRST_RUN_APPROVE: Rgba = ("#2c9e57", 1.0);
+        pub const FIRST_RUN_APPROVE_DEEP: Rgba = ("#1d7a42", 1.0);
+        pub const HERO_INK: Rgba = ("#ffffff", 1.0);
+        pub const WELL_FILL: Rgba = ("#000000", 0.3);
+        pub const TEXT_PRIMARY: Rgba = ("#f2f3f8", 1.0);
+        pub const TEXT_SECONDARY: Rgba = ("#f2f3f8", 0.88);
+        pub const TEXT_TERTIARY: Rgba = ("#f2f3f8", 0.84);
+        pub const TOOL_CLAUDE: Rgba = ("#e08a6a", 1.0);
+        pub const TOOL_CODEX: Rgba = ("#e6e6ec", 1.0);
+        pub const TOOL_ANTIGRAVITY: Rgba = ("#6d9cff", 1.0);
+        pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
+        pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
+        pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+    }
+}

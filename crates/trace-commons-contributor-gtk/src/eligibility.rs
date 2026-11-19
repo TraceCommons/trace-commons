@@ -157,6 +157,58 @@ pub fn offers_send(entry: &QueueEntry) -> bool {
     }
 }
 
+/// Whether a row's Submit is offered (the Mac's `maySubmitSession`): the
+/// trace may be sent, and it is not waiting on a person. A held trace is
+/// looked at first, in its review, where [`offers_send`] still governs.
+#[must_use]
+pub fn offers_row_send(entry: &QueueEntry) -> bool {
+    offers_send(entry) && !held_for_review(entry)
+}
+
+/// The daemon's `held_for_review`: a pending entry whose reason is one the
+/// daemon will not approve on anyone's behalf.
+#[must_use]
+pub fn held_for_review(entry: &QueueEntry) -> bool {
+    entry.state == "pending"
+        && entry.reason_label.as_deref().is_some_and(|reason| {
+            trace_commons_contributor::daemon::queue::REASONS_NEEDING_A_PERSON.contains(&reason)
+        })
+}
+
+/// Whether the row is flagged held (the Mac's `isHeld`): a second-look
+/// hold, Manual Scrub check, or back from Keep.
+#[must_use]
+pub fn is_held(entry: &QueueEntry) -> bool {
+    matches!(
+        entry.reason_label.as_deref(),
+        Some("second-look-review-required" | "scrub-check-manual" | "returned-from-keep")
+    )
+}
+
+/// Why a second look is owed, in the core's sentences: the daemon's line
+/// for each reason, else the shared table's.
+#[must_use]
+pub fn held_reason_lines(entry: &QueueEntry) -> Vec<String> {
+    let Some(reasons) = entry.second_look.as_ref() else {
+        return Vec::new();
+    };
+    let lines = entry.second_look_lines.as_deref().unwrap_or_default();
+    reasons
+        .iter()
+        .enumerate()
+        .map(|(index, reason)| {
+            lines
+                .get(index)
+                .filter(|line| !line.is_empty())
+                .cloned()
+                .unwrap_or_else(|| {
+                    trace_commons_contributor::preview_copy::second_look_line_or_fallback(reason)
+                        .to_string()
+                })
+        })
+        .collect()
+}
+
 /// The entries a group-level submit is expected to send, for the undo bar.
 ///
 /// **This is a display list, not the control's decision.** The number that
@@ -174,7 +226,7 @@ pub fn offers_send(entry: &QueueEntry) -> bool {
 #[must_use]
 pub fn sendable_ids<'a>(pending: impl Iterator<Item = &'a QueueEntry>) -> Vec<String> {
     pending
-        .filter(|entry| offers_send(entry))
+        .filter(|entry| offers_row_send(entry))
         .map(|entry| entry.entry_id.clone())
         .collect()
 }
@@ -212,6 +264,9 @@ mod tests {
     /// Read at compile time so a sweep cannot pass over a file that moved.
     const SOURCE: &str = include_str!("eligibility.rs");
     const QUEUE_SOURCE: &str = include_str!("ui/queue.rs");
+    /// The Traces tab's folder list, where the folder's bulk controls are
+    /// built since the Mac's tree replaced the folder cards.
+    const FOLDER_LIST_SOURCE: &str = include_str!("ui/monitor/traces_list.rs");
     const PREVIEW_SOURCE: &str = include_str!("ui/preview.rs");
 
     /// Build an entry the way the daemon does: through the real
@@ -236,6 +291,58 @@ mod tests {
             object.insert(key.clone(), value.clone());
         }
         entry_from_wire(base)
+    }
+
+    /// A trace waiting on a person is not sent from its row, and a folder's
+    /// Submit all leaves it out, as on the Mac (`heldForReview`): the daemon's
+    /// own list of reasons, on a pending entry only.
+    #[test]
+    fn a_trace_held_for_a_person_is_not_offered_from_its_row() {
+        let held = wire(serde_json::json!({
+            "state": "pending", "reason_label": "second-look-review-required",
+        }));
+        assert!(held_for_review(&held));
+        assert!(!offers_row_send(&held));
+        assert!(offers_send(&held), "its review may still send it");
+        assert!(sendable_ids([&held].into_iter()).is_empty());
+        let retrying = wire(serde_json::json!({
+            "state": "approved", "reason_label": "witness_timeout",
+        }));
+        assert!(!held_for_review(&retrying));
+        let manual = wire(serde_json::json!({
+            "state": "pending", "reason_label": "scrub-check-manual",
+        }));
+        assert!(
+            !held_for_review(&manual),
+            "Manual Scrub check is sent with the rest"
+        );
+        assert!(is_held(&manual), "but it is flagged held");
+        assert!(is_held(&held));
+        let plain = wire(serde_json::json!({"state": "pending"}));
+        assert!(!is_held(&plain) && !held_for_review(&plain));
+    }
+
+    /// The second look's reasons and the unsure count come off the wire as
+    /// the daemon sent them; absent is unknown, never zero.
+    #[test]
+    fn the_second_look_is_read_off_the_wire() {
+        let entry = wire(serde_json::json!({
+            "second_look": ["looks-unsure"],
+            "second_look_lines": ["The scrubber was unsure about some of it."],
+            "unsure_spans": 3,
+        }));
+        assert_eq!(
+            entry.second_look.as_deref(),
+            Some(&["looks-unsure".to_string()][..])
+        );
+        assert_eq!(entry.unsure_spans, Some(3));
+        assert_eq!(
+            held_reason_lines(&entry),
+            vec!["The scrubber was unsure about some of it.".to_string()]
+        );
+        let absent = wire(serde_json::json!({}));
+        assert_eq!(absent.unsure_spans, None);
+        assert!(held_reason_lines(&absent).is_empty());
     }
 
     // -- (b) the absent key is not a state ------------------------------
@@ -492,7 +599,7 @@ mod tests {
             "the card does not ask for the eligibility view"
         );
         assert!(
-            QUEUE_SOURCE.contains("crate::eligibility::offers_send(entry)"),
+            QUEUE_SOURCE.contains("crate::eligibility::offers_row_send(entry)"),
             "the card does not gate its send control on the shared answer"
         );
         assert!(
@@ -729,11 +836,11 @@ mod tests {
         // The row: the send control is appended only inside the gate, so an
         // ineligible row never builds one.
         assert!(
-            row.contains("if crate::eligibility::offers_send(entry) {"),
+            row.contains("if crate::eligibility::offers_row_send(entry) {"),
             "the row does not gate its send control"
         );
         assert_eq!(
-            row.matches("actions.append(&submit)").count(),
+            row.matches("style::wrap_append(&actions, &submit)").count(),
             1,
             "the row appends its send control somewhere other than the gate"
         );
@@ -917,18 +1024,30 @@ mod tests {
     #[test]
     fn neither_group_control_is_built_when_nothing_can_be_sent() {
         let row = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
         );
-        for control in ["submit_all", "submit_all_as"] {
+        // Submit all and Submit all as are built together, under the one
+        // answer, or not at all.
+        let gated = row
+            .find("ifsubmits{")
+            .expect("the folder's Submit is gated on the shared answer");
+        let built = &row[gated..];
+        let end = built
+            .find("//TheAutomaticswitch")
+            .expect("the gated block ends");
+        let built = &built[..end];
+        for control in ["split.append(&pill);", "split.append(&more);"] {
             assert!(
-                row.contains(&format!("ifsendable{{bar.append(&{control});}}")),
-                "{control} is not gated on the group having something to send"
+                built.contains(control),
+                "{control} is built outside the gate on the group having something to send"
             );
+        }
+        for control in ["pill", "more"] {
             assert!(
-                !row.contains(&format!("{control}.set_sensitive(")),
+                !row.contains(&format!("{control}.set_sensitive(false)")),
                 "{control} is drawn and disabled; it should not be drawn at all"
             );
         }
@@ -938,18 +1057,14 @@ mod tests {
         // reading that as zero would take the control away from somebody
         // whose sessions are all sendable.
         assert!(
-            row.contains("crate::eligibility::group_offers_send(waitingasu64,contributable)"),
+            row.contains("crate::eligibility::group_offers_send(waiting,contributable)"),
             "the group control is decided here instead of asked for"
         );
         assert_eq!(
-            row.matches("letsendable=crate::eligibility::group_offers_send(")
+            row.matches("crate::eligibility::group_offers_send(")
                 .count(),
             1,
             "the two controls do not share one computed answer"
-        );
-        assert!(
-            !row.contains("!group.eligible.is_empty()"),
-            "the group control is re-derived from an emptiness test"
         );
         // And it is decided from the DAEMON's count, not from a total the
         // shell could have filtered itself.
@@ -1027,16 +1142,16 @@ mod tests {
                 "a derived contributable count survives: {removed}"
             );
         }
-        // The queue asks for it and computes nothing.
+        // The folder list asks for it and computes nothing.
         let queue = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
         );
         assert!(
             queue.contains(
-                "crate::eligibility::group_contributable(&app.projects.borrow(),project_id)"
+                "crate::eligibility::group_contributable(&app.projects.borrow(),&folder.id)"
             ),
             "the folder does not read the daemon's count"
         );
@@ -1155,7 +1270,7 @@ mod tests {
     #[test]
     fn the_folder_says_what_its_submit_leaves_behind() {
         let row = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
@@ -1200,7 +1315,7 @@ mod tests {
             .find("fn submit_group(")
             .expect("the group submit exists");
         let group_end = production[group..]
-            .find("\n/// The head of a folder")
+            .find("\n/// A folder opened or closed by its chevron")
             .expect("submit_group ends")
             + group;
         let inside = &production[group..group_end];
@@ -1228,8 +1343,17 @@ mod tests {
             "a bulk control builds the project-wide call outside submit_group, which is \
              the one place the rule is enforced"
         );
+        // The folder list's bulk controls build no call of their own.
+        let list = FOLDER_LIST_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        assert!(
+            !list.contains("ApproveTarget::Project") && !list.contains("approve_params("),
+            "the folder list builds the project-wide call outside submit_group"
+        );
         assert_eq!(
-            production.matches("submit_group(").count(),
+            production.matches("submit_group(").count() + list.matches("submit_group(").count(),
             3,
             "expected the definition plus both bulk handlers to reach submit_group"
         );
@@ -1298,12 +1422,18 @@ mod tests {
         // The gate wraps the send control alone. `Look inside` and `Not
         // this one` are appended unconditionally, on the lines above it.
         let gate = production
-            .find("if crate::eligibility::offers_send(entry) {")
+            .find("if crate::eligibility::offers_row_send(entry) {")
             .expect("the send control is gated");
         let body_end = production[gate..].find('}').expect("the gate closes") + gate;
         let gated = &production[gate..body_end];
-        assert!(gated.contains("actions.append(&submit)"), "{gated}");
-        for ungated in ["actions.append(&skip)", "actions.append(&look)"] {
+        assert!(
+            gated.contains("style::wrap_append(&actions, &submit)"),
+            "{gated}"
+        );
+        for ungated in [
+            "style::wrap_append(&actions, &skip)",
+            "style::wrap_append(&actions, &look)",
+        ] {
             assert!(
                 !gated.contains(ungated),
                 "the gate swallowed a control that is not the send control: {ungated}"

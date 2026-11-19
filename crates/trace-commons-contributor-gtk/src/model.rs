@@ -28,6 +28,16 @@ pub struct Status {
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,
+    /// New terms are owed: uploads wait until they are accepted again.
+    #[serde(default)]
+    pub terms_hold: bool,
+    /// The global override (#1173): `null`, or `{mode, since}` while one
+    /// is in force.
+    #[serde(default)]
+    pub contribution_override: Option<serde_json::Value>,
+    /// True when an `auto_upload` roll-up leaves some folders out (#1208).
+    #[serde(default)]
+    pub contribution_mode_partial: Option<bool>,
     #[serde(default)]
     pub queue_depth: u64,
     /// The daemon's unresolved decision count. Missing on older daemons;
@@ -101,6 +111,33 @@ pub struct Status {
     /// F10: the last NEAR AI sign-in was refused as another account.
     #[serde(default)]
     pub login_mismatch: bool,
+    /// The re-engagement state (`status.nudge`): only the menu-bar mark and
+    /// its words are read here, for the tray icon. Absent on a daemon older
+    /// than the block, which lights nothing.
+    #[serde(default)]
+    pub nudge: Option<Nudge>,
+}
+
+/// The parts of `status.nudge` the tray draws: the mark the core lit after
+/// its own mute and caps (`menu_bar_mark_enabled`, the cooldowns, the news
+/// window), and the core's words for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Nudge {
+    /// `news`, `ready`, `none` or `unknown`. Anything else draws nothing.
+    #[serde(default)]
+    pub mark: Option<String>,
+    /// The lit mark's sentence and tooltip, present only while it is lit.
+    #[serde(default)]
+    pub mark_text: Option<NudgeMarkText>,
+}
+
+/// `status.nudge.mark_text`, the core's words (`nudge_render::MarkText`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct NudgeMarkText {
+    #[serde(default)]
+    pub accessibility: String,
+    #[serde(default)]
+    pub tooltip: String,
 }
 
 /// One rewording notice as the window draws it (K5).
@@ -180,6 +217,21 @@ pub struct WitnessCapacity {
 }
 
 impl Status {
+    /// Whether the health label is a fault to show: the Mac's
+    /// `model.health != nil`. A label whose own card is drawn below
+    /// (`witness-saturated`, the gate-held notice) is not.
+    pub fn unhealthy(&self) -> bool {
+        match self.health.last_error_label.as_deref() {
+            Some(label) => !self.label_shown_below(label),
+            None => false,
+        }
+    }
+
+    fn label_shown_below(&self, label: &str) -> bool {
+        (label == crate::copy::WITNESS_SATURATED_LABEL && self.witness_capacity_line().is_some())
+            || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some())
+    }
+
     /// The health banner's lines, in order: the health label's own
     /// sentence, and sessions waiting on the witness.
     ///
@@ -193,9 +245,7 @@ impl Status {
         if let Some(label) = self.health.last_error_label.as_deref() {
             // And `automatic-contribution-held`, whose card names the folders
             // and says why, drawn beside the banner from its own object.
-            let shown_below = (label == crate::copy::WITNESS_SATURATED_LABEL && witness.is_some())
-                || (label == crate::copy::GATE_HELD_LABEL && self.gate_held_notice().is_some());
-            if !shown_below {
+            if !self.label_shown_below(label) {
                 lines.push(crate::copy::health_sentence(label).to_string());
             }
         }
@@ -345,10 +395,25 @@ pub struct QueueEntry {
     pub size_bytes: u64,
     #[serde(default)]
     pub discovered_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When the session itself started, when the daemon knew it. The
+    /// Traces map orders its folders by their newest waiting session, by
+    /// this first and `discovered_at` after (`monitor::traces_tree`).
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub state: String,
     #[serde(default)]
     pub reason_label: Option<String>,
+    /// The second look's fixed reasons (`nothing-matched`, `looks-unsure`,
+    /// `trimmed-to-fit`); absent until scrubbed.
+    #[serde(default)]
+    pub second_look: Option<Vec<String>>,
+    /// The core's sentence for each `second_look` reason, index for index.
+    #[serde(default)]
+    pub second_look_lines: Option<Vec<String>>,
+    /// Spans the scrubber was unsure about; absent until scrubbed, never 0.
+    #[serde(default)]
+    pub unsure_spans: Option<u64>,
     /// How many delegated subagent transcripts this entry's session covers,
     /// and how many were left out because the conversation exceeded the
     /// source's raw byte budget.
@@ -780,6 +845,15 @@ pub struct Project {
     /// contributor should read.
     #[serde(default)]
     pub is_unresolved_bucket: bool,
+    /// The modes the daemon would set for this project (`offerable_modes`),
+    /// wire values. Absent from an older daemon, which then offers what the
+    /// row itself allows (`first_run::rules::offerable_modes`).
+    #[serde(default)]
+    pub offerable_modes: Option<Vec<String>>,
+    /// The folder's own rule (`folder_mode`), when it has one; `mode` is
+    /// what the daemon applies after any override.
+    #[serde(default)]
+    pub folder_mode: Option<String>,
     /// How many of this project's sessions are waiting. Always present.
     #[serde(default)]
     pub pending_count: u64,
@@ -817,6 +891,11 @@ pub struct HistoryRecord {
     pub submission_id: String,
     #[serde(default)]
     pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The tool the session came from, when the daemon says. Read only to
+    /// count one tool's contributions in the Traces graph; absent, the
+    /// record counts under no tool.
+    #[serde(default)]
+    pub source: Option<String>,
     /// The opaque project id, for grouping history the same way the queue
     /// groups: on identity rather than on a display name.
     ///
@@ -840,6 +919,10 @@ pub struct HistoryRecord {
     /// address".
     #[serde(default)]
     pub explanations: Vec<String>,
+    /// The row belongs to an account this device used before. The current
+    /// account cannot withdraw it, and the daemon refuses it.
+    #[serde(default)]
+    pub previous_account: bool,
 }
 
 /// `history_rollup`.
@@ -901,8 +984,6 @@ pub struct Settings {
     #[serde(default)]
     pub digest_interval_secs: u64,
     #[serde(default)]
-    pub approval_hold_secs: u64,
-    #[serde(default)]
     pub local_notifications: bool,
     /// `watch`, `off` or `unset`, per source.
     ///
@@ -922,6 +1003,11 @@ pub struct Settings {
     pub gemini_source_mode: String,
     #[serde(default)]
     pub cline_source_mode: String,
+    /// OpenCode's, which the Traces map reads beside the other four
+    /// (`monitor::traces_tree`). Absent on an older daemon, which reads as
+    /// unset, as the Mac's does.
+    #[serde(default)]
+    pub opencode_source_mode: String,
     /// The local proxy declaration as the daemon holds it. Absent means
     /// off -- there is no conventional fallback for a local service, so
     /// unlike a source root there is no third state.
@@ -966,7 +1052,7 @@ pub struct Settings {
 /// deliberately not parsed into an enum here: a label a later daemon grows
 /// would then have to be spelled in this shell before it could be shown, and
 /// the shared table already answers an unknown label safely.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PrivateInferenceState {
     #[serde(default)]
     pub state: String,
@@ -1008,6 +1094,11 @@ pub struct NearAiBalance {
     pub spend_limit_nanos: Option<i64>,
     #[serde(default)]
     pub total_spent_nanos: Option<i64>,
+    /// Everything received into the account so far, by the daemon's count.
+    /// Home marks NEAR AI credit arriving only when this grows
+    /// (`ui::hero_art::arrival`): the balance also moves with spending.
+    #[serde(default)]
+    pub received_total_nanos: Option<i64>,
     /// The DAEMON'S clock at the moment the service answered, RFC 3339 --
     /// not the service's own `updated_at`. What a shell may say with it is
     /// how long ago the question was put, and nothing about bookkeeping.
@@ -1212,6 +1303,134 @@ pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
     }
 }
 
+/// `tool_destinations`, the parts the Traces map reads.
+///
+/// `tools` carries no default: a reply without it is not a reply this
+/// shell can read, and the map then draws as if the call had failed, which
+/// opens nothing (`monitor::map_scene::CommonsGate`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolDestinations {
+    /// The Private AI destination's state label.
+    #[serde(default)]
+    pub private_ai: Option<String>,
+    /// `witness`, `local`, `witness_refusing`, `not_enrolled` or
+    /// `settings_unreadable`.
+    #[serde(default)]
+    pub sessions_route: Option<String>,
+    pub tools: Vec<ToolDestination>,
+    /// Managed configuration, never evidence of a call or a contribution.
+    #[serde(default)]
+    pub managed_sessions: Option<Vec<ManagedMapSession>>,
+    /// The core's words for `managed_sessions`, keyed as the daemon keys
+    /// them.
+    #[serde(default)]
+    pub managed_copy: Option<std::collections::BTreeMap<String, String>>,
+}
+
+/// One `tool_destinations.tools[]` row.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolDestination {
+    pub tool: String,
+    #[serde(default)]
+    pub sessions: Option<SessionRoute>,
+    #[serde(default)]
+    pub counts: Option<ToolCounts>,
+    /// Absent on an older daemon, or for a tool with no executable probe.
+    #[serde(default)]
+    pub installed: Option<bool>,
+}
+
+/// Where a tool's sessions go: `watch` is `watched`, `off` or
+/// `not_watched`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SessionRoute {
+    pub watch: String,
+    #[serde(default)]
+    pub to: Vec<String>,
+}
+
+/// A tool's counts for the window; `None` is unread, never zero.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ToolCounts {
+    #[serde(default)]
+    pub sessions: Option<u64>,
+}
+
+/// One `tool_destinations.managed_sessions[]` row.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ManagedMapSession {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub collection_state: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+impl ManagedMapSession {
+    /// The source name the queue uses for this row's tool.
+    pub fn source(&self) -> &str {
+        if self.tool == "claude" {
+            "claude-code"
+        } else {
+            &self.tool
+        }
+    }
+
+    /// The row's line, in the core's words: provider, model, state and
+    /// collection, the ones the core named.
+    pub fn detail(&self, copy: &std::collections::BTreeMap<String, String>) -> String {
+        const STATES: [&str; 5] = ["starting", "running", "exited", "failed", "unknown"];
+        let state = if STATES.contains(&self.state.as_str()) {
+            self.state.as_str()
+        } else {
+            "unknown"
+        };
+        [
+            copy.get(&format!("provider_{}", self.provider)).cloned(),
+            self.model.clone(),
+            copy.get(&format!("state_{state}")).cloned(),
+            copy.get(&format!("collection_{}", self.collection_state))
+                .cloned(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+    }
+}
+
+/// The `status` fields the Traces map's commons gate reads, each `None`
+/// when the daemon did not send it. [`Status`] defaults these to the
+/// answer that reads as "nothing stops a flow", which a gate must never
+/// take from a missing field: a missing signal never draws a flow.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct GateStatus {
+    #[serde(default)]
+    pub paused: Option<bool>,
+    #[serde(default)]
+    pub logged_in: Option<bool>,
+    #[serde(default)]
+    pub automatic_contribution_held: Option<HeldSessions>,
+    #[serde(default)]
+    pub grant_voids: Option<Vec<serde_json::Value>>,
+    /// The Private AI destination's state, which the Private AI map's
+    /// credential falls back to when `tool_destinations` does not say.
+    #[serde(default)]
+    pub private_inference_state: Option<PrivateInferenceState>,
+}
+
+/// `status.automatic_contribution_held`'s count.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct HeldSessions {
+    #[serde(default)]
+    pub held_sessions: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1347,6 +1566,47 @@ mod tests {
             .expect("status decodes");
         assert!(old.arming_rewording_notices().is_empty());
         assert!(old.gate_held_notice().is_none());
+    }
+
+    /// The Mac's `model.health != nil`: a label whose own card is drawn
+    /// (`witness-saturated` with sessions waiting, the held gate) is not a
+    /// fault, so the tray's strip stays live; any other label is.
+    #[test]
+    fn a_label_with_its_own_card_is_not_unhealthy() {
+        let status = |value: serde_json::Value| -> Status {
+            serde_json::from_value(value).expect("status decodes")
+        };
+        let witness = |waiting: u64| {
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "witness-saturated", "since": null },
+                "witness_capacity": { "waiting_sessions": waiting },
+            }))
+        };
+        assert!(!witness(3).unhealthy(), "the witness line says it");
+        assert!(
+            witness(0).unhealthy(),
+            "no line below: the label is the fault"
+        );
+        let held = |held_sessions: u64| {
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "automatic-contribution-held", "since": null },
+                "automatic_contribution_held": { "held_sessions": held_sessions,
+                    "reasons": ["admission-evidence-is-per-session"],
+                    "projects": [{ "project_id": "p", "project_label": "api",
+                        "held_sessions": held_sessions }] },
+            }))
+        };
+        assert!(!held(2).unhealthy(), "the held card says it");
+        assert!(
+            status(serde_json::json!({
+                "logged_in": true,
+                "health": { "last_error_label": "token-expired", "since": null },
+            }))
+            .unhealthy()
+        );
+        assert!(!status(serde_json::json!({ "logged_in": true })).unhealthy());
     }
 
     /// The held notice is the core's, and the bare label steps aside for

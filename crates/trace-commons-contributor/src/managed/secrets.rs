@@ -25,6 +25,33 @@ impl std::fmt::Debug for ApiKey {
     }
 }
 
+/// Serializable secret wrapper whose `Debug` implementation never prints the
+/// secret value. Used only for the Red Team daemon -> helper key handoff in
+/// `LaunchContext::red_team_key`.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RedactedSecret(String);
+
+impl RedactedSecret {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    // Its callers are macOS-only; a test build elsewhere compiles it with
+    // no caller, which -D warnings fails.
+    #[cfg(any(target_os = "macos", test))]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactedSecret([redacted])")
+    }
+}
+
 pub struct SecretStore {
     service: String,
 }

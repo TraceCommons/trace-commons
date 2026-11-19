@@ -298,24 +298,13 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
         let candidate = describe_opencode(&path.join("opencode.db"));
         return vec![candidate];
     }
-    let homes: Vec<SourceCandidate> = [
-        (
-            SOURCE_CLAUDE_CODE,
-            "projects",
-            claude_code_layout as fn(&Path) -> Tally,
-        ),
-        (SOURCE_CODEX, "sessions", codex_layout),
-    ]
-    .into_iter()
-    .filter_map(|(source, store, layout)| {
-        let at = path.join(store);
-        if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
-            return None;
-        }
-        let tally = layout(&at);
-        (tally.count > 0).then(|| row(source, at, tally))
-    })
-    .collect();
+    let homes: Vec<SourceCandidate> = [SOURCE_CLAUDE_CODE, SOURCE_CODEX]
+        .into_iter()
+        .filter_map(|source| {
+            let (at, tally) = store_in_home(source, path)?;
+            Some(row(source, at, tally))
+        })
+        .collect();
     if !homes.is_empty() {
         return homes;
     }
@@ -334,6 +323,81 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
     .filter(|(_, tally)| tally.count > 0)
     .map(|(source, tally)| row(source, path.to_path_buf(), tally))
     .collect()
+}
+
+/// The store folder inside `path` when `path` has `source`'s home layout:
+/// `projects` for Claude Code, `sessions` for Codex, a real folder (never
+/// followed through a symlink), whatever it holds. `None` for any other
+/// tool or folder, and for a relative path, which would be read against
+/// the process's working directory.
+fn home_store(source: &str, path: &Path) -> Option<PathBuf> {
+    let store = store_name(source)?;
+    if !path.has_root() {
+        return None;
+    }
+    let at = path.join(store);
+    std::fs::symlink_metadata(&at)
+        .is_ok_and(|m| m.is_dir())
+        .then_some(at)
+}
+
+/// The name of `source`'s store inside its home: `projects` for Claude
+/// Code, `sessions` for Codex, `None` for any other tool.
+fn store_name(source: &str) -> Option<&'static str> {
+    match source {
+        SOURCE_CLAUDE_CODE => Some("projects"),
+        SOURCE_CODEX => Some("sessions"),
+        _ => None,
+    }
+}
+
+/// The store a home declared for `source` will be read at once the tool
+/// makes it ([`declared_store`]): `path`'s `projects` (Claude Code) or
+/// `sessions` (Codex) when nothing at all is there yet -- not a folder,
+/// not a link, not a file, and not a path that cannot be read. `None` for
+/// any other tool, a relative path, a folder already named as its store
+/// (a store, not a home), and whenever anything is in the store's place.
+///
+/// The automatic grant treats the home and this store as one source (owner
+/// decision 2026-11-18), so a session written in the store after the grant
+/// recorded the home arms; this is the only case it does. Anything already
+/// in the store's place may hold sessions from before the grant.
+pub fn store_to_come(source: &str, path: &Path) -> Option<PathBuf> {
+    let store = store_name(source)?;
+    if !path.has_root() || path.file_name() == Some(std::ffi::OsStr::new(store)) {
+        return None;
+    }
+    let at = path.join(store);
+    match std::fs::symlink_metadata(&at) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(at),
+        _ => None,
+    }
+}
+
+/// The store inside `path` when `path` is `source`'s home ([`home_store`])
+/// holding at least one session: what the chooser ([`describe_folder`])
+/// offers as a home.
+fn store_in_home(source: &str, path: &Path) -> Option<(PathBuf, Tally)> {
+    let layout: fn(&Path) -> Tally = match source {
+        SOURCE_CLAUDE_CODE => claude_code_layout,
+        SOURCE_CODEX => codex_layout,
+        _ => return None,
+    };
+    let at = home_store(source, path)?;
+    let tally = layout(&at);
+    (tally.count > 0).then_some((at, tally))
+}
+
+/// Where a folder declared for `source` is read: a Claude Code or Codex
+/// home at the store inside it ([`home_store`]), any other folder as it
+/// is. A terminal opened in the folder a person picked declares the home,
+/// not the store. Unlike the chooser, an empty store counts: a session
+/// written there later is then found. A store never holds a folder of its
+/// own store's name (Claude Code names a project folder after its path,
+/// `-home-...`; Codex dates its folders), so a store stays as it is. Cheap
+/// enough to read on every pass: one `lstat`.
+pub fn declared_store(source: &str, path: &Path) -> PathBuf {
+    home_store(source, path).unwrap_or_else(|| path.to_path_buf())
 }
 
 /// The config files a coding tool keeps beside its store: never an export,
@@ -1120,6 +1184,140 @@ mod tests {
         let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
         assert_eq!(row.path, picked.path().join("sessions"));
         assert_eq!(row.session_count, 1);
+    }
+
+    /// A folder declared for Claude Code or Codex is read where the chooser
+    /// reads it: a tool's home at its store, a store as it is, and any
+    /// other folder as it is (#2171 review, finding 4).
+    #[test]
+    fn a_declared_folder_is_read_at_the_store_the_chooser_finds() {
+        let claude_home = Scratch::new("declared-claude-home");
+        std::fs::write(claude_home.path().join("settings.json"), b"{}").unwrap();
+        write_session(
+            &claude_home.path().join("projects/-Users-someone-code-app"),
+            &format!("{A_UUID}.jsonl"),
+        );
+        let codex_home = Scratch::new("declared-codex-home");
+        write_session(
+            &codex_home.path().join("sessions/2026/08/20"),
+            "rollout-2026-08-20T10-00-00-abc.jsonl",
+        );
+        let unrelated = Scratch::new("declared-unrelated");
+        std::fs::write(unrelated.path().join("notes.txt"), b"x").unwrap();
+
+        // Home: the store under it, as `describe_folder` offers it.
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, claude_home.path()),
+            claude_home.path().join("projects")
+        );
+        assert_eq!(
+            declared_store(SOURCE_CODEX, codex_home.path()),
+            codex_home.path().join("sessions")
+        );
+        for (source, home) in [
+            (SOURCE_CLAUDE_CODE, &claude_home),
+            (SOURCE_CODEX, &codex_home),
+        ] {
+            let row = only(&describe_folder(home.path()), source);
+            assert_eq!(declared_store(source, home.path()), row.path);
+        }
+        // Store: as it is.
+        let store = claude_home.path().join("projects");
+        assert_eq!(declared_store(SOURCE_CLAUDE_CODE, &store), store);
+        let store = codex_home.path().join("sessions");
+        assert_eq!(declared_store(SOURCE_CODEX, &store), store);
+        // Unrelated, missing, or another tool's home: as it is.
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, unrelated.path()),
+            unrelated.path()
+        );
+        let missing = unrelated.path().join("not-there");
+        assert_eq!(declared_store(SOURCE_CODEX, &missing), missing);
+        assert_eq!(
+            declared_store(SOURCE_CODEX, claude_home.path()),
+            claude_home.path()
+        );
+        assert_eq!(
+            declared_store(SOURCE_GEMINI_CLI, claude_home.path()),
+            claude_home.path()
+        );
+    }
+
+    /// A declared home whose store is empty is still a home: read at its
+    /// store whatever the store holds, so a session written there later is
+    /// found. A home with no store yet is read as it is until the store
+    /// folder is made. A symlinked store is not followed, and the chooser
+    /// still offers no empty home (#2171 review 2, finding 3).
+    #[test]
+    fn a_declared_home_is_read_at_its_store_before_the_store_holds_a_session() {
+        let home = Scratch::new("declared-empty-claude-home");
+        std::fs::write(home.path().join("settings.json"), b"{}").unwrap();
+        assert_eq!(declared_store(SOURCE_CLAUDE_CODE, home.path()), home.path());
+        std::fs::create_dir(home.path().join("projects")).unwrap();
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, home.path()),
+            home.path().join("projects")
+        );
+        assert!(describe_folder(home.path()).is_empty());
+        let codex = Scratch::new("declared-empty-codex-home");
+        std::fs::create_dir(codex.path().join("sessions")).unwrap();
+        assert_eq!(
+            declared_store(SOURCE_CODEX, codex.path()),
+            codex.path().join("sessions")
+        );
+        assert_eq!(
+            declared_store(SOURCE_CLAUDE_CODE, codex.path()),
+            codex.path()
+        );
+        #[cfg(unix)]
+        {
+            let linked = Scratch::new("declared-linked-claude-home");
+            std::os::unix::fs::symlink(
+                home.path().join("projects"),
+                linked.path().join("projects"),
+            )
+            .unwrap();
+            assert_eq!(
+                declared_store(SOURCE_CLAUDE_CODE, linked.path()),
+                linked.path()
+            );
+        }
+    }
+
+    /// The store a home will be read at is named only while nothing is in
+    /// its place: the grant carries over to it, and to nothing else (owner
+    /// decision 2026-11-18).
+    #[test]
+    fn a_store_to_come_is_named_only_while_nothing_is_in_its_place() {
+        let home = Scratch::new("store-to-come-claude-home");
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, home.path()),
+            Some(home.path().join("projects"))
+        );
+        assert_eq!(
+            store_to_come(SOURCE_CODEX, home.path()),
+            Some(home.path().join("sessions"))
+        );
+        assert_eq!(store_to_come(SOURCE_GEMINI_CLI, home.path()), None);
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, Path::new("relative/home")),
+            None
+        );
+        std::fs::create_dir(home.path().join("projects")).unwrap();
+        assert_eq!(store_to_come(SOURCE_CLAUDE_CODE, home.path()), None);
+        // A store is not a home.
+        assert_eq!(
+            store_to_come(SOURCE_CLAUDE_CODE, &home.path().join("projects")),
+            None
+        );
+        std::fs::write(home.path().join("sessions"), b"").unwrap();
+        assert_eq!(store_to_come(SOURCE_CODEX, home.path()), None);
+        #[cfg(unix)]
+        {
+            let linked = Scratch::new("store-to-come-linked-home");
+            std::os::unix::fs::symlink(home.path(), linked.path().join("projects")).unwrap();
+            assert_eq!(store_to_come(SOURCE_CLAUDE_CODE, linked.path()), None);
+        }
     }
 
     /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is

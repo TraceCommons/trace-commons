@@ -100,7 +100,7 @@ BASE="https://storage.googleapis.com/$BUCKET"
 
 cat > ai.tracecommons.Contributor.flatpakref <<REF
 [Flatpak Ref]
-Title=Trace Commons
+Title=Near AI Gateway
 Name=ai.tracecommons.Contributor
 Branch=master
 Url=$BASE/repo

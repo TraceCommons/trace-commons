@@ -26,9 +26,39 @@ enum DebugScreenshot {
         return (value?.isEmpty == false) ? value : nil
     }
 
+    /// True only while `captureWindows` draws the Monitor window from a
+    /// recorded sample set: `AppModel` then reads onboarding as known and
+    /// done, so the window draws the sample's tabs rather than this
+    /// machine's start-up state. Debug builds only; false in release.
+    static var capturesSampleWindows: Bool {
+        #if DEBUG
+        renderingSampleWindows
+        #else
+        false
+        #endif
+    }
+
+    #if DEBUG
+    /// Set and cleared by `captureWindows` around its renders, on the main
+    /// actor that both it and every reader run on.
+    nonisolated(unsafe) static var renderingSampleWindows = false
+    #endif
+
     @MainActor
     static func scheduleIfRequested(model: AppModel) {
         guard let directory else { return }
+        #if DEBUG
+        if let choice = sampleChoice {
+            Task { @MainActor in
+                // Only the window's own first layout to wait for: the
+                // stores are loaded from the sample set before each render.
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                await captureWindows(set: choice, model: model, to: directory)
+                await quitIfAsked(model: model)
+            }
+            return
+        }
+        #endif
         Task { @MainActor in
             // Late enough that the watcher has polled, queued, and scrubbed.
             try? await Task.sleep(nanoseconds: 12_000_000_000)
@@ -160,15 +190,125 @@ enum DebugScreenshot {
                     size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)
                 )
             }
-            if ProcessInfo.processInfo.environment["TRACE_COMMONS_QUIT_AFTER_SHOT"] == "1" {
-                // Late enough that the self-test, which starts on the same
-                // clock, has finished writing.
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
-                model.shutdown()
-                NSApp.terminate(nil)
+            await quitIfAsked(model: model)
+        }
+    }
+
+    @MainActor
+    private static func quitIfAsked(model: AppModel) async {
+        if ProcessInfo.processInfo.environment["TRACE_COMMONS_QUIT_AFTER_SHOT"] == "1" {
+            // Late enough that the self-test, which starts on the same
+            // clock, has finished writing.
+            try? await Task.sleep(nanoseconds: 25_000_000_000)
+            model.shutdown()
+            NSApp.terminate(nil)
+        }
+    }
+
+    #if DEBUG
+    /// The sample set `TRACE_COMMONS_SAMPLE` names, with the window's own
+    /// fallback (`MonitorWindowView.sampleChoice`); nil when it is unset.
+    @MainActor
+    static var sampleChoice: SampleDaemonClient.SampleSet? {
+        guard let name = ProcessInfo.processInfo.environment["TRACE_COMMONS_SAMPLE"] else { return nil }
+        return MonitorWindowView.sampleChoice(name).set
+    }
+
+    /// One whole-window capture: a tab and which of the map and the
+    /// inspector are shown beside the main pane.
+    struct WindowShot: Equatable {
+        let tab: MonitorWindowView.Tab
+        let showsMap: Bool
+        let showsInspector: Bool
+
+        /// The panes token of the shared capture name: `main`, then `map`
+        /// and `inspector` when shown, joined by `+`.
+        var panes: String {
+            (["main"] + (showsMap ? ["map"] : []) + (showsInspector ? ["inspector"] : [])).joined(separator: "+")
+        }
+
+        /// `<set>-<tab>-<panes>-<appearance>.png`, the name
+        /// `scripts/parity/gallery.py` pairs a Linux capture by.
+        func fileName(set: SampleDaemonClient.SampleSet, appearance: String) -> String {
+            "\(set.rawValue)-\(tab.rawValue.lowercased())-\(panes)-\(appearance).png"
+        }
+
+        /// The window's width with these panes at their default widths.
+        var width: CGFloat { GlassPaneLayout.windowWidth(showsMap: showsMap, showsInspector: showsInspector) }
+    }
+
+    /// Every tab in the default order, each with the map hidden and shown,
+    /// and with the inspector too wherever the tab's first page has one
+    /// (`MonitorWindowView.inspectorAvailable`): only Traces. A combination
+    /// that would draw the same window as another is not captured twice.
+    @MainActor
+    static func windowShots() -> [WindowShot] {
+        MonitorWindowView.Tab.ordered("").flatMap { tab in
+            let inspector = MonitorWindowView.inspectorAvailable(tab, homePage: .overview)
+            return [false, true].flatMap { map in
+                (inspector ? [false, true] : [false]).map { WindowShot(tab: tab, showsMap: map, showsInspector: $0) }
             }
         }
     }
+
+    /// `TRACE_COMMONS_APPEARANCE`'s word in a capture's name.
+    static var appearanceName: String { forcedColorScheme == .dark ? "dark" : "light" }
+
+    /// The whole Monitor window, once per `windowShots()`, drawn from the
+    /// sample set alone: the stores read `SampleDaemonClient`, never the
+    /// live client, so no capture holds anything from this machine's
+    /// queue. The synthetic-preview rule above still holds: no preview,
+    /// real or recorded, is opened here.
+    @MainActor
+    static func captureWindows(set: SampleDaemonClient.SampleSet, model: AppModel, to directory: String) async {
+        let client = DaemonDataWiring.sample(set)
+        // An empty Insights store of this run's own, so Insights draws no
+        // local data of the person's.
+        let insightsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trace-commons-capture-insights-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: insightsDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: insightsDirectory) }
+        // A run killed before its cleanup leaves its suite file behind.
+        CaptureSuite.sweepStale()
+        for shot in windowShots() {
+            let traces = TracesStore(client: nil)
+            traces.attach(client)
+            traces.markSample(set.rawValue, unknown: false)
+            let home = HomeStore(client: nil)
+            home.attach(client)
+            let inference = InferenceStore(client: nil)
+            inference.attach(client)
+            await traces.load()
+            await home.load()
+            await inference.load()
+            // The panes' switches, in a suite of this capture's own.
+            CaptureSuite.run { defaults, _ in
+                defaults.set(shot.showsMap, forKey: "monitor.showsMap")
+                defaults.set(shot.showsInspector, forKey: "monitor.showsInspector")
+                defaults.set(true, forKey: "monitor.panesSeeded")
+                let capture = MonitorWindowView.Capture(
+                    tab: shot.tab, mapTab: MonitorWindowView.mapTab(for: shot.tab) ?? .traces,
+                    traces: traces, home: home, inference: inference,
+                    insightsStore: .custom(insightsDirectory.path))
+                // Only around the synchronous render, so the live app never
+                // reads onboarding as done or its glass as painted in between.
+                renderingSampleWindows = true
+                GlassMaterial.paintsForCapture = true
+                defer {
+                    renderingSampleWindows = false
+                    GlassMaterial.paintsForCapture = false
+                }
+                render(
+                    MonitorWindowView(capture: capture, navigation: MainWindowNavigation(), missionDrafts: MissionDraftsModel())
+                        .environmentObject(model)
+                        .defaultAppStorage(defaults),
+                    to: directory + "/" + shot.fileName(set: set, appearance: appearanceName),
+                    size: CGSize(width: shot.width, height: GlassTokens.Size.windowHeight)
+                )
+            }
+        }
+    }
+    #endif
 
     /// `TRACE_COMMONS_APPEARANCE` as a colour scheme: `ImageRenderer` has no
     /// window to inherit one from, so each capture is pinned to it. Unset,

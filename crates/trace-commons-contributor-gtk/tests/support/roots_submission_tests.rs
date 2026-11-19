@@ -161,12 +161,13 @@ fn pending_submission_is_single_and_failure_allows_retry() {
         .register(None::<&gtk::gio::Cancellable>)
         .unwrap();
     let fixture = Fixture::new();
+    // Claude Code found, Codex not: Codex is not asked and is declared off.
     let candidates = ["claude-code", "codex"]
         .into_iter()
         .map(|source| SourceCandidate {
             source: source.into(),
             path: fixture.store.dir().join(source),
-            exists: false,
+            exists: source == "claude-code",
             session_count: 0,
             most_recent: None,
             total_bytes: None,
@@ -188,55 +189,56 @@ fn pending_submission_is_single_and_failure_allows_retry() {
     assert_eq!(windows.len(), 1);
     let window = &windows[0];
     let widgets = descendants(window.upcast_ref());
+    let continue_label = trace_commons_contributor::first_run_copy::first_run_copy()
+        .frame
+        .continue_button;
     let button = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<gtk::Button>().ok())
-        .find(|button| button.label().as_deref() == Some(copy::ROOTS_CONTINUE))
+        .find(|button| button.label().as_deref() == Some(continue_label))
         .unwrap();
-    let failure = widgets
-        .iter()
-        .filter_map(|widget| widget.clone().downcast::<gtk::Label>().ok())
-        .find(|label| label.text() == copy::ROOTS_FAILED)
-        .unwrap();
-    let off: Vec<_> = widgets
+    let checks: Vec<_> = widgets
         .iter()
         .filter_map(|widget| widget.clone().downcast::<gtk::CheckButton>().ok())
-        .filter(|button| button.label().as_deref() == Some(copy::ROOTS_OFF))
         .collect();
-    assert_eq!(off.len(), 2);
-    let source_controls: Vec<_> = widgets
-        .iter()
-        .filter(|widget| {
-            widget.is::<gtk::CheckButton>()
-                || widget
-                    .downcast_ref::<gtk::Button>()
-                    .is_some_and(|button| button.label().as_deref() == Some(copy::ROOTS_CHOOSE))
-        })
-        .collect();
-    assert_eq!(source_controls.len(), 6);
-    assert!(!button.is_sensitive());
-    assert!(!failure.is_visible());
-    for choice in off {
-        choice.set_active(true);
-    }
-    assert!(button.is_sensitive());
-
+    // One check per found tool, unticked.
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].label().as_deref(), Some("Claude Code"));
+    assert!(!checks[0].is_active());
+    let failure = || {
+        descendants(window.upcast_ref())
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
+            .any(|label| label.text() == copy::ROOTS_FAILED && label.is_visible())
+    };
+    let source_controls = || {
+        descendants(window.upcast_ref())
+            .into_iter()
+            .filter(|widget| widget.is::<gtk::CheckButton>())
+            .collect::<Vec<_>>()
+    };
+    assert!(!button.is_sensitive(), "nothing watched yet");
+    assert!(!failure());
+    checks[0].set_active(true);
+    spin_until(&context, &fixture, || button.is_sensitive());
     fixture.hold();
     button.emit_clicked();
     button.emit_clicked();
     assert_pending(&context, &fixture, &button, &completed);
     assert!(
-        source_controls
+        source_controls()
             .iter()
             .all(|control| !control.is_sensitive())
     );
     std::fs::set_permissions(fixture.store.dir(), Permissions::from_mode(0o500)).unwrap();
     fixture.release();
-    spin_until(&context, &fixture, || {
-        failure.is_visible() && button.is_sensitive()
-    });
+    spin_until(&context, &fixture, || failure() && button.is_sensitive());
     assert_eq!(completed.get(), 0);
-    assert!(source_controls.iter().all(|control| control.is_sensitive()));
+    assert!(
+        source_controls()
+            .iter()
+            .all(|control| control.is_sensitive())
+    );
     assert!(window.is_visible());
     let unchanged = DaemonSettings::load(&fixture.store).unwrap();
     assert!(unchanged.claude_source.is_none() && unchanged.codex_source.is_none());
@@ -247,7 +249,7 @@ fn pending_submission_is_single_and_failure_allows_retry() {
     button.emit_clicked();
     assert_pending(&context, &fixture, &button, &completed);
     assert!(
-        source_controls
+        source_controls()
             .iter()
             .all(|control| !control.is_sensitive())
     );
@@ -264,8 +266,13 @@ fn pending_submission_is_single_and_failure_allows_retry() {
     }
     assert_eq!(completed.get(), 1);
     assert!(!window.is_visible());
-    assert!(!failure.is_visible());
+    assert!(!failure());
     let persisted = DaemonSettings::load(&fixture.store).unwrap();
-    assert_eq!(persisted.claude_source, Some(SourceDeclaration::Off));
+    assert_eq!(
+        persisted.claude_source,
+        Some(SourceDeclaration::Watch {
+            path: fixture.store.dir().join("claude-code")
+        })
+    );
     assert_eq!(persisted.codex_source, Some(SourceDeclaration::Off));
 }

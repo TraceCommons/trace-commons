@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Marks this directory's .js files as ES modules for `node --test`; no dependencies, never packed into the extension."
+}

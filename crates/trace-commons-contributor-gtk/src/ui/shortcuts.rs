@@ -38,6 +38,11 @@ use super::{App, screens};
 /// accelerators is a loop over `SCREENS` and not a list somebody maintains.
 const SCREEN_ACTION: &str = "screen";
 
+/// The window action that opens Settings, and its chord: the Mac's
+/// Command-comma, spelled the way GTK's own parser prints it.
+const SETTINGS_ACTION: &str = "settings";
+const SETTINGS_ACCEL: &str = "<Control>comma";
+
 /// The window action the toggle chord drives.
 const TOGGLE_ACTION: &str = "model-calls-toggle";
 
@@ -78,7 +83,7 @@ pub(crate) fn screen_accels() -> Vec<(&'static str, String)> {
     screens()
         .iter()
         .enumerate()
-        .filter_map(|(index, (name, _, _))| Some((*name, screen_accel(index)?)))
+        .filter_map(|(index, (name, _))| Some((*name, screen_accel(index)?)))
         .collect()
 }
 
@@ -123,13 +128,21 @@ pub(crate) fn wire(app: &Rc<App>, application: &adw::Application) {
         let Some(wanted) = parameter.and_then(glib::Variant::str) else {
             return;
         };
-        let Some((name, _, _)) = screens().into_iter().find(|(name, _, _)| *name == wanted) else {
+        let Some((name, _)) = screens().into_iter().find(|(name, _)| *name == wanted) else {
             return;
         };
-        target.stack.set_visible_child_name(name);
+        target.open_screen(name);
         target.window.present();
     });
     app.window.add_action(&screen);
+
+    // Settings is its own window and no tab, so it has no digit.
+    let settings = gio::SimpleAction::new(SETTINGS_ACTION, None);
+    let target = Rc::clone(app);
+    settings.connect_activate(move |_, _| {
+        target.open_screen(super::SETTINGS_SCREEN);
+    });
+    app.window.add_action(&settings);
 
     let toggle = gio::SimpleAction::new(TOGGLE_ACTION, None);
     let target = Rc::clone(app);
@@ -144,6 +157,7 @@ pub(crate) fn wire(app: &Rc<App>, application: &adw::Application) {
     for (name, accel) in screen_accels() {
         application.set_accels_for_action(&screen_action(name), &[&accel]);
     }
+    application.set_accels_for_action(&format!("win.{SETTINGS_ACTION}"), &[SETTINGS_ACCEL]);
     application.set_accels_for_action(&format!("win.{TOGGLE_ACTION}"), &[TOGGLE_ACCEL]);
 }
 
@@ -201,8 +215,7 @@ mod tests {
             screens().len(),
             "a screen without an accelerator, or one too many"
         );
-        for (index, ((name, accel), (screen, _, _))) in
-            accels.iter().zip(screens().iter()).enumerate()
+        for (index, ((name, accel), (screen, _))) in accels.iter().zip(screens().iter()).enumerate()
         {
             assert_eq!(name, screen, "the accelerators are out of switcher order");
             assert_eq!(*accel, format!("<Control>{}", index + 1));
@@ -238,6 +251,37 @@ mod tests {
             );
         }
         assert_eq!(TOGGLE_ACCEL, "<Control><Shift>m");
+        assert_eq!(SETTINGS_ACCEL, "<Control>comma");
+    }
+
+    /// The accelerators follow the tab strip: Control-1 to Control-4 are
+    /// Home, Inference, Traces and Insights, and nothing past them has a
+    /// digit. Settings left the strip for its own window and keeps a chord.
+    #[test]
+    fn the_digits_are_the_four_tabs_and_settings_has_its_own_chord() {
+        let accels = screen_accels();
+        let names: Vec<_> = accels.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            [
+                "home",
+                super::super::PRIVATE_INFERENCE_SCREEN,
+                "queue",
+                "insights"
+            ]
+        );
+        assert!(
+            names
+                .iter()
+                .all(|name| *name != super::super::SETTINGS_SCREEN)
+        );
+        let code: String = include_str!("shortcuts.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("the module has a body before its tests")
+            .to_string();
+        assert!(code.contains("win.{SETTINGS_ACTION}"));
+        assert!(code.contains("open_screen(super::SETTINGS_SCREEN)"));
     }
 
     /// Nothing here may take a chord GTK, libadwaita or GNOME already own.
@@ -279,6 +323,7 @@ mod tests {
             .map(|(_, accel)| accel)
             .collect();
         ours.push(TOGGLE_ACCEL.to_string());
+        ours.push(SETTINGS_ACCEL.to_string());
         for accel in ours {
             assert!(
                 !reserved.contains(&accel.as_str()),
@@ -313,6 +358,9 @@ mod tests {
                     // is -- which is the same screen `connect_needs_exposure`
                     // sends a first connect to.
                     assert_eq!(screen, super::super::PRIVATE_INFERENCE_SCREEN);
+                }
+                crate::tray::TrayRequest::Panel(_) => {
+                    panic!("the chord never opens the menu-bar panel")
                 }
             }
         }

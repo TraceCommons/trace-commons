@@ -22,25 +22,28 @@ fail() {
 
 # The rendering fixture explicitly selects Insights and its Overview tab;
 # the connected shell's default destination is Home.
-# Require the page's own tab switcher -- an interactive control on the
-# Insights page, not the sidebar's "Insights" entry -- and the Overview's
-# "Tokens by day" card heading, which shows its body rendered.
 #
-# $1 is a sparse-text OCR pass (`--psm 11`). Since #2083 the switcher spans
-# the page in a shaded bar, and Tesseract's default layout analysis skips
-# that bar entirely, so the tab names are read word by word instead of as
-# one line. The selected tab (Overview, white on the accent) is not read
-# even then -- not inverted, thresholded or upscaled either -- so the check
-# asks for two unselected tabs: "Breakdown", and "Analyze" as a whole,
-# case-sensitive word ("analyzed" is in the page's own text). Every label
-# and the switching itself are asserted by the mounted
+# The popover notices are laid over the top of the tab, as on the Mac
+# (owner decision 1 of the 2026-11-16 spec, chosen again 2026-11-17), and a
+# build from source outside a flatpak always shows the update notice. That
+# card lies over the Insights page's tab switcher (Overview, Benchmarks,
+# Breakdown), which is the first thing on the page, so no switcher word is
+# readable in this frame and none is asked for. The switcher's labels and
+# its switching are asserted by the mounted
 # `ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages`
-# run above. Tesseract has misread tab names before ("Details" as "Deta"),
-# so only Breakdown's first letters are required. The capture loop below
-# retries while the body loads.
+# run above, and the notices' placement and X by
+# `ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to`
+# and `mounted_closing_every_notice_uncovers_the_tabs_first_heading`.
+#
+# What the frame does require is the Overview's body, below the card: the
+# "Cache share" and "Tokens by day" card headings, which only the Overview
+# draws (the tab strip and the map say neither). No notice's text is asked
+# for.
+#
+# $1 is a sparse-text OCR pass (`--psm 11`), which reads the page's text
+# word by word; the capture loop below retries while the body loads.
 insights_frame() {
-  grep -qE '(^|[[:space:]])Br[[:alpha:]]{3,}' <<< "$1" &&
-    grep -qE '(^|[[:space:]])Analyze([[:space:]]|$)' <<< "$1" &&
+  grep -qi 'Cache share' <<< "$1" &&
     grep -qi 'Tokens by day' <<< "$1"
 }
 
@@ -162,15 +165,122 @@ else
     fail "first-run Insights created contributor state"
   fi
 
+  # Offscreen renders a mounted test writes for review, when the job asks.
+  if [ -n "${TC_RENDER_DIR:-}" ]; then
+    mkdir -p "$TC_RENDER_DIR"
+  fi
+
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
+  # The background-service dialogs and the Private AI start area's "Set up"
+  # (Flatpak on the host service) are mounted tests with no display
+  # elsewhere in CI.
   for test_name in \
+    ui::service_dialog::tests::mounted_not_installed_dialog_has_the_approved_words_and_buttons \
+    ui::service_dialog::tests::mounted_not_running_dialog_has_start_it_and_the_status_command_on_failure \
+    ui::service_dialog::tests::mounted_install_and_update_dialogs_show_the_status_command_after_their_last_try \
+    ui::service_dialog::tests::mounted_too_old_dialog_has_the_install_command_and_copy \
+    ui::service_dialog::tests::mounted_copy_command_puts_the_fixed_command_on_the_clipboard \
+    ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
+    ui::service_dialog::tests::mounted_a_narrow_command_fits_and_wraps_only_between_runs \
+    ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
+    ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
+    ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
+    ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
     ui::insights::analytics::tests::summary_actions_wrap_and_remain_keyboard_reachable \
     ui::style::tests::both_schemes_parse_with_insights_styles \
+    ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
-    ui::queue::traces_map::tests::mounted_map_preserves_identity_accessibility_and_reduced_motion \
-    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body; do
+    ui::settings::navigation::tests::mounted_settings_opened_at_a_section_scrolls_there_on_first_show \
+    ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
+    ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
+    ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
+    ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
+    ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
+    ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
+    ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
+    ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
+    ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
+    ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
+    ui::monitor::graph_footer::tests::mounted_footer_controls_are_the_macs_sizes \
+    ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
+    ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
+    ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
+    ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
+    ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
+    ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
+    ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
+    ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
+    ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
+    ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
+    ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
+    ui::monitor::shell::tests::mounted_notices_are_laid_over_the_tab_they_belong_to \
+    ui::monitor::shell::tests::mounted_closing_every_notice_uncovers_the_tabs_first_heading \
+    ui::monitor::shell::tests::mounted_a_notices_x_closes_that_card \
+    ui::monitor::shell::tests::mounted_a_new_card_slides_in_and_a_revealed_one_fades \
+    ui::monitor::shell::tests::mounted_the_main_pane_never_scrolls_sideways \
+    ui::monitor::shell::tests::mounted_a_hidden_graph_leaves_the_tab_the_whole_pane \
+    ui::monitor::shell::tests::mounted_a_front_cards_buttons_are_whole_at_every_pane_width \
+    ui::monitor::shell::tests::mounted_a_covered_heading_shows_nothing_beside_the_card \
+    ui::wrap_row::tests::mounted_wrapped_buttons_stay_inside_their_card \
+    ui::tool_tile::mounted::mounted_a_tile_is_the_macs_size_and_says_nothing \
+    ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
+    ui::armed_mark::tests::mounted_the_armed_card_goes_once \
+    ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
+    ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
+    ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
+    ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
+    ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
+    ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
+    ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
+    ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
+    ui::queue::consent_mounted_tests::mounted_held_trace_shows_its_reasons_and_no_row_submit \
+    ui::settings::consent_mounted_tests::mounted_settings_have_no_undo_window_control \
+    ui::settings::consent_mounted_tests::mounted_sharing_ask_each_time_withdraws_the_grant \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_asks_about_ask_folders_first \
+    ui::settings::consent_mounted_tests::mounted_sharing_automatic_refuses_on_an_unreadable_configuration \
+    ui::settings::consent_mounted_tests::mounted_uses_sends_the_daemons_list_with_one_scope_changed \
+    ui::terms_hold::consent_mounted_tests::mounted_terms_hold_notice_follows_the_hold \
+    ui::history::consent_mounted_tests::mounted_previous_accounts_row_offers_no_withdraw \
+    ui::history::consent_mounted_tests::mounted_an_opened_record_shows_its_contribution_details \
+    ui::history::consent_mounted_tests::mounted_withdraw_asks_first_then_sends_the_record \
+    ui::history::consent_mounted_tests::mounted_tab_reaches_a_history_folders_records \
+    ui::style::tests::mounted_tab_passes_a_grid_of_figures \
+    ui::queue::consent_mounted_tests::mounted_an_undo_reply_clears_only_the_undo_that_was_pressed \
+    ui::queue::consent_mounted_tests::mounted_not_this_one_asks_first \
+    ui::queue::consent_mounted_tests::mounted_preview_sheet_says_why_held_and_sends_nothing \
+    ui::queue::consent_mounted_tests::mounted_the_sheet_buttons_end_inside_the_sheet \
+    ui::settings::consent_mounted_tests::mounted_an_override_shows_on_the_sharing_card_with_no_clear \
+    ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
+    ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
+    ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::edge_surfaces::tests::mounted_rail_switch_is_hidden_until_the_session_is_known \
+    ui::edge_surfaces::tests::mounted_rail_slides_and_fades_under_reduced_motion \
+    ui::edge_surfaces::tests::mounted_compact_graph_is_shown_without_its_controls \
+    ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend \
+    ui::edge_surfaces::tests::mounted_the_popovers_private_ai_card_follows_the_mac \
+    ui::edge_surfaces::tests::mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys \
+    edge::gnome::tests::mounted_the_placed_windows_carry_their_marker_and_the_brand_name \
+    ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
+    ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
+    ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \
+    ui::first_run_screens::mounted_tests::tools_tick_a_tool_the_daemon_already_watches \
+    ui::first_run_screens::mounted_tests::a_folder_the_old_portal_cannot_map_shows_the_line_and_a_copy_only_command \
+    ui::first_run_screens::mounted_tests::a_refusal_hides_once_the_daemon_holds_the_refused_tool \
+    ui::first_run_screens::mounted_tests::a_refusal_for_a_held_tool_hides_once_its_declaration_is_written \
+    ui::first_run_screens::mounted_tests::private_ai_counts_the_tools_that_can_connect \
+    ui::first_run_screens::mounted_tests::the_uses_flow_names_its_gate_and_the_commons \
+    ui::first_run_terms::mounted_tests::terms_sits_in_the_same_frame_as_the_other_steps \
+    ui::first_run_screens::mounted_tests::the_uses_captions_sit_under_their_nodes \
+    ui::first_run_screens::mounted_tests::the_marker_check_ticks_only_while_its_stroke_moves \
+    ui::first_run_screens::mounted_tests::the_customize_card_rises_to_its_place \
+    ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
+    ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
+    ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
+    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
@@ -194,9 +304,9 @@ else
   # --- axis 2: a real portal daemon ------------------------------------------
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::credential::provider_tests::wallet_provider_signals_preserve_pending_and_recover \
+      ui::credential::provider_tests::settings_sign_in_signals_preserve_pending_and_recover \
       -- --exact --ignored --test-threads=1; then
-    fail "wallet provider controls did not preserve pending, failure and retry behavior"
+    fail "Settings sign-in controls did not preserve pending, failure and retry behavior"
   fi
   if ! WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
@@ -329,9 +439,9 @@ else
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
-        echo "OCR found the Insights tab switcher and the Overview's Tokens by day card"
+        echo "OCR found the Overview's Cache share and Tokens by day cards"
       else
-        fail "OCR did not find the Insights tab switcher and the Overview's Tokens by day card in the screenshot"
+        fail "OCR did not find the Overview's Cache share and Tokens by day cards in the screenshot"
       fi
     else
       fail "tesseract not available -- OCR text-presence check could not run"

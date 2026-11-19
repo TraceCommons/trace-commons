@@ -20,6 +20,13 @@
 //! socket's own mode; the daemon refuses to serve from a directory that is
 //! not 0700.
 //!
+//! On Linux a daemon on its default state directory, outside a Flatpak
+//! sandbox, also serves this same dispatcher on the host link
+//! (`daemon::host_link`), for a Flatpak window that cannot see the state
+//! directory. That socket's directory under `XDG_RUNTIME_DIR` is held at
+//! 0700 too, and every connection to it must also come from the daemon's own
+//! uid (`SO_PEERCRED`) before a byte is read.
+//!
 //! Two operations -- arming a project for `auto_upload` and bulk-approving
 //! the whole queue -- used to be refused over the socket and required a
 //! terminal. That restriction is gone: the reasoning behind it does not
@@ -344,6 +351,10 @@ pub const METHODS: &[&str] = &[
     "feature_flags_snapshot",
     "feature_flags_refresh",
     "feature_flags_override_set",
+    "claude_desktop_status",
+    "claude_desktop_configure",
+    "claude_desktop_preset",
+    "claude_desktop_disconnect",
     "managed_snapshot",
     "managed_tool_setup",
     "managed_cli_options_set",
@@ -960,6 +971,7 @@ pub struct GateHeld {
 /// temporary in a `match` scrutinee, which lives for the whole `match`.
 pub struct DaemonShared {
     pub feature_flags: crate::feature_flags::Runtime,
+    pub(crate) claude_desktop: Mutex<super::claude_desktop::Connection>,
     /// NEAR AI's chat-model catalogue, shared by every reader (a leaf lock).
     /// See `managed::catalogue_cache`.
     pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
@@ -1507,7 +1519,8 @@ impl DaemonShared {
     /// them that a pass takes with `expect` panics again before reading
     /// anything, which the supervisor's backoff absorbs.
     pub(crate) fn poisoned_state_lock(&self) -> Option<&'static str> {
-        let locks: [(&'static str, bool); 24] = [
+        let locks: [(&'static str, bool); 25] = [
+            ("claude_desktop", self.claude_desktop.is_poisoned()),
             ("managed", self.managed.is_poisoned()),
             ("queue", self.queue.is_poisoned()),
             ("policy", self.policy.is_poisoned()),
@@ -1678,6 +1691,7 @@ impl DaemonShared {
         let terms_held = terms.held();
         Ok(Self {
             feature_flags: crate::feature_flags::Runtime::for_store(&store)?,
+            claude_desktop: Mutex::new(super::claude_desktop::Connection::open(&store)),
             managed,
             model_catalogue,
             store,
@@ -1890,6 +1904,9 @@ impl DaemonShared {
         // ownership while Forget or shutdown needs to withdraw a live key.
         // Absorption rechecks disk authority under the credential commit lock.
         self.absorb_near_ai_credential_change().await;
+        // Revoke Desktop before waiting for managed CLI streams to drain: a
+        // withdrawn key must stop accepting Desktop calls promptly.
+        super::claude_desktop::reconcile(self).await;
         // A managed session on the NEAR AI sign-in loses its proxy with the
         // sign-in, whatever Private AI's switch says.
         super::managed::close_routes_without_sign_in(self).await;
@@ -2005,6 +2022,7 @@ impl DaemonShared {
     /// Begin terminal cleanup on the daemon runtime, retaining only proxy state.
     /// The cleanup task cannot restart hosting or keep contributor queues alive.
     pub(crate) fn request_private_inference_stop(&self) {
+        super::claude_desktop::request_stop(self);
         let mut task = self
             .private_inference_stop_task
             .lock()
@@ -2098,7 +2116,11 @@ impl DaemonShared {
     /// A deadline does not abort the retained cleanup task or report Off.
     pub(crate) async fn stop_private_inference(&self) {
         const STOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
-        if !self.finish_private_inference_stop(STOP_BUDGET).await {
+        let (desktop, hosted) = tokio::join!(
+            tokio::time::timeout(STOP_BUDGET, super::claude_desktop::stop(self, false)),
+            self.finish_private_inference_stop(STOP_BUDGET),
+        );
+        if desktop.is_err() || !hosted {
             tracing::warn!(
                 reason = "private-inference-drain-pending",
                 "proxy cleanup is still pending"
@@ -3989,6 +4011,10 @@ fn handle_certificate_detail(shared: &DaemonShared, req: &Request) -> Response {
 /// Labels are explicit because several methods share a label that cannot
 /// be derived from their names, including the onboarding and profile groups.
 const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
+    ("claude_desktop_status", "claude-desktop-requires-async"),
+    ("claude_desktop_configure", "claude-desktop-requires-async"),
+    ("claude_desktop_preset", "claude-desktop-requires-async"),
+    ("claude_desktop_disconnect", "claude-desktop-requires-async"),
     ("insights_skills", "insights-skills-requires-async"),
     // It waits for the revoke at NEAR AI and takes the key out of the
     // running proxy; neither can happen on this dispatcher.
@@ -4263,6 +4289,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     EVENT_SETTLEMENT_ESTIMATE_CHANGED, EVENT_NEAR_AI_BALANCE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
+                (super::service::HELLO_SERVICE_LEVEL_KEY): super::service::SERVICE_LEVEL,
             }),
         ),
         "feature_flags_snapshot" => Response::ok(
@@ -7499,6 +7526,10 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         return super::managed::handle_async(shared, req).await;
     }
     match req.method.as_str() {
+        "claude_desktop_status" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_configure" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_preset" => super::claude_desktop::handle(shared, req).await,
+        "claude_desktop_disconnect" => super::claude_desktop::handle(shared, req).await,
         "insights_skills" => super::insights_skills::handle(shared, req).await,
         "harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
@@ -16317,6 +16348,24 @@ mod tests {
         assert_eq!(result["methods"].as_array().unwrap().len(), METHODS.len());
     }
 
+    /// The background service's level, which every shell compares with its
+    /// minimum (`daemon::service`): this daemon meets its own shells.
+    #[test]
+    fn hello_reports_the_service_level() {
+        let s = shared();
+        let result = handle_request(&s, &req("hello", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(
+            result[super::super::service::HELLO_SERVICE_LEVEL_KEY],
+            super::super::service::SERVICE_LEVEL
+        );
+        assert_eq!(
+            super::super::service::answer_from_hello(Some(&result)),
+            super::super::service::DaemonAnswer::Meets
+        );
+    }
+
     #[test]
     fn status_exposes_every_field_a_tray_needs() {
         let s = shared();
@@ -20456,7 +20505,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 79);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 83);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -20940,7 +20989,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 116, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 86, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 90, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -23105,6 +23154,23 @@ mod tests {
                     "{method}: a refusal publishes nothing"
                 );
             }
+        }
+
+        /// `capabilities.daemon_on_host`: whether the answering daemon is
+        /// the host part, outside any Flatpak sandbox. A sandboxed window
+        /// attached over the host link reads it; absent (an older daemon)
+        /// reads as false. These tests never run in a sandbox.
+        #[test]
+        fn the_managed_snapshot_says_the_daemon_runs_on_the_host() {
+            let s = live();
+            let snapshot = handle_request(&s, &req("managed_snapshot", serde_json::json!({})))
+                .result
+                .expect("snapshot");
+            assert_eq!(
+                snapshot["capabilities"]["daemon_on_host"],
+                !crate::daemon::host_link::runs_sandboxed()
+            );
+            assert_eq!(snapshot["capabilities"]["daemon_on_host"], true);
         }
 
         /// The managed-session terminal: one of three ids, persisted

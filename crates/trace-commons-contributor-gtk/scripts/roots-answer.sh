@@ -19,6 +19,10 @@
 # absent or holds the wrong pair, and this script fails. It cannot silently
 # pass by clicking the wrong control -- a stray click leaves an unanswered
 # row, Continue stays insensitive, and nothing is written at all.
+# STALE since the first-run parity port (2026-11-17): the window now opens on
+# Welcome, and Tools has one unticked check per found tool instead of the
+# Watch / decline pair these coordinates were read for. Re-derive them from a
+# fresh --roots-shot before relying on this script.
 set -euo pipefail
 
 SHOT=${SHOT:-.linux-roots-answered.png}

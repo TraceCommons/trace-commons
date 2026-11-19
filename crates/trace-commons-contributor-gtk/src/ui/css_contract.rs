@@ -20,6 +20,12 @@ mod tests {
     const SOURCES: &[(&str, &str)] = &[
         ("roots.rs", include_str!("roots.rs")),
         ("first_run.rs", include_str!("first_run.rs")),
+        ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+        ("first_run_tools.rs", include_str!("first_run_tools.rs")),
+        (
+            "first_run_stage_view.rs",
+            include_str!("first_run_stage_view.rs"),
+        ),
         ("insights.rs", include_str!("insights.rs")),
         (
             "insights_analytics.rs",
@@ -28,11 +34,32 @@ mod tests {
         ("onboarding.rs", include_str!("onboarding.rs")),
         ("history.rs", include_str!("history.rs")),
         ("home.rs", include_str!("home.rs")),
+        ("hero_card.rs", include_str!("hero_card.rs")),
         ("settings.rs", include_str!("settings.rs")),
         ("queue.rs", include_str!("queue.rs")),
         ("preview.rs", include_str!("preview.rs")),
         ("update.rs", include_str!("update.rs")),
         ("mark.rs", include_str!("mark.rs")),
+        // The Monitor window's views (spec 2026-11-16, window shell).
+        ("monitor/shell.rs", include_str!("monitor/shell.rs")),
+        (
+            "monitor/three_pane.rs",
+            include_str!("monitor/three_pane.rs"),
+        ),
+        (
+            "monitor/graph_footer.rs",
+            include_str!("monitor/graph_footer.rs"),
+        ),
+        ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
+        (
+            "monitor/traces_list.rs",
+            include_str!("monitor/traces_list.rs"),
+        ),
+        ("monitor/map.rs", include_str!("monitor/map.rs")),
+        (
+            "monitor/transfer_card.rs",
+            include_str!("monitor/transfer_card.rs"),
+        ),
     ];
 
     const STYLE_CSS: &str = include_str!("style.css");
@@ -72,8 +99,8 @@ mod tests {
     /// EMPTY, and it should stay that way. It held ten entries for one round:
     /// six were this check's own blindness to compound selectors (see
     /// `is_defined`) and were never defects at all, and the remaining four
-    /// were real, all in `onboarding.rs`, all fixed by photographing the pages
-    /// under Xvfb -- `scripts/linux-build.sh --onboarding-shots` -- and moving
+    /// were real, all in the old `onboarding.rs` pages, all fixed by
+    /// photographing the pages under Xvfb and moving
     /// each name onto the class the surrounding code already used for that
     /// job.
     ///
@@ -116,11 +143,16 @@ mod tests {
         let selector = format!(".{class}");
         let ends_name =
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
+        // Home's hero cards: generated from the hero tokens at load time.
+        let hero = super::super::hero_art::css();
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,
+            hero.as_str(),
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
+            super::super::style::brand_tokens::GLASS_LIGHT_CSS,
+            super::super::style::brand_tokens::GLASS_DARK_CSS,
         ] {
             for line in sheet.lines() {
                 let line = line.trim();
@@ -195,8 +227,8 @@ mod tests {
             ("first_run_terms.rs", include_str!("first_run_terms.rs")),
             ("roots.rs", include_str!("roots.rs")),
             ("onboarding.rs", include_str!("onboarding.rs")),
-            ("onboarding_nearai.rs", include_str!("onboarding_nearai.rs")),
-            ("onboarding_wallet.rs", include_str!("onboarding_wallet.rs")),
+            ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+            ("first_run_tools.rs", include_str!("first_run_tools.rs")),
         ];
         let mut offenders = Vec::new();
         for (file, source) in FLOW {

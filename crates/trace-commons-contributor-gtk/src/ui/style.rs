@@ -103,6 +103,8 @@
 use adw::prelude::*;
 use gtk::gdk;
 
+use super::omarchy;
+
 #[path = "brand_tokens.rs"]
 pub mod brand_tokens;
 
@@ -430,33 +432,125 @@ pub fn install() {
         _ => {}
     }
 
+    PROVIDER.with(|slot| *slot.borrow_mut() = Some(provider.clone()));
     load(&provider, manager.is_dark());
     let p = provider.clone();
     manager.connect_dark_notify(move |manager| load(&p, manager.is_dark()));
+
+    // The Appearance choice. With Standard -- the default -- this changes
+    // nothing above.
+    super::appearance::start();
+}
+
+thread_local! {
+    /// The one provider [`install`] made, for [`reload`] and [`set_translucent`].
+    static PROVIDER: std::cell::RefCell<Option<gtk::CssProvider>> =
+        const { std::cell::RefCell::new(None) };
+    /// Whether the translucent glass sheet is loaded (`ui::glass_backdrop`).
+    static TRANSLUCENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn load(provider: &gtk::CssProvider, dark: bool) {
-    provider.load_from_data(&stylesheet(dark));
+    provider.load_from_data(&sheet_for_window(
+        super::appearance::active_palette().as_ref(),
+        dark,
+        is_translucent(),
+    ));
+}
+
+/// Load the stylesheet again into the existing provider, after the
+/// appearance or its palette changed. Main thread only, like everything
+/// that touches GTK; a no-op before `install`.
+pub(crate) fn reload() {
+    let provider = PROVIDER.with(|slot| slot.borrow().clone());
+    if let Some(provider) = provider {
+        load(&provider, adw::StyleManager::default().is_dark());
+    }
+}
+
+/// Whether the translucent glass sheet is loaded.
+pub fn is_translucent() -> bool {
+    TRANSLUCENT.with(|on| on.get())
+}
+
+/// Load the translucent glass sheet over the painted one, or take it off.
+/// Only `ui::glass_backdrop` calls this, and only while KDE's blur is
+/// granted: without blur behind it a translucent pane fails the contrast
+/// floors over a busy desktop.
+pub fn set_translucent(on: bool) {
+    if TRANSLUCENT.with(|current| current.replace(on)) == on {
+        return;
+    }
+    reload();
+}
+
+/// What [`load`] loads: an Omarchy palette's sheet while the skin has one,
+/// and it stays painted, since the blur sheets redefine the glass colours
+/// the palette set; otherwise the standard sheet, translucent or not.
+fn sheet_for_window(palette: Option<&omarchy::Palette>, dark: bool, translucent: bool) -> String {
+    match palette {
+        Some(_) => sheet_for(palette, dark),
+        None => stylesheet_for(dark, translucent),
+    }
+}
+
+/// The painted stylesheet for one scheme ([`stylesheet_for`]).
+pub(super) fn stylesheet(dark: bool) -> String {
+    stylesheet_for(dark, false)
 }
 
 /// The whole stylesheet for one scheme: the generated accent and status
 /// roles first, since the palette refers to them by name, then the palette,
-/// then the rules.
-fn stylesheet(dark: bool) -> String {
-    let (brand, tokens) = if dark {
-        (brand_tokens::DARK_CSS, DARK_TOKENS)
+/// then the rules. `translucent` appends the blur sheets last: they redefine
+/// the glass colours, and GTK resolves a `@define-color` to its last
+/// definition, so every rule naming one follows, hand-written ones included.
+fn stylesheet_for(dark: bool, translucent: bool) -> String {
+    let (brand, glass, tokens) = if dark {
+        (
+            brand_tokens::DARK_CSS,
+            brand_tokens::GLASS_DARK_CSS,
+            DARK_TOKENS,
+        )
     } else {
-        (brand_tokens::LIGHT_CSS, LIGHT_TOKENS)
+        (
+            brand_tokens::LIGHT_CSS,
+            brand_tokens::GLASS_LIGHT_CSS,
+            LIGHT_TOKENS,
+        )
     };
     let insights = if dark {
         brand_tokens::INSIGHTS_DARK_CSS
     } else {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
-    format!(
-        "{brand}\n{tokens}\n{}\n{insights}",
-        include_str!("style.css")
-    )
+    let mut sheet = format!(
+        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}",
+        first_run_glow_css(),
+        include_str!("style.css"),
+        super::hero_art::css()
+    );
+    if translucent {
+        let (glass, insights) = if dark {
+            (
+                brand_tokens::GLASS_DARK_BLUR_CSS,
+                brand_tokens::INSIGHTS_DARK_BLUR_CSS,
+            )
+        } else {
+            (
+                brand_tokens::GLASS_LIGHT_BLUR_CSS,
+                brand_tokens::INSIGHTS_LIGHT_BLUR_CSS,
+            )
+        };
+        sheet.push_str(&format!("\n{glass}\n{insights}"));
+    }
+    sheet
+}
+
+/// The first run's glow as a `@define-color` rule. The first run's stage is
+/// dark in either scheme (`stage.rs`), so its glow is the dark scheme's.
+fn first_run_glow_css() -> String {
+    let glow = brand_tokens::first_run::dark::FIRST_RUN_GLOW.0;
+    format!("@define-color tc_first_run_glow {glow};")
 }
 
 /// The accent the mark's open bracket is stroked in, for `scheme`.
@@ -469,6 +563,376 @@ pub fn mark_accent(dark: bool) -> &'static str {
         brand_tokens::dark::ACCENT
     } else {
         brand_tokens::light::ACCENT
+    }
+}
+
+/// The stylesheet `install` loads: the standard one for `dark`, or, while
+/// the Omarchy skin has a palette, that palette's.
+pub(crate) fn sheet_for(palette: Option<&omarchy::Palette>, dark: bool) -> String {
+    match palette {
+        Some(palette) => omarchy_stylesheet(palette),
+        None => stylesheet(dark),
+    }
+}
+
+/// The standard stylesheet with every colour value replaced from `palette`.
+///
+/// Structure is the standard sheet's for the palette's mode -- the same
+/// blocks, rules and `@define-color` names -- and only values change:
+/// every literal definition by its role name, and every literal colour in
+/// the generated Insights rules by the role it plays there. Rules only the
+/// skin has are appended, scoped under [`super::appearance::SKIN_CLASS`].
+pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
+    let dark = palette.mode == omarchy::Mode::Dark;
+    let (brand, glass, tokens, insights) = if dark {
+        (
+            brand_tokens::DARK_CSS,
+            brand_tokens::GLASS_DARK_CSS,
+            DARK_TOKENS,
+            brand_tokens::INSIGHTS_DARK_CSS,
+        )
+    } else {
+        (
+            brand_tokens::LIGHT_CSS,
+            brand_tokens::GLASS_LIGHT_CSS,
+            LIGHT_TOKENS,
+            brand_tokens::INSIGHTS_LIGHT_CSS,
+        )
+    };
+    let define = |css: &str| rewrite_defines(css, |name| omarchy_define(palette, name));
+    let skin = super::appearance::SKIN_CLASS;
+    let scoped = format!(
+        ".{skin} textview text selection, .{skin} label selection, \
+         .{skin} entry text selection {{ background-color: {}; color: {}; }}\n\
+         .{skin} .dim-label {{ color: {}; opacity: 1; }}\n",
+        palette.selection.hex(),
+        palette.selection_ink.hex(),
+        palette.tertiary.hex(),
+    );
+    format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}",
+        define(brand),
+        define(glass),
+        define(tokens),
+        define(&first_run_glow_css()),
+        include_str!("style.css"),
+        recolour_insights(insights, palette, dark),
+    )
+}
+
+/// The value the skin gives a `@define-color` that the standard sheet
+/// defines as a literal. `None` keeps the standard value; only the neutral
+/// translucent overlays are kept (`tc_scrim`, and `tc_selected` under
+/// selected rows), since they darken or lighten whatever ground they sit on.
+/// They are not neutral for contrast: an ink checked on a bare ground can
+/// lose some through them (measured in the spec). The search highlight is
+/// checked through them; the other inks are checked on the bare grounds.
+/// The theme's `selection` colour is used for selected text, in the scoped
+/// rule.
+fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
+    let hex = |c: omarchy::Rgb| Some(c.hex());
+    let dark = p.mode == omarchy::Mode::Dark;
+    // A wash of a palette colour at the standard sheet's own alpha.
+    let wash = |c: omarchy::Rgb, dark_alpha: f64, light_alpha: f64| {
+        let omarchy::Rgb(r, g, b) = c;
+        let alpha = if dark { dark_alpha } else { light_alpha };
+        Some(format!("rgba({r}, {g}, {b}, {alpha})"))
+    };
+    match name {
+        // The generated brand roles.
+        "tc_accent" => hex(p.accent),
+        "tc_accent_line" => hex(p.accent_line),
+        "tc_accent_text" => hex(p.accent_text),
+        "tc_on_accent" => hex(p.on_accent),
+        "tc_status_on" => hex(p.status_on),
+        "tc_status_on_text" => hex(p.status_on_text),
+        "tc_status_ask" => hex(p.status_ask),
+        "tc_status_ask_text" => hex(p.status_ask_text),
+        "tc_status_outside" => hex(p.status_outside),
+        "tc_status_outside_text" => hex(p.status_outside_text),
+        "tc_on_status" => hex(p.on_status),
+        // The glass tiers.
+        "tc_glass_pane" => hex(p.bg),
+        "tc_glass_card"
+        | "tc_glass_card_quiet"
+        | "tc_glass_control"
+        | "tc_glass_popover"
+        | "tc_glass_menu"
+        | "tc_glass_node_card" => hex(p.surface),
+        "tc_glass_well" => hex(p.inset),
+        "tc_glass_control_selected" => hex(p.accent),
+        "tc_glass_scene" => hex(p.scene),
+        "tc_glass_ink" | "tc_glass_toolbar_glyph" => hex(p.ink),
+        "tc_glass_ink_secondary" => hex(p.muted),
+        "tc_glass_selected_ink" => hex(p.on_accent),
+        "tc_glass_toolbar_glyph_hidden" => hex(p.tertiary),
+        "tc_glass_toolbar_expanded" => hex(p.accent_text),
+        "tc_glass_control_hover" => hex(p.control_hover),
+        "tc_glass_row_hover" => hex(p.row_hover),
+        "tc_glass_tab_ember" => hex(p.accent_line),
+        // The glass tiers out of focus: the skin does not dim, so each is
+        // its focused role.
+        "tc_glass_pane_inactive" => hex(p.bg),
+        "tc_glass_card_inactive"
+        | "tc_glass_card_quiet_inactive"
+        | "tc_glass_control_inactive"
+        | "tc_glass_popover_inactive"
+        | "tc_glass_menu_inactive"
+        | "tc_glass_node_card_inactive" => hex(p.surface),
+        "tc_glass_well_inactive" | "tc_glass_tile_folder" => hex(p.inset),
+        "tc_glass_control_selected_inactive" => hex(p.accent),
+        "tc_glass_rule" | "tc_glass_rule_inactive" => hex(p.line),
+        "tc_glass_ink_tertiary" | "tc_glass_status_off" | "tc_glass_graph_focus_off" => {
+            hex(p.tertiary)
+        }
+        "tc_glass_graph_focus_on" => hex(p.accent_text),
+        "tc_glass_graph_focus_idle" => hex(p.muted),
+        "tc_glass_status_on" => hex(p.status_on),
+        "tc_glass_status_on_text" => hex(p.status_on_text),
+        "tc_glass_status_ask" => hex(p.status_ask),
+        "tc_glass_status_ask_text" => hex(p.status_ask_text),
+        "tc_glass_tab_ember_halo" => wash(p.accent_line, 0.31, 0.28),
+        "tc_glass_edge_high_contrast" => wash(p.ink, 0.4, 0.55),
+        "tc_glass_range_fill" => wash(p.ink, 0.07, 0.07),
+        // The glow behind the first run's current step.
+        "tc_first_run_glow" => hex(p.accent),
+        // The closed edge rail's handle: the ink at the token's 0.28, as
+        // the standard sheet draws it (dark ink on light, white on dark).
+        "tc_glass_edge_rail_handle" => {
+            let omarchy::Rgb(r, g, b) = p.ink;
+            Some(format!("rgba({r}, {g}, {b}, 0.28)"))
+        }
+        // The shell's own grounds and inks.
+        "tc_bg" => hex(p.bg),
+        "tc_surface" => hex(p.surface),
+        "tc_surface2" => hex(p.inset),
+        "tc_ink" => hex(p.ink),
+        "tc_muted" => hex(p.muted),
+        "tc_ink_tertiary" => hex(p.tertiary),
+        "tc_line" | "tc_line_divider" => hex(p.line),
+        "tc_blue" => hex(p.held),
+        "tc_blue_text" | "tc_blue_icon" => hex(p.held_text),
+        "tc_gold_highlight" => {
+            let omarchy::Rgb(r, g, b) = p.highlight;
+            let alpha = omarchy::HIGHLIGHT_WASH;
+            Some(format!("rgba({r}, {g}, {b}, {alpha})"))
+        }
+        "tc_redaction_bg" => hex(p.redaction_bg),
+        "tc_redaction_fg" => hex(p.redaction_ink),
+        // Labels on status fills; light mode writes them as white.
+        "warning_fg_color" | "error_fg_color" | "destructive_fg_color" | "success_fg_color" => {
+            hex(p.on_status)
+        }
+        _ => None,
+    }
+}
+
+/// Every `@define-color NAME VALUE;` line whose value is a literal (not a
+/// reference) and for which `value` answers, rewritten. Everything else is
+/// kept as it is.
+fn rewrite_defines(css: &str, value: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(css.len());
+    for line in css.split_inclusive('\n') {
+        let rewritten = line
+            .trim_start()
+            .strip_prefix("@define-color ")
+            .and_then(|rest| {
+                let (name, current) = rest.split_once(char::is_whitespace)?;
+                if current.trim_start().starts_with('@') {
+                    return None;
+                }
+                value(name).map(|v| format!("@define-color {name} {v};\n"))
+            });
+        out.push_str(rewritten.as_deref().unwrap_or(line));
+    }
+    out
+}
+
+/// The generated Insights rules carry literal colours (they mirror the Mac
+/// layout); each is replaced by the role it plays there.
+fn recolour_insights(css: &str, p: &omarchy::Palette, dark: bool) -> String {
+    let roles: &[(&str, omarchy::Rgb)] = if dark {
+        &[
+            ("#171b2d", p.bg),
+            ("#f2f3f8", p.ink),
+            ("#14182a", p.surface),
+            ("#2a2d3e", p.control_hover),
+            ("#7ebcff", p.accent),
+            ("#10131f", p.inset),
+            ("#3b3d47", p.control_hover),
+            ("#071a2e", p.on_accent),
+            ("#d8d9e0", p.muted),
+            // The unfocused twins: the skin does not dim.
+            ("#15192a", p.bg),
+            ("#121628", p.surface),
+            ("#0f121d", p.surface),
+        ]
+    } else {
+        &[
+            ("#f2f3f6", p.bg),
+            ("#1d1d1f", p.ink),
+            ("#fafafb", p.surface),
+            ("#dbdde3", p.control_hover),
+            ("#0558b6", p.accent),
+            ("#fbfbfc", p.surface),
+            ("#dbdee4", p.control_hover),
+            ("#ffffff", p.on_accent),
+            ("#3c3c43", p.muted),
+            // The unfocused twins: the skin does not dim.
+            ("#e8e9ec", p.bg),
+            ("#f6f6f7", p.surface),
+            ("#f8f8f9", p.surface),
+        ]
+    };
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = rest.find('#') {
+        out.push_str(&rest[..at]);
+        let candidate = rest.get(at..at + 7).unwrap_or("");
+        let replacement = roles
+            .iter()
+            .find(|(literal, _)| literal.eq_ignore_ascii_case(candidate))
+            .map(|(_, role)| role.hex());
+        match replacement {
+            Some(hex) => {
+                out.push_str(&hex);
+                rest = &rest[at + 7..];
+            }
+            None => {
+                out.push('#');
+                rest = &rest[at + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The colours custom (cairo and Pango) drawing uses, as `#rrggbb`.
+///
+/// GTK offers no supported way to read a `@define-color` back out of a
+/// provider, so drawing cannot ask the stylesheet. This is the one place it
+/// asks instead: the standard values below are the ones the drawing sites
+/// used to carry as literals, and in the Omarchy skin every one comes from
+/// the same resolved palette the stylesheet was generated from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Inks {
+    /// The mark: its frame fill, frame hairline, open and close brackets,
+    /// and the single ink of its frameless variant.
+    pub mark_surface: String,
+    pub mark_line: String,
+    pub mark_open: String,
+    pub mark_close: String,
+    pub mark_template: String,
+    /// Fills the map draws dots and rings in.
+    pub accent: String,
+    pub status_on: String,
+    pub status_ask: String,
+    pub status_outside: String,
+    /// Text-safe inks History strokes its 11px status glyphs in.
+    pub accent_text: String,
+    pub held_icon: String,
+    pub muted: String,
+    pub outside_text: String,
+    /// Where scrubbing fired, in the transcript.
+    pub redaction_bg: String,
+    pub redaction_fg: String,
+    /// The preview's highlighted excerpt: a colour and Pango `bgalpha`.
+    pub highlight: String,
+    pub highlight_alpha: String,
+    /// The hit's own text colour, set only in the skin; the standard look
+    /// keeps the label's ink.
+    pub highlight_ink: Option<String>,
+    /// The Omarchy palette these inks came from; `None` in the standard
+    /// look. The Traces map draws its every role from it in the skin
+    /// (`monitor::map::MapColours::resolve`).
+    pub skin: Option<omarchy::Palette>,
+}
+
+impl Inks {
+    pub fn standard(dark: bool) -> Self {
+        use trace_commons_mark::Scheme;
+        let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+        let s = |v: &str| v.to_string();
+        if dark {
+            use brand_tokens::dark as t;
+            Self {
+                mark_surface: s(scheme.surface()),
+                mark_line: s(scheme.line()),
+                mark_open: s(mark_accent(true)),
+                mark_close: s(scheme.bracket_close()),
+                mark_template: s(scheme.ink()),
+                accent: s(t::ACCENT),
+                status_on: s(t::STATUS_ON),
+                status_ask: s(t::STATUS_ASK),
+                status_outside: s(t::STATUS_OUTSIDE),
+                accent_text: s(t::ACCENT_TEXT),
+                held_icon: s("#9DB6F1"),
+                muted: s("#A6AC9F"),
+                outside_text: s(t::STATUS_OUTSIDE_TEXT),
+                redaction_bg: s("#4A3C18"),
+                redaction_fg: s("#F0EBDD"),
+                highlight: s("#DCAA43"),
+                highlight_alpha: s("32%"),
+                highlight_ink: None,
+                skin: None,
+            }
+        } else {
+            use brand_tokens::light as t;
+            Self {
+                mark_surface: s(scheme.surface()),
+                mark_line: s(scheme.line()),
+                mark_open: s(mark_accent(false)),
+                mark_close: s(scheme.bracket_close()),
+                mark_template: s(scheme.ink()),
+                accent: s(t::ACCENT),
+                status_on: s(t::STATUS_ON),
+                status_ask: s(t::STATUS_ASK),
+                status_outside: s(t::STATUS_OUTSIDE),
+                accent_text: s(t::ACCENT_TEXT),
+                held_icon: s("#315FBA"),
+                muted: s("#5C635B"),
+                outside_text: s(t::STATUS_OUTSIDE_TEXT),
+                redaction_bg: s("#f3e3c0"),
+                redaction_fg: s("#202426"),
+                highlight: s("#B9821F"),
+                highlight_alpha: s("28%"),
+                highlight_ink: None,
+                skin: None,
+            }
+        }
+    }
+
+    pub fn omarchy(p: &omarchy::Palette) -> Self {
+        Self {
+            mark_surface: p.surface.hex(),
+            mark_line: p.ink.hex(),
+            mark_open: p.accent_line.hex(),
+            mark_close: p.ink.hex(),
+            mark_template: p.ink.hex(),
+            accent: p.accent.hex(),
+            status_on: p.status_on.hex(),
+            status_ask: p.status_ask.hex(),
+            status_outside: p.status_outside.hex(),
+            accent_text: p.accent_text.hex(),
+            held_icon: p.held_text.hex(),
+            muted: p.muted.hex(),
+            outside_text: p.status_outside_text.hex(),
+            redaction_bg: p.redaction_bg.hex(),
+            redaction_fg: p.redaction_ink.hex(),
+            highlight: p.highlight.hex(),
+            highlight_alpha: omarchy::HIGHLIGHT_ALPHA.to_string(),
+            highlight_ink: Some(p.highlight_ink.hex()),
+            skin: Some(p.clone()),
+        }
+    }
+}
+
+/// The inks for what is on screen now.
+pub fn inks() -> Inks {
+    match super::appearance::active_palette() {
+        Some(palette) => Inks::omarchy(&palette),
+        None => Inks::standard(adw::StyleManager::default().is_dark()),
     }
 }
 
@@ -635,6 +1099,50 @@ pub fn card(orientation: gtk::Orientation, spacing: i32) -> gtk::Box {
     card
 }
 
+/// A row of controls or figures that wraps onto further lines when its
+/// column is narrower than the row, so it never makes the column wider
+/// than the Monitor window's 440 main pane. Fill it with [`wrap_append`].
+///
+/// Its own container, not a `GtkFlowBox`: on GTK 4.14 a flow box of
+/// buttons asked for less height than the lines it drew, clipping its last
+/// buttons ([`super::wrap_row`]).
+pub fn wrap_row(spacing: i32) -> super::wrap_row::WrapRow {
+    super::wrap_row::WrapRow::new(spacing)
+}
+
+/// Appends to a [`wrap_row`].
+pub fn wrap_append(row: &super::wrap_row::WrapRow, widget: &impl IsA<gtk::Widget>) {
+    row.append(widget);
+}
+
+/// Appends to a grid of equal tiles (a homogeneous `GtkFlowBox`). The flow
+/// box's own child wrapper takes no focus, so the keyboard reaches the tile
+/// itself in one step.
+///
+/// A grid with nothing in it to focus (the stat cards: figures and words)
+/// is taken off the Tab chain. A `GtkFlowBox` answers Tab as handled even
+/// when the tile it offered focus to refused it, so focus stayed where it
+/// was: Tab never got past it to the records below (KDE box, 2026-11-18).
+pub fn grid_append(grid: &gtk::FlowBox, widget: &impl IsA<gtk::Widget>) {
+    grid.insert(widget, -1);
+    if let Some(child) = widget.parent() {
+        child.set_focusable(false);
+    }
+    grid.set_can_focus(takes_focus(grid.upcast_ref()));
+}
+
+/// Whether anything inside `root` can hold keyboard focus.
+fn takes_focus(root: &gtk::Widget) -> bool {
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if widget.can_focus() && (widget.is_focusable() || takes_focus(&widget)) {
+            return true;
+        }
+        child = widget.next_sibling();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     //! Contrast, measured from the values this file actually loads.
@@ -646,25 +1154,134 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use super::{brand_tokens, stylesheet};
+    use super::{brand_tokens, stylesheet, stylesheet_for};
+    use crate::ui::glass_backdrop;
+
+    /// A grid of figures is no stop on the Tab chain, and Tab goes on
+    /// past it; a grid of buttons still takes focus on its tiles.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_tab_passes_a_grid_of_figures() {
+        use gtk::prelude::*;
+        adw::init().expect("GTK display unavailable");
+        let mount = |tile: gtk::Widget| {
+            let grid = gtk::FlowBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .homogeneous(true)
+                .build();
+            super::grid_append(&grid, &tile);
+            let after = gtk::Button::with_label("after");
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            column.append(&grid);
+            column.append(&after);
+            let window = gtk::Window::builder().child(&column).build();
+            window.present();
+            let context = gtk::glib::MainContext::default();
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < until {
+                context.iteration(false);
+            }
+            // From no focus, as the first Tab into a window that opened
+            // with none.
+            gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+            window.child_focus(gtk::DirectionType::TabForward);
+            let focus = gtk::prelude::GtkWindowExt::focus(&window);
+            window.destroy();
+            (focus, after.upcast::<gtk::Widget>())
+        };
+        let figure = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        figure.append(&gtk::Label::new(Some("3")));
+        let (focus, after) = mount(figure.upcast());
+        assert_eq!(focus, Some(after), "Tab stopped on a grid of figures");
+        let button = gtk::Button::with_label("tile");
+        let (focus, _) = mount(button.clone().upcast());
+        assert_eq!(
+            focus,
+            Some(button.upcast()),
+            "a grid of buttons is passed over"
+        );
+    }
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn both_schemes_parse_with_insights_styles() {
         assert_eq!(std::env::consts::OS, "linux");
         adw::init().expect("GTK display unavailable");
-        for dark in [false, true] {
+        for (dark, translucent) in [(false, false), (true, false), (false, true), (true, true)] {
             let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let captured = errors.clone();
             let provider = gtk::CssProvider::new();
             provider.connect_parsing_error(move |_, _, error| {
                 captured.borrow_mut().push(error.to_string());
             });
-            provider.load_from_data(&stylesheet(dark));
+            provider.load_from_data(&stylesheet_for(dark, translucent));
             assert!(
                 errors.borrow().is_empty(),
-                "dark={dark}: {:?}",
+                "dark={dark} translucent={translucent}: {:?}",
                 errors.borrow()
+            );
+        }
+    }
+
+    /// The translucent sheet works by redefining colours the painted rules
+    /// already name, which holds only if GTK resolves a `@define-color` to
+    /// its LAST definition in a provider. Pinned against GTK itself.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn gtk_resolves_a_redefined_colour_to_its_last_definition() {
+        assert_eq!(std::env::consts::OS, "linux");
+        adw::init().expect("GTK display unavailable");
+        use gtk::prelude::*;
+        let display = gtk::gdk::Display::default().expect("display");
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(
+            "@define-color tc_probe #ff0000;\n\
+             label.tc-probe { color: @tc_probe; }\n\
+             @define-color tc_probe #0000ff;",
+        );
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        let label = gtk::Label::new(None);
+        label.add_css_class("tc-probe");
+        let window = gtk::Window::new();
+        window.set_child(Some(&label));
+        #[allow(deprecated)]
+        let colour = label.style_context().color();
+        gtk::style_context_remove_provider_for_display(&display, &provider);
+        window.destroy();
+        assert_eq!(
+            (colour.red(), colour.green(), colour.blue()),
+            (0.0, 0.0, 1.0),
+            "{colour:?}"
+        );
+    }
+
+    /// The translucent sheets come after everything they redefine, and the
+    /// painted stylesheet carries none of them.
+    #[test]
+    fn the_translucent_sheet_is_last_and_only_when_asked() {
+        for dark in [false, true] {
+            let (glass, insights) = if dark {
+                (
+                    brand_tokens::GLASS_DARK_BLUR_CSS,
+                    brand_tokens::INSIGHTS_DARK_BLUR_CSS,
+                )
+            } else {
+                (
+                    brand_tokens::GLASS_LIGHT_BLUR_CSS,
+                    brand_tokens::INSIGHTS_LIGHT_BLUR_CSS,
+                )
+            };
+            let painted = stylesheet(dark);
+            assert!(!painted.contains("@define-color tc_glass_scene transparent;"));
+            let translucent = stylesheet_for(dark, true);
+            assert!(translucent.starts_with(&painted), "dark={dark}");
+            assert!(
+                translucent.ends_with(&format!("\n{glass}\n{insights}")),
+                "dark={dark}"
             );
         }
     }
@@ -674,7 +1291,10 @@ mod tests {
     /// Every `@define-color` in the stylesheet, references resolved, opaque
     /// hex values only.
     fn palette(dark: bool) -> HashMap<String, String> {
-        let css = stylesheet(dark);
+        palette_of(&stylesheet(dark))
+    }
+
+    fn palette_of(css: &str) -> HashMap<String, String> {
         let mut raw = HashMap::new();
         for line in css.lines() {
             let Some(rest) = line.trim().strip_prefix("@define-color ") else {
@@ -717,7 +1337,11 @@ mod tests {
     }
 
     fn check(dark: bool, pairs: &[(&str, &str)], floor: f64) -> Vec<String> {
-        let colours = palette(dark);
+        check_css(&format!("dark={dark}"), &stylesheet(dark), pairs, floor)
+    }
+
+    fn check_css(label: &str, css: &str, pairs: &[(&str, &str)], floor: f64) -> Vec<String> {
+        let colours = palette_of(css);
         let get = |name: &str| {
             colours
                 .get(name)
@@ -728,7 +1352,7 @@ mod tests {
             .iter()
             .filter_map(|(fg, bg)| {
                 let ratio = contrast(&get(fg), &get(bg));
-                (ratio < floor).then(|| format!("dark={dark}: {fg} on {bg} is {ratio:.2}:1"))
+                (ratio < floor).then(|| format!("{label}: {fg} on {bg} is {ratio:.2}:1"))
             })
             .collect()
     }
@@ -737,6 +1361,155 @@ mod tests {
         inks.iter()
             .flat_map(|ink| GROUNDS.iter().map(move |ground| (*ink, *ground)))
             .collect()
+    }
+
+    /// A colour the translucent sheet defines, as r, g, b (0-255) and
+    /// alpha.
+    fn blur_colour(dark: bool, name: &str) -> (f64, f64, f64, f64) {
+        let sheet = if dark {
+            brand_tokens::GLASS_DARK_BLUR_CSS
+        } else {
+            brand_tokens::GLASS_LIGHT_BLUR_CSS
+        };
+        let value = sheet
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("@define-color {name} ")))
+            .unwrap_or_else(|| panic!("the translucent sheet defines no {name}"));
+        let inner = value
+            .trim_end_matches(';')
+            .trim()
+            .strip_prefix("rgba(")
+            .and_then(|v| v.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{name} is not rgba: {value}"));
+        let parts: Vec<f64> = inner
+            .split(',')
+            .map(|v| v.trim().parse().unwrap())
+            .collect();
+        (parts[0], parts[1], parts[2], parts[3])
+    }
+
+    fn flatten(colour: (f64, f64, f64, f64), ground: &str) -> String {
+        let (r, g, b, a) = colour;
+        let base: Vec<f64> = (0..3)
+            .map(|i| f64::from(u8::from_str_radix(&ground[1 + 2 * i..3 + 2 * i], 16).unwrap()))
+            .collect();
+        let mix = |c: f64, i: usize| (c * a + base[i] * (1.0 - a)).round() as u8;
+        format!("#{:02x}{:02x}{:02x}", mix(r, 0), mix(g, 1), mix(b, 2))
+    }
+
+    /// Every text colour the panes' screens use, for the translucent check:
+    /// the glass inks, tertiary included (column titles and sub-lines), the
+    /// shell's own and every status and accent text. `tc_glass_status_off`
+    /// is left out: it colours the chevron glyph and a turned-off Submit,
+    /// which carry no text a person must read. The selected row's ink sits
+    /// on the selection's opaque fill, not on the pane.
+    const PANE_INKS: [&str; 15] = [
+        "tc_glass_ink",
+        "tc_glass_ink_secondary",
+        "tc_glass_ink_tertiary",
+        "tc_glass_status_on_text",
+        "tc_glass_status_ask_text",
+        "tc_ink",
+        "tc_muted",
+        "accent_color",
+        "tc_green_text",
+        "tc_gold_text",
+        "tc_coral_text",
+        "tc_blue_text",
+        "success_color",
+        "warning_color",
+        "error_color",
+    ];
+
+    /// The desktop as KWin hands it to the pane: `desktop` itself, or
+    /// through the frost when the contrast is granted.
+    fn behind_pane(desktop: [f64; 3], frost: Option<glass_backdrop::Frost>) -> String {
+        let shown = frost.map_or(desktop, |frost| glass_backdrop::frosted(desktop, frost));
+        let byte = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            byte(shown[0]),
+            byte(shown[1]),
+            byte(shown[2])
+        )
+    }
+
+    /// Every failure of [`PANE_INKS`] on the translucent panes over a black
+    /// and a white desktop, in and out of focus, on the pane and on the
+    /// tiers that hold text.
+    fn translucent_failures(dark: bool, frost: Option<glass_backdrop::Frost>) -> Vec<String> {
+        let mut failures = Vec::new();
+        let colours = palette(dark);
+        for desktop in [[0.0; 3], [1.0; 3]] {
+            let desktop = behind_pane(desktop, frost);
+            for pane in ["tc_glass_pane", "tc_glass_pane_inactive"] {
+                let ground = flatten(blur_colour(dark, pane), &desktop);
+                let mut grounds = vec![(pane.to_string(), ground.clone())];
+                for tier in ["tc_glass_card", "tc_glass_card_quiet", "tc_glass_control"] {
+                    grounds.push((
+                        format!("{tier} on {pane}"),
+                        flatten(blur_colour(dark, tier), &ground),
+                    ));
+                }
+                for (where_, under) in &grounds {
+                    for ink in PANE_INKS {
+                        let ratio = contrast(&colours[ink], under);
+                        if ratio < 4.5 {
+                            failures.push(format!(
+                                "dark={dark}: {ink} on {where_} over {desktop} is {ratio:.2}:1"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        failures
+    }
+
+    /// Text in a translucent pane sits on whatever KWin's blur averages the
+    /// desktop to, through the frost where KWin's contrast is granted. A
+    /// scheme may go translucent on its own (`glass_backdrop::readable`)
+    /// only if every text colour the panes' screens use reads at 4.5:1
+    /// there too, over a black and a white desktop, in and out of focus,
+    /// on the pane and on the tiers that hold text. Two-sided: `readable`
+    /// must agree with the measurement, so the gate can neither open on a
+    /// failure nor stay shut after a fix.
+    #[test]
+    fn every_text_colour_reads_on_the_translucent_panes() {
+        for dark in [false, true] {
+            for granted in [false, true] {
+                let frost = granted.then(|| glass_backdrop::frost(dark));
+                let failures = translucent_failures(dark, frost);
+                assert_eq!(
+                    failures.is_empty(),
+                    glass_backdrop::readable(dark, granted),
+                    "dark={dark} contrast={granted}: {failures:#?}"
+                );
+            }
+        }
+    }
+
+    /// The frost's contrast is the largest, in steps of 0.05, at which the
+    /// text reads: the most desktop that can show through. In light no step
+    /// reads (a mid-grey desktop at contrast 0 still leaves `tc_muted`
+    /// under 4.5:1), so light asks for none and stays painted.
+    #[test]
+    fn the_frost_shows_as_much_desktop_as_the_text_allows() {
+        for dark in [false, true] {
+            let chosen = glass_backdrop::frost(dark);
+            let best = (0..=20)
+                .rev()
+                .map(|step| f64::from(step) * 0.05)
+                .find(|&contrast| {
+                    translucent_failures(dark, Some(glass_backdrop::Frost { contrast, ..chosen }))
+                        .is_empty()
+                });
+            match best {
+                Some(best) => assert!((chosen.contrast - best).abs() < 1e-9, "dark={dark}: {best}"),
+                None => assert_eq!(chosen.contrast, 1.0, "dark={dark}"),
+            }
+            assert_eq!(best.is_some(), dark, "dark={dark}: {best:?}");
+        }
     }
 
     #[test]
@@ -791,6 +1564,52 @@ mod tests {
         }
     }
 
+    /// The colour a rule for exactly `selector` in this shell's stylesheet
+    /// gives its text, if one does.
+    fn rule_colour(selector: &str) -> Option<String> {
+        let css = include_str!("style.css");
+        css.split('}').find_map(|rule| {
+            let (selectors, body) = rule.split_once('{')?;
+            let selectors: Vec<&str> = selectors
+                .rsplit("*/")
+                .next()
+                .unwrap_or(selectors)
+                .split(',')
+                .map(str::trim)
+                .collect();
+            if !selectors.contains(&selector) {
+                return None;
+            }
+            body.split(';').find_map(|line| {
+                let value = line.trim().strip_prefix("color:")?.trim();
+                Some(value.trim_start_matches('@').to_string())
+            })
+        })
+    }
+
+    /// The Traces tab's count badge with the attention glyph beside it
+    /// (`App::set_queue_count`) is text on the accent fill. `.tc-attention`
+    /// alone is gold text for a plain ground, and it comes after
+    /// `.tc-count-badge`, so without a rule of its own the badge read dark
+    /// brown on purple in light mode. The Mac's badge has one colour pair
+    /// whatever it counts (`GlassBadgeValue`).
+    #[test]
+    fn the_attention_badge_is_readable_on_its_fill() {
+        let colour = rule_colour(".tc-count-badge.tc-attention")
+            .or_else(|| rule_colour(".tc-attention"))
+            .expect("the attention badge has a colour");
+        assert_eq!(
+            rule_colour(".tc-count-badge").as_deref(),
+            Some("tc_primary_label")
+        );
+        for dark in [false, true] {
+            assert_eq!(
+                check(dark, &[(colour.as_str(), "tc_primary_fill")], 4.5),
+                Vec::<String>::new()
+            );
+        }
+    }
+
     /// The mark's open bracket on the mark's own frame fill.
     #[test]
     fn the_mark_accent_clears_3_on_the_mark_frame() {
@@ -818,6 +1637,376 @@ mod tests {
                     !css.contains(retired),
                     "dark={dark}: {retired} is still loaded"
                 );
+            }
+        }
+    }
+
+    // --- The Omarchy skin -------------------------------------------------
+
+    use super::omarchy::{self, fixtures::FIXTURES};
+
+    fn omarchy_sheets() -> Vec<(String, omarchy::Palette, String)> {
+        FIXTURES
+            .iter()
+            .map(|(name, text)| {
+                let palette = omarchy::parse(text, false).expect(name);
+                let css = super::omarchy_stylesheet(&palette);
+                (name.to_string(), palette, css)
+            })
+            .collect()
+    }
+
+    fn define_names(css: &str) -> std::collections::BTreeSet<String> {
+        css.lines()
+            .filter_map(|line| line.trim().strip_prefix("@define-color "))
+            .map(|rest| rest.split_whitespace().next().unwrap().to_string())
+            .collect()
+    }
+
+    /// Off is off: with Standard chosen, what loads is today's sheet, byte
+    /// for byte.
+    #[test]
+    fn the_standard_sheet_is_unchanged_without_a_palette() {
+        for dark in [false, true] {
+            assert_eq!(super::sheet_for(None, dark), stylesheet(dark));
+        }
+        let (_, palette, css) = omarchy_sheets().remove(0);
+        for dark in [false, true] {
+            assert_eq!(super::sheet_for(Some(&palette), dark), css);
+        }
+    }
+
+    /// The skin's sheet loads whether or not the translucent one is asked
+    /// for: the blur sheets would redefine the glass colours the palette
+    /// set. Without a palette, the translucent sheet loads as asked.
+    #[test]
+    fn a_skin_stays_painted_and_the_standard_sheet_follows_the_blur() {
+        let (_, palette, css) = omarchy_sheets().remove(0);
+        for dark in [false, true] {
+            for translucent in [false, true] {
+                assert_eq!(
+                    super::sheet_for_window(Some(&palette), dark, translucent),
+                    css
+                );
+                assert_eq!(
+                    super::sheet_for_window(None, dark, translucent),
+                    super::stylesheet_for(dark, translucent)
+                );
+            }
+        }
+        assert_ne!(
+            super::sheet_for_window(None, true, true),
+            super::sheet_for_window(None, true, false)
+        );
+    }
+
+    /// `@define-color` cannot be scoped, so the skin replaces values and
+    /// never structure: the same names, every one of them.
+    #[test]
+    fn the_omarchy_sheet_defines_exactly_the_standard_names() {
+        for (name, palette, css) in omarchy_sheets() {
+            let dark = palette.mode == omarchy::Mode::Dark;
+            assert_eq!(
+                define_names(&css),
+                define_names(&stylesheet(dark)),
+                "{name}"
+            );
+            let glass = define_names(&css)
+                .into_iter()
+                .filter(|n| n.starts_with("tc_glass_"))
+                .count();
+            // 43, and the edge rail's handle.
+            assert_eq!(glass, 44, "{name}");
+            let omarchy::Rgb(r, g, b) = palette.ink;
+            assert!(
+                css.contains(&format!(
+                    "@define-color tc_glass_edge_rail_handle rgba({r}, {g}, {b}, 0.28);"
+                )),
+                "{name}: the rail's handle in the skin's ink"
+            );
+        }
+    }
+
+    /// Every literal colour in the skin's sheet is one of the palette's own,
+    /// so no brand colour is left behind on an Omarchy screen. Comments are
+    /// stripped first: style.css mentions hex values in prose.
+    #[test]
+    fn no_standard_colour_survives_in_the_omarchy_sheet() {
+        fn strip_comments(css: &str) -> String {
+            let mut out = String::new();
+            let mut rest = css;
+            while let Some(start) = rest.find("/*") {
+                out.push_str(&rest[..start]);
+                rest = rest[start..]
+                    .split_once("*/")
+                    .map_or("", |(_, after)| after);
+            }
+            out.push_str(rest);
+            out
+        }
+        for (name, p, css) in omarchy_sheets() {
+            let allowed: std::collections::BTreeSet<String> = [
+                p.bg,
+                p.surface,
+                p.inset,
+                p.scene,
+                p.control_hover,
+                p.row_hover,
+                p.ink,
+                p.strong,
+                p.muted,
+                p.tertiary,
+                p.line,
+                p.accent,
+                p.on_accent,
+                p.accent_line,
+                p.accent_text,
+                p.status_on,
+                p.status_on_text,
+                p.status_ask,
+                p.status_ask_text,
+                p.status_outside,
+                p.status_outside_text,
+                p.held,
+                p.held_text,
+                p.on_status,
+                p.selection,
+                p.selection_ink,
+                p.redaction_bg,
+                p.redaction_ink,
+                p.highlight,
+            ]
+            .iter()
+            .map(|c| c.hex())
+            .collect();
+            let css = strip_comments(&css);
+            let mut stray = Vec::new();
+            for (i, _) in css.match_indices('#') {
+                let candidate = css.get(i..i + 7).unwrap_or("");
+                if omarchy::Rgb::parse(candidate).is_some()
+                    && !allowed.contains(&candidate.to_ascii_uppercase())
+                {
+                    stray.push(candidate.to_string());
+                }
+            }
+            assert!(stray.is_empty(), "{name}: {stray:?}");
+        }
+    }
+
+    /// The same matrix the standard sheet is held to, over every vendored
+    /// palette, read back out of the generated CSS -- so the sheet and the
+    /// adapter cannot drift apart.
+    #[test]
+    fn the_omarchy_sheet_meets_the_standard_contrast_matrix() {
+        let text = on_every_ground(&[
+            "accent_color",
+            "tc_green_text",
+            "tc_gold_text",
+            "tc_coral_text",
+            "tc_blue_text",
+            "success_color",
+            "warning_color",
+            "error_color",
+            "tc_ink",
+            "tc_muted",
+            "tc_ink_tertiary",
+        ]);
+        let rules = on_every_ground(&["tc_green", "tc_gold", "tc_coral", "tc_blue"]);
+        let fills = [
+            ("accent_bg_color", "tc_bg"),
+            ("accent_bg_color", "tc_surface"),
+        ];
+        let labels = [
+            ("accent_fg_color", "accent_bg_color"),
+            ("tc_primary_label", "tc_primary_fill"),
+            ("success_fg_color", "success_bg_color"),
+            ("warning_fg_color", "warning_bg_color"),
+            ("error_fg_color", "error_bg_color"),
+            ("destructive_fg_color", "destructive_bg_color"),
+            ("tc_redaction_fg", "tc_redaction_bg"),
+        ];
+        let glass_grounds = [
+            "tc_glass_pane",
+            "tc_glass_card",
+            "tc_glass_card_quiet",
+            "tc_glass_well",
+            "tc_glass_control",
+            "tc_glass_popover",
+            "tc_glass_menu",
+            "tc_glass_node_card",
+            "tc_glass_scene",
+            "tc_glass_control_hover",
+            "tc_glass_row_hover",
+        ];
+        let glass_text: Vec<(&str, &str)> = ["tc_glass_ink", "tc_glass_ink_secondary"]
+            .iter()
+            .flat_map(|ink| glass_grounds.iter().map(move |g| (*ink, *g)))
+            .collect();
+        let glass_label = [("tc_glass_selected_ink", "tc_glass_control_selected")];
+        for (name, _, css) in omarchy_sheets() {
+            let mut failures = check_css(&name, &css, &text, 4.5);
+            failures.extend(check_css(&name, &css, &rules, 3.0));
+            failures.extend(check_css(&name, &css, &fills, 3.0));
+            failures.extend(check_css(&name, &css, &labels, 4.5));
+            failures.extend(check_css(&name, &css, &glass_text, 4.5));
+            failures.extend(check_css(&name, &css, &glass_label, 4.5));
+            assert_eq!(failures, Vec::<String>::new());
+        }
+    }
+
+    /// Rules only the skin has are scoped under the class the shell puts on
+    /// its windows while the skin is on.
+    #[test]
+    fn skin_only_rules_are_scoped_and_absent_from_the_standard_sheet() {
+        for dark in [false, true] {
+            assert!(!stylesheet(dark).contains(".tc-omarchy"));
+        }
+        for (name, p, css) in omarchy_sheets() {
+            let scoped = css
+                .split('}')
+                .find(|rule| rule.contains(".tc-omarchy") && rule.contains("selection"))
+                .unwrap_or_else(|| panic!("{name}: no scoped selection rule"));
+            assert!(scoped.contains(&p.selection.hex()), "{name}");
+            assert!(scoped.contains(&p.selection_ink.hex()), "{name}");
+        }
+    }
+
+    /// libadwaita draws `.dim-label` as the text colour at 55% opacity. On a
+    /// theme's own foreground that fell to 2.5:1 on Rose Pine and Catppuccin
+    /// Latte (measured on the Omarchy box: the map legend). Under the skin a
+    /// dim label is the palette's tertiary ink, opaque, which clears 4.5:1 on
+    /// every ground.
+    #[test]
+    fn skin_dim_labels_are_the_opaque_tertiary_ink() {
+        for (name, p, css) in omarchy_sheets() {
+            let rule = css
+                .split('}')
+                .find(|rule| rule.contains(".tc-omarchy .dim-label"))
+                .unwrap_or_else(|| panic!("{name}: no scoped dim-label rule"));
+            assert!(rule.contains(&p.tertiary.hex()), "{name}: {rule}");
+            assert!(rule.contains("opacity: 1"), "{name}: {rule}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn every_omarchy_sheet_parses() {
+        assert_eq!(std::env::consts::OS, "linux");
+        adw::init().expect("GTK display unavailable");
+        for (name, _, css) in omarchy_sheets() {
+            let errors = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = errors.clone();
+            let provider = gtk::CssProvider::new();
+            provider.connect_parsing_error(move |_, _, error| {
+                captured.borrow_mut().push(error.to_string());
+            });
+            provider.load_from_data(&css);
+            assert!(errors.borrow().is_empty(), "{name}: {:?}", errors.borrow());
+        }
+    }
+
+    /// The standard inks are the literals the drawing sites carried before
+    /// they asked here, so the standard look draws exactly as it did.
+    #[test]
+    fn the_standard_inks_are_the_old_literals() {
+        use trace_commons_mark::Scheme;
+        for (dark, scheme) in [(false, Scheme::Light), (true, Scheme::Dark)] {
+            let inks = super::Inks::standard(dark);
+            let tokens = if dark {
+                (brand_tokens::dark::ACCENT, brand_tokens::dark::ACCENT_TEXT)
+            } else {
+                (
+                    brand_tokens::light::ACCENT,
+                    brand_tokens::light::ACCENT_TEXT,
+                )
+            };
+            assert_eq!(inks.mark_surface, scheme.surface());
+            assert_eq!(inks.mark_line, scheme.line());
+            assert_eq!(inks.mark_open, super::mark_accent(dark));
+            assert_eq!(inks.mark_close, scheme.bracket_close());
+            assert_eq!(inks.mark_template, scheme.ink());
+            assert_eq!(inks.accent, tokens.0);
+            assert_eq!(inks.accent_text, tokens.1);
+        }
+        let light = super::Inks::standard(false);
+        assert_eq!(light.held_icon, "#315FBA");
+        assert_eq!(light.muted, "#5C635B");
+        assert_eq!(light.outside_text, brand_tokens::light::STATUS_OUTSIDE_TEXT);
+        assert_eq!(light.status_on, brand_tokens::light::STATUS_ON);
+        assert_eq!(light.status_ask, brand_tokens::light::STATUS_ASK);
+        assert_eq!(light.status_outside, brand_tokens::light::STATUS_OUTSIDE);
+        assert_eq!(
+            (light.redaction_bg.as_str(), light.redaction_fg.as_str()),
+            ("#f3e3c0", "#202426")
+        );
+        assert_eq!(
+            (light.highlight.as_str(), light.highlight_alpha.as_str()),
+            ("#B9821F", "28%")
+        );
+        let dark = super::Inks::standard(true);
+        assert_eq!(dark.held_icon, "#9DB6F1");
+        assert_eq!(dark.muted, "#A6AC9F");
+        assert_eq!(
+            (dark.redaction_bg.as_str(), dark.redaction_fg.as_str()),
+            ("#4A3C18", "#F0EBDD")
+        );
+        assert_eq!(
+            (dark.highlight.as_str(), dark.highlight_alpha.as_str()),
+            ("#DCAA43", "32%")
+        );
+        // The standard look keeps the label's own ink on the wash.
+        assert_eq!((light.highlight_ink, dark.highlight_ink), (None, None));
+    }
+
+    /// In the skin every drawing ink is the palette's.
+    #[test]
+    fn the_omarchy_inks_come_from_the_palette() {
+        for (name, p, _) in omarchy_sheets() {
+            let inks = super::Inks::omarchy(&p);
+            assert_eq!(inks.mark_surface, p.surface.hex(), "{name}");
+            assert_eq!(inks.mark_line, p.ink.hex(), "{name}");
+            assert_eq!(inks.mark_open, p.accent_line.hex(), "{name}");
+            assert_eq!(inks.mark_close, p.ink.hex(), "{name}");
+            assert_eq!(inks.mark_template, p.ink.hex(), "{name}");
+            assert_eq!(inks.accent, p.accent.hex(), "{name}");
+            assert_eq!(inks.status_on, p.status_on.hex(), "{name}");
+            assert_eq!(inks.status_ask, p.status_ask.hex(), "{name}");
+            assert_eq!(inks.status_outside, p.status_outside.hex(), "{name}");
+            assert_eq!(inks.accent_text, p.accent_text.hex(), "{name}");
+            assert_eq!(inks.held_icon, p.held_text.hex(), "{name}");
+            assert_eq!(inks.muted, p.muted.hex(), "{name}");
+            assert_eq!(inks.outside_text, p.status_outside_text.hex(), "{name}");
+            assert_eq!(inks.redaction_bg, p.redaction_bg.hex(), "{name}");
+            assert_eq!(inks.redaction_fg, p.redaction_ink.hex(), "{name}");
+            assert_eq!(inks.highlight, p.highlight.hex(), "{name}");
+            assert_eq!(inks.highlight_alpha, omarchy::HIGHLIGHT_ALPHA, "{name}");
+            assert_eq!(inks.highlight_ink, Some(p.highlight_ink.hex()), "{name}");
+            // The mark's open bracket on its own frame, as the standard
+            // mark is held to.
+            let ratio = omarchy::contrast(p.accent_line, p.surface);
+            assert!(ratio >= 3.0, "{name}: {ratio:.2}:1");
+        }
+    }
+
+    /// The overlays the adapter checks the highlight through are the ones
+    /// the token blocks define, and the skin keeps them.
+    #[test]
+    fn the_adapters_overlays_are_the_sheets() {
+        let rgba = |(tint, alpha): (omarchy::Rgb, f64)| {
+            let omarchy::Rgb(r, g, b) = tint;
+            format!("rgba({r}, {g}, {b}, {alpha})")
+        };
+        for (mode, block) in [
+            (omarchy::Mode::Light, super::LIGHT_TOKENS),
+            (omarchy::Mode::Dark, super::DARK_TOKENS),
+        ] {
+            let [scrim, selected] = omarchy::overlays(mode);
+            for (name, value) in [("tc_scrim", rgba(scrim)), ("tc_selected", rgba(selected))] {
+                let line = block
+                    .lines()
+                    .find(|l| l.starts_with(&format!("@define-color {name} ")))
+                    .unwrap_or_else(|| panic!("{name}"));
+                assert!(line.contains(&value), "{mode:?}: {line} vs {value}");
             }
         }
     }
