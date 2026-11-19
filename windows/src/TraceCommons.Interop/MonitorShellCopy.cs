@@ -31,6 +31,62 @@ public static class MonitorShellCopy
     /// <summary>A top-level word of the table; empty when absent.</summary>
     public static string Top(string key) => Words.Value.Top.TryGetValue(key, out string? word) ? word : string.Empty;
 
+    private static readonly Lazy<IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>> Sections =
+        new(() => ParseSections(NativeMethods.TakeOwnedString(NativeMethods.tc_monitor_screens_copy_json())));
+
+    /// <summary>
+    /// A word from one of the table's other objects (<c>home_history</c>,
+    /// <c>edge_rail</c>, ...); empty when absent, so a control says nothing
+    /// rather than something typed here.
+    /// </summary>
+    public static string Section(string section, string key) =>
+        Sections.Value.TryGetValue(section, out IReadOnlyDictionary<string, string>? words)
+        && words.TryGetValue(key, out string? word) ? word : string.Empty;
+
+    /// <summary>Every object of the table, each as its string fields; nothing for anything but a JSON object.</summary>
+    internal static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>> ParseSections(string? json)
+    {
+        var sections = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(json))
+        {
+            return sections;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return sections;
+            }
+
+            foreach (JsonProperty field in doc.RootElement.EnumerateObject())
+            {
+                if (field.Value.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var words = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (JsonProperty inner in field.Value.EnumerateObject())
+                {
+                    if (inner.Value.ValueKind == JsonValueKind.String && inner.Value.GetString() is { } word)
+                    {
+                        words[inner.Name] = word;
+                    }
+                }
+
+                sections[field.Name] = words;
+            }
+        }
+        catch (JsonException)
+        {
+            sections.Clear();
+        }
+
+        return sections;
+    }
+
     /// <summary>The table's string fields, top level and <c>shell</c>.</summary>
     internal sealed record Table(IReadOnlyDictionary<string, string> Top, IReadOnlyDictionary<string, string> Shell);
 

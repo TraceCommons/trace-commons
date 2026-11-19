@@ -50,6 +50,7 @@ public static class MonitorWords
     {
         CrumbWord.History => MonitorShellCopy.Top("history"),
         CrumbWord.Missions => MonitorShellCopy.Top("missions"),
+        CrumbWord.MissionCatalogue => MonitorShellCopy.Section("home_history", "mission_catalogue"),
         _ => TabTitle(crumb.Tab),
     };
 

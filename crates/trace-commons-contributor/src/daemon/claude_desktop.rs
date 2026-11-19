@@ -171,7 +171,12 @@ fn copy() -> Value {
         "status_disconnected":"Disconnected", "status_ready":"Ready", "status_observed":"Connected",
         "status_unavailable":"Unavailable", "status_sign_in_required":"Sign in required", "status_disabled":"Private AI is off",
         "instructions":"In Claude Desktop’s Code tab, create a Local saved environment, select a folder, and paste these variables. Start a new session with that environment. Only sessions using it route through Private AI. Do not set ANTHROPIC_AUTH_TOKEN.",
-        "error":"Setup unavailable. Check Private AI, sign-in, and model availability, then try again."
+        "error":"Setup unavailable. Check Private AI, sign-in, and model availability, then try again.",
+        // The Private AI tab's notice while Claude Desktop is installed and
+        // not set up; its action is "setup". DRAFT, NEEDS APPROVAL.
+        "prompt_title":"Use Claude Desktop with Private AI",
+        "prompt_line":"Claude Desktop is on this Mac. Set it up to run its Code sessions on Private AI.",
+        "prompt_dismiss":"Not now"
     })
 }
 fn environment(binding: &Binding) -> String {

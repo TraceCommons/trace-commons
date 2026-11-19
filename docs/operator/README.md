@@ -42,6 +42,7 @@ the link.
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
 | Verifying the contributor apps before tagging a release | [`./client-end-to-end-verification.md`](./client-end-to-end-verification.md) |
+| Releasing the Windows app again: inputs, signing, where it publishes, and the 2026-11-19 trial | [`./windows-app-release-checklist.md`](./windows-app-release-checklist.md) |
 | Running the model bake-off | [`./calibration.md`](./calibration.md) (Phase 0) + [`./agent-traces-bakeoff-run.md`](./agent-traces-bakeoff-run.md) |
 | Building or admitting a bake-off corpus | [`./corpus-validity-battery.md`](./corpus-validity-battery.md) |
 | Handling an A2.6 bake-off result | [`./a26-bakeoff-result-handler.md`](./a26-bakeoff-result-handler.md) |

@@ -268,6 +268,13 @@ public static class DaemonProtocol
         public const string RefreshHistory = "refresh_history";
         public const string QueueOutcomeCounts = "queue_outcome_counts";
 
+        // W21: an opened History record's detail and its public run
+        // (DaemonClient.swift:305-345). All three are in the daemon's
+        // METHODS array (ipc.rs:457, :522, :550).
+        public const string HistoryDetail = "history_detail";
+        public const string PublishPublicRun = "publish_public_run";
+        public const string UnpublishPublicRun = "unpublish_public_run";
+
         /// <summary>
         /// Withdraws one submission and reports the tier the server applied.
         ///

@@ -277,9 +277,7 @@ pub fn render(app: &Rc<App>, state: &str) {
     if action == CredentialAction::Cancel {
         ensure_poll(app);
     }
-    app.home
-        .balance
-        .set_action_sensitive(!obtain_in_progress(app));
+    app.home.set_sign_in_sensitive(!obtain_in_progress(app));
 }
 
 pub(super) fn obtain_in_progress(app: &Rc<App>) -> bool {
@@ -368,9 +366,7 @@ pub(super) fn act_guarded(
         }
     }
     view.action.set_sensitive(!view.pending.get());
-    app.home
-        .balance
-        .set_action_sensitive(!obtain_in_progress(app));
+    app.home.set_sign_in_sensitive(!obtain_in_progress(app));
 }
 
 /// Open the sign-in page, and say whether anything took it.

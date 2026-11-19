@@ -12,14 +12,18 @@ pub mod balance;
 pub mod community_brand;
 pub(crate) mod consent_settings;
 pub mod credential;
+pub mod credit_arrival;
 mod css_contract;
+mod edge_motion;
 pub mod edge_surfaces;
 mod first_run;
+mod first_run_fade;
 mod first_run_marker_check;
 mod first_run_screens;
 mod first_run_stage;
 mod first_run_stage_paint;
 mod first_run_stage_view;
+mod first_run_switch;
 mod first_run_terms;
 mod first_run_tools;
 pub mod folder_handoff;
@@ -27,6 +31,7 @@ pub mod funding;
 pub mod glass_backdrop;
 pub mod glass_feedback;
 pub mod glass_motion;
+mod glass_switch;
 pub mod hero_art;
 pub mod hero_card;
 pub mod history;
@@ -38,7 +43,9 @@ mod lift;
 mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
+mod modal_motion;
 pub mod monitor;
+mod motion_css;
 pub mod omarchy;
 pub mod onboarding;
 mod payout_link;
@@ -78,6 +85,21 @@ use crate::model::{ApproveResult, HistoryRollup, PreviewSummary, QueueEntry, Sta
 use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
+
+/// Names the process by the app id, before any window exists. A window GTK
+/// does not hold as one of the application's (the first run, the Look
+/// inside sheet, every dialog) takes its Wayland app id and its X11
+/// `WM_CLASS` from the program name, which is otherwise the binary's
+/// (`trace-commons-shell`), so the desktop could not match it to
+/// `ai.tracecommons.Contributor.desktop`.
+///
+/// The application name is the brand's: a window with no title of its own
+/// is listed by it (GDK titles an untitled X11 window with it, and GLib
+/// answers the program name, the raw id, when it is unset).
+pub fn name_the_process() {
+    glib::set_prgname(Some(APP_ID));
+    glib::set_application_name(copy::APP_NAME);
+}
 
 /// The reading column, shared by every screen in this window so the header's
 /// switcher, the health banner and the queue's cards all sit on the same two
@@ -137,7 +159,7 @@ pub fn peek_state_dir() -> std::path::PathBuf {
 /// drafts are sub-pages behind the breadcrumb, and Settings is its own
 /// window. Each still opens by its old name (`App::open_screen`).
 pub(crate) fn screens() -> Vec<(&'static str, &'static str)> {
-    monitor::tabs::Tab::ALL
+    monitor::tabs::current_order()
         .into_iter()
         .map(|tab| (tab.name(), tab.title()))
         .collect()
@@ -183,6 +205,9 @@ pub struct App {
     /// that a listener is running. It decides which way the tray's one
     /// action row points and nothing else.
     pub tray: crate::tray::TrayState,
+    /// The tray icon's celebration and the window's request for attention
+    /// when credit arrives (`credit_arrival`).
+    pub credit_arrival: Rc<credit_arrival::CreditArrival>,
     pub window: adw::ApplicationWindow,
     pub toasts: adw::ToastOverlay,
     /// The three-pane Monitor shell: the tabs, the map pane and the
@@ -273,6 +298,10 @@ pub struct App {
     /// count it did not give stays unknown); `None` before the first answer
     /// and after a failed read, so the summary never shows a stale figure.
     pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
+    /// Whether `history_rollup` has answered at all, worked or failed: until
+    /// it has, the summary's contributed line is a skeleton bar
+    /// (the Mac's `HomeStore.isLoading` for that read).
+    pub summary_rollup_answered: std::cell::Cell<bool>,
     /// The commons' statement of what pending credit waits on, from the
     /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
     pub credit_condition: RefCell<Option<String>>,
@@ -523,9 +552,31 @@ impl App {
         toasts.set_child(Some(&shell.root));
         window.set_content(Some(&toasts));
 
+        let tray = crate::tray::TrayState::default();
+        let credit_arrival = {
+            let shown = tray.clone();
+            let attention = window.downgrade();
+            credit_arrival::clear_attention_when_active(window.upcast_ref());
+            credit_arrival::CreditArrival::new(
+                crate::home_cards::HomePrefs::load().animates_credit_icon,
+                credit_arrival::Hooks {
+                    reduce_motion: Box::new(|| !glass_motion::animations_enabled()),
+                    attention: Box::new(move || {
+                        if let Some(window) = attention.upgrade() {
+                            credit_arrival::request_attention(window.upcast_ref());
+                        }
+                    }),
+                    show: Box::new(move |t| shown.set_burst(t)),
+                    after: Box::new(|ms, frame| {
+                        glib::timeout_add_local_once(std::time::Duration::from_millis(ms), frame);
+                    }),
+                },
+            )
+        };
         let app = Rc::new(Self {
             worker,
-            tray: crate::tray::TrayState::default(),
+            tray,
+            credit_arrival,
             edge: edge_surfaces::Surfaces::default(),
             window,
             toasts,
@@ -554,6 +605,7 @@ impl App {
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             summary_rollup: RefCell::new(None),
+            summary_rollup_answered: std::cell::Cell::new(false),
             credit_condition: RefCell::new(None),
             undo: RefCell::new(None),
             undo_writing: RefCell::new(Default::default()),
@@ -1084,6 +1136,7 @@ impl App {
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            app.home.render_uncontributed(&entries);
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
@@ -1124,7 +1177,19 @@ impl App {
                 serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
             });
             app.home.render_rollup(home_rollup.as_ref());
+            app.home.render_credit(
+                home_rollup.as_ref(),
+                app.credit_condition.borrow().as_deref(),
+            );
+            // A whole Trace credit settled while the app runs celebrates on
+            // the tray (`AppModel.recordHistoryRollup`), signed in to NEAR
+            // AI or not.
+            if let Some(rollup) = home_rollup.as_ref() {
+                app.credit_arrival
+                    .observe_credit_final(rollup.credit_final.map(f64::from));
+            }
             *app.summary_rollup.borrow_mut() = home_rollup;
+            app.summary_rollup_answered.set(true);
             app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
             if let Ok(Ok(rollup)) = result {
@@ -1140,9 +1205,14 @@ impl App {
             "commons_credit_summary",
             serde_json::json!({}),
             |app, result| {
+                app.home.render_credit_summary(result.as_ref().ok());
                 *app.credit_condition.borrow_mut() = result
                     .ok()
                     .and_then(|value| monitor::summary::pending_condition(&value));
+                app.home.render_credit(
+                    app.summary_rollup.borrow().as_ref(),
+                    app.credit_condition.borrow().as_deref(),
+                );
                 app.shell.inspector.render_summary(app);
             },
         );

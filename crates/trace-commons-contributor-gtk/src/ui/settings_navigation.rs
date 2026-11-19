@@ -13,12 +13,13 @@ pub(crate) enum Section {
     Profile,
     Changes,
     PrivateAI,
+    General,
     Startup,
     Witness,
 }
 
 impl Section {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Account,
         Self::Watching,
         Self::Tools,
@@ -27,6 +28,7 @@ impl Section {
         Self::Profile,
         Self::Changes,
         Self::PrivateAI,
+        Self::General,
         Self::Startup,
         Self::Witness,
     ];
@@ -42,6 +44,7 @@ impl Section {
             Self::Profile => nav.profile,
             Self::Changes => nav.log,
             Self::PrivateAI => nav.private_ai,
+            Self::General => nav.general,
             Self::Startup => nav.startup,
             Self::Witness => nav.witness,
         }
@@ -50,7 +53,7 @@ impl Section {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::Watching | Self::Projects | Self::PrivateAI | Self::Startup | Self::Witness
+            Self::Watching | Self::Projects | Self::PrivateAI | Self::General | Self::Witness
         )
     }
 }
@@ -268,13 +271,15 @@ impl Navigation {
         // Written when the libadwaita floor was 1.2, which has no
         // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
         // been moved to one. Allocation is checked at frame time and only
-        // visibility changes; fields are never rebuilt.
-        root.add_tick_callback({
+        // visibility changes; fields are never rebuilt. Minimised or
+        // suspended, the check comes off the clock, and goes back on when
+        // the window is shown.
+        let frame: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();
             let scroller = scroller.downgrade();
             let navigate = navigate.clone();
-            move |root, _| {
+            move |root: &gtk::Box| {
                 if let (Some(sidebar), Some(compact)) = (sidebar.upgrade(), compact.upgrade()) {
                     let wide = root.width() >= 760;
                     sidebar.set_visible(wide);
@@ -288,7 +293,44 @@ impl Navigation {
                     pending.set(None);
                     navigate(index);
                 }
-                gtk::glib::ControlFlow::Continue
+            }
+        });
+        let tick: std::rc::Rc<std::cell::RefCell<Option<gtk::TickCallbackId>>> =
+            std::rc::Rc::default();
+        let start: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
+            let tick = tick.clone();
+            move |root: &gtk::Box| {
+                if tick.borrow().is_some() || crate::ui::glass_motion::window_hidden(root) {
+                    return;
+                }
+                let frame = frame.clone();
+                let slot = tick.clone();
+                let id = root.add_tick_callback(move |root, _| {
+                    if crate::ui::glass_motion::window_hidden(root) {
+                        // Ended by returning Break; shown again, it restarts.
+                        drop(slot.borrow_mut().take());
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    frame(root);
+                    gtk::glib::ControlFlow::Continue
+                });
+                *tick.borrow_mut() = Some(id);
+            }
+        });
+        start(&root);
+        crate::ui::glass_motion::on_window_state(&root, {
+            let tick = tick.clone();
+            move |widget| {
+                let Some(root) = widget.downcast_ref::<gtk::Box>() else {
+                    return;
+                };
+                if crate::ui::glass_motion::window_hidden(root) {
+                    if let Some(id) = tick.borrow_mut().take() {
+                        id.remove();
+                    }
+                } else {
+                    start(root);
+                }
             }
         });
         list.select_row(list.row_at_index(0).as_ref());
@@ -327,14 +369,16 @@ mod tests {
                 nav.profile,
                 nav.log,
                 nav.private_ai,
+                nav.general,
                 nav.startup,
                 nav.witness
             ]
         );
+        // The Mac's App group (General, Startup) starts at General.
         assert_eq!(
             Section::ALL.map(Section::starts_group),
             [
-                false, true, false, true, false, false, false, true, true, true
+                false, true, false, true, false, false, false, true, true, false, true
             ]
         );
     }
@@ -391,9 +435,16 @@ mod tests {
         wait_for_layout(&navigation, false);
         assert!(!navigation.sidebar.is_visible());
         assert!(navigation.compact.is_visible());
-        navigation.compact_choices[9].emit_clicked();
+        let witness = Section::ALL
+            .iter()
+            .position(|section| *section == Section::Witness)
+            .unwrap();
+        navigation.compact_choices[witness].emit_clicked();
         settle();
-        assert_eq!(navigation.list.selected_row().unwrap().index(), 9);
+        assert_eq!(
+            navigation.list.selected_row().unwrap().index(),
+            witness as i32
+        );
         assert!(navigation.scroller.vadjustment().value() > 0.0);
         let witness_scroll = navigation.scroller.vadjustment().value();
         navigation.scroller.vadjustment().set_value(0.0);
@@ -403,7 +454,7 @@ mod tests {
             navigation.compact.label().as_deref(),
             Some(Section::Witness.title())
         );
-        navigation.compact_choices[9].emit_clicked();
+        navigation.compact_choices[witness].emit_clicked();
         settle();
         assert_eq!(navigation.scroller.vadjustment().value(), witness_scroll);
         window.set_default_size(1000, 600);
@@ -455,6 +506,46 @@ mod tests {
         (navigation.select)(Section::PrivateAI);
         settle();
         assert!(navigation.scroller.vadjustment().value() > 0.0);
+        window.close();
+    }
+
+    /// Minimised, the layout check comes off the clock: narrowed
+    /// meanwhile, the window keeps its wide layout. Shown again, the check
+    /// is back on the clock and takes the narrow one.
+    #[test]
+    #[ignore = "requires a GTK display; run separately with --ignored --test-threads=1"]
+    fn mounted_the_layout_check_holds_while_minimised_and_resumes() {
+        use crate::ui::glass_motion::minimise_for_test;
+        adw::init().expect("GTK display unavailable");
+        let sections = Sections::new();
+        for section in Section::ALL {
+            sections.body(section).set_size_request(-1, 240);
+        }
+        let navigation = Navigation::new(sections);
+        let window = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(600)
+            .child(&navigation.root)
+            .build();
+        window.present();
+        wait_for_layout(&navigation, true);
+
+        minimise_for_test(&window, true);
+        settle();
+        window.set_default_size(550, 600);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while navigation.root.width() >= 760 && std::time::Instant::now() < end {
+            settle();
+        }
+        assert!(navigation.root.width() < 760, "the window did not narrow");
+        settle();
+        assert!(
+            navigation.sidebar.is_visible() && !navigation.compact.is_visible(),
+            "the layout check ran while minimised"
+        );
+
+        minimise_for_test(&window, false);
+        wait_for_layout(&navigation, false);
         window.close();
     }
 

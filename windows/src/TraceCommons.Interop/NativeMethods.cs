@@ -219,6 +219,59 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_preview_free(IntPtr preview);
 
+    // ---- W21 and W22: History detail, public runs, the preview's turns ----
+    // One block, so the slices' bindings sit together (Mac: TCPublicRun.swift,
+    // TCDaemon.swift:351-362, TCCoreCopy.swift:41-52).
+
+    /// <summary>
+    /// The turn index over an open preview's redacted body
+    /// (<c>{entry_id, body_digest, envelope_digest, turn_count, turns}</c>),
+    /// anchored to <paramref name="bodyDigest"/>: <c>sha256:</c> and lowercase
+    /// hex over the exact UTF-8 bytes of the body on screen. Owned; NULL with
+    /// <paramref name="err"/> set (owned too) on failure.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_preview_turns_json(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string entryId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string bodyDigest,
+        out IntPtr err);
+
+    /// <summary>
+    /// The preview's removed-summary panel (<c>redaction_summary::summary_copy</c>):
+    /// <c>{"removed": [row], "still_present": [row]}</c>. Owned; NULL for an
+    /// unreadable <paramref name="redactionsJson"/> and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_redaction_summary_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? redactionsJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? distinctJson);
+
+    /// <summary>
+    /// Every fixed word on owned session detail and reviewed publication, as
+    /// one owned JSON object. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_copy();
+
+    /// <summary>
+    /// Validates and normalizes the publication editor's input through the
+    /// shared Rust protocol: an owned <c>{draft}</c> or <c>{error}</c> object.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_validate_editor(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? inputJson);
+
+    /// <summary>The sentence for a <c>history_detail</c> error label. Owned.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_session_detail_error_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>The sentence for a publish or unpublish error label. Owned.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_error_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
     /// <summary>
     /// Describes the session stores on this machine, so the roots screen can
     /// ask about something specific rather than showing an empty field.

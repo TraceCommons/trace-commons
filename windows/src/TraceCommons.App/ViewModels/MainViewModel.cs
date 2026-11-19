@@ -477,6 +477,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Insights,
         MissionDrafts,
         Home,
+        Missions,
     }
 
     public bool ShowingQueue => _pane == MainPane.Queue;
@@ -488,6 +489,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool ShowingInsights => _pane == MainPane.Insights;
 
     public bool ShowingMissionDrafts => _missionsShown && _pane == MainPane.MissionDrafts;
+
+    /// <summary>
+    /// Home's commons catalogue page (W23), apart from Mission drafts as on
+    /// the Mac (HomeViews.swift:87-98), and hidden with them.
+    /// </summary>
+    public bool ShowingMissions => _missionsShown && _pane == MainPane.Missions;
 
     private bool _missionsShown;
 
@@ -507,6 +514,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         SetPane(MainPane.MissionDrafts);
+    }
+
+    public void ShowMissions()
+    {
+        if (!_missionsShown)
+        {
+            return;
+        }
+
+        SetPane(MainPane.Missions);
     }
 
     /// <summary>
@@ -543,6 +560,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingHome));
         Raise(nameof(ShowingInsights));
         Raise(nameof(ShowingMissionDrafts));
+        Raise(nameof(ShowingMissions));
     }
 
     // --- The health banner -------------------------------------------------
@@ -805,7 +823,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 _missionsShown = missionsShown;
                 Raise(nameof(MissionsShown));
                 Raise(nameof(ShowingMissionDrafts));
-                if (!missionsShown && _pane == MainPane.MissionDrafts)
+                Raise(nameof(ShowingMissions));
+                if (!missionsShown && _pane is MainPane.MissionDrafts or MainPane.Missions)
                 {
                     // A mission page falls back to Home's overview
                     // (MonitorNavigation.swift:17-20).

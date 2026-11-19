@@ -15,6 +15,8 @@ use trace_commons_contributor::first_run_copy::first_run_copy;
 use trace_commons_contributor::source::discovery;
 
 use super::first_run_marker_check::MarkerCheck;
+use super::first_run_stage::motion;
+use super::lift::Lift;
 use super::onboarding::body_label;
 use crate::first_run::tools::{
     AddOutcome, AddedFolder, FolderKind, Found, ToolAnswer, Tools, add_outcome,
@@ -48,6 +50,13 @@ pub(super) struct ToolsScreen {
     marks: RefCell<Vec<Rc<MarkerCheck>>>,
     /// Told after anything Tools shows changes: found, watched or not.
     on_change: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Each found tool's row, and the add row, rising after the scan
+    /// (`RowRise`).
+    row_lifts: RefCell<Vec<Lift>>,
+    add_lift: Lift,
+    /// Where the rise is: None until the stage tells it; Some(None) while
+    /// the scan holds the rows back; Some(Some(s)) `s` seconds into it.
+    rise: std::cell::Cell<Option<Option<f64>>>,
 }
 
 /// The tool's name, as the Mac's `SourceKind.displayName` gives it.
@@ -125,6 +134,7 @@ pub(super) fn build(
     continue_button.add_css_class("suggested-action");
     continue_button.set_halign(gtk::Align::End);
     continue_button.set_sensitive(false);
+    let add = gtk::Button::with_label(copy.tools.add_tool);
     let screen = Rc::new(ToolsScreen {
         root,
         rows,
@@ -143,8 +153,10 @@ pub(super) fn build(
         toggled: RefCell::new(HashMap::new()),
         marks: RefCell::new(Vec::new()),
         on_change: RefCell::new(None),
+        row_lifts: RefCell::new(Vec::new()),
+        add_lift: Lift::new(&add),
+        rise: std::cell::Cell::new(None),
     });
-    let add = gtk::Button::with_label(copy.tools.add_tool);
     add.add_css_class("flat");
     add.set_halign(gtk::Align::Start);
     add.set_tooltip_text(Some(copy.tools.add_tool_caption));
@@ -156,7 +168,7 @@ pub(super) fn build(
             }
         }
     });
-    screen.root.append(&add);
+    screen.root.append(&screen.add_lift);
     // "Click to add or drag & drop": a folder dropped anywhere on Tools is
     // added as one picked with the button.
     let drop = gtk::DropTarget::new(gtk::gio::File::static_type(), gtk::gdk::DragAction::COPY);
@@ -211,6 +223,36 @@ impl ToolsScreen {
     /// `changed` runs after anything Tools shows changes: discovery
     /// landing, a tool watched or not, a folder added. The first run's
     /// stage redraws from it, since with animations off nothing else would.
+    /// The rows rising once the scan is over, as the Mac's `RowRise`:
+    /// `since` None holds them back (and the card hidden) while the scan
+    /// runs; otherwise each rises 18 points on the spatial spring, 0.08 s
+    /// after the one before, as the card fades in over 0.3 s.
+    pub fn rise_rows(&self, since: Option<f64>) {
+        let lifts = self.row_lifts.borrow();
+        let end = motion::rows_risen_by(lifts.len());
+        if let (Some(Some(before)), Some(now)) = (self.rise.get(), since) {
+            if before >= end && now >= end {
+                return;
+            }
+        }
+        self.rise.set(Some(since));
+        let card = since.map_or(0.0, |s| motion::card_fade(s, false));
+        let at = |index: usize| {
+            since.map_or((motion::ROW_LIFT, 0.0), |s| {
+                motion::row_rise(index, s, false)
+            })
+        };
+        self.rows.set_opacity(card);
+        for (index, lift) in lifts.iter().enumerate() {
+            let (offset, opacity) = at(index);
+            lift.set_offset(offset);
+            lift.set_opacity(opacity);
+        }
+        let (offset, opacity) = at(lifts.len());
+        self.add_lift.set_offset(offset);
+        self.add_lift.set_opacity(opacity * card);
+    }
+
     pub fn connect_changed(&self, changed: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Rc::new(changed));
     }
@@ -368,6 +410,7 @@ impl ToolsScreen {
             self.rows.remove(&child);
         }
         self.marks.borrow_mut().clear();
+        self.row_lifts.borrow_mut().clear();
         let copy = first_run_copy();
         let tools = self.tools.borrow().clone();
         for found in tools.listed() {
@@ -399,7 +442,9 @@ impl ToolsScreen {
                 }
             });
             let mark = self.mark(check, &found.source);
-            self.rows.append(&mark);
+            let lift = Lift::new(&mark);
+            self.rows.append(&lift);
+            self.row_lifts.borrow_mut().push(lift);
         }
         let twice = tools.watched_twice();
         for folder in tools.added.iter() {
@@ -487,6 +532,10 @@ impl ToolsScreen {
             }
             row.append(&choices);
             self.rows.append(&row);
+        }
+        // Rebuilt rows carry on where the rise is.
+        if let Some(since) = self.rise.take() {
+            self.rise_rows(since);
         }
         self.update();
     }

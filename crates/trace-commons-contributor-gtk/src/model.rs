@@ -17,6 +17,10 @@ use serde::Deserialize;
 pub struct Status {
     #[serde(default)]
     pub logged_in: bool,
+    /// The machine-wide settlement estimate, while the daemon reports one
+    /// (Home's Not contributed dollar line).
+    #[serde(default)]
+    pub settlement_estimate: Option<SettlementEstimate>,
     #[serde(default)]
     pub tenant_id: Option<String>,
     /// CLI completion for the current enrollment, absent on older daemons.
@@ -344,6 +348,27 @@ pub struct Health {
     pub since: Option<String>,
 }
 
+/// A trace's credit estimate (`DaemonData.CreditEstimate`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CreditEstimate {
+    #[serde(default)]
+    pub low: f64,
+    #[serde(default)]
+    pub high: f64,
+    #[serde(default)]
+    pub drawn: Option<bool>,
+}
+
+/// The daemon's machine-wide settlement estimate on `status`
+/// (`DaemonData.SettlementEstimate`): its finished lines only.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SettlementEstimate {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub share_text: Option<String>,
+}
+
 /// One queue entry, as `list_pending` and the `snapshot` event carry it.
 ///
 /// `project_key` and `path` are absent from the wire by design; they are
@@ -393,6 +418,10 @@ pub struct QueueEntry {
     /// larger. Never label this one "would send".
     #[serde(default)]
     pub size_bytes: u64,
+    /// The credit the core estimates for this trace, and whether to draw
+    /// it (Home's Not contributed estimate sums only the drawn ones).
+    #[serde(default)]
+    pub credit_estimate: Option<CreditEstimate>,
     #[serde(default)]
     pub discovered_at: Option<chrono::DateTime<chrono::Utc>>,
     /// When the session itself started, when the daemon knew it. The
@@ -1286,6 +1315,39 @@ pub fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// A byte count as the Mac's `ByteCountFormatter` draws it with
+/// `countStyle: .file`: decimal units (1 KB is 1,000 bytes).
+/// Whole kilobytes, one decimal of a megabyte, two of a gigabyte and up,
+/// with trailing zeros dropped; a figure that rounds to 1,000 of a unit
+/// moves to the next one ("1 MB", not "1000 KB").
+pub fn file_bytes(bytes: u64) -> String {
+    // Under a kilobyte the shell keeps its own "{bytes} bytes": the Mac's
+    // "Zero KB" and "1 byte" are words the core does not carry, and a
+    // shell may not author them (`tests/shell_wording.rs`).
+    if bytes < 1000 {
+        return format!("{bytes} bytes");
+    }
+    const UNITS: [(&str, i32); 4] = [("KB", 0), ("MB", 1), ("GB", 2), ("TB", 2)];
+    let mut value = bytes as f64 / 1000.0;
+    let mut at = 0;
+    let round = |value: f64, places: i32| {
+        let scale = 10f64.powi(places);
+        (value * scale).round() / scale
+    };
+    while at + 1 < UNITS.len() && round(value, UNITS[at].1) >= 1000.0 {
+        value /= 1000.0;
+        at += 1;
+    }
+    let (unit, places) = UNITS[at];
+    let text = format!("{:.*}", places as usize, round(value, places));
+    let text = if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        &text
+    };
+    format!("{text} {unit}")
+}
+
 /// "3 hours ago", for a queue row. Never an absolute timestamp: a
 /// contributor placing a session in their own day thinks in elapsed time.
 pub fn human_when(then: Option<chrono::DateTime<chrono::Utc>>) -> String {
@@ -1434,6 +1496,33 @@ pub struct HeldSessions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's `ByteCountFormatter.string(fromByteCount:countStyle: .file)`,
+    /// as a Swift probe printed it on macOS for each count. Its "Zero KB"
+    /// and "1 byte" are left out: see `file_bytes`.
+    #[test]
+    fn file_bytes_is_the_macs_file_count_style() {
+        for (bytes, mac) in [
+            (2, "2 bytes"),
+            (999, "999 bytes"),
+            (1_000, "1 KB"),
+            (1_499, "1 KB"),
+            (1_500, "2 KB"),
+            (148_480, "148 KB"),
+            (144_384, "144 KB"),
+            (999_499, "999 KB"),
+            (999_500, "1 MB"),
+            (1_000_000, "1 MB"),
+            (1_049_999, "1 MB"),
+            (1_050_000, "1.1 MB"),
+            (1_500_000, "1.5 MB"),
+            (12_345_678, "12.3 MB"),
+            (123_456_789, "123.5 MB"),
+            (1_234_567_890, "1.23 GB"),
+        ] {
+            assert_eq!(file_bytes(bytes), mac, "{bytes} bytes");
+        }
+    }
 
     /// #1836 F1: the account status is the core's, for both reasons, with
     /// the Private AI line only while a NEAR AI login is stored.
