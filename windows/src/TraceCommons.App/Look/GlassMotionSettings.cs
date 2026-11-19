@@ -1,6 +1,5 @@
 using System;
 using Microsoft.UI.Dispatching;
-using Windows.Foundation.Metadata;
 using Windows.UI.ViewManagement;
 
 namespace TraceCommons.App.Look;
@@ -49,7 +48,7 @@ internal static class GlassMotionSettings
         // UISettings.AnimationsEnabledChanged is raised off the UI thread;
         // where the system lacks the event the setting is still read on
         // every start, and again whenever the window is shown.
-        if (ApiInformation.IsEventPresent("Windows.UI.ViewManagement.UISettings", "AnimationsEnabledChanged"))
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
         {
             Settings.AnimationsEnabledChanged += (_, _) => _queue?.TryEnqueue(Refresh);
         }
