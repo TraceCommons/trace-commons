@@ -588,6 +588,15 @@
                 </Border>
 
                 <!--
+                    Which organization Private AI spends from (W19,
+                    PrivateAISection.swift:33-35): SpendOrganizationCard,
+                    filled in code, collapsed unless the daemon lists two or
+                    more. Where the Private AI prompt's action leads.
+                -->
+                <ContentControl IsTabStop="False" x:Name="SpendOrganizationHost"
+                                HorizontalContentAlignment="Stretch" />
+
+                <!--
                     Open sessions in (#1406): the terminal managed sessions
                     open in, under Private AI as on macOS. Filled in code
                     with ManagedTerminalPicker, which reads the label and the
@@ -1003,6 +1012,12 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- About (spec W24-D1 (a)): opens the About window. -->
+                <HyperlinkButton Content="{x:Bind AboutTitle}"
+                                 AutomationProperties.Name="{x:Bind AboutTitle}"
+                                 Click="OnAbout"
+                                 Padding="0" />
             </StackPanel>
         </ScrollViewer>
     </Grid>

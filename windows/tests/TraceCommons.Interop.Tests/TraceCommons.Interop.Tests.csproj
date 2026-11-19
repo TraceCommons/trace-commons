@@ -196,9 +196,6 @@
       so the only way to hold "no shell spells a control name" is to read the
       source as text.
     -->
-    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/OnboardingViewModel.cs"
-          Link="OnboardingViewModel.cs.txt"
-          CopyToOutputDirectory="PreserveNewest" />
     <!--
       The history view model, for the refused-outcome guard. It renders the
       outcome list, and it is WinUI, so the only way to hold "a refusal says
@@ -206,9 +203,6 @@
     -->
     <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/ViewModels/HistoryViewModel.cs"
           Link="HistoryViewModel.cs.txt"
-          CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/OnboardingWindow.xaml"
-          Link="OnboardingWindow.xaml.txt"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
@@ -281,6 +275,9 @@
     <Compile Include="../../src/TraceCommons.Interop/SampleDaemon.cs" Link="SampleDaemon.cs" />
     <None Include="$(MSBuildThisFileDirectory)../../../macos/Sources/TCShellCore/DataContract/RecordedSamples/**/*.json"
           Link="RecordedSamples/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/SampleExtras/**/*.json"
+          Link="SampleExtras/%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <!--
