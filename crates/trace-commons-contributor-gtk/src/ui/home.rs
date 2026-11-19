@@ -1254,7 +1254,9 @@ mod tests {
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn the_heroes_show_and_close_as_the_macs_do() {
-        gtk::init().unwrap();
+        // libadwaita first, as the app starts it: the card's drawing
+        // reads the style manager, which must not be created mid-frame.
+        adw::init().unwrap();
         let state = std::env::temp_dir().join(format!("tc-home-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&state);
         crate::home_cards::set_test_file(Some(state.clone()));
