@@ -1510,8 +1510,12 @@ pub struct MonitorHomeHistoryCopy {
     pub credit_icon_animation_caption: &'static str,
     /// The Linux app's words for the same switch, naming the taskbar and
     /// tray where the Mac names the Dock and menu bar. The Linux card shows
-    /// these in place of the Mac's toggle and caption.
+    /// these in place of the Mac's toggle and caption. The Linux app reads
+    /// them from this struct; they stay out of the JSON the Mac decodes,
+    /// which carries exactly the fields that shell reads.
+    #[serde(skip_serializing)]
     pub credit_icon_animation_toggle_linux: &'static str,
+    #[serde(skip_serializing)]
     pub credit_icon_animation_caption_linux: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
