@@ -4786,6 +4786,60 @@ mod tests {
         assert!(include_str!("settings.rs").contains("words.credit_icon_animation_toggle"));
     }
 
+    /// The Linux words for the credit switch (taskbar and tray) are in the
+    /// core as a DRAFT and not shown until the owner approves them: no
+    /// shell source reads them, and the card keeps the Mac's.
+    #[test]
+    fn the_linux_credit_words_are_a_draft_not_yet_shown() {
+        let draft = [
+            concat!("credit_icon_animation_", "toggle_linux"),
+            concat!("credit_icon_animation_", "caption_linux"),
+        ];
+        let home = serde_json::to_value(
+            trace_commons_contributor::preview_copy::monitor_screens_copy().home_history,
+        )
+        .unwrap();
+        for key in draft {
+            let words = home[key].as_str().unwrap_or_else(|| panic!("no {key}"));
+            assert!(
+                words.contains("taskbar") && words.contains("tray"),
+                "{words}"
+            );
+            assert!(
+                !words.contains("Dock") && !words.contains("menu bar"),
+                "{words}"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stack = vec![root.join("src")];
+        let mut read = 0;
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    read += 1;
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    for key in draft {
+                        assert!(
+                            !source.contains(key),
+                            "{} shows the draft {key}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+        assert!(read > 50, "the shell's sources were not read");
+        let macos = root.join("../../macos/Sources");
+        let swift =
+            std::fs::read_to_string(macos.join("TCShellCore/MonitorTracesCopy.swift")).unwrap();
+        for key in draft {
+            assert!(!swift.contains(key), "the Mac decodes the draft {key}");
+        }
+    }
+
     /// The Mac has no control over the approval hold, so this window has
     /// none either: nothing here writes it, and the daemon's default hold
     /// is the only one. A hold of zero would be no Undo at all.
