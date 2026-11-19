@@ -92,9 +92,10 @@ for what it expects up to a deadline instead of sleeping a fixed time.
 The title-matching version before this one (interface version 2) ran on
 GNOME Shell 51.1 (Arch) and on GNOME Shell 46.0 (Ubuntu 24.04), where it
 failed until the extension placed a window again once shown. The marker
-version (interface version 3) has not yet been run on a real shell; a
-probe on GNOME Shell 51.1 confirmed what it relies on: Mutter reports the
-window's object path and unique bus name for GTK application windows of an
-application registered with `NON_UNIQUE`, only after `window-created`, and
-the window's actions can be listed at that path. Shell 47 to 50 are listed
+version (interface version 3) passed this test on GNOME Shell 51.1 (Arch)
+and 46.0 (Ubuntu 24.04) on 2026-11-18, and was walked by hand on 46.0 in a
+real session. It relies on Mutter reporting the window's object path and
+unique bus name for GTK application windows of an application registered
+with `NON_UNIQUE`, only after `window-created`, and on the window's
+actions being listed at that path. Shell 47 to 50 are listed
 in `metadata.json` on the strength of the APIs used, all present since 45.
