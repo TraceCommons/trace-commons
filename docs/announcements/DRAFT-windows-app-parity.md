@@ -6,8 +6,8 @@
   shipped. Trim each line to what has merged before the release is cut, and
   date and version the file then (docs/announcements/<date>-v<x-y-z>.md).
 
-  Words that are not yet core copy, for the owner to approve or replace, are
-  marked [DRAFT WORD] inline and listed at the end.
+  The whole note is draft copy; the list at the end names the phrases that
+  are not core copy at all.
 -->
 
 # Near AI Gateway for Windows
@@ -44,8 +44,9 @@ For Windows 10 22H2 or later and Windows 11, 64-bit.
   account only and needs no administrator rights.
 - **Portable zip:** `trace-commons-app-windows-x86_64-<version>.zip` on this
   release. Unzip it and run `TraceCommons.exe`.
-- **Command line:** `trace-commons-windows-x86_64-<version>.zip`, or
-  `scripts/install.ps1`.
+- **Command line:** `trace-commons-windows-x86_64-<version>.zip` on this
+  release. `scripts/install.ps1` installs the command line from its own
+  release stream (`contributor-v*`), not from this page.
 
 Every download is signed by Iqlusion Inc and timestamped.
 
@@ -54,6 +55,10 @@ Windows 10 versions before 22H2 are no longer supported.
 Nothing leaves your machine until you approve an upload.
 
 <!--
+  The whole note is draft copy. Beyond the Mac's existing feature names, every
+  sentence is new and needs approval, including "App (recommended)", "needs no
+  administrator rights", "installs for your user account only" and "Every
+  download is signed by Iqlusion Inc and timestamped".
   [DRAFT WORD] list for the owner:
   - "Near AI Gateway for Windows" (title)
   - "Portable zip"

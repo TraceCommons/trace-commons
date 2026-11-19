@@ -49,9 +49,11 @@ using it, because it is the source of truth.
 
 The tag must also equal the GTK crate's version
 (`crates/trace-commons-contributor-gtk/Cargo.toml`), checked in the `version`
-job on a tag push; the release-prep commit bumps all the contributor crates
-together (#2136 is the shape: the five contributor crates, the FFI crate, the
-GTK crate and its metainfo, and the three lockfiles).
+job on a tag push; the release-prep commit bumps the contributor crates
+together. #2136 (1.0.8) is the shape: `trace-commons-contributor`,
+`-sources`, `-insights`, `-platform`, `-ffi` and `-gtk` `Cargo.toml`, the GTK
+metainfo, and the three lockfiles (root, GTK, Tauri). No Windows file carries
+the version; the MSIX version is stamped from the tag at build time.
 
 ## Before tagging
 
@@ -62,7 +64,9 @@ GTK crate and its metainfo, and the three lockfiles).
    ("Near AI Gateway"), and the tiles carry the NEAR AI N. Its invite protocol
    name (`<uap:DisplayName>`) still reads "Near.ai invite" on #2209's head at
    6ce0202c; W10-D2 (a) says it becomes `APP_NAME` alone.
-3. The physical Windows 11 PC sign-off (parity spec, test matrix).
+3. The physical Windows 11 PC sign-off (parity spec, test matrix), and a
+   launch on Windows 10 22H2, the new floor. Nothing has run on Windows 10
+   yet; the trial below was Windows Server 2025.
 4. A dispatch dry run on the release commit: run `release-apps` with
    `platform=windows`, `version=<next>`, `msix=false`. It signs with the real
    profile, installs the MSIX on the runner, checks write virtualization is
@@ -86,6 +90,14 @@ GTK crate and its metainfo, and the three lockfiles).
   `gs://tracecommons-flatpak/windows/TraceCommons.appinstaller` (no-cache),
   from the `windows-app` job, before the Release is cut.
 - Build provenance attestations for every signed binary and the MSIX.
+- `gs://tracecommons-flatpak/updates/latest.json` and `latest.json.sig`
+  (`publish-updates` job, which runs when `macos` or `windows` succeeded): the
+  Windows entry `windows-x86_64` points at the CLI zip on the `app-vX.Y.Z`
+  Release, and `windows-x86_64-cli` at the `contributor-vX.Y.Z` Release's
+  exe. It signs with `update-manifest-signing-key` from Secret Manager in
+  `tracecommons-pilot-2026`, through the same `GCP_WIF_PROVIDER` and
+  `GCP_FLATPAK_PUBLISHER_SA`. The MSIX is not in this manifest; installed
+  packages follow the `.appinstaller` feed.
 
 ## Also fix before the first Windows tag
 
