@@ -84,7 +84,7 @@ public sealed class InsightsSkillsView : UserControl
 
     public void SelectSection(string section)
     {
-        if (!Sections.Contains(section) || section == _section) return;
+        if (_rendering || !Sections.Contains(section) || section == _section) return;
         _model.InvalidateDetails();
         if (section != "catalog")
         {
@@ -93,7 +93,8 @@ public sealed class InsightsSkillsView : UserControl
         }
 
         _section = section;
-        Render();
+        // After the toggle's own event: the tab row is rebuilt.
+        DispatcherQueue.TryEnqueue(Render);
     }
 
     private void OnModelChanged(object? sender, PropertyChangedEventArgs e)
@@ -290,10 +291,12 @@ public sealed class InsightsSkillsView : UserControl
         {
             var tab = new ToggleButton { Content = T("skills_tab_" + section), IsChecked = section == _section };
             AutomationProperties.SetAutomationId(tab, "skills-tab-" + section);
-            tab.Click += (_, _) =>
+            // Checked, not Click: UI Automation's Toggle and the keyboard
+            // reach a ToggleButton through Checked as a click does.
+            tab.Checked += (_, _) => SelectSection(section);
+            tab.Unchecked += (_, _) =>
             {
-                SelectSection(section);
-                if (tab.IsChecked != true) tab.IsChecked = true;
+                if (section == _section) tab.IsChecked = true;
             };
             tabs.Children.Add(tab);
         }
@@ -1283,7 +1286,16 @@ public sealed class InsightsSkillsView : UserControl
         foreach (int days in InsightsSkillsUsage.Periods)
         {
             var button = new ToggleButton { Content = T("skills_days", "count", N(days)), IsChecked = days == _usageDays };
-            button.Click += (_, _) => { _usageDays = days; Render(); };
+            button.Checked += (_, _) =>
+            {
+                if (_usageDays == days) return;
+                _usageDays = days;
+                DispatcherQueue.TryEnqueue(Render);
+            };
+            button.Unchecked += (_, _) =>
+            {
+                if (_usageDays == days) button.IsChecked = true;
+            };
             periods.Children.Add(button);
         }
 
