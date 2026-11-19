@@ -407,7 +407,19 @@ internal static class DaemonCalls
     public static async Task<JsonElement> ResultAsync(
         Func<string, string, Task<DaemonResponse>> call, string method, Dictionary<string, object?> parameters)
     {
-        DaemonResponse response = await call(method, JsonSerializer.Serialize(parameters)).ConfigureAwait(true);
+        DaemonResponse response;
+        try
+        {
+            response = await call(method, JsonSerializer.Serialize(parameters)).ConfigureAwait(true);
+        }
+        catch (Exception e) when (e is not DaemonRefusedException)
+        {
+            // Any failure to get an answer is a refusal, as the Mac's
+            // clients read every error: the flows then say "failed" rather
+            // than leave Busy set or crash the handler that awaited them.
+            throw new DaemonRefusedException("unavailable");
+        }
+
         if (response.Error is { } error)
         {
             throw new DaemonRefusedException(string.IsNullOrEmpty(error.Message) ? "unavailable" : error.Message);
@@ -500,6 +512,24 @@ public sealed class AccountDevicesFlow
         Changed?.Invoke();
     }
 
+    private ulong _follow;
+
+    /// <summary>
+    /// Stops asking about the code on screen, as the Mac's task is cancelled
+    /// when its view goes away. The code stays shown; a later
+    /// <see cref="ResumeFollowing"/> asks again.
+    /// </summary>
+    public void StopFollowing() => _follow++;
+
+    /// <summary>Asks about the code on screen again after <see cref="StopFollowing"/>.</summary>
+    public async Task ResumeFollowing()
+    {
+        if (Link.ShownCode is { } code)
+        {
+            await FollowAsync(code).ConfigureAwait(true);
+        }
+    }
+
     public async Task LinkServerAsync()
     {
         if (Busy || Link.ShownCode is not null)
@@ -534,10 +564,15 @@ public sealed class AccountDevicesFlow
     private async Task FollowAsync(DeviceCode code)
     {
         string codeId = code.CodeId;
+        ulong follow = ++_follow;
         int missed = 0;
         while (Link.ShownCode?.CodeId == codeId)
         {
             await _delay(PollEvery).ConfigureAwait(true);
+            if (follow != _follow)
+            {
+                return;
+            }
 
             // Past its expiry the code is spent whatever the daemon says.
             Link = Link.Checked(_now(), codeId);

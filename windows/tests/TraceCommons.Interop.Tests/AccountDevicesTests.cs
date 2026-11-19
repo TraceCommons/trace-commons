@@ -240,4 +240,41 @@ public class AccountDevicesTests
         await flow.UnlinkAsync(new AccountDevice("b"));
         Assert.Null(flow.Refusal);
     }
+
+    [Fact]
+    public async Task ACallThatThrowsIsARefusalAndLeavesNothingBusy()
+    {
+        var flow = new AccountDevicesFlow(
+            new AccountDevicesClient((_, _) => throw new System.InvalidOperationException("pipe closed")),
+            Surface(), _ => Task.CompletedTask);
+        await flow.UnlinkAsync(new AccountDevice("b"));
+        Assert.Equal(AccountDevicesRefusal.Failed, flow.Refusal);
+        Assert.False(flow.Busy);
+    }
+
+    [Fact]
+    public async Task StoppingTheFollowStopsTheAsking()
+    {
+        var daemon = new Scripted();
+        for (int i = 0; i < 9; i++)
+        {
+            daemon.Statuses.Enqueue("""{"result":{"state":"pending"}}""");
+        }
+
+        AccountDevicesFlow? flow = null;
+        int delays = 0;
+        flow = new AccountDevicesFlow(new AccountDevicesClient(daemon.Call), Surface(), _ =>
+        {
+            // The window goes away during the second wait.
+            if (++delays == 2)
+            {
+                flow!.StopFollowing();
+            }
+
+            return Task.CompletedTask;
+        });
+        await flow.LinkServerAsync();
+        Assert.Equal(1, daemon.Sent.Count(m => m == "account_device_code_status"));
+        Assert.IsType<DeviceLinkPhase.Waiting>(flow.Link);
+    }
 }

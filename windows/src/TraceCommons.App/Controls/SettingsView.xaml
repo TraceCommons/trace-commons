@@ -59,6 +59,7 @@
             <StackPanel x:Name="SectionBody" Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
                 <!-- Account (SettingsSections.swift:14): who this app is, the account, its devices. -->
                 <TextBlock x:Name="RuleAccount" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyAccount" Spacing="12">
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -188,7 +189,9 @@
 
                 <ContentControl x:Name="DevicesHost" HorizontalContentAlignment="Stretch" />
                 <!-- Payouts: drawn, with its row, only while something in it applies (D2). -->
+                </StackPanel>
                 <TextBlock x:Name="RulePayouts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPayouts" Spacing="12">
                 <ContentControl x:Name="PayoutsHost" HorizontalContentAlignment="Stretch" />
                 <!--
                     F10, entry point 3: a wallet-origin account's payouts need
@@ -217,10 +220,14 @@
                     </StackPanel>
                 </Border>
 
+                </StackPanel>
                 <TextBlock x:Name="RuleReferrals" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyReferrals" Spacing="12">
                 <ContentControl x:Name="ReferralsHost" HorizontalContentAlignment="Stretch" />
                 <!-- Watching: how the watcher behaves. -->
+                </StackPanel>
                 <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyWatching" Spacing="12">
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -270,7 +277,9 @@
                     </StackPanel>
                 </Border>
 
+                </StackPanel>
                 <TextBlock x:Name="RuleTools" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyTools" Spacing="12">
                 <!--
                     The routing surface.
 
@@ -472,8 +481,12 @@
                     </StackPanel>
                 </Border>
 
+                </StackPanel>
                 <TextBlock x:Name="RuleInsights" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyInsights" Spacing="12">
+                </StackPanel>
                 <TextBlock x:Name="RuleProjects" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyProjects" Spacing="12">
                 <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
                            Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
@@ -514,7 +527,9 @@
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
 
+                </StackPanel>
                 <TextBlock x:Name="RuleConsent" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyConsent" Spacing="12">
                 <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
                            Style="{StaticResource TcEyebrowTextStyle}" />
                 <TextBlock Text="Applies to traces you send from now on."
@@ -563,7 +578,9 @@
                 <TextBlock Text="Nothing here is pre-selected on your behalf."
                            Style="{StaticResource TcCaptionTextStyle}" />
 
+                </StackPanel>
                 <TextBlock x:Name="RulePublicProfile" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPublicProfile" Spacing="12">
                 <TextBlock Text="{x:Bind ViewModel.HeadingText}"
                            Style="{StaticResource TcTitleSectionTextStyle}" />
 
@@ -678,7 +695,9 @@
                            Foreground="{ThemeResource TcInkTertiaryBrush}"
                            TextWrapping="Wrap" />
 
+                </StackPanel>
                 <TextBlock x:Name="RuleChanges" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyChanges" Spacing="12">
                 <TextBlock Text="Nothing has been changed."
                            Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
@@ -695,7 +714,9 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                </StackPanel>
                 <TextBlock x:Name="RulePrivateAI" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPrivateAI" Spacing="12">
                 <!--
                     Answering model calls on this computer.
 
@@ -753,18 +774,28 @@
                 <ContentControl x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
+                </StackPanel>
                 <TextBlock x:Name="RuleSavedAccounts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodySavedAccounts" Spacing="12">
+                </StackPanel>
                 <TextBlock x:Name="RuleGeneral" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyGeneral" Spacing="12">
                 <ContentControl x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
                 <TextBlock x:Name="RuleStartup" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyStartup" Spacing="12">
                 <ToggleSwitch x:Name="StartAtLoginSwitch"
                               IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
                               IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
                               Toggled="OnStartAtLoginToggled" />
 
+                </StackPanel>
                 <TextBlock x:Name="RuleUpdates" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyUpdates" Spacing="12">
+                </StackPanel>
                 <TextBlock x:Name="RuleWitness" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyWitness" Spacing="12">
                 <!--
                     K11: where sessions go. The raw send, both enclaves, and
                     where the witness came from, above the witness card they
@@ -1039,8 +1070,11 @@
                            Style="{StaticResource TcBodyDenseTextStyle}"
                            TextWrapping="Wrap" />
 
+                </StackPanel>
                 <TextBlock x:Name="RuleCompute" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyCompute" Spacing="12">
                 <ContentControl x:Name="ComputeHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
             </StackPanel>
             </ScrollViewer>
         </Grid>

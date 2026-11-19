@@ -29,8 +29,33 @@ public sealed class AccountDevicesSection : UserControl
             copy is null ? null : new AccountDevicesSurface(copy));
         _flow.Changed += Render;
         Content = _root;
-        Loaded += async (_, _) => await _flow.RefreshAsync();
+        Loaded += async (_, _) =>
+        {
+            WindowClocks.Changed -= OnClocks;
+            WindowClocks.Changed += OnClocks;
+            await _flow.RefreshAsync();
+        };
+
+        // A code on screen is asked about only while the window is up, as
+        // the Mac's follow task ends with its view (checklist P1).
+        Unloaded += (_, _) =>
+        {
+            WindowClocks.Changed -= OnClocks;
+            _flow.StopFollowing();
+        };
         Render();
+    }
+
+    private async void OnClocks(bool running)
+    {
+        if (!running)
+        {
+            _flow.StopFollowing();
+        }
+        else if (IsLoaded)
+        {
+            await _flow.ResumeFollowing();
+        }
     }
 
     /// <summary>Reads the list again, after a sign-in or a change of account.</summary>

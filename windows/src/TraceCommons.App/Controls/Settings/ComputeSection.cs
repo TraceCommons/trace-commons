@@ -32,7 +32,6 @@ public sealed class ComputeSection : UserControl
         _model = model;
         _configDir = host.ConfigDir;
         _sample = host.IsSample;
-        _model.Changed += Render;
         // Typing only arms Enable: rebuilding would take the field's focus.
         _allowance.TextChanged += (_, _) => ArmEnable();
         Content = _root;
@@ -40,8 +39,14 @@ public sealed class ComputeSection : UserControl
         // The Mac reads the controller each second while its section is up;
         // here the clock also stops while the window is hidden or minimised.
         _clock.Tick += async (_, _) => await _model.RefreshAsync();
+        // The model is the app's and outlives this view: hold its event only
+        // while loaded, so a closed Settings window leaves nothing behind.
         Loaded += async (_, _) =>
         {
+            _model.Changed -= Render;
+            _model.Changed += Render;
+            _drawn = null;
+            Render();
             WindowClocks.Changed -= OnClocks;
             WindowClocks.Changed += OnClocks;
             if (_sample)
@@ -61,6 +66,7 @@ public sealed class ComputeSection : UserControl
         };
         Unloaded += (_, _) =>
         {
+            _model.Changed -= Render;
             WindowClocks.Changed -= OnClocks;
             _clock.Stop();
         };

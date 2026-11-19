@@ -27,14 +27,20 @@ public sealed class GeneralSection : UserControl
         var choice = new RadioButtons
         {
             MaxColumns = 3,
-            SelectedIndex = Index(AppearanceChoice.Shared.Current),
         };
         AutomationProperties.SetName(choice, words.Appearance);
         choice.Items.Add(words.Light);
         choice.Items.Add(words.Dark);
         choice.Items.Add(words.System);
+        choice.SelectedIndex = Index(AppearanceChoice.Shared.Current);
         choice.SelectionChanged += (_, _) =>
         {
+            // Nothing selected is not a choice: never write System for it.
+            if (choice.SelectedIndex < 0)
+            {
+                return;
+            }
+
             Appearance picked = choice.SelectedIndex switch
             {
                 0 => Appearance.Light,
