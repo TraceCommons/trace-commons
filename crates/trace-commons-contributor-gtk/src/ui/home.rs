@@ -97,16 +97,11 @@ impl HomeView {
         links.push((waiting_button, "queue"));
         links.push((contributed_button, "history"));
         let (waiting_here, count, size) = size_tile(words.home_history.uncontributed);
-        tiles.insert(&waiting_here, -1);
+        let place = gtk::FlowBoxChild::new();
+        place.set_child(Some(&waiting_here));
+        tiles.insert(&place, -1);
         links.push((waiting_here, "queue"));
-        let not_contributed = (
-            tiles
-                .last_child()
-                .and_downcast::<gtk::FlowBoxChild>()
-                .expect("the tile's place"),
-            count,
-            size,
-        );
+        let not_contributed = (place, count, size);
         not_contributed.0.set_visible(false);
         content.append(&tiles);
         content.append(&heading(words.home_history.section_account));
