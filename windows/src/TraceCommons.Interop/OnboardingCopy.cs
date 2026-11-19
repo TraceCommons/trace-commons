@@ -17,6 +17,7 @@ public sealed record OnboardingCopy
     [JsonPropertyName("notification_allow")] public string NotificationAllow { get; init; } = "";
     [JsonPropertyName("not_now")] public string NotNow { get; init; } = "";
     [JsonPropertyName("system_settings")] public string SystemSettings { get; init; } = "";
+    [JsonPropertyName("watcher_start_failed")] public string WatcherStartFailed { get; init; } = "";
 
     public static OnboardingCopy? Load()
     {

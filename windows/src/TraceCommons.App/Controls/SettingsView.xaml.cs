@@ -80,6 +80,17 @@ public sealed partial class SettingsView : UserControl
     /// </summary>
     public event EventHandler? SetUpAgainRequested;
 
+    /// <summary>
+    /// Opens the About window (spec W24-D1 (a): a row in Settings and one in
+    /// the tray menu). Raised for the window to open, as the others are.
+    /// </summary>
+    public event EventHandler? AboutRequested;
+
+    /// <summary>The About row's word: "About" and the app's name (<c>about_app</c>).</summary>
+    public string AboutTitle => TraceCommons.Interop.Shell.AboutLines.Title;
+
+    private void OnAbout(object sender, RoutedEventArgs e) => AboutRequested?.Invoke(this, EventArgs.Empty);
+
     private bool _setUpAgainDialogOpen;
 
     /// <summary>
