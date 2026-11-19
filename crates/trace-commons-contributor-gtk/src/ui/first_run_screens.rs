@@ -46,7 +46,12 @@ pub(super) fn welcome(
 ) -> (gtk::Box, Vec<(Lift, f64)>) {
     use super::first_run_stage::welcome as layout;
     let copy = first_run_copy();
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    // The Mac's `WelcomeScreen`: one centred column, centred in the window
+    // (a spacer above and below), the N over the title by 52, the title
+    // over the body by 14 (`s7`), the body over Get started by 38, and the
+    // agent's button 14 under it.
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_valign(gtk::Align::Center);
     root.set_margin_start(32);
     root.set_margin_end(32);
     root.set_margin_top(24);
@@ -55,6 +60,8 @@ pub(super) fn welcome(
     let title = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .accessible_role(gtk::AccessibleRole::Heading)
+        .halign(gtk::Align::Center)
+        .margin_top(52)
         .build();
     title.update_property(&[gtk::accessible::Property::Label(copy.welcome.title)]);
     for (index, word) in layout::words(copy.welcome.title).iter().enumerate() {
@@ -68,7 +75,12 @@ pub(super) fn welcome(
         rises.push((lift, layout::word_delay(index)));
     }
     root.append(&title);
-    let body = Lift::new(&body_label(copy.welcome.body));
+    let body = body_label(copy.welcome.body);
+    body.set_xalign(0.5);
+    body.set_justify(gtk::Justification::Center);
+    let body = Lift::new(&body);
+    body.set_halign(gtk::Align::Center);
+    body.set_margin_top(14);
     root.append(&body);
     rises.push((body, layout::BODY_DELAY));
     let start = gtk::Button::with_label(copy.welcome.start);
@@ -76,13 +88,16 @@ pub(super) fn welcome(
     start.add_css_class("pill");
     start.connect_clicked(move |_| on_start());
     let start = Lift::new(&start);
-    start.set_halign(gtk::Align::Start);
+    start.set_halign(gtk::Align::Center);
+    start.set_margin_top(38);
     root.append(&start);
     rises.push((start, layout::BUTTON_DELAY));
     let agent = gtk::Button::with_label(copy.agent_configuration.action);
+    agent.add_css_class("pill");
     agent.connect_clicked(move |_| on_agent());
     let agent = Lift::new(&agent);
-    agent.set_halign(gtk::Align::Start);
+    agent.set_halign(gtk::Align::Center);
+    agent.set_margin_top(14);
     root.append(&agent);
     rises.push((agent, layout::BUTTON_DELAY));
     (root, rises)
