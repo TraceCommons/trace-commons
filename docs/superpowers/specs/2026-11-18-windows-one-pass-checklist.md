@@ -12,6 +12,8 @@ ONE-PASS RULES (Linux took 2-4 rounds on each). Full list: this file
    #081538/#07152F/#0A2546 since fc4ecc1c6; stat-tile icons gone; accent #0091FD, not #8A3DFF). Port conditions, not just shapes.
 2. Decoration and motion are parity: every glow, halo, gradient, mark, shine, spring, transition in the slice's Mac files is
    ported with the Mac's numbers or listed under "Not ported" with a reason. Silent omission = defect.
+   Motion: each animation is a row of design.md "Animation coverage" for the slice: the Mac's curve, duration or spring, the Mac's
+   frame rate (no one 30 fps clock), direction pinned by a test (dashPhase sign), none skipped.
 3. Tests pin Swift-probe numbers or Mac-render pixels (file:line). No source/XAML-grep tests, no expectation computed by the
    port. Each new test is run red against old or mutated behaviour first; paste the red line. Test the wiring, not the helper.
 4. No literal colours: generated tokens through the skin. Measure DRAWN pixels >= 4.5:1 on every ground (light, dark, inactive,
