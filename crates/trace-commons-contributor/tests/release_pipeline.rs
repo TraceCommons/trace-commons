@@ -2064,9 +2064,8 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
 
     let manifest = read("windows/packaging/Package.appxmanifest");
     assert!(
-        manifest.contains(
-            "<TargetDeviceFamily Name=\"Windows.Desktop\" MinVersion=\"10.0.19041.0\""
-        ),
+        manifest
+            .contains("<TargetDeviceFamily Name=\"Windows.Desktop\" MinVersion=\"10.0.19041.0\""),
         "the MSIX floor must equal the app project's TargetPlatformMinVersion"
     );
     assert!(
