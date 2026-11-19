@@ -81,19 +81,6 @@ public class NoCommonsNameTests
     }
 
     /// <summary>
-    /// Lines that keep the app's former name, each with why. Both are the
-    /// <c>tracecommons</c> invite protocol's display name, which owner
-    /// decision W10-D2 has not settled (spec 2026-11-18, "Still open"): the
-    /// manifest's for the packaged build and the registry's for the
-    /// unpackaged one. They change together once it is answered.
-    /// </summary>
-    private static readonly (string File, string Needle)[] FormerNameAllowed =
-    {
-        ("manifest-source/Package.appxmanifest.txt", "<uap:DisplayName>Near.ai invite</uap:DisplayName>"),
-        ("TraceCommons.App/UrlSchemeRegistration.cs.txt", "key.SetValue(string.Empty, \"URL:Near.ai Invite\");"),
-    };
-
-    /// <summary>
     /// The app's name comes from <c>brand.rs</c> (<c>tc_app_name</c>); the
     /// name it shipped under before (<c>brand::FORMER_APP_NAMES</c>,
     /// "Near.ai") appears nowhere a person sees: XAML text, window titles,
@@ -112,10 +99,6 @@ public class NoCommonsNameTests
             string text = File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
             foreach ((int line, string content) in Findings(text, NamesFormer))
             {
-                if (FormerNameAllowed.Any(a => a.File == rel && content.Contains(a.Needle, StringComparison.Ordinal)))
-                {
-                    continue;
-                }
                 offences.Add($"{rel}:{line}: {content}");
             }
         }
@@ -134,12 +117,27 @@ public class NoCommonsNameTests
         Assert.Single(Findings("string s = $\"NEAR.AI — {detail}\";", NamesFormer));
         Assert.Empty(Findings("string url = \"https://cloud.near.ai/dashboard\";", NamesFormer));
         Assert.Empty(Findings("string url = \"near.ai/login\";", NamesFormer));
+        // A bare host compared in code is not the name: lower case, quoted
+        // whole (HomeFacts' link check on the W11 branch).
+        Assert.Empty(Findings("|| !string.Equals(actionUri!.Host, \"near.ai\", StringComparison.OrdinalIgnoreCase)", NamesFormer));
+        Assert.Single(Findings("string title = \"Near.ai\";", NamesFormer));
+        Assert.Single(Findings("<TextBlock Text=\"near.ai\" />", NamesFormer));
         Assert.Empty(Findings("<!-- the Near.ai window -->", NamesFormer));
         Assert.Empty(Findings("    /// The Near.ai tray.", NamesFormer));
     }
 
+    /// <summary>
+    /// The former name, in any case, except as a URL's host or path and
+    /// except a bare host passed to a call: the lower-case literal
+    /// <c>"near.ai"</c> as an argument (after <c>(</c> or <c>,</c>), as a
+    /// link check compares it. The same literal anywhere else, an attribute
+    /// or an assignment, is still the name.
+    /// </summary>
     private static bool NamesFormer(string text) =>
-        Regex.IsMatch(text, @"(?<![\w./-])near\.ai(?![\w/])", RegexOptions.IgnoreCase);
+        Regex.IsMatch(
+            Regex.Replace(text, @"(?<=[(,]\s*)""near\.ai""", "\"\""),
+            @"(?<![\w./-])near\.ai(?![\w/])",
+            RegexOptions.IgnoreCase);
 
     private static List<(int Line, string Content)> Findings(string text) => Findings(text, Names);
 

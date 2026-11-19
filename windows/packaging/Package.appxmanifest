@@ -90,7 +90,7 @@
         -->
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="tracecommons">
-            <uap:DisplayName>Near.ai invite</uap:DisplayName>
+            <uap:DisplayName>Near AI Gateway</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
 

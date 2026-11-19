@@ -27,11 +27,11 @@ public class ManifestBrandTests
     }
 
     /// <summary>
-    /// The three names Windows shows for the app: the package's
+    /// The four names Windows shows for the app: the package's
     /// <c>Properties/DisplayName</c>, the tile's <c>VisualElements</c>
-    /// <c>DisplayName</c>, and the startup task's, which Settings &gt; Apps &gt;
-    /// Startup lists. The invite protocol's <c>uap:DisplayName</c> is not the
-    /// app's name and waits on owner decision W10-D2.
+    /// <c>DisplayName</c>, the startup task's, which Settings &gt; Apps &gt;
+    /// Startup lists, and the invite protocol's <c>uap:DisplayName</c>, which
+    /// is the app name alone (owner decision W10-D2 (a), 2026-11-19).
     /// </summary>
     [Fact]
     public void EveryAppNameTheManifestShowsIsTheCores()
@@ -47,5 +47,39 @@ public class ManifestBrandTests
         Assert.Equal(MonitorWords.AppName, package);
         Assert.Equal(MonitorWords.AppName, tile);
         Assert.Equal(MonitorWords.AppName, startup);
+
+        string invite = manifest.Descendants().Single(e => e.Name.LocalName == "Protocol")
+            .Elements().Single(e => e.Name.LocalName == "DisplayName").Value;
+        Assert.Equal(MonitorWords.AppName, invite);
+    }
+
+    /// <summary>
+    /// The unpackaged build registers the same protocol in HKCU, and its
+    /// display name is the app name alone too (W10-D2 (a)).
+    /// </summary>
+    [Fact]
+    public void TheUnpackagedInviteProtocolIsNamedForTheApp()
+    {
+        Assert.Equal(MonitorWords.AppName, InviteScheme.DisplayName);
+    }
+
+    /// <summary>
+    /// The exe's version resource: <c>FileDescription</c> (from
+    /// <c>AssemblyTitle</c>) is what Task Manager and Settings &gt; Apps &gt;
+    /// Startup show for an unpackaged build, and <c>ProductName</c> (from
+    /// <c>Product</c>) is beside it in the file's properties. Both are the
+    /// core's name; without them the SDK writes the assembly name,
+    /// "TraceCommons" (checklist J1).
+    /// </summary>
+    [Fact]
+    public void TheExesVersionResourceNamesTheApp()
+    {
+        XDocument project = XDocument.Load(
+            Path.Combine(AppContext.BaseDirectory, "manifest-source", "TraceCommons.App.csproj.txt"));
+        string? Property(string name) =>
+            project.Descendants().SingleOrDefault(e => e.Name.LocalName == name)?.Value;
+
+        Assert.Equal(MonitorWords.AppName, Property("AssemblyTitle"));
+        Assert.Equal(MonitorWords.AppName, Property("Product"));
     }
 }
