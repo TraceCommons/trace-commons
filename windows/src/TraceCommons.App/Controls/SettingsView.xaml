@@ -32,22 +32,33 @@
 
     <Grid RowDefinitions="Auto,*">
 
-        <StackPanel Grid.Row="0"
-                    Spacing="2"
-                    Padding="20,9"
-                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                    BorderThickness="0,0,0,1">
-            <TextBlock Text="Settings" Style="{StaticResource TcTitleScreenTextStyle}" />
-            <TextBlock Text="What this machine watches, and what your traces are allowed to do."
-                       Style="{StaticResource TcCaptionTextStyle}"
-                       TextWrapping="Wrap" />
-        </StackPanel>
+        <!--
+            The header: the core's settings_title, as the Mac's SettingsModal
+            draws it (SettingsModal.swift:62-80), over a hairline.
+        -->
+        <Grid Grid.Row="0"
+              Padding="18,14,16,10"
+              BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+              BorderThickness="0,0,0,1">
+            <TextBlock x:Name="SettingsTitleText" Style="{StaticResource TcTitleScreenTextStyle}" />
+        </Grid>
 
-        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
-            <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
-
-                <TextBlock Text="CONNECTION"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
+        <!--
+            Two columns, as on the Mac (SettingsModal.swift:82-150): the
+            section list (180 wide, a hairline between groups, no group
+            headings), a hairline, and one scrolling body holding every
+            section in the Mac's order. A row scrolls the body to its section.
+            The list is filled in code from SettingsSections.
+        -->
+        <Grid Grid.Row="1" ColumnDefinitions="180,Auto,*">
+            <ScrollViewer Grid.Column="0">
+                <StackPanel x:Name="SectionList" Spacing="1" Padding="8,10,8,10" />
+            </ScrollViewer>
+            <Border Grid.Column="1" Width="1" Background="{ThemeResource TcHairlineDividerBrush}" />
+            <ScrollViewer x:Name="SectionScroller" Grid.Column="2" Padding="22,0,22,16">
+            <StackPanel x:Name="SectionBody" Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+                <!-- Account (SettingsSections.swift:14): who this app is, the account, its devices. -->
+                <TextBlock x:Name="RuleAccount" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -165,6 +176,21 @@
                 </StackPanel>
 
                 <!--
+                    Move a legacy invite identity to the contributor's NEAR AI
+                    account. Shown only while the daemon offers it. The same
+                    control the main window's notices card uses, here without
+                    the dismiss: the move stays available as long as it is
+                    offered. Every string is bound, from the Rust.
+                -->
+                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
+                                                   ShowsDismiss="False"
+                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
+
+                <ContentControl x:Name="DevicesHost" HorizontalContentAlignment="Stretch" />
+                <!-- Payouts: drawn, with its row, only while something in it applies (D2). -->
+                <TextBlock x:Name="RulePayouts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <ContentControl x:Name="PayoutsHost" HorizontalContentAlignment="Stretch" />
+                <!--
                     F10, entry point 3: a wallet-origin account's payouts need
                     a NEAR AI login. This shell has no payouts section, so the
                     line sits here in the account section, where macOS shows
@@ -191,76 +217,9 @@
                     </StackPanel>
                 </Border>
 
-                <!--
-                    Move a legacy invite identity to the contributor's NEAR AI
-                    account. Shown only while the daemon offers it. The same
-                    control the main window's notices card uses, here without
-                    the dismiss: the move stays available as long as it is
-                    offered. Every string is bound, from the Rust.
-                -->
-                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
-                                                   ShowsDismiss="False"
-                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
-
-                <TextBlock Text="STARTUP"
-                           Style="{StaticResource TcEyebrowTextStyle}"
-                           Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
-                <ToggleSwitch Header="Start Near.ai when you sign in"
-                              IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
-                              IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                              Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
-                              Toggled="OnStartAtLoginToggled" />
-
-                <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="Applies to traces you send from now on."
-                           Style="{StaticResource TcCaptionTextStyle}" />
-
-                <TextBlock Text="ALWAYS INCLUDED"
-                           Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.AlwaysIncluded}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
-                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
-                                      IsEnabled="False"
-                                      Margin="0,2">
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="{x:Bind Title}"
-                                               Style="{StaticResource TcTitleCardTextStyle}" />
-                                    <TextBlock Text="{x:Bind Description}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                            </CheckBox>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
-                <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
-                           Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.OptionalScopes}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
-                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
-                                      IsEnabled="{x:Bind IsEnabled}"
-                                      Click="OnConsentChanged"
-                                      Margin="0,2">
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="{x:Bind Title}"
-                                               Style="{StaticResource TcTitleCardTextStyle}" />
-                                    <TextBlock Text="{x:Bind Description}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                            </CheckBox>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock Text="Nothing here is pre-selected on your behalf."
-                           Style="{StaticResource TcCaptionTextStyle}" />
-
-                <TextBlock Text="HOW IT BEHAVES"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock x:Name="RuleReferrals" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <!-- Watching: how the watcher behaves. -->
+                <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -310,48 +269,7 @@
                     </StackPanel>
                 </Border>
 
-                <TextBlock Text="PROJECTS"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
-                           Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.Projects}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ProjectSettingViewModel">
-                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
-                                <StackPanel Grid.Column="0" Spacing="2">
-                                    <TextBlock Text="{x:Bind ProjectLabel}"
-                                               Style="{StaticResource TcBodyDenseTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <!--
-                                        Only the unresolvable bucket carries a
-                                        note, saying why it can never be armed.
-                                        Collapsed on every other row.
-                                    -->
-                                    <TextBlock Text="{x:Bind Note}"
-                                               Visibility="{x:Bind HasNote}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                                <!--
-                                    Top rather than centre: a row carrying the
-                                    note is three times the height of an
-                                    ordinary one, and centred controls would
-                                    float away from the name they act on.
-                                -->
-                                <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           VerticalAlignment="Top" />
-                                <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
-                                        IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
-                                        VerticalAlignment="Top"
-                                        Click="OnProjectMode"
-                                        Style="{StaticResource TcSecondaryButtonStyle}" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
+                <TextBlock x:Name="RuleTools" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <!--
                     The routing surface.
 
@@ -553,6 +471,230 @@
                     </StackPanel>
                 </Border>
 
+                <TextBlock x:Name="RuleInsights" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock x:Name="RuleProjects" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
+                           Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.Projects}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ProjectSettingViewModel">
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind ProjectLabel}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <!--
+                                        Only the unresolvable bucket carries a
+                                        note, saying why it can never be armed.
+                                        Collapsed on every other row.
+                                    -->
+                                    <TextBlock Text="{x:Bind Note}"
+                                               Visibility="{x:Bind HasNote}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <!--
+                                    Top rather than centre: a row carrying the
+                                    note is three times the height of an
+                                    ordinary one, and centred controls would
+                                    float away from the name they act on.
+                                -->
+                                <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           VerticalAlignment="Top" />
+                                <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
+                                        IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
+                                        VerticalAlignment="Top"
+                                        Click="OnProjectMode"
+                                        Style="{StaticResource TcSecondaryButtonStyle}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock x:Name="RuleConsent" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock Text="Applies to traces you send from now on."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                <TextBlock Text="ALWAYS INCLUDED"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.AlwaysIncluded}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                                      IsEnabled="False"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.OptionalScopes}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                      IsEnabled="{x:Bind IsEnabled}"
+                                      Click="OnConsentChanged"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="Nothing here is pre-selected on your behalf."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                <TextBlock x:Name="RulePublicProfile" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock Text="{x:Bind ViewModel.HeadingText}"
+                           Style="{StaticResource TcTitleSectionTextStyle}" />
+
+                <!--
+                    Off the roster. One control, and turning it on does not
+                    put anyone on the roster: it opens the consent dialog,
+                    which is where the handle is typed and the acknowledgement
+                    is given. Nothing is claimed by a toggle flip.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsNotListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0"
+                                   Text="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Center" />
+                        <!--
+                            A ToggleSwitch with no on/off words, because the
+                            row's own label already says what it does and the
+                            switch is never the thing that grants anything.
+                            It is put back to off if the dialog is abandoned:
+                            see OnGoPublicToggled.
+                        -->
+                        <ToggleSwitch x:Name="GoPublicToggle"
+                                      Grid.Column="1"
+                                      OnContent=""
+                                      OffContent=""
+                                      IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                      Toggled="OnGoPublicToggled" />
+                    </Grid>
+                </Border>
+
+                <!--
+                    On the roster. The fields as published, and the two acts
+                    available on them.
+
+                    Save re-publishes the WHOLE profile, because that is what
+                    the PUT does: the handle and the bio as they stand in
+                    these two boxes, both of them, every time. There is no
+                    partial update to offer, so there is no per field save.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="16,14">
+                    <StackPanel Spacing="12">
+
+                        <TextBlock Text="{x:Bind ViewModel.OnRosterSinceText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasOnRosterSince, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   HorizontalAlignment="Right" />
+
+                        <TextBox Header="{x:Bind ViewModel.HandleLabelText}"
+                                 Text="{x:Bind ViewModel.Handle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 FontFamily="{ThemeResource TcMonoFontFamily}"
+                                 IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+
+                        <StackPanel Spacing="4">
+                            <TextBox Header="{x:Bind ViewModel.BioLabelText}"
+                                     Text="{x:Bind ViewModel.Bio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     Height="78"
+                                     IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+                            <!--
+                                The counter counts UTF-8 bytes, which is the
+                                unit the budget is denominated in, and it
+                                refuses nothing: what happens at and above the
+                                limit is the server's call.
+                            -->
+                            <TextBlock Text="{x:Bind ViewModel.BioCounterText, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                       HorizontalAlignment="Right" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.SaveProfileText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnSaveProfile" />
+                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.LeaveRosterText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnLeaveRoster" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    What the last act actually did. It is the one place this
+                    screen reports an outcome, and the sentence is chosen in
+                    TraceCommons.Interop.PublicProfileCopy rather than here: a
+                    claim the daemon could not cache locally is still a
+                    PUBLISHED profile, and saying otherwise is the one error
+                    this surface must never make.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcBodyDenseTextStyle}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="{x:Bind ViewModel.FootnoteText}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcInkTertiaryBrush}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock x:Name="RuleChanges" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock Text="Nothing has been changed."
+                           Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:AuditSettingViewModel">
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">
+                                <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
+                                           Style="{StaticResource TcMonoChipTextStyle}" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock x:Name="RulePrivateAI" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <!--
                     Answering model calls on this computer.
 
@@ -610,6 +752,18 @@
                 <ContentControl x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
+                <TextBlock x:Name="RuleSavedAccounts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock x:Name="RuleGeneral" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <ContentControl x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
+                <TextBlock x:Name="RuleStartup" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <ToggleSwitch x:Name="StartAtLoginSwitch"
+                              IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
+                              IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                              Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
+                              Toggled="OnStartAtLoginToggled" />
+
+                <TextBlock x:Name="RuleUpdates" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <TextBlock x:Name="RuleWitness" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <!--
                     K11: where sessions go. The raw send, both enclaves, and
                     where the witness came from, above the witness card they
@@ -884,139 +1038,10 @@
                            Style="{StaticResource TcBodyDenseTextStyle}"
                            TextWrapping="Wrap" />
 
-                <TextBlock Text="{x:Bind ViewModel.HeadingText}"
-                           Style="{StaticResource TcTitleSectionTextStyle}" />
-
-                <!--
-                    Off the roster. One control, and turning it on does not
-                    put anyone on the roster: it opens the consent dialog,
-                    which is where the handle is typed and the acknowledgement
-                    is given. Nothing is claimed by a toggle flip.
-                -->
-                <Border Visibility="{x:Bind ViewModel.IsNotListed, Mode=OneWay}"
-                        Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcHairlineBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="14,12">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                        <TextBlock Grid.Column="0"
-                                   Text="{x:Bind ViewModel.ListHandlePubliclyText}"
-                                   Style="{StaticResource TcBodyTextStyle}"
-                                   TextWrapping="Wrap"
-                                   VerticalAlignment="Center" />
-                        <!--
-                            A ToggleSwitch with no on/off words, because the
-                            row's own label already says what it does and the
-                            switch is never the thing that grants anything.
-                            It is put back to off if the dialog is abandoned:
-                            see OnGoPublicToggled.
-                        -->
-                        <ToggleSwitch x:Name="GoPublicToggle"
-                                      Grid.Column="1"
-                                      OnContent=""
-                                      OffContent=""
-                                      IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                      AutomationProperties.Name="{x:Bind ViewModel.ListHandlePubliclyText}"
-                                      Toggled="OnGoPublicToggled" />
-                    </Grid>
-                </Border>
-
-                <!--
-                    On the roster. The fields as published, and the two acts
-                    available on them.
-
-                    Save re-publishes the WHOLE profile, because that is what
-                    the PUT does: the handle and the bio as they stand in
-                    these two boxes, both of them, every time. There is no
-                    partial update to offer, so there is no per field save.
-                -->
-                <Border Visibility="{x:Bind ViewModel.IsListed, Mode=OneWay}"
-                        Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="16,14">
-                    <StackPanel Spacing="12">
-
-                        <TextBlock Text="{x:Bind ViewModel.OnRosterSinceText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.HasOnRosterSince, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   HorizontalAlignment="Right" />
-
-                        <TextBox Header="{x:Bind ViewModel.HandleLabelText}"
-                                 Text="{x:Bind ViewModel.Handle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 FontFamily="{ThemeResource TcMonoFontFamily}"
-                                 IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
-
-                        <StackPanel Spacing="4">
-                            <TextBox Header="{x:Bind ViewModel.BioLabelText}"
-                                     Text="{x:Bind ViewModel.Bio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     AcceptsReturn="True"
-                                     TextWrapping="Wrap"
-                                     Height="78"
-                                     IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
-                            <!--
-                                The counter counts UTF-8 bytes, which is the
-                                unit the budget is denominated in, and it
-                                refuses nothing: what happens at and above the
-                                limit is the server's call.
-                            -->
-                            <TextBlock Text="{x:Bind ViewModel.BioCounterText, Mode=OneWay}"
-                                       Style="{StaticResource TcCaptionSmallTextStyle}"
-                                       HorizontalAlignment="Right" />
-                        </StackPanel>
-
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Style="{StaticResource TcPrimaryButtonStyle}"
-                                    Content="{x:Bind ViewModel.SaveProfileText}"
-                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                    Click="OnSaveProfile" />
-                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                    Content="{x:Bind ViewModel.LeaveRosterText}"
-                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                    Click="OnLeaveRoster" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!--
-                    What the last act actually did. It is the one place this
-                    screen reports an outcome, and the sentence is chosen in
-                    TraceCommons.Interop.PublicProfileCopy rather than here: a
-                    claim the daemon could not cache locally is still a
-                    PUBLISHED profile, and saying otherwise is the one error
-                    this surface must never make.
-                -->
-                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
-                           Style="{StaticResource TcBodyDenseTextStyle}"
-                           TextWrapping="Wrap" />
-
-                <TextBlock Text="{x:Bind ViewModel.FootnoteText}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcInkTertiaryBrush}"
-                           TextWrapping="Wrap" />
-
-                <TextBlock Text="WHAT HAS BEEN CHANGED ON THIS MACHINE"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="Nothing has been changed."
-                           Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:AuditSettingViewModel">
-                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">
-                                <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
-                                           Style="{StaticResource TcMonoChipTextStyle}" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           TextWrapping="Wrap" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <TextBlock x:Name="RuleCompute" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <ContentControl x:Name="ComputeHost" HorizontalContentAlignment="Stretch" />
             </StackPanel>
-        </ScrollViewer>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </UserControl>

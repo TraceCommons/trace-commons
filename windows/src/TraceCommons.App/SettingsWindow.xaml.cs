@@ -26,6 +26,23 @@ public sealed partial class SettingsWindow : Window
         InitializeComponent();
         Title = MonitorWords.SettingsTitle;
         SettingsHost.Content = view;
+
+        // Settings > General's appearance, here as on the Monitor window.
+        SettingsRoot.RequestedTheme = Controls.Settings.GeneralSection.Theme(AppearanceChoice.Shared.Current);
+        void OnAppearance(Appearance appearance) =>
+            SettingsRoot.RequestedTheme = Controls.Settings.GeneralSection.Theme(appearance);
+        AppearanceChoice.Shared.Changed += OnAppearance;
+
+        // Escape closes the window, as the Mac's onExitCommand does
+        // (SettingsModal.swift:57).
+        var escape = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            Close();
+        };
+        SettingsRoot.KeyboardAccelerators.Add(escape);
+        Closed += (_, _) => AppearanceChoice.Shared.Changed -= OnAppearance;
     }
 
     /// <summary>

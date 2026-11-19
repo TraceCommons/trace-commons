@@ -120,6 +120,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        FollowAppearance();
 
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
         // every event hop targets.

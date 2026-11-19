@@ -1,0 +1,145 @@
+using System.Collections.Generic;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using TraceCommons.App.Controls.Settings;
+using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
+
+namespace TraceCommons.App.Controls;
+
+/// <summary>
+/// The Settings window's sections (W16-D1 (a); <c>SettingsModal</c>,
+/// SettingsModal.swift): the section list and the rule over each section
+/// in the one body, both named from the core (<see cref="SettingsSections"/>),
+/// and the new sections' bodies: devices, payouts, General and compute.
+/// </summary>
+public sealed partial class SettingsView
+{
+    /// <summary>
+    /// The app's compute controller, opened once and kept while the app runs,
+    /// as the Mac's <c>ComputeModel</c> is the app's and not the window's.
+    /// </summary>
+    private static readonly ComputeModel AppCompute = new();
+
+    /// <summary>
+    /// Sections whose bodies this window draws. The rest of the Mac's
+    /// nineteen have no Windows body yet; their rows and rules are left out
+    /// rather than drawn over nothing.
+    /// </summary>
+    private static readonly HashSet<SettingsSection> Drawn = new()
+    {
+        SettingsSection.Account, SettingsSection.Payouts, SettingsSection.Watching, SettingsSection.Tools,
+        SettingsSection.Projects, SettingsSection.Consent, SettingsSection.PublicProfile, SettingsSection.Changes,
+        SettingsSection.PrivateAI, SettingsSection.General, SettingsSection.Startup, SettingsSection.Witness,
+        SettingsSection.Compute,
+    };
+
+    private readonly Dictionary<SettingsSection, TextBlock> _rules = new();
+    private PayoutLinkSection? _payouts;
+
+    private void BuildSections(DaemonHost host)
+    {
+        SettingsTitleText.Text = MonitorWords.SettingsTitle;
+        StartAtLoginSwitch.Header = MonitorShellCopy.Shell("start_at_login");
+        AutomationProperties.SetName(SectionList, MonitorShellCopy.Top("settings_sections"));
+
+        _rules[SettingsSection.Account] = RuleAccount;
+        _rules[SettingsSection.Payouts] = RulePayouts;
+        _rules[SettingsSection.Referrals] = RuleReferrals;
+        _rules[SettingsSection.Watching] = RuleWatching;
+        _rules[SettingsSection.Tools] = RuleTools;
+        _rules[SettingsSection.Insights] = RuleInsights;
+        _rules[SettingsSection.Projects] = RuleProjects;
+        _rules[SettingsSection.Consent] = RuleConsent;
+        _rules[SettingsSection.PublicProfile] = RulePublicProfile;
+        _rules[SettingsSection.Changes] = RuleChanges;
+        _rules[SettingsSection.PrivateAI] = RulePrivateAI;
+        _rules[SettingsSection.SavedAccounts] = RuleSavedAccounts;
+        _rules[SettingsSection.General] = RuleGeneral;
+        _rules[SettingsSection.Startup] = RuleStartup;
+        _rules[SettingsSection.Updates] = RuleUpdates;
+        _rules[SettingsSection.Witness] = RuleWitness;
+        _rules[SettingsSection.Compute] = RuleCompute;
+
+        DevicesHost.Content = new AccountDevicesSection(host);
+        _payouts = new PayoutLinkSection(host);
+        _payouts.VisibilityChanged += _ => DrawList();
+        PayoutsHost.Content = _payouts;
+        GeneralHost.Content = new GeneralSection();
+        ComputeHost.Content = new ComputeSection(host, AppCompute);
+
+        DrawList();
+    }
+
+    /// <summary>
+    /// Draws the list and the rules: each drawn section's row in the Mac's
+    /// order, a hairline where the group changes, Payouts only while it
+    /// applies, and a disabled dash for a row whose words have not loaded.
+    /// </summary>
+    private void DrawList()
+    {
+        SettingsNavWords words = SettingsNavWordsLive.Value;
+        bool payoutsShown = _payouts?.Shown == true;
+        var rows = new List<SettingsSection>();
+        foreach (SettingsSection section in SettingsSections.Rows(payoutsShown))
+        {
+            if (Drawn.Contains(section))
+            {
+                rows.Add(section);
+            }
+        }
+
+        SectionList.Children.Clear();
+        foreach (SettingsSection section in rows)
+        {
+            if (SettingsSections.StartsGroup(section, rows))
+            {
+                var hairline = new Border
+                {
+                    Height = 1,
+                    Margin = new Thickness(0, 6, 0, 6),
+                    Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcHairlineDividerBrush"],
+                };
+                AutomationProperties.SetAccessibilityView(hairline, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+                SectionList.Children.Add(hairline);
+            }
+
+            SettingsListRow row = SettingsSections.ListRow(section, words);
+            var button = new Button
+            {
+                Content = new TextBlock { Text = row.Text, Style = (Style)Application.Current.Resources["TcCaptionTextStyle"] },
+                IsEnabled = row.Enabled,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Background = null,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(8, 4, 8, 4),
+            };
+            AutomationProperties.SetName(button, row.Enabled ? row.Text : MonitorShellCopy.Top("unknown"));
+            ToolTipService.SetToolTip(button, row.Enabled ? row.Text : null);
+            SettingsSection target = section;
+            button.Click += (_, _) => ScrollTo(target);
+            SectionList.Children.Add(button);
+        }
+
+        foreach ((SettingsSection section, TextBlock rule) in _rules)
+        {
+            string? name = SettingsSections.NavName(section, words);
+            bool shown = Drawn.Contains(section) && name is not null
+                && (section != SettingsSection.Payouts || payoutsShown);
+            rule.Text = name ?? string.Empty;
+            rule.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            AutomationProperties.SetHeadingLevel(rule, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level2);
+        }
+    }
+
+    /// <summary>Straight to a section, its rule at the top (<c>scrollTo(_, anchor: .top)</c>, no animation).</summary>
+    public void ScrollTo(SettingsSection section)
+    {
+        if (_rules.TryGetValue(section, out TextBlock? rule) && rule.Visibility == Visibility.Visible)
+        {
+            rule.StartBringIntoView(new BringIntoViewOptions { AnimationDesired = false, VerticalAlignmentRatio = 0 });
+        }
+    }
+}
