@@ -4,13 +4,16 @@
     keeping each control's own automation peer: the switch, the spinner (a
     ProgressRing), the refresh pill (a Button) and the loading bar.
 
-    Every colour and size is a generated token (GlassTokens.xaml). Every
-    transition carries the Mac's curve and duration as key frames: the token
-    curve is KeySpline 0.2,0.8 0.2,1 (GlassMotion.swift:7-11) and SwiftUI's
-    ease-out is KeySpline 0,0 0.58,1. Never WinUI's own timings. Each template
-    root sets GlassVisualStateManager, which skips the transitions while the
-    system's animations are off or the window cannot be seen, so a control
-    then goes straight to its final state.
+    Every colour is a generated token (GlassTokens.xaml). The templates
+    carry only their visual states' names: each state's values, each
+    transition's duration and curve, and the switch's size, knob and inset
+    are built into them by GlassTemplate from GlassTemplateMotion (the
+    control's look:GlassTemplate.Kind), whose numbers the Interop tests pin
+    to the Mac's. Never WinUI's own timings. Each template root sets
+    GlassVisualStateManager, which builds them on the first state change and
+    skips the transitions while the system's animations are off or the
+    control cannot be seen, so a control then goes straight to its final
+    state.
 
     XML comments cannot contain a double hyphen.
 -->
@@ -47,6 +50,7 @@
         <Setter Property="OffContent" Value="" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
         <Setter Property="FocusVisualMargin" Value="-4" />
+        <Setter Property="look:GlassTemplate.Kind" Value="Switch" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ToggleSwitch">
@@ -54,86 +58,26 @@
                         <VisualStateManager.CustomVisualStateManager>
                             <look:GlassVisualStateManager />
                         </VisualStateManager.CustomVisualStateManager>
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
-                        </Grid.RowDefinitions>
+                        <!-- States only: GlassTemplate builds each state's values and
+                             each transition's duration and curve from
+                             GlassTemplateMotion, by the control's
+                             look:GlassTemplate.Kind. -->
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup x:Name="CommonStates">
-                                <VisualStateGroup.Transitions>
-                                    <VisualTransition To="Pressed">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PressWash" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="1" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                    <VisualTransition From="Pressed">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PressWash" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="0" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                </VisualStateGroup.Transitions>
                                 <VisualState x:Name="Normal" />
                                 <VisualState x:Name="PointerOver" />
-                                <VisualState x:Name="Pressed">
-                                    <VisualState.Setters>
-                                        <Setter Target="PressWash.Opacity" Value="1" />
-                                    </VisualState.Setters>
-                                </VisualState>
+                                <VisualState x:Name="Pressed" />
                                 <VisualState x:Name="Disabled">
                                     <VisualState.Setters>
                                         <Setter Target="SwitchArea.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
-                                        <Setter Target="HeaderContentPresenter.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
+                                        <Setter Target="LabelArea.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
                                     </VisualState.Setters>
                                 </VisualState>
                             </VisualStateGroup>
                             <VisualStateGroup x:Name="ToggleStates">
-                                <VisualStateGroup.Transitions>
-                                    <VisualTransition To="On">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="KnobTranslateTransform" Storyboard.TargetProperty="X">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="16" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="OnTrack" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="1" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="KnobOn" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="1" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                    <VisualTransition To="Off">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="KnobTranslateTransform" Storyboard.TargetProperty="X">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="0" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="OnTrack" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="0" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="KnobOn" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.22" Value="0" KeySpline="0,0 0.58,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                </VisualStateGroup.Transitions>
                                 <VisualState x:Name="Dragging" />
-                                <VisualState x:Name="Off">
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="KnobTranslateTransform" Storyboard.TargetProperty="X" To="0" Duration="0" />
-                                        <DoubleAnimation Storyboard.TargetName="OnTrack" Storyboard.TargetProperty="Opacity" To="0" Duration="0" />
-                                        <DoubleAnimation Storyboard.TargetName="KnobOn" Storyboard.TargetProperty="Opacity" To="0" Duration="0" />
-                                    </Storyboard>
-                                </VisualState>
-                                <VisualState x:Name="On">
-                                    <Storyboard>
-                                        <DoubleAnimation Storyboard.TargetName="KnobTranslateTransform" Storyboard.TargetProperty="X" To="16" Duration="0" />
-                                        <DoubleAnimation Storyboard.TargetName="OnTrack" Storyboard.TargetProperty="Opacity" To="1" Duration="0" />
-                                        <DoubleAnimation Storyboard.TargetName="KnobOn" Storyboard.TargetProperty="Opacity" To="1" Duration="0" />
-                                    </Storyboard>
-                                </VisualState>
+                                <VisualState x:Name="Off" />
+                                <VisualState x:Name="On" />
                             </VisualStateGroup>
                             <VisualStateGroup x:Name="ContentStates">
                                 <VisualState x:Name="OffContent">
@@ -151,34 +95,49 @@
                             </VisualStateGroup>
                         </VisualStateManager.VisualStateGroups>
 
-                        <ContentPresenter x:Name="HeaderContentPresenter"
-                                          Grid.Row="0"
-                                          Margin="0,0,0,6"
-                                          Content="{TemplateBinding Header}"
-                                          ContentTemplate="{TemplateBinding HeaderTemplate}"
-                                          Foreground="{ThemeResource TcGlassInkBrush}"
-                                          IsHitTestVisible="False"
-                                          TextWrapping="Wrap"
-                                          Visibility="Collapsed"
-                                          x:DeferLoadStrategy="Lazy" />
-
-                        <Grid Grid.Row="1" HorizontalAlignment="Left" VerticalAlignment="Top">
+                        <!-- The label, then the switch, as the Mac's GlassToggleStyle
+                             lays them out (HStack, label first); the first run's
+                             small switch puts the switch first. GlassTemplate sets
+                             the columns and the gap. -->
+                        <Grid HorizontalAlignment="Left" VerticalAlignment="Top">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="12" />
+                                <ColumnDefinition x:Name="LabelGap" Width="0" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <Grid x:Name="SwitchAreaGrid" Grid.ColumnSpan="3" Background="Transparent" Control.IsTemplateFocusTarget="True" />
+                            <Grid x:Name="LabelArea" Grid.Column="0" VerticalAlignment="Center">
+                                <ContentPresenter x:Name="HeaderContentPresenter"
+                                                  Content="{TemplateBinding Header}"
+                                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                                  Foreground="{ThemeResource TcGlassInkBrush}"
+                                                  IsHitTestVisible="False"
+                                                  TextWrapping="Wrap"
+                                                  VerticalAlignment="Center"
+                                                  Visibility="Collapsed" />
+                                <ContentPresenter x:Name="OffContentPresenter"
+                                                  Opacity="0"
+                                                  VerticalAlignment="Center"
+                                                  IsHitTestVisible="False"
+                                                  Content="{TemplateBinding OffContent}"
+                                                  ContentTemplate="{TemplateBinding OffContentTemplate}"
+                                                  Foreground="{TemplateBinding Foreground}" />
+                                <ContentPresenter x:Name="OnContentPresenter"
+                                                  Opacity="0"
+                                                  VerticalAlignment="Center"
+                                                  IsHitTestVisible="False"
+                                                  Content="{TemplateBinding OnContent}"
+                                                  ContentTemplate="{TemplateBinding OnContentTemplate}"
+                                                  Foreground="{TemplateBinding Foreground}" />
+                            </Grid>
                             <Grid x:Name="SwitchArea"
-                                  Grid.Column="0"
-                                  Width="{StaticResource TcGlassSizeToggleWidth}"
-                                  Height="{StaticResource TcGlassSizeToggleHeight}"
+                                  Grid.Column="2"
                                   VerticalAlignment="Center">
                                 <Border x:Name="OffTrack" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassToggleOffBrush}" />
                                 <Border x:Name="OnTrack" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassToggleOnBrush}" Opacity="0" />
                                 <Border x:Name="PressWash" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassPressWashBrush}" Opacity="0" />
-                                <Border x:Name="SwitchKnobBounds" Margin="3,0,3,0" />
-                                <Grid x:Name="SwitchKnob" Width="18" Height="18" Margin="3,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                <Border x:Name="SwitchKnobBounds" />
+                                <Grid x:Name="SwitchKnob" HorizontalAlignment="Left" VerticalAlignment="Center">
                                     <Grid.RenderTransform>
                                         <TranslateTransform x:Name="KnobTranslateTransform" />
                                     </Grid.RenderTransform>
@@ -190,6 +149,12 @@
                                         <ControlTemplate TargetType="Thumb">
                                             <Rectangle Fill="Transparent" />
                                         </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </ControlTemplate>
                                     </Thumb.Template>
                                 </Thumb>
                             </Grid>
@@ -218,6 +183,19 @@
 
     <!-- Every ToggleSwitch in the app takes the Mac's switch. -->
     <Style TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}" />
+
+    <!-- The watch switch (GlassToggleStyle .watch): 38 by 22, the knob inset 2,
+         sliding over 0.15 s. -->
+    <Style x:Key="TcGlassWatchSwitchStyle" TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}">
+        <Setter Property="look:GlassTemplate.Kind" Value="WatchSwitch" />
+    </Style>
+
+    <!-- The first run's small switch (FirstRunStage.swift:463-492): 30 by 18,
+         a 14 knob inset 2, 0.2 s on the token curve, the switch before its
+         label, and no press wash. -->
+    <Style x:Key="TcGlassFirstRunSwitchStyle" TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}">
+        <Setter Property="look:GlassTemplate.Kind" Value="FirstRunSwitch" />
+    </Style>
 
     <!--
         The spinner (Feedback.swift:15-63): a ring in ink at 0.18 and a quarter
@@ -276,6 +254,7 @@
         <Setter Property="FontWeight" Value="Medium" />
         <Setter Property="Padding" Value="10,0,10,0" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="look:GlassTemplate.Kind" Value="RefreshPill" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="look:GlassRefreshButton">
@@ -285,50 +264,9 @@
                         </VisualStateManager.CustomVisualStateManager>
                         <VisualStateManager.VisualStateGroups>
                             <VisualStateGroup x:Name="CommonStates">
-                                <VisualStateGroup.Transitions>
-                                    <VisualTransition To="PointerOver">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HoverFill" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="1" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PressWash" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="0" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                    <VisualTransition To="Pressed">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HoverFill" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="1" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PressWash" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="1" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                    <VisualTransition To="Normal">
-                                        <Storyboard>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="HoverFill" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="0" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                            <DoubleAnimationUsingKeyFrames Storyboard.TargetName="PressWash" Storyboard.TargetProperty="Opacity">
-                                                <SplineDoubleKeyFrame KeyTime="0:0:0.15" Value="0" KeySpline="0.2,0.8 0.2,1" />
-                                            </DoubleAnimationUsingKeyFrames>
-                                        </Storyboard>
-                                    </VisualTransition>
-                                </VisualStateGroup.Transitions>
                                 <VisualState x:Name="Normal" />
-                                <VisualState x:Name="PointerOver">
-                                    <VisualState.Setters>
-                                        <Setter Target="HoverFill.Opacity" Value="1" />
-                                    </VisualState.Setters>
-                                </VisualState>
-                                <VisualState x:Name="Pressed">
-                                    <VisualState.Setters>
-                                        <Setter Target="HoverFill.Opacity" Value="1" />
-                                        <Setter Target="PressWash.Opacity" Value="1" />
-                                    </VisualState.Setters>
-                                </VisualState>
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed" />
                                 <VisualState x:Name="Disabled">
                                     <VisualState.Setters>
                                         <Setter Target="Root.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />

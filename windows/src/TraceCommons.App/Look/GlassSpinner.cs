@@ -28,7 +28,13 @@ public sealed class GlassSpinner : ProgressRing
         Width = Height = GlassTokens.Size.Spinner;
         IsActive = true;
         _clock = new GlassClock(this, GlassSpinnerMotion.FrameInterval, Draw);
-        RegisterPropertyChangedCallback(IsActiveProperty, (_, _) => _clock.Paused = !IsActive);
+        // Inactive, it is not drawn, as the stock ring it replaces; its
+        // place in the layout is kept.
+        RegisterPropertyChangedCallback(IsActiveProperty, (_, _) =>
+        {
+            _clock.Paused = !IsActive;
+            Opacity = IsActive ? 1 : 0;
+        });
         SizeChanged += (_, _) => Shape();
     }
 

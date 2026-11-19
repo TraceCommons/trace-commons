@@ -35,7 +35,7 @@ internal sealed class AccountLoginChangeDialog
     private readonly TextBlock _heading = new() { TextWrapping = TextWrapping.Wrap, FontWeight = FontWeights.SemiBold };
     private readonly StackPanel _lines = new() { Spacing = 6 };
     private readonly TextBox _walletAccount = new();
-    private readonly ProgressRing _working = new() { IsActive = false, Width = 20, Height = 20, HorizontalAlignment = HorizontalAlignment.Left };
+    private readonly Look.GlassSpinner _working = new() { IsActive = false, HorizontalAlignment = HorizontalAlignment.Left };
     private readonly TextBlock _error = new() { TextWrapping = TextWrapping.Wrap };
     private bool _closingByFlow;
 
