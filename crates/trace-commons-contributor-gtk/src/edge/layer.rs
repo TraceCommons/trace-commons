@@ -38,13 +38,14 @@ pub fn make_rail(window: &gtk::Window, monitor: Option<&gtk::gdk::Monitor>) {
 /// Whether the rail takes the keyboard, as `edge::keyboard` decides: only
 /// after a click inside the open rail (owner, 2026-11-18, "Keyboard only
 /// after a click"), so Escape and Tab reach it; `None` again as it closes.
-/// Asked for outright (`edge::keyboard::ask`): checked on 2026-11-18,
-/// Hyprland 0.56.2 gave an on-demand rail the keyboard only on the next
-/// pointer motion, never on the press; asked for outright, both it and
-/// KWin 6.6.6 gave it on the press.
+/// Asked for on demand (`edge::keyboard::ask`). Checked on 2026-11-18:
+/// KWin 6.6.6 gives it on the press; Hyprland 0.56.2 only on the next
+/// pointer motion over the rail, not on the press. Exclusive would give it
+/// on the press there, but Hyprland then sends the rail every pointer
+/// event too, so the rail could not be clicked away from.
 pub fn set_rail_keyboard(window: &gtk::Window, takes: bool) {
     window.set_keyboard_mode(match crate::edge::keyboard::ask(takes) {
-        crate::edge::keyboard::Ask::Outright => KeyboardMode::Exclusive,
+        crate::edge::keyboard::Ask::OnDemand => KeyboardMode::OnDemand,
         crate::edge::keyboard::Ask::Nothing => KeyboardMode::None,
     });
 }

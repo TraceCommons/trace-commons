@@ -16,14 +16,16 @@ use std::cell::Cell;
 pub enum Ask {
     /// Not at all: the compositor never gives it the keyboard.
     Nothing,
-    /// Outright, on the press that asked: an on-demand surface was given it
-    /// only on the next pointer motion on Hyprland 0.56.2 (2026-11-18).
-    Outright,
+    /// When the compositor decides: on the press on KWin 6.6.6, on the next
+    /// pointer motion on Hyprland 0.56.2 (2026-11-18). Never outright: on
+    /// Hyprland an exclusive rail also took every pointer event, so a click
+    /// on another window went to the rail.
+    OnDemand,
 }
 
 /// What the rail asks for when it takes the keyboard (`takes`) or not.
 pub fn ask(takes: bool) -> Ask {
-    if takes { Ask::Outright } else { Ask::Nothing }
+    if takes { Ask::OnDemand } else { Ask::Nothing }
 }
 
 /// The rail's keyboard, as it opens, closes and is clicked.
@@ -121,13 +123,14 @@ mod tests {
         assert!(!keyboard.placed(true));
     }
 
-    /// Hyprland 0.56.2 (2026-11-18) never gave an on-demand rail the
-    /// keyboard on a press, the first or the second, only on the next
-    /// pointer motion; asked for outright, it gave it on the press. KWin
-    /// 6.6.6 gave it on the press either way.
+    /// On demand, never outright. Hyprland 0.56.2 (2026-11-18), asked
+    /// outright, gave the rail the keyboard on the press but also every
+    /// pointer event after it: a click on another window went to the rail,
+    /// which stayed open until Escape. On demand, it gives the keyboard only
+    /// on the next pointer motion; KWin 6.6.6 gives it on the press.
     #[test]
-    fn a_press_asks_for_the_keyboard_outright() {
-        assert_eq!(ask(true), Ask::Outright);
+    fn a_press_asks_for_the_keyboard_on_demand() {
+        assert_eq!(ask(true), Ask::OnDemand);
         assert_eq!(ask(false), Ask::Nothing);
     }
 
