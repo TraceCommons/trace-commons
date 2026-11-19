@@ -728,6 +728,9 @@ impl HomeView {
             .overlay
             .frame_clock()
             .map_or_else(glib::monotonic_time, |clock| clock.frame_time());
+        // Minimised, the coins stand still for the hold, as under reduced
+        // motion: nothing ticks for a window no one can see.
+        let still = still || super::glass_motion::window_hidden(&self.burst);
         flourish.start.set(Some(start));
         flourish.still.set(still);
         self.burst.set_visible(true);
