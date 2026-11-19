@@ -390,6 +390,99 @@ public class FeatureFlagsTests
         }
     }
 
+    /// <summary>
+    /// The window's whole loop against a real daemon: a local override sends
+    /// <c>feature_flags_changed</c>, the gate reads again on it, and the
+    /// flag's value flips in the gate's snapshot. A flag the snapshot does
+    /// not name reads off throughout.
+    /// </summary>
+    [Fact]
+    public async Task AnOverrideFlipsTheFlagThroughTheChangeEvent()
+    {
+        const string unknown = "no_such_flag_in_any_registry";
+        (string dir, string settings) = ThrowawayDaemonDir();
+        try
+        {
+            using var daemon = new TcDaemon(dir, settings);
+            var gate = new FeatureFlagGate((method, parameters) => Task.FromResult(DaemonResponse.Parse(daemon.Call(method, parameters))));
+            await gate.RefreshAsync();
+            FeatureFlagSnapshot before = gate.Current!;
+            Assert.NotNull(before);
+            Assert.False(before.Flags.ContainsKey(unknown));
+            Assert.False(gate.IsEnabled(unknown));
+
+            bool was = gate.IsEnabled(FeatureFlagGate.InsightsSkills);
+            using var heard = new SemaphoreSlim(0);
+            TcSubscription? subscription = daemon.Subscribe(
+                json =>
+                {
+                    if (DaemonEvent.Parse(json)?.Event == DaemonProtocol.Events.FeatureFlagsChanged) heard.Release();
+                },
+                new[] { DaemonProtocol.Events.FeatureFlagsChanged });
+            Assert.NotNull(subscription);
+
+            string parameters = new JsonObject
+            {
+                ["id"] = FeatureFlagGate.InsightsSkills,
+                ["value"] = !was,
+                ["environment"] = before.Environment,
+                ["profile_digest"] = before.ProfileDigest,
+            }.ToJsonString();
+            DaemonResponse reply = DaemonResponse.Parse(daemon.Call("feature_flags_override_set", parameters));
+            Assert.False(reply.IsError, reply.Error?.Message);
+
+            Assert.True(await heard.WaitAsync(TimeSpan.FromSeconds(10)), "no feature_flags_changed after the override");
+            await gate.RefreshAsync();
+            Assert.Equal(!was, gate.IsEnabled(FeatureFlagGate.InsightsSkills));
+            Assert.Equal(before.InstanceId, gate.Current!.InstanceId);
+            Assert.True(gate.Current.Generation > before.Generation, $"{gate.Current.Generation} after {before.Generation}");
+            Assert.False(gate.IsEnabled(unknown));
+            Assert.True(daemon.Unsubscribe(subscription!));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch (IOException) { }
+        }
+    }
+
+    /// <summary>
+    /// A replaced daemon, as the window sees one through
+    /// <c>DaemonHost.Started</c>: the reset drops the old daemon's snapshot
+    /// at once, and the next read is the new daemon's own instance.
+    /// </summary>
+    [Fact]
+    public async Task AReplacedDaemonDropsTheOldSnapshotAndReadsTheNewOne()
+    {
+        (string dir, string settings) = ThrowawayDaemonDir();
+        try
+        {
+            TcDaemon? current = null;
+            var gate = new FeatureFlagGate((method, parameters) => Task.FromResult(DaemonResponse.Parse(current!.Call(method, parameters))));
+
+            string first;
+            using (current = new TcDaemon(dir, settings))
+            {
+                await gate.RefreshAsync();
+                Assert.NotNull(gate.Current);
+                first = gate.Current!.InstanceId;
+            }
+
+            using (current = new TcDaemon(dir, settings))
+            {
+                gate.Reset();
+                Assert.Null(gate.Current);
+                Assert.False(gate.IsEnabled(FeatureFlagGate.InsightsSkills));
+                await gate.RefreshAsync();
+                Assert.NotNull(gate.Current);
+                Assert.NotEqual(first, gate.Current!.InstanceId);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch (IOException) { }
+        }
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(AppContext.BaseDirectory, "shell-source", relativePath + ".txt");
