@@ -70,6 +70,10 @@ mod lift {
         /// The dragged tab's offset from its slot, and the drop moving it.
         pub drag: Cell<f64>,
         pub drop_driver: glass_motion::Driver,
+        /// Bumped by each new lift or drop, so the one it interrupts does
+        /// not jump to its own end as it is stopped.
+        pub lift_generation: Cell<u64>,
+        pub drop_generation: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -178,6 +182,8 @@ impl TabLift {
             return;
         }
         let from = self.amount();
+        let generation = imp.lift_generation.get() + 1;
+        imp.lift_generation.set(generation);
         let length = glass_motion::spring_settles(LIFT_SPRING.0, LIFT_SPRING.1);
         let weak = self.downgrade();
         imp.lift_driver.start(
@@ -185,7 +191,9 @@ impl TabLift {
             length,
             0.0,
             move |t| {
-                if let Some(lift) = weak.upgrade() {
+                if let Some(lift) = weak.upgrade()
+                    && lift.imp().lift_generation.get() == generation
+                {
                     let now = if t >= length || !glass_motion::animations_enabled() {
                         to
                     } else {
@@ -210,6 +218,10 @@ impl TabLift {
 
     /// The dragged tab's offset from its slot, following the pointer.
     pub fn set_drag(&self, offset: f64) {
+        // The pointer takes the tab where it is: a drop under way stops.
+        self.imp()
+            .drop_generation
+            .set(self.imp().drop_generation.get() + 1);
         self.imp().drop_driver.finish();
         self.imp().drag.set(offset);
         self.queue_allocate();
@@ -226,6 +238,8 @@ impl TabLift {
         if from == 0.0 {
             return;
         }
+        let generation = self.imp().drop_generation.get() + 1;
+        self.imp().drop_generation.set(generation);
         let length = glass_motion::spring_settles(DROP_SPRING.0, DROP_SPRING.1);
         let weak = self.downgrade();
         self.imp().drop_driver.start(
@@ -233,7 +247,9 @@ impl TabLift {
             length,
             0.0,
             move |t| {
-                if let Some(lift) = weak.upgrade() {
+                if let Some(lift) = weak.upgrade()
+                    && lift.imp().drop_generation.get() == generation
+                {
                     let now = if t >= length || !glass_motion::animations_enabled() {
                         0.0
                     } else {
