@@ -21,21 +21,12 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         InitializeComponent();
         _window = window;
-        // Bound only once the core's words are in (CopyLoaded): this view
-        // binds its words by key, through the view model's indexer, and a
-        // binding read before the words arrive keeps showing the key
-        // (analytics_tab_overview and the rest), because a nameless
-        // PropertyChanged does not re-read an indexer. Binding then, before
-        // any figure loads, is the same as binding here but with the words.
-        ViewModel.CopyLoaded += (_, _) => DataContext ??= ViewModel;
+        DataContext = ViewModel;
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
     }
     public async Task ActivateAsync()
     {
         await ViewModel.LoadAsync();
-        // Bound already if the words arrived; bound here regardless if they
-        // did not, so the view still shows what it can.
-        DataContext ??= ViewModel;
         _activated = true;
         await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
     }
