@@ -1261,14 +1261,9 @@ public sealed partial class TracesMapView : UserControl
             builder.AddCubicBezier(new Vector2((float)c1.X, (float)c1.Y), new Vector2((float)c2.X, (float)c2.Y), new Vector2((float)b.X, (float)b.Y));
             builder.EndFigure(CanvasFigureLoop.Open);
             using CanvasGeometry path = CanvasGeometry.CreatePath(builder);
-            foreach (MapStroke stroke in MapGeometry.ArcStrokes(arc.Style, Healthy, strong, fit.Scale))
-            {
-                Color colour = stroke.Ink == "white"
-                    ? Color.FromArgb((byte)Math.Round(255 * stroke.Alpha * arc.Dim), 255, 255, 255)
-                    : Ink(stroke.Ink, stroke.Alpha * arc.Dim);
-                double offset = stroke.Moves ? MapMotion.DashPhase(seconds, fit.Scale, !motion) : 0;
-                MapPainter.Stroke(ds, path, stroke, offset, colour);
-            }
+            MapPainter.DrawArc(ds, path, arc.Style, Healthy, strong, fit.Scale, seconds, !motion, stroke => stroke.Ink == "white"
+                ? Color.FromArgb((byte)Math.Round(255 * stroke.Alpha * arc.Dim), 255, 255, 255)
+                : Ink(stroke.Ink, stroke.Alpha * arc.Dim));
         }
     }
 

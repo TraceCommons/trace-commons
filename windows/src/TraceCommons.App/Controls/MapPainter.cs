@@ -195,6 +195,24 @@ internal static class MapPainter
     }
 
     /// <summary>
+    /// One arc as the Mac draws it (FlowMapView.swift:263-297): every stroke
+    /// of <see cref="MapGeometry.ArcStrokes"/> in order, the moving dash's
+    /// phase running 18 points a second unless motion is reduced. The window
+    /// draws every arc through here, and the render test
+    /// <c>ArcsDrawTheMacsStrokes</c> reads the drawn pixels.
+    /// </summary>
+    public static void DrawArc(
+        CanvasDrawingSession ds, CanvasGeometry path, MapArcStyle style, bool healthy, bool strong, double scale,
+        double seconds, bool reduceMotion, Func<MapStroke, Color> colour)
+    {
+        foreach (MapStroke stroke in MapGeometry.ArcStrokes(style, healthy, strong, scale))
+        {
+            double offset = stroke.Moves ? MapMotion.DashPhase(seconds, scale, reduceMotion) : 0;
+            Stroke(ds, path, stroke, offset, colour(stroke));
+        }
+    }
+
+    /// <summary>
     /// A flowing arc's moving dash over <paramref name="path"/>: the second of
     /// <see cref="MapGeometry.ArcStrokes"/> for a healthy flowing arc, its
     /// phase 18 points a second from the arc's start (FlowMapView.swift:290-295,

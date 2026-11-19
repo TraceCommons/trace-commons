@@ -134,6 +134,75 @@ public static partial class RenderChecks
     }
 
     /// <summary>
+    /// The arcs as the window draws them (<see cref="MapPainter.DrawArc"/>),
+    /// read from the drawn pixels against the Mac's numbers
+    /// (FlowMapView.swift:268-294): at scale 4 a healthy flowing arc's moving
+    /// dash repeats every (4 + 8) x 4 = 48 px and is 1.4 x 1.3 x 4 = 7.28 px
+    /// thick; a dashed arc repeats every (5 + 5) x 4 = 40 px and is
+    /// 1.4 x 4 = 5.6 px thick. This replaces a check that only read the
+    /// window's source for the call (B2 of #2215).
+    /// </summary>
+    [RenderTest]
+    public static string ArcsDrawTheMacsStrokes(CanvasDevice device, string outDir)
+    {
+        (double Period, int Thick) Measure(MapArcStyle style, byte threshold)
+        {
+            const int w = 400, h = 40;
+            using var target = new CanvasRenderTarget(device, w, h, 96f);
+            using (CanvasDrawingSession ds = target.CreateDrawingSession())
+            {
+                ds.Clear(Color.FromArgb(0, 0, 0, 0));
+                using var builder = new CanvasPathBuilder(device);
+                builder.BeginFigure(10, 20);
+                builder.AddCubicBezier(new Vector2(140, 20), new Vector2(260, 20), new Vector2(390, 20));
+                builder.EndFigure(CanvasFigureLoop.Open);
+                using CanvasGeometry line = CanvasGeometry.CreatePath(builder);
+                MapPainter.DrawArc(ds, line, style, healthy: true, strong: false, 4, 0, reduceMotion: true,
+                    // Opaque, except a flowing arc's line under its dash.
+                    stroke => Color.FromArgb(
+                        style == MapArcStyle.Flowing && !stroke.Moves ? (byte)Math.Round(255 * stroke.Alpha) : (byte)255, 0, 0, 0));
+            }
+
+            byte[] px = target.GetPixelBytes();
+            bool On(int x, int y) => px[(y * w + x) * 4 + 3] >= threshold;
+            var rises = new System.Collections.Generic.List<int>();
+            for (int x = 21; x < w - 20; x++)
+            {
+                if (On(x, 20) && !On(x - 1, 20))
+                {
+                    rises.Add(x);
+                }
+            }
+
+            if (rises.Count < 3)
+            {
+                throw new InvalidOperationException($"{style}: {rises.Count} dashes drawn");
+            }
+
+            double period = (double)(rises[^1] - rises[0]) / (rises.Count - 1);
+            int column = rises[1] + 2, thick = 0;
+            for (int y = 0; y < h; y++)
+            {
+                thick += On(column, y) ? 1 : 0;
+            }
+
+            return (period, thick);
+        }
+
+        // The flowing arc's line is drawn at 0.35 under its dash: read the dash alone.
+        (double flowPeriod, int flowThick) = Measure(MapArcStyle.Flowing, 200);
+        (double dashPeriod, int dashThick) = Measure(MapArcStyle.Dashed, 128);
+        string numbers = $"flowing period={flowPeriod:F2} thick={flowThick}; dashed period={dashPeriod:F2} thick={dashThick}";
+        if (Math.Abs(flowPeriod - 48) > 1 || Math.Abs(flowThick - 7.28) > 1.5
+            || Math.Abs(dashPeriod - 40) > 1 || Math.Abs(dashThick - 5.6) > 1.5)
+        {
+            throw new InvalidOperationException(numbers + " (want 48 and ~7.3; 40 and ~5.6)");
+        }
+
+        return numbers;
+    }
+
+    /// <summary>
     /// Alpha IoU (covered at 50%) and the mean absolute difference over every
     /// channel of the premultiplied pixels, against a Mac fixture.
     /// </summary>

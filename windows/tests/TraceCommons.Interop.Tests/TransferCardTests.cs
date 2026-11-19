@@ -138,6 +138,13 @@ public class TransferCardTests
         Assert.Equal("Details", MonitorWords.NoticeDetails);
     }
 
+    /// <remarks>
+    /// Read as source text, with reason (checklist B2 of #2215): the cards'
+    /// placement and their words are decided by TransferCardFace and
+    /// NoticeCatalog, tested behaviourally above; what is left is that the
+    /// WinUI window calls them, which this macOS suite cannot mount. The box
+    /// captures of the cards on Traces and over Home are its witness.
+    /// </remarks>
     [Fact]
     public void TheWindowShowsTheCardsWhereTheMacDoes()
     {
@@ -157,6 +164,10 @@ public class TransferCardTests
         // The stack's X draws over the front card, which RefreshNotices
         // raises to 1 (box 2026-11-19: the transfer card hid it).
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
+        // Read as XAML text, with reason (checklist B2 of #2215): which of
+        // two siblings draws on top is a property of the mounted WinUI
+        // canvas, which this macOS suite cannot make. The box captures with
+        // a transfer card open are the behavioural witness (PR box section).
         Assert.Matches("x:Name=\"NoticeClose\"\\s+Canvas\\.ZIndex=\"2\"", markup);
     }
 

@@ -12,6 +12,13 @@ namespace TraceCommons.Interop.Tests;
 /// landed on these with no name: the certificate list on Traces, and the
 /// managed sessions host and the harness list on Private AI.
 /// </summary>
+/// <remarks>
+/// Read as XAML text, with reason (checklist B2 of #2215): a tab stop is a
+/// property of the mounted WinUI element, and this suite runs on macOS,
+/// where no XAML element can be made. The behaviour itself is witnessed on
+/// the test box, whose UIA Tab walk of both tabs is in the PR's box section;
+/// this check keeps the attribute from being dropped between box runs.
+/// </remarks>
 public class TabStopTests
 {
     [Theory]

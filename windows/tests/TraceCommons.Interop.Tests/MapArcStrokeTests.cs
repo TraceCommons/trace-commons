@@ -74,25 +74,9 @@ public class MapArcStrokeTests
         Assert.Equal(new[] { 8.0, 16.0 }, flowing.Dash);
     }
 
-    [Fact]
-    public void TheMapDrawsTheseStrokes()
-    {
-        string view = ShellSource("TraceCommons.App/Controls/TracesMapView.cs");
-        string painter = ShellSource("TraceCommons.App/Controls/MapPainter.cs");
-        Assert.Contains("MapGeometry.ArcStrokes(", view, StringComparison.Ordinal);
-        Assert.Contains("MapGeometry.ArcStrokes(", painter, StringComparison.Ordinal);
-        foreach (string source in new[] { view, painter })
-        {
-            Assert.DoesNotContain("MapGeometry.ArcWidth", source, StringComparison.Ordinal);
-            Assert.DoesNotContain("MapGeometry.FlowingDash", source, StringComparison.Ordinal);
-            Assert.DoesNotContain("MapGeometry.FlowingWidthFactor", source, StringComparison.Ordinal);
-        }
-    }
-
-    private static string ShellSource(string relativePath)
-    {
-        string path = Path.Combine(AppContext.BaseDirectory, "shell-source", relativePath + ".txt");
-        Assert.True(File.Exists(path), $"{relativePath} was not copied to {path}");
-        return File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
-    }
+    // The window's drawing of these strokes is read from its pixels by the
+    // render test ArcsDrawTheMacsStrokes (TraceCommons.RenderTests), which
+    // draws through MapPainter.DrawArc, the call TracesMapView makes for
+    // every arc. That the window calls it at all is seen on the box's
+    // captures, where a map with no arcs would show.
 }
