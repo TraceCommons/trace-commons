@@ -221,30 +221,22 @@ fn show_rail(app: &Rc<App>) {
 
 // --- Motion ----------------------------------------------------------------
 
-/// The slide's length: the token's quarter second, or none while the desktop
-/// has animations off, where the rail fades instead of sliding, as the
-/// Mac's does under Reduce Motion.
+/// The revealer only shows and hides the open rail; the slide in from the
+/// trailing edge and the fade are `edge_motion::SlideX`'s, on the token
+/// curve, as the Mac's `EdgeRailView` moves it.
 fn follow_motion(revealer: &gtk::Revealer) {
-    let apply = |revealer: &gtk::Revealer, animate: bool| {
-        revealer.set_transition_duration(if animate { glass::motion::SLIDE_MS } else { 0 });
-        revealer.set_transition_type(if animate {
-            gtk::RevealerTransitionType::SlideLeft
-        } else {
-            gtk::RevealerTransitionType::Crossfade
-        });
+    revealer.set_transition_duration(0);
+    revealer.set_transition_type(gtk::RevealerTransitionType::None);
+}
+
+/// How far right of its place the open rail starts: off the trailing edge,
+/// its own width and the inset beside it (`.move(edge: .trailing)`).
+fn slide_distance(row: &gtk::Box) -> f64 {
+    let width = match row.width() {
+        0 => row.measure(gtk::Orientation::Horizontal, -1).1,
+        laid_out => laid_out,
     };
-    match gtk::Settings::default() {
-        Some(settings) => {
-            apply(revealer, settings.is_gtk_enable_animations());
-            let weak = revealer.downgrade();
-            settings.connect_gtk_enable_animations_notify(move |settings| {
-                if let Some(revealer) = weak.upgrade() {
-                    apply(&revealer, settings.is_gtk_enable_animations());
-                }
-            });
-        }
-        None => apply(revealer, false),
-    }
+    f64::from(width + glass::space::EDGE_RAIL_INSET)
 }
 
 /// A monitor's place and size in desktop coordinates.
@@ -763,8 +755,9 @@ impl Rail {
             .build();
         open_row.append(&peek_card);
         open_row.append(&icons);
+        let slide = super::edge_motion::SlideX::new(&open_row);
         let revealer = gtk::Revealer::builder()
-            .child(&open_row)
+            .child(&slide)
             .visible(false)
             .build();
         follow_motion(&revealer);
@@ -787,10 +780,14 @@ impl Rail {
             let animate: crate::edge::opening::Animate = {
                 let revealer = revealer.clone();
                 let keyboard = Rc::clone(&keyboard);
+                let (slide, open_row) = (slide.clone(), open_row.clone());
                 #[cfg(all(target_os = "linux", feature = "layer-shell"))]
                 let window = window.clone();
                 Box::new(move |open, done| {
-                    revealer.set_reveal_child(open);
+                    if open {
+                        revealer.set_reveal_child(true);
+                    }
+                    slide.slide(open, slide_distance(&open_row));
                     if open {
                         done();
                     } else {
@@ -803,10 +800,18 @@ impl Rail {
                             crate::edge::layer::set_rail_keyboard(&window, takes);
                         }
                         let _ = takes;
-                        let duration = u64::from(revealer.transition_duration());
+                        let duration = if super::glass_motion::animations_enabled() {
+                            u64::from(glass::motion::SLIDE_MS)
+                        } else {
+                            0
+                        };
+                        let revealer = revealer.clone();
                         glib::timeout_add_local_once(
                             std::time::Duration::from_millis(duration + 16),
-                            done,
+                            move || {
+                                revealer.set_reveal_child(false);
+                                done();
+                            },
                         );
                     }
                 })
@@ -1693,21 +1698,41 @@ mod tests {
         gtk::init().expect("GTK display");
         let settings = gtk::Settings::default().expect("settings");
         let previous = settings.is_gtk_enable_animations();
+        // The revealer only shows and hides; the slide is `SlideX`'s.
         let revealer = gtk::Revealer::new();
-        settings.set_gtk_enable_animations(true);
         follow_motion(&revealer);
-        assert_eq!(revealer.transition_duration(), glass::motion::SLIDE_MS);
-        assert_eq!(
-            revealer.transition_type(),
-            gtk::RevealerTransitionType::SlideLeft
-        );
-        settings.set_gtk_enable_animations(false);
         assert_eq!(revealer.transition_duration(), 0);
         assert_eq!(
             revealer.transition_type(),
-            gtk::RevealerTransitionType::Crossfade
+            gtk::RevealerTransitionType::None
         );
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.set_size_request(200, 40);
+        let slide = super::super::edge_motion::SlideX::new(&row);
+        let window = gtk::Window::new();
+        window.set_child(Some(&slide));
+        window.present();
+        settings.set_gtk_enable_animations(true);
+        slide.slide(true, 220.0);
+        assert_eq!((slide.offset(), slide.opacity()), (220.0, 0.0));
+        let between = Cell::new(false);
+        let context = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while slide.sliding() && std::time::Instant::now() < deadline {
+            if slide.offset() > 1.0 && slide.offset() < 219.0 && slide.opacity() > 0.0 {
+                between.set(true);
+            }
+            if !context.iteration(false) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        assert!(between.get(), "the rail jumped into place");
+        assert_eq!((slide.offset(), slide.opacity()), (0.0, 1.0));
+        settings.set_gtk_enable_animations(false);
+        slide.slide(false, 220.0);
+        assert_eq!((slide.offset(), slide.opacity()), (220.0, 0.0));
         settings.set_gtk_enable_animations(previous);
+        window.destroy();
     }
 
     #[test]

@@ -276,6 +276,34 @@ fn pixels_are_not_premultiplied() {
 #[test]
 fn the_credit_burst_is_the_macs() {
     use credit::*;
+    // Since the base took main, the Swift is in the tree too.
+    let strip = swift("Sources/TCDesign/Components/MenuBarPanel.swift");
+    for line in [
+        "static let stripCoinCount = 10",
+        "static let stripDrag: Double = 3.8",
+        "static let stripGravity: Double = 10",
+        "static let markHopDuration: Double = 0.35",
+        "static let markHopPeak: CGFloat = 2.0",
+        "let rise = 0.15",
+        "let holdUntil = 0.7",
+        "let angle = slot * 0.88 * .pi + (GlassCoinBurst.noise(index, 21) - 0.5) * 0.14",
+        "speed: 44 + GlassCoinBurst.noise(index, 22) * 58,",
+        "return CGVector(dx: cos(coin.angle) * reach, dy: sin(coin.angle) * reach * 0.45 + fall)",
+        "let radius = (Self.height / 2) * CGFloat(0.45 + 0.55 * (t / GlassCoinBurst.flashDuration))",
+        "let flash = (1 - t / 0.3) * 0.55",
+    ] {
+        assert!(strip.contains(line), "{line}");
+    }
+    let arrival = swift("Sources/TCShellCore/BalanceArrival.swift");
+    for line in [
+        "public static let framesPerSecond: Double = 24",
+        "public static let stillAt: Double = 0.45",
+        "public static let reduceMotionHold: Duration = .milliseconds(1600)",
+        "public static let minimumReceivedNanos: Int64 = 1_000_000_000",
+        "public static let minimumCreditFinal: Double = 1.0",
+    ] {
+        assert!(arrival.contains(line), "{line}");
+    }
     assert_eq!(
         (COIN_COUNT, DRAG, GRAVITY, HOP_DURATION, HOP_PEAK),
         (10, 3.8, 10.0, 0.35, 2.0)

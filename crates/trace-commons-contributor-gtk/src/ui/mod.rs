@@ -14,6 +14,7 @@ pub(crate) mod consent_settings;
 pub mod credential;
 pub mod credit_arrival;
 mod css_contract;
+mod edge_motion;
 pub mod edge_surfaces;
 mod first_run;
 mod first_run_marker_check;
