@@ -1105,6 +1105,10 @@ public sealed partial class MainWindow
     /// <summary>Stops a card's motion and puts it at rest: opaque, in its place.</summary>
     private static void ResetMotion(FrameworkElement card)
     {
+        // A card that has never slid in has no Translation yet, and stopping
+        // an animation on a property that is not there throws E_INVALIDARG:
+        // from the constructor, a stowed exception before the first frame.
+        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
