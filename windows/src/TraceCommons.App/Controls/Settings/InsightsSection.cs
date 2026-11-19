@@ -51,6 +51,9 @@ public sealed class InsightsSection : UserControl
                 Header = label,
                 IsOn = on,
                 IsEnabled = !_switch.Busy,
+                // The Mac's switch carries no On or Off words (GlassToggleStyle).
+                OnContent = string.Empty,
+                OffContent = string.Empty,
             };
             AutomationProperties.SetName(toggle, label);
             toggle.Toggled += async (_, _) =>
