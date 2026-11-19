@@ -739,6 +739,32 @@ mod tests {
         window.destroy();
     }
 
+    /// A clock that runs on its own (not through `keep_ticking` or a
+    /// `Driver`) holds while its window is minimised or suspended, and
+    /// starts again when the window is shown: the first-run stage, the
+    /// map's clock and shimmer, the hero art, and the refresh turn.
+    #[test]
+    fn every_long_clock_holds_while_its_window_is_hidden() {
+        for (name, source) in [
+            (
+                "first_run_stage_view.rs",
+                include_str!("first_run_stage_view.rs"),
+            ),
+            ("monitor/map.rs", include_str!("monitor/map.rs")),
+            ("hero_card.rs", include_str!("hero_card.rs")),
+            ("glass_feedback.rs", include_str!("glass_feedback.rs")),
+        ] {
+            assert!(
+                source.contains("window_hidden("),
+                "{name}: its clock runs on while the window is hidden"
+            );
+            assert!(
+                source.contains("on_window_state("),
+                "{name}: its clock does not start again when the window is shown"
+            );
+        }
+    }
+
     /// Every expander the shell builds moves as `GlassExpander` does (or
     /// as the first run's disclosure, which turns only its chevron): one
     /// `expander` or `disclosure` call per expander built, file by file.

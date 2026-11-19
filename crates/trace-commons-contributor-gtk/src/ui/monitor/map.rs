@@ -488,6 +488,18 @@ mod imp {
                 obj.stop_shimmer();
                 obj.update_clock();
             });
+            // Minimised or suspended, the clock and the shimmer hold, as
+            // while unmapped; shown again, the shimmer starts over.
+            let weak = obj.downgrade();
+            crate::ui::glass_motion::on_window_state(&*obj, move |_| {
+                let Some(obj) = weak.upgrade() else { return };
+                if crate::ui::glass_motion::window_hidden(&obj) {
+                    obj.stop_shimmer();
+                } else {
+                    obj.schedule_shimmer(map_motion::SHIMMER_FIRST);
+                }
+                obj.update_clock();
+            });
 
             // Reduced motion stops the clock at once and puts everything
             // that moves at its end, and lets it run again: the shimmer
@@ -1495,7 +1507,7 @@ impl MapCanvas {
     /// again starts it (`GlassAnimationTimeline`'s visibility gate).
     fn clock_wanted(&self) -> Option<f64> {
         let imp = self.imp();
-        if !self.is_mapped() {
+        if !self.is_mapped() || crate::ui::glass_motion::window_hidden(self) {
             return None;
         }
         let reduce = reduce_motion();
@@ -1526,7 +1538,7 @@ impl MapCanvas {
         if let Some(timer) = imp.shimmer_timer.take() {
             timer.remove();
         }
-        if !self.is_mapped() || reduce_motion() {
+        if !self.is_mapped() || reduce_motion() || crate::ui::glass_motion::window_hidden(self) {
             return;
         }
         let weak = self.downgrade();
@@ -1536,7 +1548,10 @@ impl MapCanvas {
                 let imp = canvas.imp();
                 // This timer has fired: forget it rather than remove it.
                 imp.shimmer_timer.take();
-                if !canvas.is_mapped() || reduce_motion() {
+                if !canvas.is_mapped()
+                    || reduce_motion()
+                    || crate::ui::glass_motion::window_hidden(&canvas)
+                {
                     return;
                 }
                 imp.shimmer_start.set(Some(imp.now()));

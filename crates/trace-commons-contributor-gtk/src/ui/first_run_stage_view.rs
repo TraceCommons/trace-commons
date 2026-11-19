@@ -224,6 +224,17 @@ impl Stage {
                 stage.stop_ticking();
             }
         });
+        // Minimised or suspended, the stage holds; shown again, it goes on
+        // from where its clock now is.
+        let weak = Rc::downgrade(&stage);
+        super::glass_motion::on_window_state(&stage.area, move |area| {
+            if let Some(stage) = weak.upgrade() {
+                stage.stop_ticking();
+                if area.is_mapped() {
+                    stage.start_ticking();
+                }
+            }
+        });
         if let Some(settings) = gtk::Settings::default() {
             let weak = Rc::downgrade(&stage);
             settings.connect_gtk_enable_animations_notify(move |_| {
@@ -468,7 +479,10 @@ impl Stage {
     }
 
     fn start_ticking(self: &Rc<Self>) {
-        if !animations() || self.inner.borrow().tick.is_some() {
+        if !animations()
+            || super::glass_motion::window_hidden(&self.area)
+            || self.inner.borrow().tick.is_some()
+        {
             return;
         }
         let weak = Rc::downgrade(self);
@@ -476,6 +490,11 @@ impl Stage {
             let Some(stage) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if super::glass_motion::window_hidden(area) {
+                // Ended here; the window's state change starts it again.
+                stage.inner.borrow_mut().tick.take();
+                return glib::ControlFlow::Break;
+            }
             let frame = clock.frame_time();
             let at = now();
             let interval = {
