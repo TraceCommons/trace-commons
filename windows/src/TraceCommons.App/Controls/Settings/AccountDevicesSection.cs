@@ -153,7 +153,6 @@ public sealed class AccountDevicesSection : UserControl
                 panel.Children.Add(SettingsCards.Caption(surface.Copy.LinkBody));
                 var commandText = SettingsCards.Text(command, "TcMonoCodeTextStyle");
                 commandText.IsTextSelectionEnabled = true;
-                commandText.IsHyphenationEnabled = false;
                 panel.Children.Add(commandText);
                 string copyLabel = _flow.CopiedCode == waiting.Code.CodeId ? surface.Copy.Copied : surface.Copy.CopyButton;
                 panel.Children.Add(SettingsCards.Row(

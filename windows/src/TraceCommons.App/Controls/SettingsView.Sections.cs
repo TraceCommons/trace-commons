@@ -191,7 +191,7 @@ public sealed partial class SettingsView
         }
 
         bool requires;
-        if (host.IsSample)
+        if (Program.IsSampleLaunch)
         {
             requires = false;
         }

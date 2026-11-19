@@ -31,7 +31,7 @@ public sealed class ComputeSection : UserControl
     {
         _model = model;
         _configDir = host.ConfigDir;
-        _sample = host.IsSample;
+        _sample = Program.IsSampleLaunch;
         // Typing only arms Enable: rebuilding would take the field's focus.
         _allowance.TextChanged += (_, _) => ArmEnable();
         Content = _root;
