@@ -262,3 +262,44 @@ public class GlassMotionTests
         Assert.Equal(60, drawn);
     }
 }
+
+/// <summary>The ember's glide and the window's material choice.</summary>
+public class GlassLookWiringTests
+{
+    // From the Home tab (x 12, 60 wide) to Traces (x 150, 80 wide): the new
+    // ember starts over the old one (centre 42 against 190, scale 0.75) and
+    // springs to rest on the Mac's spring(0.35, 0.85).
+    [Fact]
+    public void TheEmberStartsOverTheOldTabAndSpringsHome()
+    {
+        (double tx, double sx) = TabEmberGlide.From(12, 60, 150, 80);
+        Assert.Equal(-148, tx, 9);
+        Assert.Equal(0.75, sx, 9);
+        // 0.1 s in, 0.58828 of the way (SwiftUI's spring at 0.1 s).
+        (double x, double s) = TabEmberGlide.At(tx, sx, 0.1);
+        Assert.Equal(-148 * (1 - 0.5882845611325372), x, 4);
+        Assert.Equal(0.75 + 0.25 * 0.5882845611325372, s, 4);
+        Assert.Equal((0.0, 1.0), TabEmberGlide.At(tx, sx, 10));
+        // Leftwards from Traces back to Home the sign flips.
+        Assert.True(TabEmberGlide.From(150, 80, 12, 60).TranslateX > 0);
+    }
+
+    [Fact]
+    public void MicaOnlyWhereSupportedAndNeverUnderHighContrast()
+    {
+        Assert.Equal(WindowMaterial.Mica, WindowMaterialChoice.For(micaSupported: true, highContrast: false));
+        Assert.Equal(WindowMaterial.Painted, WindowMaterialChoice.For(micaSupported: false, highContrast: false));
+        Assert.Equal(WindowMaterial.Painted, WindowMaterialChoice.For(micaSupported: true, highContrast: true));
+        Assert.Equal("TcGlassPaneOverMaterialInactiveBrush", WindowMaterialChoice.GroundKey(WindowMaterial.Mica, active: false));
+        Assert.Equal("TcGlassPaneInactiveBrush", WindowMaterialChoice.GroundKey(WindowMaterial.Painted, active: false));
+        // Every key it names is a generated brush in both schemes.
+        foreach (WindowMaterial m in new[] { WindowMaterial.Mica, WindowMaterial.Painted })
+        {
+            foreach (bool active in new[] { true, false })
+            {
+                Assert.True(GlassTokens.Brushes(true).ContainsKey(WindowMaterialChoice.GroundKey(m, active)));
+                Assert.True(GlassTokens.Brushes(false).ContainsKey(WindowMaterialChoice.GroundKey(m, active)));
+            }
+        }
+    }
+}

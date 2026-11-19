@@ -82,7 +82,9 @@
             <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#0DFFFFFF" />
             <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#380091FD" />
             <Color x:Key="TcGlassTabEmberColor">#FF0091FD</Color>
+            <Color x:Key="TcGlassTabEmberClearColor">#000091FD</Color>
             <Color x:Key="TcGlassTabEmberHaloColor">#4F0091FD</Color>
+            <Color x:Key="TcGlassTabEmberHaloClearColor">#000091FD</Color>
             <Color x:Key="TcGlassShadowPaneEdgeColor">#9902030A</Color>
             <Color x:Key="TcGlassShadowModalColor">#80000000</Color>
         </ResourceDictionary>
@@ -150,7 +152,9 @@
             <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#0A000000" />
             <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#24056BDC" />
             <Color x:Key="TcGlassTabEmberColor">#FF056BDC</Color>
+            <Color x:Key="TcGlassTabEmberClearColor">#00056BDC</Color>
             <Color x:Key="TcGlassTabEmberHaloColor">#47056BDC</Color>
+            <Color x:Key="TcGlassTabEmberHaloClearColor">#00056BDC</Color>
             <Color x:Key="TcGlassShadowPaneEdgeColor">#1F000000</Color>
             <Color x:Key="TcGlassShadowModalColor">#39000000</Color>
         </ResourceDictionary>
@@ -218,7 +222,9 @@
             <StaticResource x:Key="TcSurfaceScrimBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcSurfaceSelectedBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <Color x:Key="TcGlassTabEmberColor">Transparent</Color>
+            <Color x:Key="TcGlassTabEmberClearColor">Transparent</Color>
             <Color x:Key="TcGlassTabEmberHaloColor">Transparent</Color>
+            <Color x:Key="TcGlassTabEmberHaloClearColor">Transparent</Color>
             <Color x:Key="TcGlassShadowPaneEdgeColor">Transparent</Color>
             <Color x:Key="TcGlassShadowModalColor">Transparent</Color>
         </ResourceDictionary>

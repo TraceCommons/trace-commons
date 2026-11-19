@@ -425,3 +425,64 @@ public sealed class GlassFrameGate
     /// <summary>Forgets the last frame, so the next one draws at once when the clock starts again.</summary>
     public void Reset() => _lastDrawn = null;
 }
+
+/// <summary>
+/// The tab ember moving between tabs (Navigation.swift:288,
+/// <c>matchedGeometryEffect</c> under spring(0.35, 0.85) at :266): the ember
+/// takes its new tab's frame at once, and its visual starts where the old
+/// one was, offset and scaled about its centre, and springs to rest.
+/// </summary>
+public static class TabEmberGlide
+{
+    /// <summary>
+    /// The start of the glide: the translation along the strip and the
+    /// horizontal scale that put the new tab's ember over the old tab's.
+    /// </summary>
+    public static (double TranslateX, double ScaleX) From(double oldX, double oldWidth, double newX, double newWidth)
+    {
+        if (newWidth <= 0 || oldWidth <= 0)
+        {
+            return (0, 1);
+        }
+
+        double oldCentre = oldX + oldWidth / 2, newCentre = newX + newWidth / 2;
+        return (oldCentre - newCentre, oldWidth / newWidth);
+    }
+
+    /// <summary>The glide <paramref name="seconds"/> in: translation and scale, on the Mac's spring.</summary>
+    public static (double TranslateX, double ScaleX) At(double translateX, double scaleX, double seconds)
+    {
+        double p = GlassControlMotion.TabEmberGlide.At(seconds);
+        return (translateX * (1 - p), scaleX + (1 - scaleX) * p);
+    }
+}
+
+/// <summary>The material under the window's panes (spec W5-D1 (b)).</summary>
+public enum WindowMaterial
+{
+    /// <summary>The painted flat glass: opaque tiers, as the Mac under Reduce Transparency.</summary>
+    Painted,
+    /// <summary>Mica, with the pane's veil over it.</summary>
+    Mica,
+}
+
+/// <summary>Which material the window shows.</summary>
+public static class WindowMaterialChoice
+{
+    /// <summary>
+    /// Mica only where the system reports it supported, and never under a
+    /// high contrast theme, whose colours are the system's own; painted
+    /// glass otherwise (W5-D1 (b), checklist D4). Acrylic was not chosen.
+    /// </summary>
+    public static WindowMaterial For(bool micaSupported, bool highContrast) =>
+        micaSupported && !highContrast ? WindowMaterial.Mica : WindowMaterial.Painted;
+
+    /// <summary>The window ground's brush key for a material and focus state.</summary>
+    public static string GroundKey(WindowMaterial material, bool active) => (material, active) switch
+    {
+        (WindowMaterial.Mica, true) => "TcGlassPaneOverMaterialBrush",
+        (WindowMaterial.Mica, false) => "TcGlassPaneOverMaterialInactiveBrush",
+        (_, true) => "TcGlassPaneBrush",
+        _ => "TcGlassPaneInactiveBrush",
+    };
+}

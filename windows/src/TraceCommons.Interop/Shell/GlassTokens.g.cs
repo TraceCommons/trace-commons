@@ -234,7 +234,9 @@ public static partial class GlassTokens
         ["TcStatusOutsideTextBrush"] = "#FFFFD3D3",
         ["TcOnStatusBrush"] = "#FF0C0C0E",
         ["TcGlassTabEmberColor"] = "#FF0091FD",
+        ["TcGlassTabEmberClearColor"] = "#000091FD",
         ["TcGlassTabEmberHaloColor"] = "#4F0091FD",
+        ["TcGlassTabEmberHaloClearColor"] = "#000091FD",
         ["TcGlassShadowPaneEdgeColor"] = "#9902030A",
         ["TcGlassShadowModalColor"] = "#80000000",
     };
@@ -313,7 +315,9 @@ public static partial class GlassTokens
         ["TcStatusOutsideTextBrush"] = "#FF771814",
         ["TcOnStatusBrush"] = "#FF0C0C0E",
         ["TcGlassTabEmberColor"] = "#FF056BDC",
+        ["TcGlassTabEmberClearColor"] = "#00056BDC",
         ["TcGlassTabEmberHaloColor"] = "#47056BDC",
+        ["TcGlassTabEmberHaloClearColor"] = "#00056BDC",
         ["TcGlassShadowPaneEdgeColor"] = "#1F000000",
         ["TcGlassShadowModalColor"] = "#39000000",
     };

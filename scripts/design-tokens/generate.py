@@ -1701,8 +1701,13 @@ def windows_glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
 def windows_glass_colours(tokens: dict, scheme: str) -> dict[str, str]:
     """The Color resources: the ember line and its halo (Navigation.swift
     emberGlow), and the shadow under a floating surface and a modal."""
-    out = {"TcGlassTabEmberColor": argb(flat_color(tokens, "tabEmber", scheme), "tabEmber"),
-           "TcGlassTabEmberHaloColor": argb(flat_color(tokens, "tabEmberHalo", scheme), "tabEmberHalo")}
+    ember, halo = flat_color(tokens, "tabEmber", scheme), flat_color(tokens, "tabEmberHalo", scheme)
+    # Each with its clear twin, the same colour at alpha 0, so a gradient to
+    # nothing fades the colour out rather than through black.
+    out = {"TcGlassTabEmberColor": argb(ember, "tabEmber"),
+           "TcGlassTabEmberClearColor": argb(dict(ember, alpha=0), "tabEmber"),
+           "TcGlassTabEmberHaloColor": argb(halo, "tabEmberHalo"),
+           "TcGlassTabEmberHaloClearColor": argb(dict(halo, alpha=0), "tabEmberHalo")}
     for name in ("paneEdge", "modal"):
         out[f"TcGlassShadow{pascal(name)}Color"] = argb(flat_layers(tokens, name, scheme)[0], name)
     return out
@@ -1773,8 +1778,8 @@ def render_windows_glass(tokens: dict) -> str:
         if job is None:
             raise TokenError(f"windows high contrast: no system colour for {key}")
         out.append(f'            <StaticResource x:Key="{key}" ResourceKey="{WINDOWS_HC[job]}" />')
-    out.append('            <Color x:Key="TcGlassTabEmberColor">Transparent</Color>')
-    out.append('            <Color x:Key="TcGlassTabEmberHaloColor">Transparent</Color>')
+    for key in ("TcGlassTabEmberColor", "TcGlassTabEmberClearColor", "TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
+        out.append(f'            <Color x:Key="{key}">Transparent</Color>')
     out.append('            <Color x:Key="TcGlassShadowPaneEdgeColor">Transparent</Color>')
     out.append('            <Color x:Key="TcGlassShadowModalColor">Transparent</Color>')
     out.append("        </ResourceDictionary>")

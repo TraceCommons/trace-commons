@@ -24,6 +24,7 @@
     xmlns:vm="using:TraceCommons.App.ViewModels"
     xmlns:interop="using:TraceCommons.Interop"
     xmlns:controls="using:TraceCommons.App.Controls"
+    xmlns:look="using:TraceCommons.App.Look"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -301,6 +302,40 @@
                         </Grid>
                     </controls:MonitorTabButton>
                 </StackPanel>
+
+                <!--
+                    The ember under the tab shown (spec W5; GlassRuleTabs.emberGlow,
+                    Navigation.swift:313-339): a halo behind the title, brightest
+                    at the rule under its middle and gone by 26 up and by the
+                    tab's sides, and a 2 high line, clear, ember, clear, reaching
+                    30 percent past each side, centred on the 1 high rule. Placed
+                    and glided between tabs from code (MainWindow.Look.cs) on the
+                    Mac's spring(0.35, 0.85). Decorative: no hit test, no name.
+                -->
+                <Canvas x:Name="TabEmberLayer"
+                        Grid.Row="0"
+                        IsHitTestVisible="False"
+                        AutomationProperties.AccessibilityView="Raw">
+                    <Grid x:Name="TabEmber" Height="36">
+                        <Rectangle x:Name="TabEmberHalo" Height="26" VerticalAlignment="Bottom" Margin="0,0,0,1">
+                            <Rectangle.Fill>
+                                <RadialGradientBrush Center="0.5,1" GradientOrigin="0.5,1" RadiusX="0.5" RadiusY="1">
+                                    <GradientStop Offset="0" Color="{ThemeResource TcGlassTabEmberHaloColor}" />
+                                    <GradientStop Offset="1" Color="{ThemeResource TcGlassTabEmberHaloClearColor}" />
+                                </RadialGradientBrush>
+                            </Rectangle.Fill>
+                        </Rectangle>
+                        <Rectangle x:Name="TabEmberLine" Height="2" VerticalAlignment="Bottom" Margin="0,0,0,-0.5">
+                            <Rectangle.Fill>
+                                <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                    <GradientStop Offset="0" Color="{ThemeResource TcGlassTabEmberClearColor}" />
+                                    <GradientStop Offset="0.5" Color="{ThemeResource TcGlassTabEmberColor}" />
+                                    <GradientStop Offset="1" Color="{ThemeResource TcGlassTabEmberClearColor}" />
+                                </LinearGradientBrush>
+                            </Rectangle.Fill>
+                        </Rectangle>
+                    </Grid>
+                </Canvas>
 
                 <!-- The breadcrumb on a sub-page (MonitorWindowView.swift:749-769),
                      built from code with the core's words. -->
@@ -1485,10 +1520,11 @@
                         </Grid>
                     </StackPanel>
 
-                    <ProgressBar Grid.Row="6"
-                                 IsIndeterminate="True"
-                                 Foreground="{ThemeResource TcGreenFillBrush}"
-                                 Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                    <!-- Work under way: the Mac's spinner (W5-D3), in place of
+                         the stock indeterminate bar. -->
+                    <look:GlassSpinner Grid.Row="6"
+                                       HorizontalAlignment="Left"
+                                       Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                 </Grid>
 
 
