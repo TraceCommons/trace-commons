@@ -1511,7 +1511,7 @@ impl MapCanvas {
     /// again starts it (`GlassAnimationTimeline`'s visibility gate).
     fn clock_wanted(&self) -> Option<f64> {
         let imp = self.imp();
-        if !self.is_mapped() || crate::ui::glass_motion::window_hidden(self) {
+        if !self.is_mapped() {
             return None;
         }
         let reduce = reduce_motion();
@@ -1542,7 +1542,7 @@ impl MapCanvas {
         if let Some(timer) = imp.shimmer_timer.take() {
             timer.remove();
         }
-        if !self.is_mapped() || reduce_motion() || crate::ui::glass_motion::window_hidden(self) {
+        if !self.is_mapped() || reduce_motion() {
             return;
         }
         let weak = self.downgrade();

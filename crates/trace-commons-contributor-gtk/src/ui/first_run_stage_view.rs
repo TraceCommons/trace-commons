@@ -479,9 +479,7 @@ impl Stage {
     }
 
     fn start_ticking(self: &Rc<Self>) {
-        if !animations()
-            || super::glass_motion::window_hidden(&self.area)
-            || self.inner.borrow().tick.is_some()
+        if !animations() || self.inner.borrow().tick.is_some()
         {
             return;
         }
@@ -490,7 +488,7 @@ impl Stage {
             let Some(stage) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if super::glass_motion::window_hidden(area) {
+            if false && super::glass_motion::window_hidden(area) {
                 // Ended here; the window's state change starts it again.
                 stage.inner.borrow_mut().tick.take();
                 return glib::ControlFlow::Break;
