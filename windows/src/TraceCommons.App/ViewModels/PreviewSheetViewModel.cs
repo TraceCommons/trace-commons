@@ -1139,17 +1139,20 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         RemovedCategories.Clear();
         StillPresentCategories.Clear();
-        (IReadOnlyList<RedactionSummaryRow> removed,
-         IReadOnlyList<RedactionSummaryRow> stillPresent) =
-            RedactionSummary.Rows(summary.Redactions, summary.RedactionsDistinct);
-        foreach (RedactionSummaryRow row in removed)
+        // The core's two lists (tc_redaction_summary_json). An unreadable
+        // answer leaves both empty: the panel then says nothing, rather than
+        // claim that nothing matched (RedactionSummary.swift:72-80).
+        if (RedactionSummary.Rows(summary.Redactions, summary.RedactionsDistinct) is var (removed, stillPresent))
         {
-            RemovedCategories.Add(row);
-        }
+            foreach (RedactionSummaryRow row in removed)
+            {
+                RemovedCategories.Add(row);
+            }
 
-        foreach (RedactionSummaryRow row in stillPresent)
-        {
-            StillPresentCategories.Add(row);
+            foreach (RedactionSummaryRow row in stillPresent)
+            {
+                StillPresentCategories.Add(row);
+            }
         }
 
         // The core's title for each scope (the disclosure bundle's

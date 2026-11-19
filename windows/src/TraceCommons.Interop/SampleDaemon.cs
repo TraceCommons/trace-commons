@@ -215,4 +215,22 @@ public sealed class SampleDaemon
             ["error"] = new JsonObject { ["code"] = "unavailable", ["message"] = label },
         }.ToJsonString();
 }
+/// <summary>
+/// The Missions page's catalogue in a sample launch: the Mac's hand-written
+/// PROVISIONAL catalogue (<c>SampleDaemonData.provisionalMissionCatalogue</c>,
+/// SampleDaemonData.swift:402-403, marked <c>"no source yet"</c>), served
+/// for every set as the Mac serves it (<c>serveProvisional</c>,
+/// SampleDaemonClient.swift:573). Synthetic, never a pilot observation, and
+/// read by nothing outside a sample launch: the live page has no source for
+/// this shape (LiveDaemonClient.swift:439-441).
+/// </summary>
+public static class MissionSamples
+{
+    /// <summary>The Mac's string, byte for byte.</summary>
+    public const string ProvisionalCatalogue =
+        "{\"_sample\":\"no source yet\",\"fetched_at\":\"2026-09-30T06:00:00Z\",\"posture\":{\"settlement\":\"disabled\",\"graded\":false,\"explanation\":\"Sample settlement explanation, supplied by the commons\"},\"missions\":[{\"id\":\"mission-sample-1\",\"title\":\"Debug a failing test\",\"summary\":\"Failing test found, then fixed\",\"credit_range\":{\"min\":5,\"max\":20,\"unit\":\"points\"}},{\"id\":\"mission-sample-2\",\"title\":\"Review a pull request\",\"summary\":null,\"credit_range\":null}]}";
+
+    /// <summary>The catalogue a set's Missions page reads: none in <c>coreDown</c>, whose every read fails.</summary>
+    public static string? For(string set) => set == SampleDaemon.CoreDown ? null : ProvisionalCatalogue;
+}
 #endif
