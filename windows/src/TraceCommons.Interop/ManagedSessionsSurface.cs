@@ -173,6 +173,31 @@ public sealed record ManagedSnapshot(
         return request;
     }
 
+    /// <summary>
+    /// The <c>managed_launch_prepare</c> request the saved-account Launch
+    /// dialog sends: <paramref name="account"/> in <paramref name="cwd"/>,
+    /// decided at send time. Null when the folder is not fully qualified, or
+    /// for OpenCode without a model (checklist L4, the sibling of
+    /// <see cref="SignInLaunchParams"/>). The wire shape is the one the
+    /// dialog sent before: <c>model</c> null and no collection for any other
+    /// tool.
+    /// </summary>
+    public Dictionary<string, object?>? AccountLaunchParams(
+        ManagedAccount account, string? cwd, string? model, bool collectTraces, string requestId)
+    {
+        if (!ManagedLaunchFolder.IsAcceptable(cwd)) return null;
+        bool openCode = account.Tool == "opencode";
+        string? trimmed = openCode ? model?.Trim() : null;
+        if (openCode && string.IsNullOrEmpty(trimmed)) return null;
+        return new Dictionary<string, object?>
+        {
+            ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = account.Tool,
+            ["connection"] = account.Connection, ["account_id"] = account.Id, ["cwd"] = cwd,
+            ["expected_generation"] = Generations.GetValueOrDefault(account.Tool), ["save_default"] = false,
+            ["model"] = trimmed, ["collect_traces"] = openCode && collectTraces,
+        };
+    }
+
     /// <summary>What the sign-in card holds at its foot (ManagedSessionsView.swift:119-129).</summary>
     [JsonIgnore] public ManagedToolArea ToolArea =>
         !Capabilities.TerminalLaunch ? ManagedToolArea.NoTerminal

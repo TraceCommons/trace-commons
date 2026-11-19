@@ -109,6 +109,38 @@ public sealed class LaunchTests
         }
     }
 
+    [Theory]
+    [InlineData(@"C:\Users\x\proj", true)]
+    [InlineData(@"C:proj", false)]
+    [InlineData(@"proj", false)]
+    public void TheSavedAccountLaunchSendsOnlyAFullyQualifiedFolder(string folder, bool sent)
+    {
+        // The sibling launch path (checklist L4): the saved-account Launch
+        // dialog's typed folder takes the same rule as the sign-in start.
+        var account = new ManagedAccount("a", "claude", "subscription", "Work", "ready");
+        var request = Snapshot().AccountLaunchParams(account, folder, model: null, collectTraces: false, "r");
+        Assert.Equal(sent, request is not null);
+        if (request is not null)
+        {
+            Assert.Equal(folder, request["cwd"]);
+            Assert.Equal("a", request["account_id"]);
+            Assert.Equal("coding", request["purpose"]);
+            Assert.Equal(false, request["save_default"]);
+            Assert.Null(request["model"]);
+            Assert.Equal(false, request["collect_traces"]);
+        }
+    }
+
+    [Fact]
+    public void AnOpenCodeAccountLaunchCarriesItsModelAndCollection()
+    {
+        var account = new ManagedAccount("o", "opencode", "api_key", "Keys", "ready");
+        var request = Snapshot().AccountLaunchParams(account, @"C:\p", model: " provider/model ", collectTraces: true, "r")!;
+        Assert.Equal("provider/model", request["model"]);
+        Assert.Equal(true, request["collect_traces"]);
+        Assert.Null(Snapshot().AccountLaunchParams(account, @"C:\p", model: "  ", collectTraces: false, "r"));
+    }
+
     [Fact]
     public void TheOpenButtonNamesTheTool()
     {

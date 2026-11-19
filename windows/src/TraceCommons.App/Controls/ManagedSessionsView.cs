@@ -471,7 +471,9 @@ public sealed class ManagedSessionsView : UserControl
         model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
         if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
+        // Decided from the typed folder at send time (L4).
+        if (_snapshot.AccountLaunchParams(selected, project.Text, model.Text, collect.IsChecked == true, Guid.NewGuid().ToString()) is not { } request) return;
         if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
-        await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false, model = selected.Tool == "opencode" ? model.Text.Trim() : null, collect_traces = selected.Tool == "opencode" && collect.IsChecked == true }));
+        await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }
 }
