@@ -432,6 +432,14 @@ public sealed partial class MainWindow
 
     private double Scale => Content?.XamlRoot?.RasterizationScale ?? 1.0;
 
+    /// <summary>
+    /// The width the panes are laid out in, from the window, never from
+    /// PaneRow: the row is arranged from the columns LayoutPanes sets, so once
+    /// they were wider than the window the row kept that width and the main
+    /// pane stayed clipped after the inspector closed.
+    /// </summary>
+    private double ClientWidth => MonitorPaneLayout.ClientWidth(AppWindow.ClientSize.Width, Scale);
+
     private bool IsMaximized =>
         AppWindow.Presenter is OverlappedPresenter presenter && presenter.State == OverlappedPresenterState.Maximized;
 
@@ -451,7 +459,7 @@ public sealed partial class MainWindow
 
         int generation = ++_moveGeneration;
         _moveTimer?.Stop();
-        if (IsMaximized || PaneRow.ActualWidth <= 0)
+        if (IsMaximized || ClientWidth <= 0)
         {
             _transition = null;
             _presented = next;
@@ -459,7 +467,7 @@ public sealed partial class MainWindow
             return;
         }
 
-        double clientWidth = PaneRow.ActualWidth;
+        double clientWidth = ClientWidth;
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
         RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         var workArea = new LayoutRect(work.X, work.Y, work.Width, work.Height);
@@ -515,7 +523,7 @@ public sealed partial class MainWindow
     /// <summary>Sets the columns from the Mac's arithmetic at the row's width.</summary>
     private void LayoutPanes()
     {
-        double width = PaneRow.ActualWidth;
+        double width = ClientWidth;
         MonitorPaneLayout layout = _transition is PaneTransition transition
             ? MonitorPaneLayout.For(width, transition)
             : MonitorPaneLayout.For(width, _presented.Map, _presented.Inspector, _keptMain);
@@ -584,9 +592,18 @@ public sealed partial class MainWindow
             return;
         }
 
+        // While a minimised window is restored the title bar reports a
+        // negative inset and the scale can be unusable: the last good widths
+        // and regions are kept rather than moving the toolbar under the
+        // caption buttons (TitleBarRegions.InsetDips).
         double scale = Scale;
-        RightInsetColumn.Width = new GridLength(AppWindow.TitleBar.RightInset / scale);
-        LeftInsetColumn.Width = new GridLength(AppWindow.TitleBar.LeftInset / scale);
+        if (!TitleBarRegions.IsUsableScale(scale))
+        {
+            return;
+        }
+
+        RightInsetColumn.Width = new GridLength(TitleBarRegions.InsetDips(AppWindow.TitleBar.RightInset, scale, RightInsetColumn.Width.Value));
+        LeftInsetColumn.Width = new GridLength(TitleBarRegions.InsetDips(AppWindow.TitleBar.LeftInset, scale, LeftInsetColumn.Width.Value));
 
         var rects = new List<LayoutRect>();
         foreach (FrameworkElement element in new FrameworkElement[] { ToolbarCapsule, SettingsGear })
@@ -621,6 +638,12 @@ public sealed partial class MainWindow
         if (args.DidSizeChange)
         {
             UpdateTitleBarRegions();
+            // PaneRow's own SizeChanged does not fire once its fixed columns
+            // are wider than the window: the window's size is what changed.
+            if (!(sender.Presenter is OverlappedPresenter shown && shown.State == OverlappedPresenterState.Minimized))
+            {
+                LayoutPanes();
+            }
         }
     }
 

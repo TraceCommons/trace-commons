@@ -553,6 +553,7 @@
                                             BorderThickness="0"
                                             Padding="0"
                                             Tag="{x:Bind}"
+                                            AutomationProperties.Name="{x:Bind ProjectLabel}"
                                             Click="OnOpenFolder">
                                         <Grid ColumnDefinitions="*,Auto,Auto,Auto"
                                               ColumnSpacing="12">

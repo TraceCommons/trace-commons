@@ -225,6 +225,15 @@ public sealed record MonitorPaneLayout(double Main, double? Map, double? Inspect
     public static int ToPhysical(double dips, double scale) => (int)Math.Ceiling(dips * scale - 1e-9);
 
     /// <summary>
+    /// The window's client width in device-independent units, the width the
+    /// panes are laid out in. Read from the window, never from the pane row:
+    /// the row is arranged from the columns this layout sets, so once they are
+    /// wider than the window the row never reports the window narrowing.
+    /// </summary>
+    public static double ClientWidth(int clientPixels, double scale) =>
+        double.IsFinite(scale) && scale > 0 && clientPixels > 0 ? clientPixels / scale : 0;
+
+    /// <summary>
     /// The panes a window opens with before the person has chosen
     /// (ThreePane.swift:208-210): the map from 1100, the inspector from 900,
     /// measured on the work area's width in device-independent units.

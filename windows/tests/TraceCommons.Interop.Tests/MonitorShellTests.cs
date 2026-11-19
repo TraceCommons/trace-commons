@@ -373,6 +373,32 @@ public class MonitorShellTests
         Assert.Equal(new[] { (13, 7, 101, 41) }, rects); // 10.5*1.25 = 13.125 down, 90.7*1.25 = 113.375 up; 6*1.25 = 7.5 down, 38*1.25 = 47.5 up
     }
 
+    [Fact]
+    public void CaptionInsetKeepsItsLastWidthWhenTheTitleBarReportsNoneWhileRestoring()
+    {
+        // Restoring a minimised window raises AppWindow.Changed with
+        // RightInset -8 (test box, 2026-11-19). GridLength threw on it inside
+        // that event, which fails the process fast; read as 0 instead, the
+        // toolbar slid under the caption buttons and stayed there, because no
+        // later size change re-read the inset, so a click on the inspector
+        // toggle maximised the window. The last good width is kept.
+        Assert.Equal(110.4, TitleBarRegions.InsetDips(138, 1.25, 0), 9);
+        Assert.Equal(0, TitleBarRegions.InsetDips(0, 1.0, 144));
+        Assert.Equal(144, TitleBarRegions.InsetDips(-8, 1.0, 144));
+        Assert.Equal(110.4, TitleBarRegions.InsetDips(138, 0, 110.4), 9);
+        Assert.Equal(110.4, TitleBarRegions.InsetDips(138, double.NaN, 110.4), 9);
+        Assert.Equal(144, TitleBarRegions.InsetDips(double.PositiveInfinity, 1.0, 144));
+    }
+
+    [Fact]
+    public void NoPassthroughRegionsAtAScaleThatIsNotAPositiveNumber()
+    {
+        var control = new[] { new LayoutRect(10, 6, 80, 32) };
+        Assert.Empty(TitleBarRegions.Passthrough(control, 0));
+        Assert.Empty(TitleBarRegions.Passthrough(control, double.NaN));
+        Assert.Empty(TitleBarRegions.Passthrough(control, double.PositiveInfinity));
+    }
+
     // ---- Clocks ----------------------------------------------------------
 
     [Fact]

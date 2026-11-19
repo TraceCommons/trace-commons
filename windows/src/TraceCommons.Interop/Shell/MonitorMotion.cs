@@ -206,9 +206,29 @@ public static class TitleBarRegions
     /// rounded down and the right and bottom edges rounded up, so the region
     /// always covers the element. Empty elements are left out.
     /// </summary>
+    /// <summary>
+    /// A caption-button inset reported by the title bar (physical pixels) as a
+    /// column width in device-independent units. A reading that is not a
+    /// usable number keeps <paramref name="previousDips"/>: while a minimised
+    /// window is restored, AppWindow.Changed reports RightInset -8, and no
+    /// later size change reads it again.
+    /// </summary>
+    public static double InsetDips(double physicalInset, double scale, double previousDips) =>
+        IsPositive(scale) && double.IsFinite(physicalInset) && physicalInset >= 0 ? physicalInset / scale : previousDips;
+
+    /// <summary>Whether a rasterization scale can convert between units.</summary>
+    public static bool IsUsableScale(double scale) => IsPositive(scale);
+
+    private static bool IsPositive(double value) => double.IsFinite(value) && value > 0;
+
     public static IReadOnlyList<(int X, int Y, int Width, int Height)> Passthrough(IEnumerable<LayoutRect> dips, double scale)
     {
         var rects = new List<(int, int, int, int)>();
+        if (!IsPositive(scale))
+        {
+            return rects;
+        }
+
         foreach (LayoutRect r in dips)
         {
             if (r.Width <= 0 || r.Height <= 0)

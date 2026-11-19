@@ -184,4 +184,16 @@ public class MonitorPaneLayoutTests
         Assert.Equal(gap, layout.MapGap);
         Assert.Equal(lower, MonitorPaneLayout.WindowWidthLowerLimit(transition));
     }
+
+    [Fact]
+    public void TheClientWidthComesFromTheWindowAndIsZeroAtAScaleThatIsNotAPositiveNumber()
+    {
+        // A minimised window can report a scale of 0; an infinite width would
+        // reach GridLength, which throws inside AppWindow.Changed.
+        Assert.Equal(880, MonitorPaneLayout.ClientWidth(1100, 1.25), 9);
+        Assert.Equal(440, MonitorPaneLayout.ClientWidth(440, 1.0), 9);
+        Assert.Equal(0, MonitorPaneLayout.ClientWidth(500, 0));
+        Assert.Equal(0, MonitorPaneLayout.ClientWidth(500, double.NaN));
+        Assert.Equal(0, MonitorPaneLayout.ClientWidth(-32000, 1.0));
+    }
 }
