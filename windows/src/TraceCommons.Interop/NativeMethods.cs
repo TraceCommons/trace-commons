@@ -1228,6 +1228,18 @@ internal static class NativeMethods
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_first_run_copy_json();
 
+    // The first run's Terms step and Traces line (W7). tc_terms_document_json
+    // fetches the published terms (blocking; call off the UI thread) and sets
+    // *err to an owned label on failure; tc_first_run_estimate_line words the
+    // Traces line from {"traces": n, "earns_credit": b}, NULL for none. Both
+    // return owned strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_terms_document_json(out IntPtr err);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_first_run_estimate_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string request);
+
     // Owned JSON strings; release with tc_string_free.
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_managed_tools_json();
