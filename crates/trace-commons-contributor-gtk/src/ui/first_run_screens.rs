@@ -176,12 +176,12 @@ pub(super) fn private_ai_body(connectable: &[Found], found: usize) -> gtk::Box {
     ] {
         detail.append(&body_label(text));
     }
-    root.append(
-        &gtk::Expander::builder()
-            .label(copy.private_ai.learn_more)
-            .child(&detail)
-            .build(),
-    );
+    let more = gtk::Expander::builder()
+        .label(copy.private_ai.learn_more)
+        .child(&detail)
+        .build();
+    super::glass_motion::expander(&more);
+    root.append(&more);
     root
 }
 

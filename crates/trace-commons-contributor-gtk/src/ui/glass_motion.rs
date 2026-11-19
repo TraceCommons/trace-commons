@@ -311,6 +311,43 @@ impl Tween {
     }
 }
 
+/// `GlassExpander`'s details: opened, they fade in over `motion.fast` on
+/// the token curve (the toggle runs in `withAnimation(GlassMotion.fast)`,
+/// and SwiftUI's default transition is opacity). Closed, they go at once:
+/// the toolkit takes the child out of the expander, so nothing is left to
+/// fade. The chevron's turn is `motion_css`'s.
+pub fn expander(expander: &gtk::Expander) {
+    let tween = Tween::new(1.0);
+    expander.connect_expanded_notify(move |expander| {
+        let Some(child) = expander.child() else {
+            return;
+        };
+        if !expander.is_expanded() {
+            tween.set(1.0, |_| {});
+            child.set_opacity(1.0);
+            return;
+        }
+        tween.set(0.0, |_| {});
+        child.set_opacity(0.0);
+        let weak = child.downgrade();
+        tween.to(expander, 1.0, motion::FAST, curve, move |opacity| {
+            if let Some(child) = weak.upgrade() {
+                child.set_opacity(opacity);
+            }
+        });
+    });
+}
+
+/// The first run's folder disclosure (`ToolsScreen`'s repo rows): the
+/// chevron turns over `motion.standard`, and the past traces appear at
+/// once, since the Mac animates only the chevron there.
+pub fn disclosure(expander: &gtk::Expander) {
+    expander.add_css_class(DISCLOSURE_CLASS);
+}
+
+/// The class `motion_css` turns a disclosure's chevron by.
+pub const DISCLOSURE_CLASS: &str = "tc-disclosure-standard";
+
 /// Runs `frame(seconds)` on `widget`'s frame clock, at most once per
 /// `interval` (0: every frame), while the widget is mapped, its window is
 /// neither minimised nor suspended, and motion is wanted. The seconds
@@ -677,6 +714,78 @@ mod tests {
         settings.set_gtk_enable_animations(true);
         pump_until(&|| frames.borrow().len() > count + 1);
         assert!(frames.borrow().len() > count + 1, "it did not start again");
+        window.destroy();
+    }
+
+    /// Every expander the shell builds moves as `GlassExpander` does (or
+    /// as the first run's disclosure, which turns only its chevron): one
+    /// `expander` or `disclosure` call per expander built, file by file.
+    #[test]
+    fn every_expander_takes_the_macs_motion() {
+        let sources = [
+            ("first_run.rs", include_str!("first_run.rs")),
+            ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+            ("history.rs", include_str!("history.rs")),
+            ("insights.rs", include_str!("insights.rs")),
+            ("private_inference.rs", include_str!("private_inference.rs")),
+            ("queue.rs", include_str!("queue.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("monitor/summary.rs", include_str!("monitor/summary.rs")),
+            (
+                "monitor/transfer_card.rs",
+                include_str!("monitor/transfer_card.rs"),
+            ),
+        ];
+        let mut total = 0;
+        for (name, source) in sources {
+            let built = source.matches("gtk::Expander::builder()").count()
+                + source.matches("gtk::Expander::new(").count();
+            let moved = source.matches("glass_motion::expander(").count()
+                + source.matches("glass_motion::disclosure(").count();
+            assert!(
+                built > 0,
+                "{name} builds no expander: drop it from the list"
+            );
+            assert_eq!(built, moved, "{name}: {built} built, {moved} moved");
+            total += built;
+        }
+        // Each file that builds one is listed: a new file must join it.
+        assert_eq!(total, 15);
+    }
+
+    /// An opened expander's details fade in over `motion.fast`, passing
+    /// through the middle; with motion off they are whole at once.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_an_opened_expanders_details_fade_in() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let details = gtk::Label::new(Some("details"));
+        let control = gtk::Expander::builder()
+            .label("more")
+            .child(&details)
+            .build();
+        expander(&control);
+        let window = gtk::Window::new();
+        window.set_child(Some(&control));
+        window.present();
+        pump_until(&|| control.is_mapped());
+        control.set_expanded(true);
+        assert_eq!(details.opacity(), 0.0, "the details start clear");
+        let between = std::cell::Cell::new(false);
+        pump_until(&|| {
+            let o = details.opacity();
+            between.set(between.get() || (o > 0.0 && o < 1.0));
+            o == 1.0
+        });
+        assert!(between.get(), "no frame between clear and whole");
+        assert_eq!(details.opacity(), 1.0);
+        control.set_expanded(false);
+        settings.set_gtk_enable_animations(false);
+        control.set_expanded(true);
+        assert_eq!(details.opacity(), 1.0, "motion off: whole at once");
+        settings.set_gtk_enable_animations(true);
         window.destroy();
     }
 }

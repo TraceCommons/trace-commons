@@ -390,6 +390,7 @@ fn section(title: &str, content: &impl IsA<gtk::Widget>) -> gtk::Box {
     card.add_css_class("tc-glass-card-quiet");
     card.add_css_class("tc-summary-section");
     let expander = gtk::Expander::builder().expanded(true).build();
+    super::super::glass_motion::expander(&expander);
     let label = text(title, &["tc-type-label", "tc-summary-section-title"]);
     expander.set_label_widget(Some(&label));
     let inner = content.as_ref();

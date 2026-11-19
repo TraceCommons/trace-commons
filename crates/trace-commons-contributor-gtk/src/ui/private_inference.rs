@@ -207,6 +207,7 @@ impl PrivateInferenceView {
             .label(copy::PRIVATE_INFERENCE_TITLE)
             .child(&card)
             .build();
+        super::glass_motion::expander(&expander);
         service.append(&expander);
         service.append(&status);
         content.append(&service);
@@ -515,6 +516,7 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         .label(copy::HARNESS_PREVIEW_TITLE)
         .expanded(false)
         .build();
+    super::glass_motion::expander(&details);
     let settings = gtk::Box::new(gtk::Orientation::Vertical, space::M);
     settings.set_margin_top(space::S);
     for text in row

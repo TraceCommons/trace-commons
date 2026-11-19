@@ -990,6 +990,7 @@ impl Coordinator {
                         .label(copy.rules.past_sessions)
                         .child(&history)
                         .build();
+                    super::glass_motion::disclosure(&more);
                     more.connect_expanded_notify({
                         let weak = Rc::downgrade(&c);
                         let id = project.project_id.clone();

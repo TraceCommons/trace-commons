@@ -381,6 +381,7 @@ impl SettingsView {
         // port. Where it has not they are the only way to answer, and
         // `render_routing` opens this.
         let routing_override = gtk::Expander::new(Some(copy::IRONWIRE_OVERRIDE_TITLE));
+        super::glass_motion::expander(&routing_override);
         let routing_override_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         routing_override.set_child(Some(&routing_override_box));
         routing_card.append(&routing_override);
@@ -488,6 +489,7 @@ impl SettingsView {
         // every refusing state: a card that says nothing is being sent must
         // not fold the thing that ends that out of sight.
         let witness_form = gtk::Expander::new(Some(copy::WITNESS_CONFIGURE));
+        super::glass_motion::expander(&witness_form);
         let witness_form_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         witness_form.set_child(Some(&witness_form_box));
         witness_card.append(&witness_form);

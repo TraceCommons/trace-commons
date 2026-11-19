@@ -310,6 +310,7 @@ impl QueueView {
             .margin_end(space::XL)
             .margin_top(space::M)
             .build();
+        super::glass_motion::expander(&first_contribution);
         let steps = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         for text in [
             guide.start,
@@ -603,6 +604,7 @@ pub fn render(app: &Rc<App>) {
         let expander = gtk::Expander::builder()
             .label(copy::no_longer_waiting(total))
             .build();
+        super::glass_motion::expander(&expander);
         let inner = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         inner.set_margin_top(space::S);
         for (label, count) in counts.iter() {

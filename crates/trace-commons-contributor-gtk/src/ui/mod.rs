@@ -283,7 +283,7 @@ pub struct App {
     pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
     /// Whether `history_rollup` has answered at all, worked or failed: until
     /// it has, the summary's contributed line is a skeleton bar
-    /// (`HomeStore.isLoading("history_rollup")`).
+    /// (the Mac's `HomeStore.isLoading` for that read).
     pub summary_rollup_answered: std::cell::Cell<bool>,
     /// The commons' statement of what pending credit waits on, from the
     /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
