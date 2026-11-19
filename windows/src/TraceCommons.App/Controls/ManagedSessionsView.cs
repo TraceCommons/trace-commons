@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -258,40 +259,97 @@ public sealed class ManagedSessionsView : UserControl
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         if (signedIn)
         {
-            // Left out while there is no terminal to start in; the line
-            // under the accounts' actions says so.
-            if (_snapshot.Capabilities.TerminalLaunch)
+            // A button for each tool, its logo and name (owner, 2026-10-19;
+            // ManagedSessionsView.swift:144-158), while there is a terminal
+            // to start in; the line under the accounts' actions says when
+            // there is none, and the install block when none is installed.
+            if (_snapshot.ToolArea == ManagedToolArea.Buttons)
             {
-                foreach (string tool in ManagedSignIn.Tools)
+                foreach (string tool in _snapshot.SignInStartTools)
                 {
-                    if (_snapshot.SignInEntry(tool) is null || ManagedSignIn.StartKey(tool) is not string key) continue;
-                    actions.Children.Add(Button(key, () => StartAsync(tool)));
+                    if (ManagedSignIn.StartKey(tool) is not string key) continue;
+                    actions.Children.Add(ToolButton(tool, key));
                 }
             }
-        }
-        else if (_signIn is not null)
-        {
-            var signIn = Button("sign_in_near_ai", _signIn);
-            AutomationProperties.SetName(signIn, T("sign_in_near_ai_accessibility"));
-            actions.Children.Add(signIn);
         }
         if (actions.Children.Count > 0) section.Children.Add(actions);
         _root.Children.Add(section);
     }
 
-    /// <summary>The folder picker the launch dialog uses, then the launch.</summary>
+    /// <summary>
+    /// A tool's launch button (ManagedFolderExplainer.swift:142-171): its
+    /// logo in its tint (or its initials) and its name, named for assistive
+    /// tech by the core's Start label, as the Mac's
+    /// <c>.accessibilityLabel(startKey)</c>.
+    /// </summary>
+    private Button ToolButton(string tool, string startKey)
+    {
+        var face = new StackPanel { Orientation = Orientation.Horizontal, Spacing = LaunchHandoff.ButtonSpacing };
+        face.Children.Add(StepGeometry.Mark(tool, LaunchHandoff.ButtonLogoSide, 10));
+        face.Children.Add(new TextBlock { Text = T(tool), MaxLines = 1, VerticalAlignment = VerticalAlignment.Center });
+        var button = new Button { Content = face, IsEnabled = !_busy };
+        AutomationProperties.SetName(button, T(startKey));
+        button.Click += async (_, _) => await RunAsync(() => StartAsync(tool));
+        return button;
+    }
+
+    /// <summary>
+    /// A tool's launch dialog (owner, 2026-10-19; ManagedFolderExplainer.swift:11-140):
+    /// the Start label as its title, the folder sliding into a terminal, the
+    /// folder row (the home folder until one is picked, Pick a folder as
+    /// context, and Use home once one is), the terminal row while launches
+    /// ask, then Cancel and Open {tool}. The folder is optional (owner,
+    /// 2026-10-29): with none, the daemon opens the tool in the home folder.
+    /// </summary>
     private async Task StartAsync(string tool)
     {
-        if (await PickFolderAsync() is not string path) return;
-        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
-        // Asked on every launch while more than one terminal is installed (#1891).
-        if (_snapshot.AsksForTerminal)
+        if (_snapshot is null || ManagedSignIn.StartKey(tool) is not string startKey) return;
+        string? path = null;
+        var form = new StackPanel { Spacing = 12, MinWidth = 320 };
+        form.Children.Add(new LaunchArtView(tool) { HorizontalAlignment = HorizontalAlignment.Center });
+        var folderRow = new Grid { ColumnSpacing = 8 };
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var tile = new Border
         {
-            var terminal = TerminalPicker();
-            var ask = Dialog("launch_title", terminal, "launch_short");
-            if (await ask.ShowAsync() != ContentDialogResult.Primary) return;
-            await SaveTerminalAsync(terminal.SelectedIndex);
+            Width = 22, Height = 22, CornerRadius = new CornerRadius(6),
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcTileFolderBrush"],
+            Child = new FontIcon { Glyph = "\uE8B7", FontSize = 11 },
+        };
+        AutomationProperties.SetAccessibilityView(tile, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        var shown = new TextBlock { VerticalAlignment = VerticalAlignment.Center, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis, IsTextSelectionEnabled = true };
+        var clear = new Button { Content = T("clear_folder") };
+        var pick = new Button { Content = T("pick_folder") };
+        void ShowFolder()
+        {
+            shown.Text = path ?? T("home_folder");
+            ToolTipService.SetToolTip(shown, path);
+            clear.Visibility = path is null ? Visibility.Collapsed : Visibility.Visible;
         }
+        clear.Click += (_, _) => { path = null; ShowFolder(); };
+        pick.Click += async (_, _) =>
+        {
+            if (await PickFolderAsync() is string chosen && ManagedLaunchFolder.IsAcceptable(chosen)) { path = chosen; ShowFolder(); }
+        };
+        ShowFolder();
+        Grid.SetColumn(tile, 0); Grid.SetColumn(shown, 1); Grid.SetColumn(clear, 2); Grid.SetColumn(pick, 3);
+        folderRow.Children.Add(tile); folderRow.Children.Add(shown); folderRow.Children.Add(clear); folderRow.Children.Add(pick);
+        form.Children.Add(folderRow);
+        // Asked on every launch while more than one terminal is installed (#1891).
+        var terminal = _snapshot.AsksForTerminal ? TerminalPicker() : null;
+        if (terminal is not null) form.Children.Add(terminal);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot, Title = T(startKey), Content = form,
+            PrimaryButtonText = ManagedSignIn.OpenLabel(T("open_tool"), T(tool)),
+            CloseButtonText = T("cancel"), DefaultButton = ContentDialogButton.Primary,
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        // Decided from the folder and the snapshot at send time (L4).
+        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
+        if (terminal is not null) await SaveTerminalAsync(terminal.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }
 
@@ -408,10 +466,10 @@ public sealed class ManagedSessionsView : UserControl
         if (terminalPicker is not null) form.Children.Add(terminalPicker);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
         var launchDialog = Dialog("launch_title", form, "launch_short");
-        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && !string.IsNullOrWhiteSpace(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
+        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && ManagedLaunchFolder.IsAcceptable(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
         account.SelectionChanged += (_, _) => ValidateLaunch();
         model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
-        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
+        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
         if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false, model = selected.Tool == "opencode" ? model.Text.Trim() : null, collect_traces = selected.Tool == "opencode" && collect.IsChecked == true }));

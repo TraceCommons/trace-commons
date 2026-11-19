@@ -139,6 +139,15 @@ public static class LaunchHandoff
     /// <summary>The logo's side (:246), and the title bar: dots 6 apart 4, padded 9, bar 18, hairline 1 (:233-241).</summary>
     public const double LogoSide = 28, DotSide = 6, DotSpacing = 4, BarPadding = 9, BarHeight = 18, Hairline = 1;
 
+    /// <summary>The terminal's and the large tile's corner: Radius.control under the flat theme (GlassTokens.swift:480).</summary>
+    public const double ControlRadius = 11;
+
+    /// <summary>The terminal's ground and dots: ink at 0.06 and 0.18 (:231, :235).</summary>
+    public const double TerminalInk = 0.06, DotInk = 0.18;
+
+    /// <summary>A launch button: logo 14, spaced s3 = 6 from the name (:152, :166; GlassTokens.swift:504).</summary>
+    public const double ButtonLogoSide = 14, ButtonSpacing = 6;
+
     /// <summary>The folder tile is the large tool tile: 30, radius control (Indicators.swift:282-284; GlassTokens.swift:578).</summary>
     public const double FolderTileSide = 30;
 
