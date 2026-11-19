@@ -133,6 +133,9 @@ public sealed partial class FirstRunWindow : Window
 
     private double Now => _clock.Elapsed.TotalSeconds;
 
+    /// <summary>The table; only read once <see cref="Render"/> has seen it decode.</summary>
+    private FirstRunCopy Copy => _copy!;
+
     private double Scale() => Win32Dpi.ForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
 
     /// <summary>A deep link's invite: held for Join; it fills and stops (no join without the person).</summary>
@@ -297,7 +300,7 @@ public sealed partial class FirstRunWindow : Window
         _painter.Draw(args.DrawingSession, sender, _model, _reduceMotion ? now + 1e6 : now, sender.ActualWidth, sender.ActualHeight,
             tracesCountText: TracesCount(now), tracesCaption: _copy?.Traces.OnThisComputer,
             privateAIPill: _privateCopy?.StatInferenceAccess is { Length: > 0 } pill ? pill : null,
-            usesCaptions: _copy is null ? null : new[] { _copy.Uses.ThisComputer, UsesGateLabel(), _copy.Uses.TheCommons });
+            usesCaptions: _copy is null ? null : new[] { Copy.Uses.ThisComputer, UsesGateLabel(), Copy.Uses.TheCommons });
     }
 
     private string TracesCount(double now)
@@ -380,13 +383,13 @@ public sealed partial class FirstRunWindow : Window
         }
 
         Footer.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
-        BackButton.Content = _copy.Frame.Back;
+        BackButton.Content = Copy.Frame.Back;
         BackButton.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
         BackButton.IsEnabled = !_runner.IsCommitting;
-        ContinueButton.Content = state.Step == FirstRunStep.Join ? _copy.Uses.Start : _copy.Frame.ContinueButton;
+        ContinueButton.Content = state.Step == FirstRunStep.Join ? Copy.Uses.Start : Copy.Frame.ContinueButton;
         ContinueButton.IsEnabled = !_runner.IsCommitting && CanContinue(state);
         AutomationProperties.SetName(ContinueButton, (string)ContinueButton.Content);
-        AutomationProperties.SetName(BackButton, _copy.Frame.Back);
+        AutomationProperties.SetName(BackButton, Copy.Frame.Back);
         Stage.Invalidate();
         Kick();
     }
@@ -452,12 +455,12 @@ public sealed partial class FirstRunWindow : Window
     private UIElement BuildStep(FirstRunStep step) => step switch
     {
         FirstRunStep.Welcome => Welcome(),
-        FirstRunStep.Tools => Framed(step, _copy!.Tools.TitleLight, _copy.Tools.TitleBold, ToolsList()),
-        FirstRunStep.PrivateAI => Framed(step, _copy!.PrivateAi.TitleLight, _copy.PrivateAi.TitleBold, PrivateAICard()),
-        FirstRunStep.Traces => Framed(step, _copy!.Traces.TitleLight, _copy.Traces.TitleBold, TracesEstimate()),
-        FirstRunStep.Uses => Framed(step, _copy!.Uses.TitleLight, _copy.Uses.TitleBold, UsesCard()),
-        FirstRunStep.Terms => Framed(step, _copy!.Welcome.Legal.TitleLight, _copy.Welcome.Legal.Terms, TermsReader()),
-        _ => Framed(step, _copy!.Join.TitleLight, _copy.Join.TitleBold, JoinCard()),
+        FirstRunStep.Tools => Framed(step, Copy.Tools.TitleLight, Copy.Tools.TitleBold, ToolsList()),
+        FirstRunStep.PrivateAI => Framed(step, Copy.PrivateAi.TitleLight, Copy.PrivateAi.TitleBold, PrivateAICard()),
+        FirstRunStep.Traces => Framed(step, Copy.Traces.TitleLight, Copy.Traces.TitleBold, TracesEstimate()),
+        FirstRunStep.Uses => Framed(step, Copy.Uses.TitleLight, Copy.Uses.TitleBold, UsesCard()),
+        FirstRunStep.Terms => Framed(step, Copy.Welcome.Legal.TitleLight, Copy.Welcome.Legal.Terms, TermsReader()),
+        _ => Framed(step, Copy.Join.TitleLight, Copy.Join.TitleBold, JoinCard()),
     };
 
     private static SolidColorBrush Brush(uint argb) => new(FirstRunStagePainter.Argb(argb));
@@ -507,9 +510,9 @@ public sealed partial class FirstRunWindow : Window
         _graphic = new Border { Height = WelcomeMotion.Hub, Margin = new Thickness(0, 0, 0, WelcomeMotion.HubGap), IsHitTestVisible = false };
         panel.Children.Add(_graphic);
         var title = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 28) };
-        AutomationProperties.SetName(title, _copy!.Welcome.Title);
+        AutomationProperties.SetName(title, Copy.Welcome.Title);
         AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level1);
-        IReadOnlyList<string> words = WelcomeMotion.Words(_copy.Welcome.Title);
+        IReadOnlyList<string> words = WelcomeMotion.Words(Copy.Welcome.Title);
         for (int i = 0; i < words.Count; i++)
         {
             TextBlock word = Text(words[i], 26 * WelcomeMotion.HeroScale, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
@@ -520,16 +523,16 @@ public sealed partial class FirstRunWindow : Window
         }
 
         panel.Children.Add(title);
-        TextBlock body = Text(_copy.Welcome.Body, 20, FirstRunTokens.TextSecondary);
+        TextBlock body = Text(Copy.Welcome.Body, 20, FirstRunTokens.TextSecondary);
         body.Margin = new Thickness(0, 0, 0, 38);
         Rise(body, WelcomeMotion.BodyDelay, focusable: false);
         panel.Children.Add(body);
-        var start = new Button { Content = _copy.Welcome.Start, Style = (Style)Application.Current.Resources["AccentButtonStyle"], HorizontalAlignment = HorizontalAlignment.Center };
-        AutomationProperties.SetName(start, _copy.Welcome.Start);
+        var start = new Button { Content = Copy.Welcome.Start, Style = (Style)Application.Current.Resources["AccentButtonStyle"], HorizontalAlignment = HorizontalAlignment.Center };
+        AutomationProperties.SetName(start, Copy.Welcome.Start);
         start.Click += (_, _) => GetStarted();
         Rise(start, WelcomeMotion.ButtonDelay, focusable: true);
         panel.Children.Add(start);
-        AgentConfigurationCopy agent = _copy.AgentConfiguration;
+        AgentConfigurationCopy agent = Copy.AgentConfiguration;
         if (agent.Action.Length > 0)
         {
             var guide = new Button { Content = agent.Action, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 28, 0, 0) };
@@ -613,7 +616,7 @@ public sealed partial class FirstRunWindow : Window
             label.VerticalAlignment = VerticalAlignment.Center;
             label.MinWidth = 150;
             line.Children.Add(label);
-            string question = FirstRunCopy.Fill(_copy!.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name });
+            string question = FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name });
             MarkerCheckButton check = MarkerCheck(question, _runner.State.RowAnswer(row.Source).Kind == ToolChoiceKind.Watch, on =>
             {
                 _runner.State.Answer(row.Source, on ? ToolChoice.Watch(row.Path) : ToolChoice.Off);
@@ -683,10 +686,10 @@ public sealed partial class FirstRunWindow : Window
         TextBlock count = Text("0", 26, FirstRunTokens.TextPrimary, FontWeights.SemiBold);
         figure.Children.Add(count);
         int found = _discovered.Count(c => c.Exists);
-        figure.Children.Add(Text(_copy!.PrivateAi.OfTotal(found), 14, FirstRunTokens.TextSecondary));
+        figure.Children.Add(Text(Copy.PrivateAi.OfTotal(found), 14, FirstRunTokens.TextSecondary));
         panel.Children.Add(figure);
-        panel.Children.Add(Text(_copy.PrivateAi.OfferLead, 14, FirstRunTokens.TextSecondary));
-        var more = new Expander { Header = _copy.PrivateAi.LearnMore, Content = Text(_copy.PrivateAi.OfferMore, 13, FirstRunTokens.TextSecondary) };
+        panel.Children.Add(Text(Copy.PrivateAi.OfferLead, 14, FirstRunTokens.TextSecondary));
+        var more = new Expander { Header = Copy.PrivateAi.LearnMore, Content = Text(Copy.PrivateAi.OfferMore, 13, FirstRunTokens.TextSecondary) };
         panel.Children.Add(more);
         double opened = _model.PrivateCounted ? double.NegativeInfinity : Now;
         _motions.Add((t => count.Text = PrivateAIDiagram.Counted(tools.Count, t - opened, _reduceMotion).ToString(System.Globalization.CultureInfo.CurrentCulture),
@@ -702,7 +705,7 @@ public sealed partial class FirstRunWindow : Window
         ulong? found = (ulong)_discovered.Where(c => c.Exists).Sum(c => (long)c.SessionCount);
         // TracesScreenLayout.showsNoCredit (TracesScreen.swift:87-89): the
         // line earns credit only with the credit use ticked on Uses.
-        bool earnsCredit = _runner.State.Scopes.Contains(_copy!.Uses.CreditScope);
+        bool earnsCredit = _runner.State.Scopes.Contains(Copy.Uses.CreditScope);
         string? line = FirstRunEstimate.Line(found, earnsCredit);
         if (line is null)
         {
@@ -711,7 +714,7 @@ public sealed partial class FirstRunWindow : Window
 
         var panel = new StackPanel { Spacing = 2 };
         panel.Children.Add(Text(line, 17, FirstRunTokens.TextPrimary, FontWeights.SemiBold));
-        panel.Children.Add(Text(_copy.Traces.CreditDepends, 12, FirstRunTokens.TextSecondary));
+        panel.Children.Add(Text(Copy.Traces.CreditDepends, 12, FirstRunTokens.TextSecondary));
         Border card = Card(panel, 24, 12);
         var lift = new TranslateTransform();
         card.RenderTransform = lift;
@@ -739,15 +742,15 @@ public sealed partial class FirstRunWindow : Window
     private UIElement UsesCard()
     {
         var panel = new StackPanel { Spacing = 6, MaxWidth = 560 };
-        panel.Children.Add(Text(_copy!.Uses.Eyebrow, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
+        panel.Children.Add(Text(Copy.Uses.Eyebrow, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
         if (_options.FirstOrDefault(o => o.AlwaysOn) is { } required && required.Title is { } requiredTitle)
         {
-            var locked = new CheckBox { Content = FirstRunCopy.Fill(_copy.Uses.AlwaysOn, new Dictionary<string, string> { ["title"] = requiredTitle }), IsChecked = true, IsEnabled = false };
+            var locked = new CheckBox { Content = FirstRunCopy.Fill(Copy.Uses.AlwaysOn, new Dictionary<string, string> { ["title"] = requiredTitle }), IsChecked = true, IsEnabled = false };
             panel.Children.Add(locked);
         }
 
         var optional = _options.Where(o => !o.AlwaysOn && o.GrantsDataUse && o.Title is not null).ToList();
-        optional = optional.Where(o => o.Name == _copy.Uses.CreditScope).Concat(optional.Where(o => o.Name != _copy.Uses.CreditScope)).ToList();
+        optional = optional.Where(o => o.Name == Copy.Uses.CreditScope).Concat(optional.Where(o => o.Name != Copy.Uses.CreditScope)).ToList();
         foreach (ConsentOption option in optional)
         {
             var box = new CheckBox { Content = option.Title, IsChecked = _runner.State.Scopes.Contains(option.Name) };
@@ -757,8 +760,8 @@ public sealed partial class FirstRunWindow : Window
             panel.Children.Add(box);
         }
 
-        panel.Children.Add(Text(_copy.Uses.Sharing, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
-        panel.Children.Add(Segmented(_copy.Uses.Sharing, new[] { (_copy.Uses.AskEachTime, SharingPath.AskMe), (_copy.Uses.AutomaticScope, SharingPath.Automatic) }));
+        panel.Children.Add(Text(Copy.Uses.Sharing, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
+        panel.Children.Add(Segmented(Copy.Uses.Sharing, new[] { (Copy.Uses.AskEachTime, SharingPath.AskMe), (Copy.Uses.AutomaticScope, SharingPath.Automatic) }));
         return Card(panel, 24, 12);
     }
 
@@ -817,7 +820,7 @@ public sealed partial class FirstRunWindow : Window
     /// <summary>TermsReader: the published terms, then Accept once read to the end.</summary>
     private UIElement TermsReader()
     {
-        LegalWords legal = _copy!.Welcome.Legal;
+        LegalWords legal = Copy.Welcome.Legal;
         var panel = new StackPanel { Spacing = 8, MaxWidth = 600 };
         if (_terms is null)
         {
@@ -825,14 +828,15 @@ public sealed partial class FirstRunWindow : Window
             return Card(panel, 24, 12);
         }
 
+        FetchedTerms terms = _terms;
         var body = new StackPanel { Spacing = 8 };
-        body.Children.Add(Text(_terms.Title, 17, FirstRunTokens.TextPrimary, FontWeights.SemiBold));
-        if (!_terms.InEffect)
+        body.Children.Add(Text(terms.Title, 17, FirstRunTokens.TextPrimary, FontWeights.SemiBold));
+        if (!terms.InEffect)
         {
             body.Children.Add(Text(legal.NotInEffect, 13, FirstRunTokens.TextSecondary));
         }
 
-        foreach (TermsBlock block in _terms.Blocks)
+        foreach (TermsBlock block in terms.Blocks)
         {
             switch (block.Kind)
             {
@@ -870,7 +874,7 @@ public sealed partial class FirstRunWindow : Window
                 accept.IsEnabled = true;
             }
         };
-        accept.Checked += (_, _) => { _runner.AcceptedTerms = new AcceptedTerms(_terms.Version, _terms.ContentSha256, DateTimeOffset.UtcNow); Render(); };
+        accept.Checked += (_, _) => { _runner.AcceptedTerms = new AcceptedTerms(terms.Version, terms.ContentSha256, DateTimeOffset.UtcNow); Render(); };
         accept.Unchecked += (_, _) => { _runner.AcceptedTerms = null; Render(); };
         panel.Children.Add(scroll);
         panel.Children.Add(Text(legal.ScrollHint, 12, FirstRunTokens.TextSecondary));
@@ -886,7 +890,7 @@ public sealed partial class FirstRunWindow : Window
     /// </summary>
     private UIElement JoinCard()
     {
-        JoinWords join = _copy!.Join;
+        JoinWords join = Copy.Join;
         FirstRunState state = _runner.State;
         var panel = new StackPanel { Spacing = 8, MaxWidth = 460 };
         panel.Children.Add(Text(join.NearAiEyebrow, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
@@ -936,15 +940,15 @@ public sealed partial class FirstRunWindow : Window
     /// <summary>The core's line for a failed commit (FoldersCopy and UsesCopy failure words).</summary>
     private string? FailureLine(FirstRunFailure? failure) => failure switch
     {
-        FirstRunFailure.SignInFailed => _copy!.Folders.SignInFailed,
-        FirstRunFailure.LookupUnavailable => _copy!.Folders.LookupUnavailable,
-        FirstRunFailure.EnrollFailed => _copy!.Folders.EnrollRefused,
-        FirstRunFailure.SettingsFailed => _copy!.Folders.SettingsFailed,
-        FirstRunFailure.ScopesFailed => _copy!.Uses.ScopesFailed,
-        FirstRunFailure.RulesFailed => _copy!.Uses.RulesFailed,
-        FirstRunFailure.PrivateAIFailed => _copy!.Uses.PrivateAiFailed,
-        FirstRunFailure.CompleteFailed => _copy!.Uses.CompleteFailed,
-        FirstRunFailure.SharingFailed => _copy!.Uses.SharingSaveFailed,
+        FirstRunFailure.SignInFailed => Copy.Folders.SignInFailed,
+        FirstRunFailure.LookupUnavailable => Copy.Folders.LookupUnavailable,
+        FirstRunFailure.EnrollFailed => Copy.Folders.EnrollRefused,
+        FirstRunFailure.SettingsFailed => Copy.Folders.SettingsFailed,
+        FirstRunFailure.ScopesFailed => Copy.Uses.ScopesFailed,
+        FirstRunFailure.RulesFailed => Copy.Uses.RulesFailed,
+        FirstRunFailure.PrivateAIFailed => Copy.Uses.PrivateAiFailed,
+        FirstRunFailure.CompleteFailed => Copy.Uses.CompleteFailed,
+        FirstRunFailure.SharingFailed => Copy.Uses.SharingSaveFailed,
         _ => null,
     };
 
@@ -961,7 +965,7 @@ public sealed partial class FirstRunWindow : Window
         int? current = FirstRunStageLayout.ThreadIndex(step);
         int? before = from is FirstRunStep f ? FirstRunStageLayout.ThreadIndex(f) : null;
         bool shown = current is not null, wasShown = before is not null;
-        IReadOnlyList<string> labels = _copy!.ThreadLabels;
+        IReadOnlyList<string> labels = Copy.ThreadLabels;
         if (shown || wasShown)
         {
             for (int i = 0; i < labels.Count; i++)
