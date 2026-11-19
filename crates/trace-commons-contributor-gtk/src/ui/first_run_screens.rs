@@ -146,8 +146,9 @@ pub(super) fn agent_configuration(on_close: impl Fn() + 'static) -> gtk::Box {
 
 /// Private AI: the tools that can connect, each one's route into the hub,
 /// the hub's line on to NEAR AI, then "N of M tools can connect" and the
-/// offer. The step has no switch; Settings turns Private AI on.
-pub(super) fn private_ai_body(connectable: &[Found], found: usize) -> gtk::Box {
+/// offer. The step has no switch; Settings turns Private AI on. Also
+/// returns the figure, which the stage counts up on the first visit.
+pub(super) fn private_ai_body(connectable: &[Found], found: usize) -> (gtk::Box, gtk::Label) {
     let copy = first_run_copy();
     let private = trace_commons_contributor::private_inference_copy::private_inference_copy();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -176,13 +177,13 @@ pub(super) fn private_ai_body(connectable: &[Found], found: usize) -> gtk::Box {
     ] {
         detail.append(&body_label(text));
     }
-    root.append(
-        &gtk::Expander::builder()
-            .label(copy.private_ai.learn_more)
-            .child(&detail)
-            .build(),
-    );
-    root
+    let more = gtk::Expander::builder()
+        .label(copy.private_ai.learn_more)
+        .child(&detail)
+        .build();
+    super::glass_motion::expander(&more);
+    root.append(&more);
+    (root, number)
 }
 
 /// The Private AI routes' words: each tool that can connect, and the
@@ -767,7 +768,7 @@ mod mounted_tests {
             session_count: 0,
             total_bytes: None,
         };
-        let body = private_ai_body(&[found], 2);
+        let (body, _) = private_ai_body(&[found], 2);
         let words = fill(first_run_copy().private_ai.can_connect, "total", "2");
         assert!(
             descendants(body.upcast_ref())

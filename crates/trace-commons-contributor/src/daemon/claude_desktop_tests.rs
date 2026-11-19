@@ -38,10 +38,10 @@ async fn fixture() -> (String, Calls, tokio::task::JoinHandle<()>) {
 }
 pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared {
     let mut shared = DaemonShared::load(store).unwrap();
-    // The shipped profile, also trusting the test key that signs `set_rollout`.
+    // The testing profile also trusts the key that signs `set_rollout`.
     shared.feature_flags = crate::feature_flags::Runtime::open(
         crate::feature_flags::registry().unwrap(),
-        crate::feature_flags::test_signing::pin(crate::feature_flags::embedded_profile().unwrap()),
+        crate::feature_flags::test_signing::testing_profile(),
         shared.store.dir(),
         chrono::Utc::now(),
     )
@@ -1383,4 +1383,19 @@ async fn late_capability_probe_has_a_live_gateway_positive_control() {
     finish_drains(&shared).await;
     stop(&shared, true).await;
     server.abort();
+}
+
+/// The Private AI tab's setup notice reads these from the status copy; the
+/// shell draws no notice without them.
+#[test]
+fn the_status_copy_carries_the_setup_prompt_words() {
+    let copy = copy();
+    for key in ["prompt_title", "prompt_line", "prompt_dismiss"] {
+        assert!(
+            copy[key]
+                .as_str()
+                .is_some_and(|word| !word.trim().is_empty()),
+            "{key}"
+        );
+    }
 }

@@ -52,7 +52,7 @@ public class ArmingOfferTests
     {
         Assert.Equal(
             "You've contributed from api 5 times.",
-            ArmingOfferCopy.Evidence("api", 5));
+            ProjectArmingCopy.For(new ArmingOffer("p", "api", 5))!.Evidence);
     }
 
     /// <summary>
@@ -65,7 +65,7 @@ public class ArmingOfferTests
     {
         Assert.Equal(
             "You've contributed from api once.",
-            ArmingOfferCopy.Evidence("api", 1));
+            ProjectArmingCopy.For(new ArmingOffer("p", "api", 1))!.Evidence);
     }
 
     [Fact]
@@ -73,14 +73,14 @@ public class ArmingOfferTests
     {
         Assert.Equal(
             "Contribute from api automatically?",
-            ArmingOfferCopy.Question("api"));
+            ProjectArmingCopy.For(new ArmingOffer("p", "api", 5))!.Question);
     }
 
     [Fact]
     public void TheButtonsCarryTheirActions()
     {
-        Assert.Equal("Enable", ArmingOfferCopy.Confirm);
-        Assert.Equal("Not now", ArmingOfferCopy.Decline);
+        Assert.Equal("Enable", ProjectArmingCopy.For(new ArmingOffer("p", "api", 5))!.Confirm);
+        Assert.Equal("Not now", ProjectArmingCopy.For(new ArmingOffer("p", "api", 5))!.Decline);
     }
 
     /// <summary>
@@ -90,7 +90,7 @@ public class ArmingOfferTests
     [Fact]
     public void DecliningDoesNotSoundPermanent()
     {
-        string lower = ArmingOfferCopy.Decline.ToLowerInvariant();
+        string lower = ProjectArmingCopy.For(new ArmingOffer("p", "api", 5))!.Decline.ToLowerInvariant();
         Assert.DoesNotContain("never", lower, StringComparison.Ordinal);
         Assert.DoesNotContain("don't ask", lower, StringComparison.Ordinal);
     }

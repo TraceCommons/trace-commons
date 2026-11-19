@@ -268,6 +268,13 @@ public static class DaemonProtocol
         public const string RefreshHistory = "refresh_history";
         public const string QueueOutcomeCounts = "queue_outcome_counts";
 
+        // W21: an opened History record's detail and its public run
+        // (DaemonClient.swift:305-345). All three are in the daemon's
+        // METHODS array (ipc.rs:457, :522, :550).
+        public const string HistoryDetail = "history_detail";
+        public const string PublishPublicRun = "publish_public_run";
+        public const string UnpublishPublicRun = "unpublish_public_run";
+
         /// <summary>
         /// Withdraws one submission and reports the tier the server applied.
         ///
@@ -338,6 +345,12 @@ public static class DaemonProtocol
         /// </summary>
         public const string ReengageDue = "reengage_due";
         public const string ResyncRequired = "resync_required";
+
+        /// <summary>
+        /// The daemon's feature flags changed. Opt-in: sent only to a
+        /// subscriber that declares it (<c>OPT_IN_EVENTS</c>, ipc.rs:745).
+        /// </summary>
+        public const string FeatureFlagsChanged = "feature_flags_changed";
 
         /// <summary>
         /// A scheduled preview finished and was delivered. Carries the same
@@ -699,6 +712,15 @@ public sealed class DaemonStatus
     /// </summary>
     [JsonPropertyName("tenant_id")]
     public string? TenantId { get; set; }
+
+    /// <summary>
+    /// The account the daemon's account-scoped answers belong to: an opaque
+    /// hash (<c>status.account_scope</c>), null until one is settled. Compared,
+    /// never shown (AppModel.swift <c>settleAutomaticGrantOwner</c>); a change
+    /// is an account boundary (<see cref="AccountGeneration"/>).
+    /// </summary>
+    [JsonPropertyName("account_scope")]
+    public string? AccountScope { get; set; }
 
     [JsonPropertyName("logged_in")]
     public bool LoggedIn { get; set; }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -37,14 +38,58 @@ public sealed class DaemonHost : IAsyncDisposable
 #endif
 
     /// <summary>
+    /// Where the shell keeps its own small marks (a closed card): the app's
+    /// local data, or the throwaway directory in a sample launch, so a sample
+    /// run writes nothing outside it.
+    /// </summary>
+    public string ShellStateDirectory
+    {
+        get
+        {
+#if DEBUG
+            if (_sample is not null)
+            {
+                return SampleDaemon.ThrowawayConfigDir();
+            }
+#endif
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TraceCommons");
+        }
+    }
+
+    /// <summary>
     /// Raised on the UI thread when the queue may have changed. Carries no
     /// payload deliberately: the event frame's own data is a delta, and the
     /// app refetches rather than patching, so there is nothing worth passing.
     /// </summary>
     public event Action? QueueChanged;
 
+    /// <summary>
+    /// The account consent writes are settled against, shared by every
+    /// window this host serves (checklist L2): a status read naming another
+    /// account, or an unenroll in Settings, voids presses made before it in
+    /// the main window too.
+    /// </summary>
+    public AccountGeneration Account { get; } = new();
+
     /// <summary>Raised on the UI thread when daemon status may have changed.</summary>
     public event Action? StatusChanged;
+
+    /// <summary>
+    /// <c>feature_flags_changed</c>: the window reads the snapshot again
+    /// (<see cref="FeatureFlagGate"/>). Declared on the subscription, since
+    /// the daemon sends it only to a subscriber that accepts it.
+    /// </summary>
+    public event Action? FeatureFlagsChanged;
+
+    /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
+    public event Action? Started;
+
+    /// <summary>
+    /// A model call was recorded (<c>inference_call_added</c>). The Private AI
+    /// tab re-reads its ledger on it, as the Mac's InferenceStore does.
+    /// </summary>
+    public event Action? InferenceCallAdded;
 
     /// <summary>
     /// Raised on the UI thread when the daemon says a digest is due, carrying
@@ -237,7 +282,12 @@ public sealed class DaemonHost : IAsyncDisposable
 
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent, AcceptedEvents);
+        // feature_flags_changed always, as the Mac does; reengage_due only
+        // while the tray can show it (AcceptedEvents).
+        _subscription = daemon.Subscribe(
+            OnDaemonEvent,
+            new[] { DaemonProtocol.Events.FeatureFlagsChanged }.Concat(AcceptedEvents).ToArray());
+        Started?.Invoke();
     }
 
     /// <summary>
@@ -359,6 +409,49 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// The turn index over the body an open preview showed
+    /// (<c>tc_preview_turns_json</c>), off the UI thread: the JSON, or null
+    /// when it could not be made (no daemon, a sample launch, or a refusal
+    /// such as <c>preview-body-changed</c>). The sheet says the core's
+    /// request-failed line for null, as the Mac does (PreviewSheet.swift:506-508).
+    /// </summary>
+    public async Task<string?> PreviewTurnsAsync(string entryId, string bodyDigest)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(bodyDigest);
+
+        if (_daemon is not TcDaemon daemon)
+        {
+            return null;
+        }
+
+        (string? json, _) = await Task.Run(() => daemon.PreviewTurns(entryId, bodyDigest)).ConfigureAwait(true);
+        return json;
+    }
+
+    /// <summary>
+    /// How the Missions page's catalogue read ends, and the catalogue when it
+    /// came back. The Mac's live client has no source for the page's shape
+    /// and answers <c>notAvailableYet</c> without asking the daemon
+    /// (LiveDaemonClient.swift:439-440), which counts as not served
+    /// (DaemonDataModels.swift:153-158), so a live launch draws a dash named
+    /// with the core's word for unknown (HomeStore.swift:215-217,
+    /// MissionsViews.swift:58-64), never a failure line. A sample launch gets
+    /// the Mac's hand-written provisional catalogue, or unreachable in
+    /// <c>coreDown</c> (SampleDaemonClient.swift:576-581).
+    /// </summary>
+    public (MissionRead Read, string? Json) MissionCatalogue()
+    {
+#if DEBUG
+        if (_sample is SampleDaemon sample)
+        {
+            return MissionSamples.Read(sample.Set);
+        }
+#endif
+        return (MissionRead.NotServed, null);
+    }
+
+    /// <summary>
     /// The subscription callback. Runs on a RUST BACKGROUND THREAD, so it does
     /// the minimum possible work and hops to the UI thread for everything
     /// else. Nothing here may touch observable state directly.
@@ -387,6 +480,14 @@ public sealed class DaemonHost : IAsyncDisposable
                     StatusChanged?.Invoke();
                     break;
 
+                case DaemonProtocol.Events.FeatureFlagsChanged:
+                    FeatureFlagsChanged?.Invoke();
+                    break;
+
+                case "inference_call_added":
+                    InferenceCallAdded?.Invoke();
+                    break;
+
                 case DaemonProtocol.Events.DigestDue:
                     DigestDue?.Invoke(new DigestFacts(
                         evt.PendingCount,
@@ -412,11 +513,13 @@ public sealed class DaemonHost : IAsyncDisposable
                     Lagged?.Invoke(evt.SkippedCount);
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.ResyncRequired:
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.PreviewReady:

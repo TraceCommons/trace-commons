@@ -183,6 +183,7 @@ else
     ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
     ui::service_dialog::tests::mounted_a_narrow_command_fits_and_wraps_only_between_runs \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
+    ui::managed_sessions::mounted_tests::mounted_the_refresh_glyph_keeps_its_turn_across_a_rebuild \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
     ui::home::tests::mounted_home_draws_the_macs_tiles \
@@ -196,30 +197,42 @@ else
     ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::settings::navigation::tests::mounted_settings_opened_at_a_section_scrolls_there_on_first_show \
+    ui::settings::navigation::tests::mounted_the_layout_check_holds_while_minimised_and_resumes \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
     ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
+    ui::monitor::map::tests::mounted_the_pile_light_and_shimmer_move_on_the_clock_and_stop \
+    ui::monitor::map::tests::mounted_the_clock_and_shimmer_hold_while_the_window_is_minimised \
+    ui::monitor::map::tests::mounted_a_covered_transfer_card_fades_under_the_new_one \
+    ui::monitor::map::tests::mounted_a_card_covered_before_it_is_drawn_still_fades \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
     ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
+    ui::settings::tests::mounted_the_credit_arrival_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
+    ui::monitor::three_pane::tests::mounted_panes_fade_as_they_open_and_close \
     ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
     ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
     ui::monitor::graph_footer::tests::mounted_footer_controls_are_the_macs_sizes \
+    ui::monitor::graph_footer::tests::mounted_footer_slides_a_step_and_fades_a_zoom \
     ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
     ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
     ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
     ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
     ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
     ui::monitor::shell::tests::mounted_settings_and_a_sheet_take_the_monitors_palette \
+    ui::monitor::shell::tests::mounted_every_switch_is_the_macs_flat_switch \
+    ui::history::tests::mounted_the_waiting_glyph_is_the_macs_secondary_ink \
     ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_the_ember_glides_to_the_chosen_tab \
+    ui::monitor::shell::tests::mounted_a_tab_lifts_drags_into_place_and_drops \
     ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \
@@ -236,6 +249,14 @@ else
     ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
     ui::armed_mark::tests::mounted_the_armed_card_goes_once \
     ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
+    ui::glass_feedback::tests::mounted_a_refresh_turns_until_its_read_ends \
+    ui::glass_motion::tests::mounted_a_running_driver_follows_reduce_motion_live \
+    ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
+    ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
+    ui::glass_motion::tests::mounted_an_opened_expanders_details_fade_in \
+    ui::glass_switch::tests::mounted_a_pressed_switch_slides_and_keeps_gtks_contract \
+    ui::hero_card::tests::mounted_the_hover_wash_fades_in_and_out \
+    ui::modal_motion::tests::mounted_a_confirmation_fades_in_and_covers_its_window \
     ui::folder_handoff::tests::mounted_the_folder_slides_in_once \
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
@@ -288,9 +309,13 @@ else
     ui::first_run_screens::mounted_tests::the_marker_check_ticks_only_while_its_stroke_moves \
     ui::first_run_screens::mounted_tests::the_customize_card_rises_to_its_place \
     ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
+    ui::first_run_stage_view::mounted_tests::the_stage_holds_while_its_window_is_minimised \
     ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
     ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
-    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit; do
+    ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit \
+    ui::first_run_stage_view::mounted_tests::the_stage_moves_its_widgets_on_the_macs_clock \
+    ui::first_run_fade::mounted_tests::steps_crossfade_on_the_spatial_spring \
+    ui::first_run_switch::mounted_tests::the_small_switch_ticks_only_while_it_slides; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
       run_ignored_test "GTK display regression failed: $test_name" \
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \

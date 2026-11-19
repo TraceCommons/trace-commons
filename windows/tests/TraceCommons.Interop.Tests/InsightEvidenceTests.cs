@@ -189,8 +189,10 @@ public sealed class InsightEvidenceTests
         using var model = new InsightsViewModel(service);
         await model.LoadAsync();
         await model.ExplainAsync("snapshot-a");
-        Assert.Contains("model_no_labels", model.ModelDetails);
-        Assert.Contains("model_candidates: 0", model.ModelDetails);
+        // The core's words (service.rs ui_copy), never the keys.
+        Assert.Contains("No valid model names were retained.", model.ModelDetails);
+        Assert.Contains("Supported metadata records: 0", model.ModelDetails);
+        Assert.DoesNotContain("model_", model.ModelDetails);
         Assert.Empty(model.ModelReferences);
     }
     [Fact]

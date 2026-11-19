@@ -197,7 +197,11 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_settings_ground #e9ebef;
 @define-color tc_glass_settings_card #f6f7f9;
 @define-color tc_glass_settings_rule #cdcfd2;
+@define-color tc_glass_toggle_on #0558b6;
+@define-color tc_glass_toggle_knob_on #ffffff;
+@define-color tc_glass_toggle_knob_off #ffffff;
 @define-color tc_glass_edge_rail_handle rgba(29, 29, 31, 0.28);
+@define-color tc_glass_toggle_off rgba(0, 0, 0, 0.43);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -285,7 +289,11 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_settings_ground #0d1124;
 @define-color tc_glass_settings_card #0d1124;
 @define-color tc_glass_settings_rule #2a2e3e;
+@define-color tc_glass_toggle_on #7ebcff;
+@define-color tc_glass_toggle_knob_on #071a2e;
+@define-color tc_glass_toggle_knob_off #071a2e;
 @define-color tc_glass_edge_rail_handle rgba(255, 255, 255, 0.28);
+@define-color tc_glass_toggle_off rgba(255, 255, 255, 0.38);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -452,6 +460,13 @@ pub mod glass {
         /// `textPrimary`, dark.
         pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
     }
+    /// The glass inks cairo draws with, opaque over the pane.
+    pub mod ink {
+        /// `textSecondary` over the pane, light.
+        pub const SECONDARY_LIGHT: &str = "#3C3C43";
+        /// `textSecondary` over the pane, dark.
+        pub const SECONDARY_DARK: &str = "#D8D9E0";
+    }
     /// The tab strip's ember line and its halo, as colour and alpha.
     pub mod tabs {
         /// `tabEmber`, light.
@@ -597,6 +612,10 @@ pub mod logo {
     ];
     pub const OPEN_CODE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 24.0, 24.0];
     pub const OPEN_CODE: &[&str] = &["M16,6H8v12h8V6zm4,16H4V2h16v20z"];
+    pub const RED_TEAM_VIEW_BOX: [f64; 4] = [0.0, 0.0, 12.0, 12.0];
+    pub const RED_TEAM: &[&str] = &[
+        "M4,0h4v1h-4zM3,1h5v1h-5zM2,2h8v1h-8zM2,3h2v1h-2zM6,3h5v1h-5zM0,4h4v1h-4zM9,4h3v1h-3zM0,5h4v1h-4zM9,5h3v1h-3zM0,6h3v1h-3zM8,6h4v1h-4zM0,7h3v1h-3zM8,7h4v1h-4zM1,8h5v1h-5zM8,8h2v1h-2zM2,9h8v1h-8zM4,10h5v1h-5zM4,11h4v1h-4z",
+    ];
     pub const THEIA_VIEW_BOX: [f64; 4] = [0.0, 0.0, 64.0, 64.0];
     pub const THEIA: &[&str] = &[
         "M49.047,17.058A14.95,14.95,0,0,1,64,32.011c0,8.256-6.692,14.953-14.953,14.953h-32.96c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h7.68c1.173,0,2.128-.955,2.128-2.134s-.955-2.134-2.128-2.134h-1.7c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h5.122c1.185-.003,2.104-.97,2.134-2.134,0-1.18-.955-2.134-2.134-2.134H9.255c-1.18,0-2.134-.955-2.134-2.134s.955-2.134,2.134-2.134h13.227c1.185-.003,2.104-.97,2.133-2.134,0-1.18-.955-2.134-2.134-2.134H19.5c-1.18,0-2.134-.955-2.134-2.134s.955-2.2,2.134-2.2zm-2.4,4.982c-4.6,0-8.306,3.72-8.306,8.306v3.323a8.3,8.3,0,0,0,8.306,8.306c4.586,0,8.306-3.714,8.306-8.306v-3.323a8.31,8.31,0,0,0-8.306-8.306zm2.837,7.853a2.01,2.01,0,0,1,2.005,2.005v.257a2.01,2.01,0,0,1-2.005,2.005H43.26a2.01,2.01,0,0,1-2.005-2.005V31.9a2.01,2.01,0,0,1,2.005-2.005zm-40.1,12.803a2,2,0,0,1,2.005,2.005v.257c0,1.106-.894,2.005-2.005,2.005h-7.38A2.01,2.01,0,0,1,0,44.959v-.257c0-1.112.9-2.005,2.005-2.005z",
@@ -713,6 +732,10 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
         pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
         pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#ffffff", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#000000", 0.24);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.92);
     }
     /// The dark scheme.
     pub mod dark {
@@ -740,5 +763,42 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
         pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
         pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#071a2e", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#ffffff", 0.38);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#071a2e", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.15);
     }
+}
+
+/// The Mac's motion: `GlassTokens.Motion`'s durations in seconds, the
+/// token curve, and `GlassMotion`'s springs as (duration, bounce).
+pub mod motion {
+    /// `motion.fast`.
+    pub const FAST: f64 = 0.15;
+    /// `motion.standard`.
+    pub const STANDARD: f64 = 0.22;
+    /// `motion.slow`.
+    pub const SLOW: f64 = 0.3;
+    /// `motion.reveal`.
+    pub const REVEAL: f64 = 0.18;
+    /// `motion.slide`.
+    pub const SLIDE: f64 = 0.25;
+    /// `motion.spin`.
+    pub const SPIN: f64 = 0.8;
+    /// `motion.pulse`.
+    pub const PULSE: f64 = 1.6;
+    /// `GlassMotion.curve`'s control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The same curve as a CSS timing function.
+    pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+    /// `GlassMotion.spatial`: `.spring(duration:bounce:)`.
+    pub const SPATIAL: (f64, f64) = (0.9, 0.04);
+    /// `GlassMotion.expressive`: `.spring(duration:bounce:)`.
+    pub const EXPRESSIVE: (f64, f64) = (0.78, 0.32);
+    /// `size.modalScrimBlur`: the blur behind a modal, in points.
+    pub const MODAL_SCRIM_BLUR: f64 = 8.0;
+    /// `modalScrim`'s black, light: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_LIGHT: f64 = 0.25;
+    /// `modalScrim`'s black, dark: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_DARK: f64 = 0.4;
 }

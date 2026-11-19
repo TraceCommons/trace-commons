@@ -141,6 +141,10 @@ public class SampleDaemonTests
         {
             "set_settings", "enroll", "withdraw", "unenroll", "preview", "preview_body",
             "search_original", "account_devices_list", "managed_cli_options_set", "managed_snapshot", "",
+            // W21: no recording of these exists (the Mac's sample client has
+            // none either), so a sample launch's History detail shows the
+            // core's failed-read line and offers no publish.
+            "history_detail", "publish_public_run", "unpublish_public_run",
             "../normalDay/status", "..\\normalDay\\status", "status.json", "Status", "status ",
         })
         {
@@ -508,4 +512,43 @@ public class SampleDaemonTests
 
     private static string ShellSource(string relativePath) =>
         File.ReadAllText(Path.Combine(ShellSourceRoot, relativePath + ".txt"));
+
+    // ---- The spending-organization extra (W19-D2) ----
+
+    private static SampleDaemon WithExtra(string set, string? extra) =>
+        SampleDaemon.FromValue(set, Root, _ => { }, extra)!;
+
+    // Off unless named exactly, so the standard sets draw what the Mac's do.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("SpendOrganizations")]
+    [InlineData("spendOrganizations ")]
+    [InlineData("../RecordedSamples/normalDay")]
+    public void TheSpendingListingIsUnrecordedUnlessTheExtraIsNamed(string? extra)
+    {
+        DaemonResponse response = Answer(WithExtra("normalDay", extra), SpendOrganizationModel.ListMethod);
+        Assert.True(response.IsError);
+        Assert.Equal(SampleDaemon.UnrecordedLabel, response.Error!.Message);
+    }
+
+    // Named, the listing draws the prompt and the picker; a pick is still
+    // unrecorded, so nothing pretends to switch; and coreDown still fails.
+    [Fact]
+    public void TheSpendingExtraListsTwoOrganizationsAndRecordsNoSwitch()
+    {
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SpendOrganizationsExtra);
+        DaemonResponse listing = Answer(sample, SpendOrganizationModel.ListMethod);
+        Assert.False(listing.IsError);
+        SpendOrganizations status = SpendOrganizations.Parse(listing.Result!.Value);
+        Assert.True(status.ShowsPicker);
+        Assert.True(status.ShowsPrompt);
+        Assert.Equal(2, status.Organizations.Count);
+
+        DaemonResponse select = Answer(sample, SpendOrganizationModel.SelectMethod);
+        Assert.Equal(SampleDaemon.UnrecordedLabel, select.Error!.Message);
+
+        DaemonResponse down = Answer(WithExtra(SampleDaemon.CoreDown, SampleDaemon.SpendOrganizationsExtra), SpendOrganizationModel.ListMethod);
+        Assert.Equal(SampleDaemon.NotRunningLabel, down.Error!.Message);
+    }
 }

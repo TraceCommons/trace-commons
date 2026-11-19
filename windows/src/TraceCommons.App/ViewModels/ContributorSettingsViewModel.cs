@@ -1285,6 +1285,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 return false;
             }
 
+            // An unenroll is an account boundary (checklist L2): consent
+            // presses made before it, in any window, are not applied.
+            _host.Account.Boundary();
+
             // The NEAR AI sign-in goes with the enrollment (#1843): said only
             // when it did not, as macOS and GTK do.
             string nearAi = NearAiCredentialSurface.UnenrollNotice(response, _privateInferenceCopy);

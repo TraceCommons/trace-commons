@@ -75,10 +75,12 @@ silently, so both are handled explicitly.
    disables both file-system and registry write virtualization, which needs the
    `unvirtualizedResources` restricted capability and Windows 10 2004.
 
-   Consequence worth stating plainly: the packaged flavour requires 10.0.19041
-   where the unpackaged build supports 10.0.17763, and `unvirtualizedResources`
-   is a restricted capability that a Store submission would have to justify.
-   The zip remains the artifact with the wider reach.
+   The packaged flavour therefore requires 10.0.19041. Since 2026-11-19 the
+   unpackaged build has the same floor (`TargetPlatformMinVersion` in
+   `TraceCommons.App.csproj`, raised from 10.0.17763 when the owner chose to
+   support Windows 10 22H2 and Windows 11 only), so the zip and the MSIX reach
+   the same machines. `unvirtualizedResources` is a restricted capability that
+   a Store submission would have to justify.
 
 ## The logo assets are generated, not edited
 

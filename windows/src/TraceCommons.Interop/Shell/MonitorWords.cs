@@ -50,6 +50,7 @@ public static class MonitorWords
     {
         CrumbWord.History => MonitorShellCopy.Top("history"),
         CrumbWord.Missions => MonitorShellCopy.Top("missions"),
+        CrumbWord.MissionCatalogue => MonitorShellCopy.Section("home_history", "mission_catalogue"),
         _ => TabTitle(crumb.Tab),
     };
 
@@ -102,6 +103,12 @@ public static class MonitorWords
 
     private static readonly Lazy<string?> TracesWordsJson = new(() =>
         NativeMethods.TakeOwnedString(NativeMethods.tc_monitor_traces_copy_json()));
+
+    /// <summary>
+    /// A folder's mode change the daemon refused (<c>settings.project_mode_failed</c>,
+    /// AppModel.swift:4752-4756): the line the arming offer shows after a refusal.
+    /// </summary>
+    public static string ProjectModeFailed => WordAt(ShellWordsJson.Value, "settings", "project_mode_failed");
 
     private static string QueueWord(string key) => WordAt(ShellWordsJson.Value, "queue", key);
 

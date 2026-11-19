@@ -143,7 +143,7 @@ public readonly record struct NoticeChange(string? Outgoing, NoticeEntrance Entr
 /// <c>closed</c> with no <c>withAnimation</c> (MonitorNotices.swift:167). So
 /// on the Mac the stack appears and goes at once unless the change that
 /// caused it was itself animated, and of the cards Windows shows only the
-/// arming offer's exit is (AppModel.swift:2252, spring 0.42/0.9), which is
+/// arming offer's exit is (AppModel.swift:2255, spring 0.42/0.9), which is
 /// W9's. The first card and the last close therefore change at once here too.
 /// </remarks>
 public static class NoticeMotion

@@ -481,6 +481,7 @@ enum ManagedWords {
         case "claude": .claudeCode
         case "codex": .codex
         case "opencode": .openCode
+        case "red_team": .redTeam
         default: .other(initials: String(tool.prefix(2)).capitalized)
         }
     }
@@ -1061,8 +1062,11 @@ struct ManagedInstallLink: View {
     var includeToolName = true
     private var actionLabel: String { copy(labelKey).isEmpty ? copy("install") : copy(labelKey) }
     private var label: String { includeToolName ? actionLabel + " " + copy(tool.tool) : actionLabel }
+    /// Red Team installs inside the daemon, not in a terminal, so it gets
+    /// no terminal hint.
     private var terminalHint: String {
-        ManagedSurface.fillTerminal(
+        guard tool.tool != "red_team" else { return "" }
+        return ManagedSurface.fillTerminal(
             copy(labelKey == "update" ? "update_in_terminal" : "install_in_terminal"),
             terminal: model.managedSnapshot.flatMap { ManagedSurface.setupDestination($0.capabilities) }, fallback: copy("terminal"))
             .replacingOccurrences(of: "{tool}", with: copy(tool.tool))

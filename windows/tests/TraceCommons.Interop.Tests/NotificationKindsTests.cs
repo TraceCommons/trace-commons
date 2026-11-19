@@ -435,7 +435,7 @@ public class NotificationShellWiringTests
         Assert.Contains("_tray.BalloonClicked += OnTrayBalloonClicked;", window);
 
         string host = ShellSource("TraceCommons.App/DaemonHost.cs");
-        Assert.Contains("daemon.Subscribe(OnDaemonEvent, AcceptedEvents)", host);
+        Assert.Contains("new[] { DaemonProtocol.Events.FeatureFlagsChanged }.Concat(AcceptedEvents).ToArray());", host);
         Assert.Contains("ReengageNotice.From(evt)", host);
     }
 

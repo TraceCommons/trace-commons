@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 
 namespace TraceCommons.Interop;
 
@@ -99,96 +100,98 @@ public sealed record RedactionSummaryRow(
 /// </remarks>
 public static class RedactionSummary
 {
-    /// <summary>What a family this build has no words for is described as.</summary>
-    /// <remarks>
-    /// Neutral, never guessed, and never a reason to hide the row. A missing
-    /// entry is expected rather than a bug: the vocabulary is generated.
-    /// </remarks>
-    public const string UnknownDescription =
-        "Removed by a pattern this version has no description for.";
-
-    /// <summary>What a secret found and left in the payload is described as.</summary>
-    public const string ResidualDescription =
-        "Found by the scan and NOT removed. It is still in what would be sent.";
-
-    private static readonly Dictionary<string, string> Descriptions = new(StringComparer.Ordinal)
-    {
-        ["local_path"] = "File paths from this machine.",
-        ["secret"] =
-            "API keys, tokens, private keys, and high-entropy strings found next to "
-            + "credential words.",
-        ["privacy_filter"] =
-            "Names, emails, and other personal details the privacy model found in prose.",
-        ["sensitive_field"] =
-            "Fields whose name marks them sensitive, like password or authorization.",
-        ["tool_sensitive_field"] = "Tool-call arguments whose name marks them sensitive.",
-        [RedactionLabels.ResidualPrefix] = ResidualDescription,
-    };
-
     /// <summary>
-    /// The two lists the panel draws: what left, and what was found and
-    /// stayed.
+    /// The two lists the panel draws, what left and what was found and
+    /// stayed, as the core grouped, split, ordered and described them
+    /// (<c>tc_redaction_summary_json</c>, <c>redaction_summary::summary_copy</c>;
+    /// the Mac's <c>RedactionSummary.rows(fromJSON:)</c>, RedactionSummary.swift:52-80).
     /// </summary>
     /// <remarks>
-    /// Both ordered by occurrences and then family, so the order is stable
-    /// between redraws rather than following whatever order a map iterated
-    /// in.
+    /// Null when the core's answer is unreadable, or the map is: that is not
+    /// "no rows", and the panel then says nothing rather than claim nothing
+    /// matched. This shell decides none of the grouping any more; the table of
+    /// descriptions it once transcribed is the core's alone.
     /// </remarks>
     public static (IReadOnlyList<RedactionSummaryRow> Removed,
-                   IReadOnlyList<RedactionSummaryRow> StillPresent) Rows(
-        IReadOnlyDictionary<string, int> occurrences,
-        IReadOnlyDictionary<string, int> distinct)
+                   IReadOnlyList<RedactionSummaryRow> StillPresent)? Rows(
+        IReadOnlyDictionary<string, int>? occurrences,
+        IReadOnlyDictionary<string, int>? distinct)
     {
-        ArgumentNullException.ThrowIfNull(occurrences);
-        ArgumentNullException.ThrowIfNull(distinct);
+        if (occurrences is null)
+        {
+            return null;
+        }
 
-        List<RedactionSummaryRow> rows = occurrences
-            .GroupBy(pair => RedactionLabels.Family(pair.Key), StringComparer.Ordinal)
-            .Select(family => Row(family.Key, family, distinct))
-            .OrderByDescending(row => row.Occurrences)
-            .ThenBy(row => row.Family, StringComparer.Ordinal)
-            .ToList();
-
-        return (
-            rows.Where(row => RedactionLabels.IsRemoval(row.Family)).ToList(),
-            rows.Where(row => !RedactionLabels.IsRemoval(row.Family)).ToList());
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_redaction_summary_json(
+            JsonSerializer.Serialize(occurrences),
+            distinct is null ? null : JsonSerializer.Serialize(distinct)));
+        return Parse(json);
     }
 
-    /// <summary>
-    /// The description for <paramref name="family"/>, falling back to
-    /// <see cref="UnknownDescription"/> rather than throwing.
-    /// </summary>
-    public static string Describe(string family)
+    /// <summary>The core's answer, decoded; null unless both lists parse.</summary>
+    public static (IReadOnlyList<RedactionSummaryRow> Removed,
+                   IReadOnlyList<RedactionSummaryRow> StillPresent)? Parse(string? json)
     {
-        ArgumentNullException.ThrowIfNull(family);
-        return Descriptions.TryGetValue(family, out string? description)
-            ? description
-            : UnknownDescription;
+        if (string.IsNullOrEmpty(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || List(doc.RootElement, "removed") is not { } removed
+                || List(doc.RootElement, "still_present") is not { } still)
+            {
+                return null;
+            }
+
+            return (removed, still);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
-    private static RedactionSummaryRow Row(
-        string family,
-        IEnumerable<KeyValuePair<string, int>> labels,
-        IReadOnlyDictionary<string, int> distinct)
+    private static IReadOnlyList<RedactionSummaryRow>? List(JsonElement root, string key)
     {
-        var members = labels.ToList();
+        if (!root.TryGetProperty(key, out JsonElement array) || array.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
 
-        // The bare family carries no sub-label, so it contributes counts and
-        // nothing to the detail line. Sub-labels are rendered in the same
-        // words the rest of the surface uses, so "contextual_entropy" and a
-        // category name never read as two different kinds of thing.
-        IReadOnlyList<string> detail = members
-            .Where(pair => pair.Key.Length > family.Length)
-            .Select(pair => pair.Key.Substring(family.Length + 1).Replace('_', ' '))
-            .OrderBy(sub => sub, StringComparer.Ordinal)
-            .ToList();
+        var rows = new List<RedactionSummaryRow>();
+        foreach (JsonElement row in array.EnumerateArray())
+        {
+            if (SessionDetail.Str(row, "family") is not { } family
+                || SessionDetail.Str(row, "display") is not { } display
+                || SessionDetail.Str(row, "description") is not { } description
+                || !row.TryGetProperty("occurrences", out JsonElement occurrences)
+                || !occurrences.TryGetInt32(out int count)
+                || !row.TryGetProperty("distinct", out JsonElement distinctElement)
+                || !distinctElement.TryGetInt32(out int distinct)
+                || !row.TryGetProperty("detail", out JsonElement detail)
+                || detail.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
 
-        return new RedactionSummaryRow(
-            family,
-            family.Replace('_', ' '),
-            Describe(family),
-            members.Sum(pair => pair.Value),
-            members.Sum(pair => distinct.TryGetValue(pair.Key, out int values) ? values : 0),
-            detail);
+            var labels = new List<string>();
+            foreach (JsonElement label in detail.EnumerateArray())
+            {
+                if (label.ValueKind != JsonValueKind.String)
+                {
+                    return null;
+                }
+
+                labels.Add(label.GetString()!);
+            }
+
+            rows.Add(new RedactionSummaryRow(family, display, description, count, distinct, labels));
+        }
+
+        return rows;
     }
 }

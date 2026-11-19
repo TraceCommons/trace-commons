@@ -282,6 +282,36 @@ public sealed class TcDaemon : IDisposable
     }
 
     /// <summary>
+    /// The turn index over the body an open preview showed
+    /// (<c>tc_preview_turns_json</c>; the Mac's <c>TCDaemon.previewTurns</c>,
+    /// TCDaemon.swift:351-362), as its raw JSON, or the fixed label it was
+    /// refused with. Blocks while the daemon re-reads the session, so callers
+    /// run it off the UI thread.
+    /// </summary>
+    public (string? Json, string? Error) PreviewTurns(string entryId, string bodyDigest)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(bodyDigest);
+
+        (IntPtr json, IntPtr err, bool refused) = WithHandle(
+            h =>
+            {
+                IntPtr p = NativeMethods.tc_preview_turns_json(h, entryId, bodyDigest, out IntPtr e);
+                return (p, e, false);
+            },
+            (IntPtr.Zero, IntPtr.Zero, true));
+
+        if (refused)
+        {
+            return (null, "daemon-not-running");
+        }
+
+        string? error = NativeMethods.TakeOwnedString(err);
+        string? body = NativeMethods.TakeOwnedString(json);
+        return body is null ? (null, error ?? "unknown error") : (body, null);
+    }
+
+    /// <summary>
     /// Registers <paramref name="handler"/>, invoked with each JSON event
     /// frame the daemon publishes, ON A RUST BACKGROUND THREAD. The handler
     /// must therefore marshal to the UI thread itself before touching
@@ -294,13 +324,13 @@ public sealed class TcDaemon : IDisposable
 
     /// <summary>
     /// <see cref="Subscribe(Action{string})"/>, declaring the opt-in events
-    /// this subscriber renders (<c>tc_subscribe_with_accepts</c>), such as
-    /// <c>reengage_due</c>; null or empty declares none.
+    /// in <paramref name="accepts"/> (<c>tc_subscribe_with_accepts</c>). None
+    /// is exactly <c>tc_subscribe</c>.
     /// </summary>
     public TcSubscription? Subscribe(Action<string> handler, IReadOnlyList<string>? accepts)
     {
         ArgumentNullException.ThrowIfNull(handler);
-        string? acceptsJson = accepts is { Count: > 0 } ? JsonSerializer.Serialize(accepts) : null;
+        string? acceptsJson = accepts is null ? null : System.Text.Json.JsonSerializer.Serialize(accepts);
 
         // Both the delegate and the ctx box must outlive every possible
         // callback, i.e. until tc_unsubscribe RETURNS. The delegate needs its

@@ -62,6 +62,30 @@
   </provides>
 
   <releases>
+    <!--
+      DRAFT, NOT APPROVED. Proposed note for the first Linux release since
+      0.23.0. The owner approves release-note text; until then it stays in
+      this comment and nothing ships it. 1.0.10 is already tagged, so this
+      cannot go into that entry: the version-bump commit for the release
+      that carries Linux adds a new release element at the top (the
+      validator pins the newest entry to the crate version), with this
+      paragraph as its description once approved, and deletes this comment.
+
+      <p>The Linux app now matches the Mac app. The main window has the
+      same three panes, with Home, a map of your traces and where they go,
+      and an inspector for the one you pick. First run takes you through
+      the same steps as on the Mac. A panel at the edge of the screen and
+      one under the top bar show what is happening at a glance on KDE
+      Plasma, Sway and Hyprland, and on GNOME with its Shell extension.
+      The app uses the NEAR AI mark, reads well in dark mode, follows the
+      terminal you pick, and uses the contributor service when it is
+      installed outside the sandbox.</p>
+    -->
+    <release version="1.0.11" date="2026-11-19">
+      <description>
+        <p>Gateway for macOS can resume setup with an already connected NEAR AI account.</p>
+      </description>
+    </release>
     <release version="1.0.10" date="2026-11-18">
       <description>
         <p>Fixed a launch error when opening a managed Codex session without choosing a folder.</p>

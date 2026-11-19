@@ -465,6 +465,8 @@ extension DaemonData {
         /// Explicit CLI setup completion for the current enrollment. Absent
         /// on older daemons, which retain shell-local completion behavior.
         public let setupComplete: Bool?
+        /// Stable enrollment fingerprint for the expected scope of complete_setup.
+        public let setupScope: String?
         /// Oldest trace observed under this enrollment, owned durably by the
         /// daemon. Missing/null cannot establish graph age on older daemons.
         public let firstTraceAt: Date?
@@ -565,6 +567,7 @@ extension DaemonData {
             case loggedIn = "logged_in"
             case tenantId = "tenant_id"
             case setupComplete = "setup_complete"
+            case setupScope = "setup_scope"
             case firstTraceAt = "first_trace_at"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"

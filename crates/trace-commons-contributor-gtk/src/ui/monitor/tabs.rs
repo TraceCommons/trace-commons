@@ -12,7 +12,10 @@
 //!   Inference and Insights: GTK's Insights is account-free, it is what a
 //!   plain launch opens, and the Weston gate reads it on a device that was
 //!   never enrolled (`scripts/weston-portal-verify-inner.sh`).
-//! - Tab order is fixed. Drag reordering is a later slice of the spec.
+//! - The person drags every tab but Home into their own order, as on the
+//!   Mac (`Tab.movable`, `ordered`, `stored`, `moving`, owner 2026-10-30),
+//!   kept in `monitor-window.json` under the Mac's comma-separated form;
+//!   the accelerators and the tray follow it (`ui::screens`).
 //! - There is no Missions catalogue page; this shell's only mission screen
 //!   is the local drafts inbox.
 
@@ -61,8 +64,135 @@ impl Tab {
         if requires_onboarding == Some(true) {
             vec![Tab::Inference, Tab::Insights]
         } else {
-            Tab::ALL.to_vec()
+            current_order()
         }
+    }
+}
+
+impl Tab {
+    /// The Mac's raw value, the stored order's word for the tab.
+    pub const fn raw(self) -> &'static str {
+        match self {
+            Tab::Home => "Home",
+            Tab::Inference => "Inference",
+            Tab::Traces => "Traces",
+            Tab::Insights => "Insights",
+        }
+    }
+
+    /// `Tab.movable`: every tab but Home, which always opens first.
+    pub fn movable(self) -> bool {
+        self != Tab::Home
+    }
+}
+
+/// `Tab.ordered(_:)`: Home, then the movable tabs as stored, then any the
+/// stored order does not name in their default order. An unknown or
+/// repeated name is skipped.
+pub fn ordered(stored: &str) -> Vec<Tab> {
+    let mut movable: Vec<Tab> = Vec::new();
+    for name in stored.split(',') {
+        if let Some(tab) = Tab::ALL.into_iter().find(|tab| tab.raw() == name)
+            && tab.movable()
+            && !movable.contains(&tab)
+        {
+            movable.push(tab);
+        }
+    }
+    let unnamed: Vec<Tab> = Tab::ALL
+        .into_iter()
+        .filter(|tab| tab.movable() && !movable.contains(tab))
+        .collect();
+    movable.extend(unnamed);
+    std::iter::once(Tab::Home).chain(movable).collect()
+}
+
+/// `Tab.stored(_:)`: an order's movable tabs, by raw value.
+pub fn stored(order: &[Tab]) -> String {
+    order
+        .iter()
+        .filter(|tab| tab.movable())
+        .map(|tab| tab.raw())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `Tab.moving(_:to:in:)`: the order after dragging `tab` onto `target`'s
+/// place. Home never moves and nothing takes its place.
+pub fn moving(tab: Tab, target: Tab, order: &[Tab]) -> Vec<Tab> {
+    let (Some(from), Some(to)) = (
+        order.iter().position(|t| *t == tab),
+        order.iter().position(|t| *t == target),
+    ) else {
+        return order.to_vec();
+    };
+    if !tab.movable() || !target.movable() || tab == target {
+        return order.to_vec();
+    }
+    let mut moved = order.to_vec();
+    moved.remove(from);
+    moved.insert(to, tab);
+    moved
+}
+
+/// `GlassRuleTabs.landing`: where a tab dragged from slot `from` by
+/// `offset` lands: the slot whose middle it has passed, kept to `allowed`.
+pub fn landing(from: usize, offset: f64, tab_width: f64, allowed: (usize, usize)) -> usize {
+    if tab_width <= 0.0 {
+        return from;
+    }
+    // Swift's `.rounded()` is half away from zero, as Rust's `round`.
+    let slot = from as i64 + (offset / tab_width).round() as i64;
+    slot.clamp(allowed.0 as i64, allowed.1 as i64) as usize
+}
+
+/// `GlassRuleTabs.dragThreshold`: how far a lifted tab travels before
+/// letting go no longer opens it.
+pub const DRAG_THRESHOLD: f64 = 6.0;
+
+/// `GlassRuleTabs.hasMoved`.
+pub fn has_moved(translation: f64) -> bool {
+    translation.abs() >= DRAG_THRESHOLD
+}
+
+/// The person's tab order as stored, for every reader: the strip and the
+/// accelerators on the main thread, the tray's rows on its D-Bus thread.
+#[cfg(not(test))]
+static ORDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(test)]
+thread_local! {
+    /// Per test thread, so tests that set an order never see each other's.
+    static ORDER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The tabs in the person's order now.
+pub fn current_order() -> Vec<Tab> {
+    #[cfg(not(test))]
+    {
+        ordered(
+            &ORDER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+    #[cfg(test)]
+    {
+        ORDER.with(|order| ordered(&order.borrow()))
+    }
+}
+
+/// Records the person's order (`stored` form).
+pub fn set_current_order(order: &str) {
+    #[cfg(not(test))]
+    {
+        *ORDER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = order.to_string();
+    }
+    #[cfg(test)]
+    {
+        ORDER.with(|kept| *kept.borrow_mut() = order.to_string());
     }
 }
 
@@ -366,6 +496,75 @@ mod tests {
             tab,
             ..Location::default()
         }
+    }
+
+    fn swift(path: &str) -> String {
+        std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/{path}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    /// `MonitorWindowView.Tab`'s order rules, case for case with the
+    /// Swift (`ordered`, `stored`, `moving`), and `GlassRuleTabs`'
+    /// `landing` and 6-point threshold.
+    #[test]
+    fn the_person_orders_every_tab_but_home_as_on_the_mac() {
+        let window = swift("TraceCommonsApp/Views/MonitorWindowView.swift");
+        assert!(window.contains("var movable: Bool { self != .home }"));
+        assert!(window.contains("case home = \"Home\""));
+        let navigation = swift("TCDesign/Components/Navigation.swift");
+        assert!(navigation.contains("static var dragThreshold: CGFloat { 6 }"));
+        assert!(navigation.contains("let slot = from + Int((offset / tabWidth).rounded())"));
+
+        use Tab::*;
+        assert_eq!(ordered(""), vec![Home, Inference, Traces, Insights]);
+        assert_eq!(
+            ordered("Insights,Traces"),
+            vec![Home, Insights, Traces, Inference]
+        );
+        // Home stored, unknown, repeated: skipped.
+        assert_eq!(
+            ordered("Home,Bogus,Traces,Traces,Inference"),
+            vec![Home, Traces, Inference, Insights]
+        );
+        assert_eq!(
+            stored(&[Home, Traces, Insights, Inference]),
+            "Traces,Insights,Inference"
+        );
+        let order = ordered("");
+        assert_eq!(
+            moving(Insights, Inference, &order),
+            vec![Home, Insights, Inference, Traces]
+        );
+        assert_eq!(
+            moving(Inference, Insights, &order),
+            vec![Home, Traces, Insights, Inference]
+        );
+        assert_eq!(moving(Home, Traces, &order), order);
+        assert_eq!(moving(Traces, Home, &order), order);
+        assert_eq!(landing(1, 0.0, 100.0, (1, 3)), 1);
+        assert_eq!(landing(1, 49.0, 100.0, (1, 3)), 1);
+        assert_eq!(landing(1, 50.0, 100.0, (1, 3)), 2);
+        assert_eq!(landing(1, -50.0, 100.0, (1, 3)), 1);
+        assert_eq!(landing(2, -50.0, 100.0, (1, 3)), 1);
+        assert_eq!(landing(3, 400.0, 100.0, (1, 3)), 3);
+        assert_eq!(landing(2, 10.0, 0.0, (1, 3)), 2);
+        assert!(!has_moved(5.9) && has_moved(6.0) && has_moved(-6.0));
+    }
+
+    /// The strip, the accelerators and the tray read the stored order.
+    #[test]
+    fn the_shown_tabs_follow_the_order() {
+        set_current_order("Insights,Inference");
+        assert_eq!(
+            Tab::shown(None),
+            vec![Tab::Home, Tab::Insights, Tab::Inference, Tab::Traces]
+        );
+        assert_eq!(Tab::shown(Some(true)), vec![Tab::Inference, Tab::Insights]);
+        set_current_order("");
+        assert_eq!(Tab::shown(None), Tab::ALL.to_vec());
     }
 
     #[test]

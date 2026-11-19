@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor"
-version = "1.0.10"
+version = "1.0.11"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -100,9 +100,9 @@ keyring-core = "=1.0.0"
 # tool's own config at the proxy without taking the file over) and
 # `ironwire_catalog` (the `Catalog` type its API takes). Pinned to the same
 # upstream revision as `nearai/nearai-red-sandbox` so both resolve one graph.
-ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
-ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
-ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6" }
+ironwire_proxy = { git = "https://github.com/nearai/ironwire", rev = "53518343781063b3c39bad9c4876488800ada89e" }
+ironwire_agents = { git = "https://github.com/nearai/ironwire", rev = "53518343781063b3c39bad9c4876488800ada89e" }
+ironwire_catalog = { git = "https://github.com/nearai/ironwire", rev = "53518343781063b3c39bad9c4876488800ada89e" }
 notify = "8.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 ring = "0.17"
@@ -150,7 +150,7 @@ windows-sys = { version = "0.61", features = [
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
 # Red Team sandboxed sessions on NEAR AI Red SandBox (macOS only). Pinned to
 # a revision that resolves the same `nearai/ironwire` revision as above.
-rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "4323ab4f6ee7682a7c96cc0e2cf64f3ac2b9d2c5" }
+rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "48b3c7b12446fcbfa748404ae4acad339ee6b879" }
 # `security-framework` moved to trace-commons-contributor-platform with
 # `os_secret_store`, whose `storage_error` is its only user here.
 

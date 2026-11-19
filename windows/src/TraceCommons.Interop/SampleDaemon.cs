@@ -79,12 +79,35 @@ public sealed class SampleDaemon
         "armedFolder",
     };
 
-    private readonly string _root;
+    /// <summary>
+    /// The variable naming a Windows-only extra beside the set. Only
+    /// <see cref="SpendOrganizationsExtra"/> exists; it is never on by default,
+    /// so the standard sets still draw what the Mac's draw.
+    /// </summary>
+    public const string ExtraVariable = "TRACE_COMMONS_SAMPLE_EXTRA";
 
-    public SampleDaemon(string set, string root)
+    /// <summary>
+    /// Two throwaway spending organizations and no choice made, so the Private
+    /// AI prompt and the Settings picker draw (W19-D2). The Mac records no
+    /// listing, because the recorder has no NEAR AI sign-in; this one is pinned
+    /// to the daemon's own answer by
+    /// <c>the_windows_spend_organization_sample_is_this_listing</c>
+    /// (spend_org_tests.rs). There is no recorded switch: a pick is refused
+    /// as unrecorded and the listing stays as it was.
+    /// </summary>
+    public const string SpendOrganizationsExtra = "spendOrganizations";
+
+    /// <summary>The directory beside the assembly that holds the extras.</summary>
+    public const string ExtrasDir = "SampleExtras";
+
+    private readonly string _root;
+    private readonly string? _extra;
+
+    public SampleDaemon(string set, string root, string? extra = null)
     {
         Set = set ?? throw new ArgumentNullException(nameof(set));
         _root = root ?? throw new ArgumentNullException(nameof(root));
+        _extra = extra;
     }
 
     /// <summary>The set this client answers from.</summary>
@@ -119,7 +142,7 @@ public sealed class SampleDaemon
     /// unrecognised name is logged once, as a fixed label and the set used,
     /// never the value itself.
     /// </summary>
-    public static SampleDaemon? FromValue(string? value, string root, Action<string> log)
+    public static SampleDaemon? FromValue(string? value, string root, Action<string> log, string? extra = null)
     {
         ArgumentNullException.ThrowIfNull(log);
         SampleChoice? choice = Choose(value);
@@ -133,8 +156,17 @@ public sealed class SampleDaemon
             log($"tracecommons-sample:{EnvironmentVariable}-unrecognised,fallback={chosen.Set}");
         }
 
-        return new SampleDaemon(chosen.Set, root);
+        return new SampleDaemon(chosen.Set, root, Extra(extra, root));
     }
+
+    /// <summary>
+    /// The extras directory <paramref name="value"/> names, matched exactly;
+    /// null for unset or anything else.
+    /// </summary>
+    public static string? Extra(string? value, string root) =>
+        string.Equals(value, SpendOrganizationsExtra, StringComparison.Ordinal)
+            ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, SpendOrganizationsExtra)
+            : null;
 
     /// <summary>
     /// Whether this launch reads recorded samples: <c>TRACE_COMMONS_SAMPLE</c>
@@ -151,7 +183,8 @@ public sealed class SampleDaemon
     public static SampleDaemon? FromEnvironment() => FromValue(
         Environment.GetEnvironmentVariable(EnvironmentVariable),
         DefaultRoot(),
-        line => System.Diagnostics.Debug.WriteLine(line));
+        line => System.Diagnostics.Debug.WriteLine(line),
+        Environment.GetEnvironmentVariable(ExtraVariable));
 
     /// <summary>
     /// The state directory the host reports in sample mode, for the reads
@@ -184,7 +217,9 @@ public sealed class SampleDaemon
         }
 
         string file = method + ".json";
-        foreach (string path in new[] { Path.Combine(_root, Set, file), Path.Combine(_root, SharedDir, file) })
+        var paths = new List<string> { Path.Combine(_root, Set, file), Path.Combine(_root, SharedDir, file) };
+        if (_extra is not null) paths.Add(Path.Combine(_extra, file));
+        foreach (string path in paths)
         {
             string text;
             try
@@ -214,5 +249,28 @@ public sealed class SampleDaemon
         {
             ["error"] = new JsonObject { ["code"] = "unavailable", ["message"] = label },
         }.ToJsonString();
+}
+/// <summary>
+/// The Missions page's catalogue in a sample launch: the Mac's hand-written
+/// PROVISIONAL catalogue (<c>SampleDaemonData.provisionalMissionCatalogue</c>,
+/// SampleDaemonData.swift:402-403, marked <c>"no source yet"</c>), served
+/// for every set as the Mac serves it (<c>serveProvisional</c>,
+/// SampleDaemonClient.swift:573). Synthetic, never a pilot observation, and
+/// read by nothing outside a sample launch: the live page has no source for
+/// this shape (LiveDaemonClient.swift:439-441).
+/// </summary>
+public static class MissionSamples
+{
+    /// <summary>The Mac's string, byte for byte.</summary>
+    public const string ProvisionalCatalogue =
+        "{\"_sample\":\"no source yet\",\"fetched_at\":\"2026-09-30T06:00:00Z\",\"posture\":{\"settlement\":\"disabled\",\"graded\":false,\"explanation\":\"Sample settlement explanation, supplied by the commons\"},\"missions\":[{\"id\":\"mission-sample-1\",\"title\":\"Debug a failing test\",\"summary\":\"Failing test found, then fixed\",\"credit_range\":{\"min\":5,\"max\":20,\"unit\":\"points\"}},{\"id\":\"mission-sample-2\",\"title\":\"Review a pull request\",\"summary\":null,\"credit_range\":null}]}";
+
+    /// <summary>
+    /// How a set's Missions read ends: unreachable in <c>coreDown</c>, whose
+    /// every read fails, and the catalogue in every other set
+    /// (<c>serveProvisional</c>, SampleDaemonClient.swift:576-581).
+    /// </summary>
+    public static (MissionRead Read, string? Json) Read(string set) =>
+        set == SampleDaemon.CoreDown ? (MissionRead.Unreachable, null) : (MissionRead.Served, ProvisionalCatalogue);
 }
 #endif

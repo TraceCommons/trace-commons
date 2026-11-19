@@ -29,9 +29,27 @@ public sealed class SettingsProtocolTests
                         || property.Name.Contains("Credential", StringComparison.Ordinal));
     }
 
+    /// <summary>
+    /// W9-D1 (a), 2026-11-18: the undo window is not a Settings control, as
+    /// on the Mac (Settings has no approval-hold row) and on Linux (#2179).
+    /// No edit this shell can make writes <c>approval_hold_secs</c>.
+    /// </summary>
+    [Fact]
+    public void NoSettingsEditWritesTheUndoWindow()
+    {
+        Assert.NotEmpty(Enum.GetValues<BehaviorSetting>());
+        foreach (BehaviorSetting setting in Enum.GetValues<BehaviorSetting>())
+        {
+            using JsonDocument json = JsonDocument.Parse(BehaviorSettingsRequest.Serialize(setting, 0));
+            foreach (JsonProperty property in json.RootElement.EnumerateObject())
+            {
+                Assert.NotEqual("approval_hold_secs", property.Name);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(BehaviorSetting.QuiescenceMinutes, 30, "quiescence_secs", 1800)]
-    [InlineData(BehaviorSetting.ApprovalHoldSeconds, 10, "approval_hold_secs", 10)]
     [InlineData(BehaviorSetting.DigestHours, 4, "digest_interval_secs", 14400)]
     public void BehaviorEditsSendExactlyOneSetting(
         BehaviorSetting setting,

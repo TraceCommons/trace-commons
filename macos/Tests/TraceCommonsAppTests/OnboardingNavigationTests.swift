@@ -84,6 +84,16 @@ final class OnboardingNavigationTests: XCTestCase {
     /// says it is enrolled). The enrollment is applied then, over no account
     /// answer or watch only; an account Join chose is kept, and an
     /// enrollment this first run made is left as it is.
+    func test_reopenedSetupUsesTheConnectedNearAIAccount() {
+        let restarted = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
+        let session = NativeAccountSession(state: "known", signedIn: true, expiresAt: nil, signIn: "near_ai")
+        let resumed = OnboardingNavigation.recordConnectedNearAI(restarted, session: session)
+        XCTAssertTrue(JoinScreenLayout.canForward(resumed))
+        XCTAssertFalse(JoinScreenLayout.canToggleNearAI(resumed))
+        XCTAssertFalse(JoinScreenLayout.showsInviteCard(resumed))
+        XCTAssertEqual(OnboardingNavigation.recordEnrolment(resumed), resumed)
+    }
+
     func test_aLateEnrolmentIsRecordedWithoutReplacingAChosenAccount() {
         let fresh = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
         let late = OnboardingNavigation.recordEnrolment(fresh)

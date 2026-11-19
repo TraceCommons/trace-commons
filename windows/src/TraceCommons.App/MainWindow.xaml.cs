@@ -97,8 +97,8 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
-    private OnboardingWindow? _onboarding;
-    private OnboardingWindow? _automaticOnboarding;
+    private FirstRunWindow? _onboarding;
+    private FirstRunWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
     private bool _activationReady;
@@ -135,6 +135,13 @@ public sealed partial class MainWindow : Window
                 (InsightsPane.Content as InsightsView)?.Deactivate();
             if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
                 (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
+            // The Private AI tab reads and follows the ledger only while shown (W19).
+            if (change.PropertyName is null or "" or nameof(MainViewModel.ShowingPrivateInference)
+                && PrivateInferencePane.Content is PrivateInferenceView privateAI)
+            {
+                if (ViewModel.ShowingPrivateInference) privateAI.ActivateMacSections();
+                else privateAI.DeactivateMacSections();
+            }
         };
 
         // Found once the template is realized, not here: the ScrollViewer
@@ -148,10 +155,23 @@ public sealed partial class MainWindow : Window
         _host.StatusChanged += OnTrayWorthyChange;
         _host.DigestDue += OnDigestDue;
         _host.ReengageDue += OnReengageDue;
+
+        // The daemon's feature flags, read as the Mac reads them: at start,
+        // on its change event (and after a lag or resync), and after a wake.
+        // Nothing on this window is gated yet: the Mac gates the Insights
+        // Skills tab and the Claude Desktop setup, and neither exists here.
+        _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
+        _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
+        _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
+        WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
+#if DEBUG
+        _flags.Changed += TraceFeatureFlags;
+#endif
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.BalloonClicked += OnTrayBalloonClicked;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
+        _tray.AboutRequested += OnTrayAboutRequested;
         _tray.PrivateInferenceRequested += OnTrayPrivateInferenceRequested;
         _tray.PrivateInferenceStopRequested += OnTrayPrivateInferenceStopRequested;
         _tray.PauseRequested += OnTrayPauseRequested;
@@ -176,6 +196,48 @@ public sealed partial class MainWindow : Window
         // The Monitor window's shell: toolbar row, tabs, panes, notices,
         // keyboard map and clocks (MainWindow.Shell.cs).
         InitializeShell();
+    }
+
+    /// <summary>
+    /// The daemon's feature flags (<see cref="FeatureFlagGate"/>). Every flag
+    /// reads off until a snapshot of this build arrives.
+    /// </summary>
+    private readonly FeatureFlagGate _flags;
+
+#if DEBUG
+    /// <summary>
+    /// Debug builds only, and only when <c>TC_DEBUG_FEATURE_FLAGS_LOG</c>
+    /// names a file: one line per snapshot the window holds, for checking the
+    /// reader against a real daemon on a Windows box. Nothing on screen.
+    /// </summary>
+    private void TraceFeatureFlags()
+    {
+        string? path = Environment.GetEnvironmentVariable("TC_DEBUG_FEATURE_FLAGS_LOG");
+        if (string.IsNullOrEmpty(path)) return;
+        FeatureFlagSnapshot? s = _flags.Current;
+        string line = s is null
+            ? "none"
+            : $"instance={s.InstanceId} generation={s.Generation} source={s.Source} "
+              + $"{FeatureFlagGate.InsightsSkills}={_flags.IsEnabled(FeatureFlagGate.InsightsSkills)} "
+              + $"unknown_flag={_flags.IsEnabled("no_such_flag")} flags=[{string.Join(",", System.Linq.Enumerable.Select(s.Flags, f => f.Key + ":" + f.Value.Enabled))}]";
+        try
+        {
+            System.IO.File.AppendAllText(path, $"{DateTime.UtcNow:O} host_generation={_host.ConnectionGeneration} {line}\n");
+        }
+        catch (Exception)
+        {
+        }
+    }
+#endif
+
+    /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
+    private bool ReadsNoFlags()
+    {
+#if DEBUG
+        return _host.IsSample;
+#else
+        return false;
+#endif
     }
 
     /// <summary>Hide to a reachable tray; otherwise confirm before stopping the daemon.</summary>
@@ -327,8 +389,25 @@ public sealed partial class MainWindow : Window
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= OnFirstActivated;
+#if DEBUG
+        // A recorded sample opens on the contribution panes, as it always has
+        // (the captures' opening tab, win-capture-samples.ps1); its Insights
+        // opens from the tab, over the sample service (CreateInsightsModel).
+        if (_host.IsSample)
+        {
+            OpenSampleLanding();
+            return;
+        }
+#endif
         ShowInsightsPane();
     }
+
+#if DEBUG
+    private async void OpenSampleLanding()
+    {
+        if (await StartContributionsAsync()) ViewModel.ShowQueue();
+    }
+#endif
 
     private bool _contributionStartupAttempted;
     private bool _contributionStartupBusy;
@@ -387,23 +466,27 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Asks which session folders to watch, then resumes startup.
+    /// No session roots yet. On a device never set up, the first run asks,
+    /// on its Tools step, and starts the daemon there, as the Mac's does
+    /// (W7); the startup this window could not finish resumes once it has.
+    /// A device set up before keeps the roots window.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// A window rather than a page: until this is answered there is no daemon,
-    /// so the queue behind it has nothing to show and no menu it offers would
-    /// work.
-    /// </para>
-    /// <para>
-    /// Discovery runs on a background thread. It counts session files
-    /// recursively under both stores, which on a working developer's machine
-    /// is thousands of them, and that is a visible hang if it happens on the
-    /// UI thread. Same reasoning as the daemon start above.
-    /// </para>
+    /// A window rather than a page: until this is answered there is no
+    /// daemon, so the queue behind it has nothing to show. Discovery runs on
+    /// a background thread: it counts session files recursively, which is a
+    /// visible hang on the UI thread.
     /// </remarks>
     private async Task ShowSessionRootsAsync()
     {
+        OnboardingState onboarding = OnboardingState.Default();
+        if (!onboarding.AnyComplete())
+        {
+            OpenOnboarding(onboarding, automatic: true).Activate();
+            return;
+        }
+
+        // Set up before, roots since withdrawn: only the roots are asked.
         IReadOnlyList<SourceCandidate> candidates = await Task
             .Run(SourceDiscovery.ProbeThisMachine)
             .ConfigureAwait(true);
@@ -716,14 +799,28 @@ public sealed partial class MainWindow : Window
         onboarding.Activate();
     }
 
-    private OnboardingWindow OpenOnboarding(OnboardingState state, bool automatic = false)
+    private FirstRunWindow OpenOnboarding(OnboardingState state, bool automatic = false)
     {
         if (_onboarding is not null)
         {
             if (!automatic) _automaticOnboarding = null;
             return _onboarding;
         }
-        var onboarding = new OnboardingWindow(_host, state);
+        var onboarding = new FirstRunWindow(_host, state);
+        onboarding.DaemonStarted += OnSessionRootsDeclared;
+        // A refused grant finished on Ask: the first run's last line, said
+        // on the queue pane once its window has gone (AppModel.firstRunNotice).
+        onboarding.Finished += line =>
+        {
+            if (line is not null)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    ViewModel.ShowQueue();
+                    ViewModel.ShowNotice(line);
+                });
+            }
+        };
         _onboarding = onboarding;
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
@@ -765,6 +862,13 @@ public sealed partial class MainWindow : Window
         // own onboarding state, and every call it makes is refused anyway.
         if (_host.IsSample)
         {
+            // Screenshots of one step (FirstRunPreview): opened on a daemon
+            // that refuses everything, never this machine's state.
+            if (global::TraceCommons.Interop.FirstRun.FirstRunPreview.StepFrom(Environment.GetEnvironmentVariable(global::TraceCommons.Interop.FirstRun.FirstRunPreview.EnvironmentVariable)) is global::TraceCommons.Interop.FirstRun.FirstRunStep step)
+            {
+                var preview = new FirstRunWindow(_host, OnboardingState.Default(), step);
+                preview.Activate();
+            }
             return;
         }
 #endif
@@ -860,7 +964,7 @@ public sealed partial class MainWindow : Window
     private async void OnShowHistory(object sender, RoutedEventArgs e)
     {
         if (!await StartContributionsAsync()) return;
-        HistoryPane.Content ??= new HistoryView(_host);
+        HistoryPane.Content ??= NewHistoryView();
         ViewModel.ShowHistory();
     }
 
@@ -946,48 +1050,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnDeclineArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.DeclineArming,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}}}""")
-            .ConfigureAwait(true);
-    }
+    /// <summary>
+    /// "Not now" against the arming offer. The daemon silences the offer for
+    /// thirty days; the card leaves on its yes only (<see cref="ArmingOfferFlow"/>).
+    /// </summary>
+    private async void OnDeclineArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.DeclineAsync();
 
     /// <summary>
-    /// Arms the offered project.
+    /// Arms the offered project. No confirmation sheet: this card IS the
+    /// confirmation (owner, 2026-11-11). Locked from the press, a check on the
+    /// daemon's yes, and the card leaves after the hold; a refusal keeps it
+    /// with the core's line (<see cref="ArmingOfferFlow"/>).
     /// </summary>
-    /// <remarks>
-    /// No confirmation sheet: this card IS the confirmation. It names the
-    /// project, states the evidence, and asks the question outright, so a
-    /// second dialog saying the same thing would be a step rather than a
-    /// safeguard. Settings, where arming is picked from a list rather than
-    /// offered, does confirm.
-    /// </remarks>
-    private async void OnAcceptArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.SetProjectMode,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}},"mode":"auto_upload"}""")
-            .ConfigureAwait(true);
-        await ViewModel.RefreshAsync().ConfigureAwait(true);
-    }
+    private async void OnAcceptArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.AcceptAsync();
 
     /// <summary>
     /// The button on the legacy invite migration notice.
@@ -1142,7 +1219,7 @@ public sealed partial class MainWindow : Window
         var onboarding = OpenOnboarding(OnboardingState.Default());
         if (!alreadyOpen && target == HealthNavigationTarget.Connect)
         {
-            onboarding.ViewModel.GetStarted();
+            onboarding.GetStarted();
         }
 
         onboarding.Activate();
@@ -1183,19 +1260,9 @@ public sealed partial class MainWindow : Window
 
     private async void ShowInsightsPane()
     {
-#if DEBUG
-        // Recorded samples open the contribution panes, never local Insights,
-        // which reads this machine's own sessions (as on Linux, #2161).
-        if (_host.IsSample)
-        {
-            if (await StartContributionsAsync()) ViewModel.ShowQueue();
-            return;
-        }
-#endif
-
         if (InsightsPane.Content is not InsightsView)
         {
-            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this), CreateInsightsModel());
             page.ContributionSetupRequested += async (_, _) =>
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
@@ -1204,6 +1271,24 @@ public sealed partial class MainWindow : Window
         }
         ViewModel.ShowInsights();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
+    }
+
+    /// <summary>
+    /// Insights' state. A recorded sample never reads this machine's own
+    /// sessions (as on Linux, #2161): its service refuses every request
+    /// (<see cref="SampleInsights"/>) and Benchmarks draws the Mac's sample
+    /// (<c>InsightsSample</c>). Otherwise the local store and the daemon's
+    /// <c>insights_benchmarks</c>.
+    /// </summary>
+    private InsightsViewModel CreateInsightsModel()
+    {
+#if DEBUG
+        if (_host.IsSample)
+        {
+            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
+        }
+#endif
+        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
@@ -1236,8 +1321,18 @@ public sealed partial class MainWindow : Window
 
     private void ShowPrivateInferencePane()
     {
-        PrivateInferencePane.Content ??= new PrivateInferenceView(_host);
+        if (PrivateInferencePane.Content is null)
+        {
+            var page = new PrivateInferenceView(_host, SpendOrganizations);
+            // The Private AI Settings card opens Settings; the spending
+            // prompt's action opens it at the organization picker (W19-D2).
+            page.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
+            page.ChooseSpendOrganizationRequested += (_, _) => ShowSpendOrganizationSettings();
+            PrivateInferencePane.Content = page;
+        }
+
         ViewModel.ShowPrivateInference();
+        (PrivateInferencePane.Content as PrivateInferenceView)?.ActivateMacSections();
     }
 
     /// <summary>
@@ -1798,6 +1893,7 @@ public sealed partial class MainWindow : Window
         _clockGate.SetClosed();
         StopMoveTicks();
         _settingsWindow?.Close();
+        _aboutWindow?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;

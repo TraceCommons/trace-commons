@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App;
 
@@ -61,6 +62,9 @@ public sealed class TrayIcon : IDisposable
 
     public event Action? SettingsRequested;
 
+    /// <summary>The About row (spec W24-D1 (a)).</summary>
+    public event Action? AboutRequested;
+
     /// <summary>Raised when the contributor asks for the model-calls destination.</summary>
     public event Action? PrivateInferenceRequested;
 
@@ -115,6 +119,7 @@ public sealed class TrayIcon : IDisposable
     private const int MenuIdResume = 13;
     private const int MenuIdPrivateInference = 14;
     private const int MenuIdPrivateInferenceAction = 15;
+    private const int MenuIdAbout = 16;
 
     private readonly WndProc _wndProc;
     private readonly string _className;
@@ -342,7 +347,7 @@ public sealed class TrayIcon : IDisposable
         return CreateWindowEx(
             0,
             _className,
-            "Near.ai",
+            TraceCommons.Interop.Shell.MonitorWords.AppName,
             WS_POPUP,
             0, 0, 0, 0,
             IntPtr.Zero,
@@ -539,8 +544,10 @@ public sealed class TrayIcon : IDisposable
                 AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             }
 
-            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Near.ai");
+            AppendMenu(menu, MF_STRING, MenuIdOpen, $"Open {TraceCommons.Interop.Shell.MonitorWords.AppName}");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
+            // About (spec W24-D1 (a)), in the core's words.
+            AppendMenu(menu, MF_STRING, MenuIdAbout, AboutLines.Title);
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit…");
@@ -571,6 +578,10 @@ public sealed class TrayIcon : IDisposable
 
                 case MenuIdSettings:
                     SettingsRequested?.Invoke();
+                    break;
+
+                case MenuIdAbout:
+                    AboutRequested?.Invoke();
                     break;
 
                 case MenuIdPrivateInference:
@@ -654,7 +665,7 @@ public sealed class TrayIcon : IDisposable
             // two legible digits, so the count lives in the tooltip and in
             // the menu header, both of which a screen reader can also read,
             // and the icon carries only "there is something".
-            TrayIconState.Attention => lightTaskbar ? 0xFF6D14F3U : 0xFF8A3DFFU,
+            TrayIconState.Attention => lightTaskbar ? 0xFF0558B6U : 0xFF7EBCFFU,
 
             // The spec says an amber dot. This design system has no amber;
             // statusOutside (TcStatusOutsideBrush, which the coral keys now

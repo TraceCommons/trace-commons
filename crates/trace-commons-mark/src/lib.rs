@@ -307,7 +307,7 @@ pub fn windows_tiles() -> Vec<BinaryExport> {
         // system appearance it cannot observe.
         out.push(BinaryExport {
             repo_path: leak_path(format!("{stem}.png")),
-            bytes: raster::png(Scheme::Light, base),
+            bytes: near::tile_png(base),
         });
         for percent in LADDER {
             // Round half up, which is not `div_ceil`: they agree on the .5
@@ -317,7 +317,7 @@ pub fn windows_tiles() -> Vec<BinaryExport> {
             let size = (base * percent + 50) / 100;
             out.push(BinaryExport {
                 repo_path: leak_path(format!("{stem}.scale-{percent}.png")),
-                bytes: raster::png(Scheme::Light, size),
+                bytes: near::tile_png(size),
             });
         }
     }
@@ -515,41 +515,46 @@ mod tests {
         assert_eq!(before, paths.len(), "duplicate tile path");
     }
 
-    /// The teeth, at the level the packaging actually consumes. Not "the file
-    /// exists", not "it is the right size", not "it has more than one colour" --
-    /// the two bracket inks have to be present in the decoded pixels, because a
-    /// flat square satisfies all three of the others and that is precisely what
-    /// shipped.
+    /// The teeth, at the level the packaging actually consumes: each shipped
+    /// tile, decoded from what was rendered, is the NEAR AI tile (owner
+    /// decision G-3 (a), 2026-11-18) -- the brand-tile ground, the N in
+    /// paper, transparent outside the rounded corners. A flat square, the old
+    /// bracket mark or an N-less tile each fails one of these.
     #[test]
-    fn windows_tiles_carry_both_brackets() {
+    fn windows_tiles_carry_the_near_ai_n() {
+        let tile_ink = [0x0B, 0x8F, 0xF6, 255];
+        let paper_ink = [0xF3, 0xF3, 0xF2, 255];
         for tile in windows_tiles() {
             let size = u32::from_be_bytes(tile.bytes[16..20].try_into().unwrap());
-            let pixels = raster::render_framed(Scheme::Light, size);
-            let ink = |hex: &str| {
-                let b = hex.as_bytes();
-                let n = |c: u8| match c {
-                    b'0'..=b'9' => c - b'0',
-                    b'A'..=b'F' => c - b'A' + 10,
-                    _ => 0,
-                };
-                [
-                    n(b[1]) * 16 + n(b[2]),
-                    n(b[3]) * 16 + n(b[4]),
-                    n(b[5]) * 16 + n(b[6]),
-                    255,
-                ]
+            // What ships is exactly this render, encoded.
+            assert_eq!(
+                tile.bytes,
+                near::tile_png(size),
+                "{} is not the N tile",
+                tile.repo_path
+            );
+            let pixels = near::render_tile(size);
+            let at = |fx: f64, fy: f64| -> [u8; 4] {
+                let x = (fx * size as f64) as usize;
+                let y = (fy * size as f64) as usize;
+                let i = (y * size as usize + x) * 4;
+                pixels[i..i + 4].try_into().unwrap()
             };
-            for (name, hex) in [
-                ("bracketOpen", Scheme::Light.bracket_open()),
-                ("bracketClose", Scheme::Light.bracket_close()),
-            ] {
-                let want = ink(hex);
-                assert!(
-                    pixels.chunks(4).any(|p| p == want),
-                    "{} has no {name} bracket",
-                    tile.repo_path
-                );
-            }
+            // The corner is outside the rounded square.
+            assert_eq!(
+                at(0.0, 0.0)[3],
+                0,
+                "{} corner is not transparent",
+                tile.repo_path
+            );
+            // The ground between the N's legs, above the diagonal.
+            assert_eq!(at(0.5, 0.3), tile_ink, "{} ground", tile.repo_path);
+            // The N's left leg (x 83..119 of the kit's 400, scaled to 58.5%
+            // of the tile and centred) and its right leg, half way down.
+            assert_eq!(at(0.27, 0.5), paper_ink, "{} left leg", tile.repo_path);
+            assert_eq!(at(0.73, 0.5), paper_ink, "{} right leg", tile.repo_path);
+            // Outside the N but inside the tile, beside the left leg.
+            assert_eq!(at(0.15, 0.5), tile_ink, "{} margin", tile.repo_path);
         }
     }
 

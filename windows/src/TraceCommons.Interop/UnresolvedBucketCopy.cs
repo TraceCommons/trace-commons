@@ -34,8 +34,8 @@ public static class UnresolvedBucketCopy
     /// into all three. Not being armable is the protective half of that, and
     /// nothing in it is a contributor's to fix.
     /// </summary>
-    public const string Note =
-        "Near.ai can't tell which folder these ran in, so they can never be "
+    public static string Note =>
+        Shell.MonitorWords.AppName + " can't tell which folder these ran in, so they can never be "
         + "contributed automatically. You'll always be asked.";
 
     /// <summary>

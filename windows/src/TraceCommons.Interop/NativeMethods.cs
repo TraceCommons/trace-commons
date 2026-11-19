@@ -155,10 +155,11 @@ internal static partial class NativeMethods
     internal static extern ulong tc_subscribe(IntPtr handle, TcEventCallback cb, IntPtr ctx);
 
     /// <summary>
-    /// <see cref="tc_subscribe"/>, declaring the opt-in events this
-    /// subscriber can render (a JSON array such as <c>["reengage_due"]</c>);
-    /// null declares none and is exactly tc_subscribe. Lifetime rules for
-    /// the callback and ctx are tc_subscribe's.
+    /// tc_subscribe, declaring the opt-in events this subscriber can draw
+    /// (<c>subscribe</c>'s <c>accepts</c>) as a borrowed JSON array of names;
+    /// the window declares <c>feature_flags_changed</c>, as the Mac does
+    /// (AppModel.swift:1859), and <c>reengage_due</c> while it can show one.
+    /// Null declares none and is exactly tc_subscribe. Lifetime rules are tc_subscribe's.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern ulong tc_subscribe_with_accepts(
@@ -166,6 +167,14 @@ internal static partial class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? acceptsJson,
         TcEventCallback cb,
         IntPtr ctx);
+
+    /// <summary>
+    /// This build's immutable feature identity (schema, environment and
+    /// profile digest) as an owned JSON object. A daemon snapshot of another
+    /// build is not used (<c>FeatureFlagGate</c>). NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_feature_profile_json();
 
     /// <summary>
     /// The ABI's only real barrier: blocks until the callback is guaranteed
@@ -231,6 +240,59 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void tc_preview_free(IntPtr preview);
+
+    // ---- W21 and W22: History detail, public runs, the preview's turns ----
+    // One block, so the slices' bindings sit together (Mac: TCPublicRun.swift,
+    // TCDaemon.swift:351-362, TCCoreCopy.swift:41-52).
+
+    /// <summary>
+    /// The turn index over an open preview's redacted body
+    /// (<c>{entry_id, body_digest, envelope_digest, turn_count, turns}</c>),
+    /// anchored to <paramref name="bodyDigest"/>: <c>sha256:</c> and lowercase
+    /// hex over the exact UTF-8 bytes of the body on screen. Owned; NULL with
+    /// <paramref name="err"/> set (owned too) on failure.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_preview_turns_json(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string entryId,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string bodyDigest,
+        out IntPtr err);
+
+    /// <summary>
+    /// The preview's removed-summary panel (<c>redaction_summary::summary_copy</c>):
+    /// <c>{"removed": [row], "still_present": [row]}</c>. Owned; NULL for an
+    /// unreadable <paramref name="redactionsJson"/> and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_redaction_summary_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? redactionsJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? distinctJson);
+
+    /// <summary>
+    /// Every fixed word on owned session detail and reviewed publication, as
+    /// one owned JSON object. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_copy();
+
+    /// <summary>
+    /// Validates and normalizes the publication editor's input through the
+    /// shared Rust protocol: an owned <c>{draft}</c> or <c>{error}</c> object.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_validate_editor(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? inputJson);
+
+    /// <summary>The sentence for a <c>history_detail</c> error label. Owned.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_session_detail_error_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>The sentence for a publish or unpublish error label. Owned.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_public_run_error_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
 
     /// <summary>
     /// Describes the session stores on this machine, so the roots screen can
@@ -422,6 +484,16 @@ internal static partial class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_certificate_detail_copy();
+
+    /// <summary>
+    /// The arming offer's words for one project
+    /// (<c>project_copy::arming_offer_copy</c>), as an owned JSON object.
+    /// NULL for a NULL label, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_offer_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string projectLabel,
+        uint count);
 
     /// <summary>
     /// The notice for one element of <c>status.arming_rewordings</c> (K5),
@@ -1240,6 +1312,39 @@ internal static partial class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_first_run_copy_json();
+
+    // The first run's Terms step and Traces line (W7). tc_terms_document_json
+    // fetches the published terms (blocking; call off the UI thread) and sets
+    // *err to an owned label on failure; tc_first_run_estimate_line words the
+    // Traces line from {"traces": n, "earns_credit": b}, NULL for none. Both
+    // return owned strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_terms_document_json(out IntPtr err);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_first_run_estimate_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string request);
+
+    // What a folder picked with "add your tool" is (W7): an owned JSON array
+    // of tc_discover_sources rows, one per kind whose layout matches, [] for
+    // none; NULL for a non-UTF-8 path or a caught panic. Reads directory
+    // entries and metadata only. Release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_describe_folder(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    // The Automatic path's disclosures (W7): the scrub sheet's sentences for
+    // the configuration in config_dir (NULL when unreadable), and whether the
+    // core lets the grant be asked for from what the person was shown
+    // ({ready, blockers, witness_signing_address}; NULL for unreadable
+    // progress). Owned strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_automatic_contribution_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string configDir);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_flow1_grant_request_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string progressJson);
 
     // Owned JSON strings; release with tc_string_free.
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]

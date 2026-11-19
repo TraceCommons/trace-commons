@@ -2,7 +2,7 @@ use super::*;
 
 fn override_params(shared: &DaemonShared, value: serde_json::Value) -> serde_json::Value {
     let snapshot = shared.feature_flags.snapshot();
-    serde_json::json!({"id":"insights_skills", "value":value, "environment":snapshot.environment,"profile_digest":snapshot.profile_digest})
+    serde_json::json!({"id":"skills_server_catalog", "value":value, "environment":snapshot.environment,"profile_digest":snapshot.profile_digest})
 }
 
 #[test]
@@ -13,14 +13,14 @@ fn feature_override_mutates_daemon_persists_and_publishes() {
     let reply = handle_request(&shared, &req("feature_flags_override_set", override_params(&shared, serde_json::json!(true))));
     assert!(reply.error.is_none(), "{:?}", reply.error);
     let result = reply.result.unwrap();
-    assert_eq!(result["flags"]["insights_skills"]["enabled"], true);
-    assert_eq!(result["local_overrides"]["insights_skills"], true);
+    assert_eq!(result["flags"]["skills_server_catalog"]["enabled"], true);
+    assert_eq!(result["local_overrides"]["skills_server_catalog"], true);
     let event = events.try_recv().expect("change notification");
     assert_eq!(event.event, EVENT_FEATURE_FLAGS_CHANGED);
     assert_eq!(event.data["generation"], result["generation"]);
-    assert!(DaemonShared::load(store).unwrap().feature_flags.is_enabled("insights_skills"));
+    assert!(DaemonShared::load(store).unwrap().feature_flags.is_enabled("skills_server_catalog"));
     let reply = handle_request(&shared, &req("feature_flags_override_set", override_params(&shared, serde_json::Value::Null)));
-    assert_eq!(reply.result.unwrap()["flags"]["insights_skills"]["enabled"], false);
+    assert_eq!(reply.result.unwrap()["flags"]["skills_server_catalog"]["enabled"], false);
     drop(dir);
 }
 

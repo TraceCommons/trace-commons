@@ -55,7 +55,6 @@ public class ShellWordingTests
             // than in a view model so a machine that cannot build WinUI can
             // still test it -- which is precisely why the same sentences are
             // written a second time in the GTK and macOS shells today.
-            { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
             { "TraceCommons.Interop/HealthCopy.cs", 6 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },
@@ -69,7 +68,6 @@ public class ShellWordingTests
             { "TraceCommons.Interop/ProjectIgnoreCopy.cs", 8 },
             { "TraceCommons.Interop/PublicProfileCopy.cs", 44 },
             { "TraceCommons.Interop/RedactionLabels.cs", 3 },
-            { "TraceCommons.Interop/RedactionSummary.cs", 7 },
             { "TraceCommons.Interop/ScrubDetectorCopy.cs", 6 },
             { "TraceCommons.Interop/ScrubbingCaveatCopy.cs", 3 },
             { "TraceCommons.Interop/SessionRootsCopy.cs", 14 },
@@ -93,7 +91,6 @@ public class ShellWordingTests
             { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 7 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
-            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
             // The approval failure sentence is shared with the tested decision factory.
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 9 },
             { "TraceCommons.App/ViewModels/PreviewDecision.cs", 2 },
@@ -115,15 +112,15 @@ public class ShellWordingTests
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            // Lowered from 10 (2026-11-19): the Watching timing card and its
-            // five sentences are gone, as on the Mac.
+            // Lowered from main's 12 at the 2026-11-19 merge: the sectioned
+            // Settings layout carries none of the old screen's eyebrows, and
+            // the Watching timing card's sentences are gone, as on the Mac.
             { "TraceCommons.App/Controls/SettingsView.xaml", 5 },
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
             // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
             // button's hand-written accessible name, which also spelled the
             // former app name, is gone; the button is named by its label.
             { "TraceCommons.App/MainWindow.xaml", 16 },
-            { "TraceCommons.App/OnboardingWindow.xaml", 11 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };
 
