@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -104,39 +105,67 @@ public sealed record SpendOrganizations(
         o.ValueKind == JsonValueKind.Object && o.TryGetProperty(key, out JsonElement v) && v.ValueKind == JsonValueKind.True;
 }
 
+/// <summary>The tone of the line under the picker (<c>GlassNotice</c> tones the Mac's card uses).</summary>
+public enum SpendOrganizationTone
+{
+    Ask,
+    Outside,
+}
+
+/// <summary>One line under the picker, at most (<c>SpendOrganizationCard.Line</c>).</summary>
+public sealed record SpendOrganizationLine(string Text, SpendOrganizationTone Tone);
+
 /// <summary>
-/// The Private AI screen's prompt to choose a spending organization (spec
-/// W19-D2 (a), <c>SpendOrganizationPrompt</c>, SpendOrganizationPrompt.swift,
-/// with AppModel.swift:1064-1114). Drawn only when the daemon asks. Its action
-/// opens Settings; "Not now" records the organization already in use, which
-/// mints nothing, and the prompt leaves only on a confirmed reply.
+/// Which organization Private AI spends from: the Private AI screen's prompt
+/// (spec W19-D2 (a), SpendOrganizationPrompt.swift) and the Settings picker
+/// it leads to (SpendOrganizationCard.swift), over one state, as the Mac's
+/// <c>AppModel</c> holds it (AppModel.swift:1043-1115). The window owns one,
+/// so a choice made in Settings ends the prompt on the tab.
 /// </summary>
-public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
+/// <remarks>
+/// Nothing is chosen for the contributor: reading or re-reading the listing
+/// sends nothing, and the picker's echo of the organization already current
+/// is not a pick. A switch is sent only for a different organization the
+/// contributor picked, or by "Not now", which records the one in use and
+/// mints nothing. Every word is the daemon's <c>view</c>.
+/// </remarks>
+public sealed class SpendOrganizationModel : INotifyPropertyChanged
 {
     public const string ListMethod = "near_ai_spend_organizations";
     public const string SelectMethod = "near_ai_spend_organization_select";
 
     private readonly Func<string, string, Task<DaemonResponse>> _call;
     private readonly Func<long> _connection;
-    private readonly CredentialActivity _credential;
     private long _reads;
     private bool _dismissing;
 
     /// <param name="credential">
     /// The sign-in or credential action in flight, shared with the credential
-    /// card; Not now waits for it, as the Mac's does (AppModel.swift:1104).
+    /// card; a pick and Not now wait for it, as the Mac's do
+    /// (AppModel.swift:1076 and :1104).
     /// </param>
-    public SpendOrganizationPromptModel(
+    public SpendOrganizationModel(
         Func<string, string, Task<DaemonResponse>> call, Func<long> connection, CredentialActivity credential)
     {
         _call = call;
         _connection = connection;
-        _credential = credential;
+        Credential = credential ?? throw new ArgumentNullException(nameof(credential));
+        Credential.Changed += _ => Raise();
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    /// <summary>
+    /// A switch settled, refused or not: the key may have moved, so the
+    /// balance is read afresh (AppModel.swift:1093). Not now raises nothing.
+    /// </summary>
+    public event Action? SwitchSettled;
+
+    public CredentialActivity Credential { get; }
+
     public SpendOrganizations Status { get; private set; } = SpendOrganizations.Unreported;
+
+    // ---- The prompt ----
 
     public bool IsShown => Status.ShowsPrompt;
 
@@ -152,7 +181,64 @@ public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
 
     public string DismissName => Status.View?.PromptDismissAccessibility ?? string.Empty;
 
-    /// <summary>Reads the listing; a failed read is unreported and draws nothing.</summary>
+    // ---- The picker ----
+
+    /// <summary>Two or more organizations, a current one, and the words.</summary>
+    public bool ShowsPicker => Status.ShowsPicker;
+
+    public string PickerTitle => Status.View?.Title ?? string.Empty;
+
+    /// <summary>Cut by the owner 2026-11-04 (P188): an empty line draws nothing.</summary>
+    public string What => Status.View?.What ?? string.Empty;
+
+    public bool HasWhat => What.Length > 0;
+
+    /// <summary>The picker's accessible name (<c>GlassSelect(words.picker, ...)</c>).</summary>
+    public string PickerName => Status.View?.Picker ?? string.Empty;
+
+    /// <summary>The organizations by name, in the daemon's order; none without a picker.</summary>
+    public IReadOnlyList<string> OptionNames =>
+        ShowsPicker ? Status.Organizations.Select(o => o.Name).ToArray() : Array.Empty<string>();
+
+    /// <summary>The current organization's row, or -1 when it is not listed.</summary>
+    public int CurrentIndex
+    {
+        get
+        {
+            for (int i = 0; i < Status.Organizations.Count; i++)
+            {
+                if (Status.Organizations[i].Id == Status.CurrentOrganizationId) return i;
+            }
+
+            return -1;
+        }
+    }
+
+    /// <summary>A switch is in flight; it takes about ten seconds.</summary>
+    public bool Switching { get; private set; }
+
+    /// <summary>The last switch's refusal, in the daemon's words. Every refusal changed nothing.</summary>
+    public string? Failure { get; private set; }
+
+    /// <summary>The picker is held while a switch or a credential action is in flight.</summary>
+    public bool CanPick => !Switching && !Credential.Busy;
+
+    public SpendOrganizationLine? StateLine => LineFor(Status, Switching, Failure);
+
+    /// <summary>
+    /// One line under the picker, at most: switching, else the last refusal,
+    /// else a replaced key still being revoked (<c>SpendOrganizationCard.stateLine</c>).
+    /// </summary>
+    public static SpendOrganizationLine? LineFor(SpendOrganizations status, bool switching, string? failure)
+    {
+        if (status.View is not { } words) return null;
+        if (switching) return new SpendOrganizationLine(words.Switching, SpendOrganizationTone.Ask);
+        if (failure is not null) return new SpendOrganizationLine(failure, SpendOrganizationTone.Outside);
+        if (status.RevokePending) return new SpendOrganizationLine(words.RevokePending, SpendOrganizationTone.Ask);
+        return null;
+    }
+
+    /// <summary>Reads the listing; a failed read is unreported and draws nothing. Sends no choice.</summary>
     public async Task RefreshAsync(bool fresh = false)
     {
         long mine = ++_reads;
@@ -173,19 +259,77 @@ public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// The picker's row <paramref name="index"/> was chosen. Only a different
+    /// organization than the current one is a pick: the picker echoing its
+    /// own selection, or a row that is not there, sends nothing.
+    /// </summary>
+    public Task PickAsync(int index)
+    {
+        if (!ShowsPicker || index < 0 || index >= Status.Organizations.Count) return Task.CompletedTask;
+        string wanted = Status.Organizations[index].Id;
+        return wanted == Status.CurrentOrganizationId ? Task.CompletedTask : SelectAsync(wanted);
+    }
+
+    /// <summary>
+    /// Switches Private AI to <paramref name="organizationId"/>
+    /// (<c>selectSpendOrganization</c>, AppModel.swift:1075-1096).
+    /// </summary>
+    public async Task SelectAsync(string organizationId)
+    {
+        if (!CanPick) return;
+        Switching = true;
+        Failure = null;
+        Raise();
+        long connection = _connection();
+        string? label;
+        try
+        {
+            DaemonResponse response = await _call(SelectMethod, Choice(organizationId)).ConfigureAwait(true);
+            label = response.IsError ? response.Error!.Message : null;
+        }
+        catch (Exception)
+        {
+            // Not the daemon's refusal: the switch may have happened, so no
+            // line; the re-read shows which organization is current.
+            label = string.Empty;
+        }
+
+        Switching = false;
+        if (connection != _connection())
+        {
+            Raise();
+            return;
+        }
+
+        if (label is null)
+        {
+            // The choice is recorded, so the prompt ends now, not on the re-read.
+            Status = Status.WithPromptEnded();
+        }
+        else
+        {
+            Failure = Status.FailureLine(label);
+        }
+
+        Raise();
+        SwitchSettled?.Invoke();
+        await RefreshAsync(fresh: true).ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// "Not now": select the organization already current. A refusal keeps the
-    /// prompt and says nothing; the fresh re-read shows the truth.
+    /// prompt and says nothing; the fresh re-read shows the truth. Waits for a
+    /// switch or a credential action in flight (AppModel.swift:1104).
     /// </summary>
     public async Task DismissAsync()
     {
-        if (_dismissing || _credential.Busy || Status.CurrentOrganizationId is not { } current) return;
+        if (_dismissing || !CanPick || Status.CurrentOrganizationId is not { } current) return;
         _dismissing = true;
         long connection = _connection();
         bool confirmed;
         try
         {
-            DaemonResponse response = await _call(SelectMethod, JsonSerializer.Serialize(new Dictionary<string, string> { ["organization_id"] = current }))
-                .ConfigureAwait(true);
+            DaemonResponse response = await _call(SelectMethod, Choice(current)).ConfigureAwait(true);
             confirmed = !response.IsError;
         }
         catch (Exception)
@@ -202,9 +346,14 @@ public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
         await RefreshAsync(fresh: true).ConfigureAwait(true);
     }
 
+    private static string Choice(string organizationId) =>
+        JsonSerializer.Serialize(new Dictionary<string, string> { ["organization_id"] = organizationId });
+
     private void Publish(SpendOrganizations status)
     {
         Status = status;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
+        Raise();
     }
+
+    private void Raise() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
 }

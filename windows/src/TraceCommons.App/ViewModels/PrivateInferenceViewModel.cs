@@ -54,10 +54,15 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     private bool _offerSeen;
 
-    public PrivateInferenceViewModel(DaemonHost host, bool requiresSession = false)
+    /// <param name="credential">
+    /// The window's one credential flag, which the spending picker waits for
+    /// wherever it is drawn; a page of its own when none is given.
+    /// </param>
+    public PrivateInferenceViewModel(DaemonHost host, bool requiresSession = false, CredentialActivity? credential = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _requiresSession = requiresSession;
+        Credential = credential ?? new CredentialActivity();
         Funding = new NearAiFunding(_copy,
             parameters => _host.CallAsync(NearAiFunding.Method, parameters),
             () => _host.IsRunning,
@@ -442,10 +447,10 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     private string? _attemptId;
 
     /// <summary>
-    /// The credential action in flight, shared with the spending prompt
-    /// (<see cref="CredentialActivity"/>), which waits for it.
+    /// The credential action in flight, shared with the spending prompt and
+    /// picker (<see cref="CredentialActivity"/>), which wait for it.
     /// </summary>
-    public CredentialActivity Credential { get; } = new();
+    public CredentialActivity Credential { get; }
 
     private bool _credentialBusy
     {
@@ -984,7 +989,11 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// and that is unreported -- never a stale figure kept on screen, and
     /// never a claim that the account is empty.
     /// </remarks>
-    public async Task LoadBalanceAsync()
+    /// <param name="fresh">
+    /// Past the daemon's cache: after a spending switch, whose key the
+    /// balance is read with (AppModel.swift:1093, <c>fresh: true</c>).
+    /// </param>
+    public async Task LoadBalanceAsync(bool fresh = false)
     {
         if (_copy is null)
         {
@@ -994,7 +1003,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         try
         {
             DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.NearAiBalance)
+                .CallAsync(DaemonProtocol.Methods.NearAiBalance, NearAiBalanceSurface.ReadParams(fresh))
                 .ConfigureAwait(true);
 
             _balance = response.IsError || response.Result is null

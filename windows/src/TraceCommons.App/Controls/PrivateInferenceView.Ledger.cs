@@ -16,10 +16,16 @@ public sealed partial class PrivateInferenceView
 {
     private InferenceLedgerModel? _ledger;
     private PrivateAIGuide? _guide;
-    private SpendOrganizationPromptModel? _spendPrompt;
+    private readonly SpendOrganizationModel _spendPrompt;
 
-    /// <summary>Opens Settings, where the switch, the tools and the organization picker are.</summary>
+    /// <summary>Opens Settings (the Private AI Settings card).</summary>
     public event EventHandler? OpenSettingsRequested;
+
+    /// <summary>
+    /// The spending prompt's action: Settings, at the organization picker
+    /// (SpendOrganizationPrompt.swift, <c>onOpenSettings</c>).
+    /// </summary>
+    public event EventHandler? ChooseSpendOrganizationRequested;
 
     public InferenceLedgerModel Ledger => _ledger ??= CreateLedger();
 
@@ -27,9 +33,20 @@ public sealed partial class PrivateInferenceView
         PrivateAIGuide.ManagedWords(),
         PrivateAIGuide.ClosedPath(_host.ShellStateDirectory));
 
-    public SpendOrganizationPromptModel SpendPrompt => _spendPrompt ??=
-        new SpendOrganizationPromptModel(
-            (m, p) => _host.CallAsync(m, p), () => _host.ConnectionGeneration, ViewModel.Credential);
+    /// <summary>The window's spending state; the prompt draws from it.</summary>
+    public SpendOrganizationModel SpendPrompt => _spendPrompt;
+
+    private async void OnSpendSwitchSettled()
+    {
+        try
+        {
+            await ViewModel.LoadBalanceAsync(fresh: true);
+        }
+        catch (Exception)
+        {
+            System.Diagnostics.Trace.TraceWarning(nameof(OnSpendSwitchSettled));
+        }
+    }
 
     private InferenceLedgerModel CreateLedger()
     {
@@ -134,7 +151,7 @@ public sealed partial class PrivateInferenceView
 
     private void OnSettingsLink(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
 
-    private void OnSpendPromptAction(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
+    private void OnSpendPromptAction(object sender, RoutedEventArgs e) => ChooseSpendOrganizationRequested?.Invoke(this, EventArgs.Empty);
 
     private async void OnSpendPromptDismiss(object sender, RoutedEventArgs e) => await SpendPrompt.DismissAsync();
 
