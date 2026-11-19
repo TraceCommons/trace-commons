@@ -986,8 +986,10 @@ public extension ManagedSnapshot {
 
     /// Explicitly reported missing tools, in the same order as launch buttons.
     /// An older daemon without availability rows cannot establish absence.
+    /// Red Team comes last, and only while the daemon reports its row (the
+    /// flag is on) with the runtime not yet installed.
     var missingInstallTools: [ManagedToolAvailability] {
-        ManagedSurface.supportedTools.compactMap { tool in
+        (ManagedSurface.supportedTools + ["red_team"]).compactMap { tool in
             tools?.first { $0.tool == tool && !$0.installed }
         }
     }
