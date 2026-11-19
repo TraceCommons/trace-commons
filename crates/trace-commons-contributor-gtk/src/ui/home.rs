@@ -1075,6 +1075,33 @@ mod tests {
         );
         one_row("Traces", &traces.iter().collect::<Vec<_>>());
         assert_eq!(view.waiting.text(), "1234");
+        // The captions are drawn uppercase: as wide as the core's word in
+        // capitals, not as the word itself, in the same type.
+        let caption = traces[0]
+            .first_child()
+            .and_then(|content| content.first_child())
+            .and_downcast::<gtk::Label>()
+            .expect("Waiting's caption");
+        assert_eq!(caption.text(), words.waiting, "the core's word, untouched");
+        let twin = |text: &str| {
+            let label = gtk::Label::new(Some(text));
+            label.add_css_class("tc-type-eyebrow");
+            label.set_halign(gtk::Align::Start);
+            view.root.append(&label);
+            label
+        };
+        let (upper, plain) = (twin(&words.waiting.to_uppercase()), twin(words.waiting));
+        settle();
+        let natural = |label: &gtk::Label| label.measure(gtk::Orientation::Horizontal, -1).1;
+        assert!(
+            (natural(&caption) - natural(&upper)).abs() <= 1,
+            "the caption is {} wide, its word in capitals {}",
+            natural(&caption),
+            natural(&upper)
+        );
+        assert_ne!(natural(&upper), natural(&plain));
+        view.root.remove(&upper);
+        view.root.remove(&plain);
         assert_eq!(view.not_contributed.count.text(), "3");
         assert_eq!(
             view.not_contributed.size.text(),

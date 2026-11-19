@@ -1304,7 +1304,13 @@ mod tests {
         }
     }
 
-    const GROUNDS: [&str; 3] = ["tc_bg", "tc_surface", "tc_surface2"];
+    const GROUNDS: [&str; 5] = [
+        "tc_bg",
+        "tc_surface",
+        "tc_surface2",
+        "tc_glass_settings_ground",
+        "tc_glass_settings_card",
+    ];
 
     /// Every `@define-color` in the stylesheet, references resolved, opaque
     /// hex values only.

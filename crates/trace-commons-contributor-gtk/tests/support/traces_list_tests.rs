@@ -511,51 +511,66 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             "dark={dark}: the knob {drawn:?} at {ratio:.2}:1 on the selection"
         );
     }
-    // Under every vendored Omarchy skin too, in its own scheme, measured
-    // on the selection as drawn. (The 2.52:1 the review measured was on the
-    // Omarchy VM's own theme; these skins read 3:1 with and without the
-    // knob's rule.)
+    // Under every vendored Omarchy skin too, in its own scheme, with the
+    // folder's Automatic switch off and on, measured on the selection as
+    // drawn. The review measured a white knob at 2.52:1 with the track
+    // gone on the Omarchy VM's theme (tokyo-night): the switch on.
     let display = gtk::gdk::Display::default().expect("a display");
-    for (name, text) in crate::ui::omarchy::fixtures::FIXTURES {
-        let palette = crate::ui::omarchy::parse(text, false).expect(name);
-        // In the skin's own scheme, as the app draws it.
-        manager.set_color_scheme(if palette.mode == crate::ui::omarchy::Mode::Dark {
-            adw::ColorScheme::ForceDark
-        } else {
-            adw::ColorScheme::ForceLight
-        });
-        let provider = gtk::CssProvider::new();
-        provider.load_from_data(&crate::ui::style::omarchy_stylesheet(&palette));
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_USER,
+    for mode in ["notify_only", "auto_upload"] {
+        *app.projects.borrow_mut() = vec![project("api", mode)];
+        crate::ui::queue::render(&app);
+        app.shell.select(
+            &app,
+            crate::ui::monitor::inspector::Selection::Folder("api".into()),
         );
-        settle(&context);
-        let page: gtk::Widget = app.queue.root.clone().upcast();
-        let row = with_class(&page, "tc-tree-row-selected").remove(0);
-        let row_at = bounds(&row, app.window.upcast_ref());
-        let knob = slider(&with_class(&row, "tc-tree-switch")[0]);
-        let at = bounds(&knob, app.window.upcast_ref());
-        let points = [
-            (
-                (at.x() + at.width() / 2.0) as i32,
-                (at.y() + at.height() / 2.0) as i32,
-            ),
-            (
-                (row_at.x() + 3.0) as i32,
-                (row_at.y() + row_at.height() / 2.0) as i32,
-            ),
-        ];
-        let drawn = window_pixels(&app.window, &points);
-        let ratio = contrast(drawn[0], drawn[1]);
-        gtk::style_context_remove_provider_for_display(&display, &provider);
-        assert!(
-            ratio >= 3.0,
-            "{name}: the knob {:?} at {ratio:.2}:1 on the selection {:?}",
-            drawn[0],
-            drawn[1]
-        );
+        for (name, text) in crate::ui::omarchy::fixtures::FIXTURES {
+            let palette = crate::ui::omarchy::parse(text, false).expect(name);
+            // In the skin's own scheme, as the app draws it.
+            manager.set_color_scheme(if palette.mode == crate::ui::omarchy::Mode::Dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+            let provider = gtk::CssProvider::new();
+            provider.load_from_data(&crate::ui::style::omarchy_stylesheet(&palette));
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_USER,
+            );
+            settle(&context);
+            let page: gtk::Widget = app.queue.root.clone().upcast();
+            let row = with_class(&page, "tc-tree-row-selected").remove(0);
+            let row_at = bounds(&row, app.window.upcast_ref());
+            let switch = with_class(&row, "tc-tree-switch").remove(0);
+            let on = switch
+                .clone()
+                .downcast::<gtk::Switch>()
+                .expect("a switch")
+                .is_active();
+            assert_eq!(on, mode == "auto_upload", "{name}: the switch's state");
+            let knob = slider(&switch);
+            let at = bounds(&knob, app.window.upcast_ref());
+            let points = [
+                (
+                    (at.x() + at.width() / 2.0) as i32,
+                    (at.y() + at.height() / 2.0) as i32,
+                ),
+                (
+                    (row_at.x() + 3.0) as i32,
+                    (row_at.y() + row_at.height() / 2.0) as i32,
+                ),
+            ];
+            let drawn = window_pixels(&app.window, &points);
+            let ratio = contrast(drawn[0], drawn[1]);
+            gtk::style_context_remove_provider_for_display(&display, &provider);
+            assert!(
+                ratio >= 3.0,
+                "{name} {mode}: the knob {:?} at {ratio:.2}:1 on the selection {:?}",
+                drawn[0],
+                drawn[1]
+            );
+        }
     }
     manager.set_color_scheme(adw::ColorScheme::Default);
     app.window.close();
