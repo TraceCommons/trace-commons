@@ -14,6 +14,16 @@
 //! A hidden pane is not allocated and reserves nothing. The container's
 //! minimum width is the sum of the shown panes, the map at its minimum,
 //! which is what gives the window its minimum.
+//!
+//! The map and the inspector fade as they open and close, over
+//! `Motion.standard` on the token curve, as the Mac's do while its window
+//! moves (`GlassThreePane.apply`): a pane opening fades in where it is
+//! laid out; a pane closing keeps its place, takes no pointer and fades
+//! out, and is then gone. As on the Mac each is instant under reduced
+//! motion (followed live), in a window that cannot change its width
+//! (maximised or full screen), and when the main pane's width would
+//! change. The window's own edge does not move with it: a Wayland client
+//! cannot drive its frame (`pane_layout`).
 
 use std::cell::{Cell, RefCell};
 
@@ -21,7 +31,9 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
+use super::map_motion;
 use super::pane_layout::{self, PaneLayout, Visibility};
+use crate::ui::glass_motion::{self, Driver};
 
 type Callback = Box<dyn Fn(f64)>;
 
@@ -51,6 +63,11 @@ mod imp {
         pub width: Cell<f64>,
         pub on_map_width: RefCell<Option<Callback>>,
         pub on_main_width: RefCell<Option<Callback>>,
+        /// A closing pane's place while it fades out: its x and width.
+        pub leaving_map: Cell<Option<(f64, f64)>>,
+        pub leaving_inspector: Cell<Option<(f64, f64)>>,
+        pub map_fade: Driver,
+        pub inspector_fade: Driver,
     }
 
     impl Default for ThreePane {
@@ -68,6 +85,10 @@ mod imp {
                 width: Cell::new(0.0),
                 on_map_width: RefCell::default(),
                 on_main_width: RefCell::default(),
+                leaving_map: Cell::new(None),
+                leaving_inspector: Cell::new(None),
+                map_fade: Driver::default(),
+                inspector_fade: Driver::default(),
             }
         }
     }
@@ -177,6 +198,18 @@ mod imp {
                 obj.set_cursor_from_name(None);
             });
             obj.add_controller(motion);
+
+            // Animations turned off part-way: each pane at its end.
+            if let Some(settings) = gtk::Settings::default() {
+                let weak = obj.downgrade();
+                settings.connect_gtk_enable_animations_notify(move |settings| {
+                    if let Some(obj) = weak.upgrade()
+                        && !settings.is_gtk_enable_animations()
+                    {
+                        obj.end_fades();
+                    }
+                });
+            }
         }
 
         fn dispose(&self) {
@@ -197,10 +230,14 @@ mod imp {
             let shows = self.visibility();
             // Every shown child is measured, so each may be allocated.
             let mut tallest = 0;
+            // A pane fading out is still allocated, so it is measured, but
+            // takes no room.
+            let leaving_map = self.leaving_map.get().is_some();
+            let leaving_inspector = self.leaving_inspector.get().is_some();
             for (slot, shown) in [
                 (&self.main, true),
-                (&self.map, shows.map),
-                (&self.inspector, shows.inspector),
+                (&self.map, shows.map || leaving_map),
+                (&self.inspector, shows.inspector || leaving_inspector),
                 (&self.grip, shows.map),
             ] {
                 if let Some(child) = slot.borrow().as_ref().filter(|_| shown) {
@@ -239,8 +276,14 @@ mod imp {
                 child.allocate(pane.round().max(0.0) as i32, height, -1, Some(transform));
             };
             place(&self.main, pane_layout::WINDOW_PADDING, Some(layout.main));
-            place(&self.map, layout.map_x(), layout.map);
-            place(&self.inspector, layout.inspector_x(), layout.inspector);
+            match (layout.map, self.leaving_map.get()) {
+                (None, Some((x, width))) => place(&self.map, x, Some(width)),
+                _ => place(&self.map, layout.map_x(), layout.map),
+            }
+            match (layout.inspector, self.leaving_inspector.get()) {
+                (None, Some((x, width))) => place(&self.inspector, x, Some(width)),
+                _ => place(&self.inspector, layout.inspector_x(), layout.inspector),
+            }
             place(
                 &self.grip,
                 pane_layout::WINDOW_PADDING + layout.main,
@@ -373,8 +416,7 @@ impl ThreePane {
         }
         imp.shows_map.set(new.map);
         imp.shows_inspector.set(new.inspector);
-        self.queue_resize();
-        (current > 0.0).then(|| {
+        let wanted = (current > 0.0).then(|| {
             pane_layout::window_width_after(
                 current,
                 old,
@@ -382,7 +424,137 @@ impl ThreePane {
                 imp.kept_main.get(),
                 imp.kept_map.get(),
             )
-        })
+        });
+        // As the Mac: no fade under reduced motion, in a window that keeps
+        // its width, or when the main pane's width changes.
+        let fades = glass_motion::animations_enabled()
+            && wanted.is_some_and(|wanted| {
+                PaneLayout::new(wanted, new, imp.kept_main.get()).main == before.main
+            })
+            && !self
+                .root()
+                .and_downcast::<gtk::Window>()
+                .is_some_and(|window| window.is_maximized() || window.is_fullscreen());
+        let map_place = before.map.map(|width| (before.map_x(), width));
+        let inspector_place = before.inspector.map(|width| (before.inspector_x(), width));
+        self.fade(
+            imp.map.borrow().clone(),
+            &imp.map_fade,
+            &imp.leaving_map,
+            (old.map, new.map),
+            map_place,
+            fades,
+        );
+        self.fade(
+            imp.inspector.borrow().clone(),
+            &imp.inspector_fade,
+            &imp.leaving_inspector,
+            (old.inspector, new.inspector),
+            inspector_place,
+            fades,
+        );
+        self.queue_resize();
+        wanted
+    }
+
+    /// A pane opening or closing (`change`, before and after): fading in
+    /// where it is laid out, or out where it was (`place`), then gone;
+    /// at its end at once unless it `fades`.
+    fn fade(
+        &self,
+        pane: Option<gtk::Widget>,
+        driver: &Driver,
+        leaving: &Cell<Option<(f64, f64)>>,
+        change: (bool, bool),
+        place: Option<(f64, f64)>,
+        fades: bool,
+    ) {
+        let Some(pane) = pane else { return };
+        driver.finish();
+        if leaving.take().is_some() {
+            pane.set_can_target(true);
+        }
+        let ease = map_motion::pane_fade();
+        match change {
+            (false, true) => {
+                leaving.set(None);
+                pane.set_can_target(true);
+                if !fades {
+                    pane.set_opacity(1.0);
+                    return;
+                }
+                pane.set_opacity(0.0);
+                let fading = pane.clone();
+                let done = pane.clone();
+                driver.start(
+                    &pane,
+                    ease.length(),
+                    0.0,
+                    move |t| fading.set_opacity(ease.progress(t)),
+                    move || done.set_opacity(1.0),
+                );
+            }
+            (true, false) => {
+                if !fades || place.is_none() {
+                    leaving.set(None);
+                    pane.set_opacity(1.0);
+                    return;
+                }
+                leaving.set(place);
+                pane.set_can_target(false);
+                let fading = pane.clone();
+                let weak = self.downgrade();
+                let gone = pane.clone();
+                // On this container's clock: the pane's own stops with it.
+                driver.start(
+                    self,
+                    ease.length(),
+                    0.0,
+                    move |t| fading.set_opacity(1.0 - ease.progress(t)),
+                    move || {
+                        gone.set_opacity(1.0);
+                        gone.set_can_target(true);
+                        if let Some(pane) = weak.upgrade() {
+                            let imp = pane.imp();
+                            if imp.map.borrow().as_ref() == Some(&gone) {
+                                imp.leaving_map.set(None);
+                            } else {
+                                imp.leaving_inspector.set(None);
+                            }
+                            pane.queue_resize();
+                        }
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    /// Every fade at its end: an opening pane shown, a closing one gone.
+    fn end_fades(&self) {
+        let imp = self.imp();
+        imp.map_fade.finish();
+        imp.inspector_fade.finish();
+        for (slot, leaving) in [
+            (&imp.map, &imp.leaving_map),
+            (&imp.inspector, &imp.leaving_inspector),
+        ] {
+            if let Some(pane) = slot.borrow().as_ref() {
+                pane.set_opacity(1.0);
+                pane.set_can_target(true);
+            }
+            leaving.set(None);
+        }
+        self.queue_resize();
+    }
+
+    /// Whether the map or the inspector is fading out now.
+    pub fn is_leaving(&self) -> (bool, bool) {
+        let imp = self.imp();
+        (
+            imp.leaving_map.get().is_some(),
+            imp.leaving_inspector.get().is_some(),
+        )
     }
 
     /// Called with the map's width when the person leaves it at a new one.
@@ -478,6 +650,60 @@ mod tests {
         assert_eq!(f64::from(main.width()), after.main.round());
         assert_eq!(f64::from(inspector.width()), pane_layout::INSPECTOR_WIDTH);
         assert!(main.width() >= pane_layout::MAIN_WIDTH as i32);
+        window.close();
+    }
+
+    /// A pane closing keeps its place, takes no pointer and fades out
+    /// over 0.22 s on the token curve, then is gone; one opening fades in;
+    /// under reduced motion each is at its end at once, followed live
+    /// (`GlassThreePane.apply`).
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_panes_fade_as_they_open_and_close() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let (window, pane, [_, map, inspector]) = mounted(1193);
+        let before = map.compute_bounds(&pane).expect("placed");
+        pane.set_visibility(Visibility::new(false, true));
+        assert_eq!(pane.is_leaving(), (true, false));
+        assert!(!map.can_target(), "a closing pane takes no pointer");
+        let seen = std::rc::Rc::new(Cell::new(false));
+        {
+            let seen = seen.clone();
+            let map = map.clone();
+            let pane = pane.clone();
+            pump_until(move || {
+                let o = map.opacity();
+                if o > 0.05 && o < 0.95 && map.is_child_visible() {
+                    seen.set(true);
+                    let at = map.compute_bounds(&pane).map(|b| b.x());
+                    assert_eq!(at, Some(before.x()), "it fades where it was");
+                }
+                seen.get()
+            });
+        }
+        assert!(seen.get(), "the map never faded part-way");
+        pump_until(|| !map.is_child_visible());
+        assert!(!map.is_child_visible() && map.can_target());
+        assert_eq!(pane.is_leaving(), (false, false));
+        // Opening: from clear to whole.
+        pane.set_visibility(Visibility::new(true, true));
+        assert!(map.opacity() < 0.05, "it starts clear");
+        pump_until(|| map.opacity() >= 1.0);
+        assert_eq!(map.opacity(), 1.0);
+        // Reduced motion: the inspector goes at once; turned off part-way,
+        // a fade ends at once.
+        settings.set_gtk_enable_animations(false);
+        pane.set_visibility(Visibility::new(true, false));
+        assert_eq!(pane.is_leaving(), (false, false));
+        settings.set_gtk_enable_animations(true);
+        pane.set_visibility(Visibility::new(true, true));
+        assert!(inspector.opacity() < 1.0);
+        settings.set_gtk_enable_animations(false);
+        assert_eq!(inspector.opacity(), 1.0, "followed live");
+        settings.set_gtk_enable_animations(previous);
         window.close();
     }
 

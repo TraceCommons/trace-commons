@@ -406,6 +406,28 @@ pub fn period_slide(edge: Edge, t: f64) -> ((f64, f64), (f64, f64)) {
     ((side * p, 1.0 - p), (side * (1.0 - p), p))
 }
 
+/// The bars as they swap, `t` seconds in: a period step slides both sets
+/// toward its edge (`period_slide`), a zoom crossfades them in place over
+/// `GlassMotion.fast`. Each set's offset as a share of the bars' width and
+/// its opacity, the old set first.
+pub fn bars_swap(edge: Option<Edge>, t: f64) -> ((f64, f64), (f64, f64)) {
+    match edge {
+        Some(edge) => period_slide(edge, t),
+        None => {
+            let p = zoom_fade().progress(t);
+            ((0.0, 1.0 - p), (0.0, p))
+        }
+    }
+}
+
+/// How long a swap of the bars runs.
+pub fn bars_swap_length(edge: Option<Edge>) -> f64 {
+    match edge {
+        Some(_) => PERIOD_SLIDE.length(),
+        None => zoom_fade().length(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,6 +922,23 @@ mod tests {
         close(covered_opacity(0.1), 1.0 - 0.567_732_99, 1e-6, "at 0.1 s");
         assert_eq!(covered_opacity(0.3), 0.0, "past the overshoot");
         assert_eq!(covered_opacity(STACK.length()), 0.0);
+    }
+
+    /// A zoom swaps the bars in place on the token curve over 0.15 s; a
+    /// step slides them.
+    #[test]
+    fn a_zoom_crossfades_the_bars_in_place() {
+        assert_eq!(bars_swap_length(None), 0.15);
+        assert_eq!(bars_swap_length(Some(Edge::Leading)), 0.45);
+        let ((old_x, old_a), (new_x, new_a)) = bars_swap(None, 0.15 * 0.25);
+        assert_eq!((old_x, new_x), (0.0, 0.0));
+        close(new_a, 0.767_284_393, 1e-5, "new bars");
+        close(old_a, 1.0 - 0.767_284_393, 1e-5, "old bars");
+        assert_eq!(bars_swap(None, 0.15), ((0.0, 0.0), (0.0, 1.0)));
+        assert_eq!(
+            bars_swap(Some(Edge::Trailing), 0.225),
+            period_slide(Edge::Trailing, 0.225)
+        );
     }
 
     /// A tween heads for its target on its ease, from wherever it is when
