@@ -336,7 +336,7 @@ public sealed class InsightsAnalyticsTests
         Assert.Equal(0, service.Count("week_overview"));
         Assert.Equal(0, service.Count("patterns"));
         Assert.Equal(0, service.Count("session_drill"));
-        Assert.Equal(3, InsightsViewModel.AnalyzeTab);
+        Assert.Equal(4, InsightsViewModel.AnalyzeTab);
     }
 
     [Fact]
@@ -568,6 +568,30 @@ public sealed class InsightsAnalyticsTests
         Assert.False(Directory.Exists(store));
     }
 
+    // InsightsView.xaml binds each tab header to [analytics_tab_*] while the
+    // control is built, before ActivateAsync reads anything. The words must
+    // already be the core's then: the Mac reads the same table with
+    // tc_insights_copy_json and no store (TCInsights.swift:8), and Windows
+    // showed "analytics_tab_overview" when the lookup fell back to its key.
+    [Fact]
+    public void TheTabWordsAreTheCoresBeforeAnyRead()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        Assert.Equal("Overview", model["analytics_tab_overview"]);
+        Assert.Equal("Analyze", model["analytics_tab_analyze"]);
+        Assert.Equal("Insights", model.Title);
+        Assert.Empty(service.Calls);
+    }
+
+    // A word the table lacks is left empty, never drawn as its key.
+    [Fact]
+    public void AMissingWordIsEmptyNeverItsKey()
+    {
+        using var model = new InsightsViewModel(new Service());
+        Assert.Equal("", model["no_such_insights_word"]);
+    }
+
     [Fact]
     public void TheWindowShowsTheFourTabsAndNoSpendWithCoreWordsOnly()
     {
@@ -575,12 +599,17 @@ public sealed class InsightsAnalyticsTests
         string code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.cs.txt"));
         int overview = xaml.IndexOf("Header=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
         int patterns = xaml.IndexOf("Header=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
+        int benchmarks = xaml.IndexOf("Header=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
         int sessions = xaml.IndexOf("Header=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
         int analyze = xaml.IndexOf("Header=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
-        Assert.True(overview >= 0 && overview < patterns && patterns < sessions && sessions < analyze);
+        // The Mac's Overview, Breakdown, Benchmarks (InsightsView.swift:162), then this app's own two.
+        Assert.True(overview >= 0 && overview < patterns && patterns < benchmarks && benchmarks < sessions && sessions < analyze);
         Assert.DoesNotContain("analytics_tab_spend", xaml);
         Assert.DoesNotContain("analytics_later", xaml);
-        Assert.DoesNotContain("ProgressRing", xaml);
+        // One spinner, Benchmarks' while it reads (InsightsBenchmarksTab.swift:270 GlassSpinner).
+        int ring = xaml.IndexOf("ProgressRing", StringComparison.Ordinal);
+        Assert.True(ring > benchmarks && ring < sessions);
+        Assert.Equal(ring, xaml.LastIndexOf("<ProgressRing", StringComparison.Ordinal) + 1);
         Assert.Contains("ViewModel.SelectTabAsync(", code);
     }
 }

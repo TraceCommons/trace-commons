@@ -54,10 +54,15 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     private bool _offerSeen;
 
-    public PrivateInferenceViewModel(DaemonHost host, bool requiresSession = false)
+    /// <param name="credential">
+    /// The window's one credential flag, which the spending picker waits for
+    /// wherever it is drawn; a page of its own when none is given.
+    /// </param>
+    public PrivateInferenceViewModel(DaemonHost host, bool requiresSession = false, CredentialActivity? credential = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _requiresSession = requiresSession;
+        Credential = credential ?? new CredentialActivity();
         Funding = new NearAiFunding(_copy,
             parameters => _host.CallAsync(NearAiFunding.Method, parameters),
             () => _host.IsRunning,
@@ -77,6 +82,20 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public string Title => _copy?.SettingsTitle ?? string.Empty;
 
     public string Subtitle => _copy?.Subtitle ?? string.Empty;
+
+    /// <summary>The card that opens Settings: the core's title and help text (InferenceAccount.swift:125-145).</summary>
+    public string SettingsLinkTitle => _copy?.PanelSettingsTitle ?? string.Empty;
+
+    public string SettingsLinkHelp => _copy?.PanelSettingsOpenAccessibility ?? string.Empty;
+
+    /// <summary>
+    /// The tab's heading row as the Mac draws it (spec W19-D1 (a),
+    /// <c>PrivateAIInspectorView</c>): the status title, the state's chip and
+    /// sentence, and the subtitle. Empty words until the core's arrive.
+    /// </summary>
+    public PrivateAIHeading Heading => _copy is null
+        ? new PrivateAIHeading(string.Empty, string.Empty, TraceCommons.Interop.Shell.DotStatus.None, string.Empty, string.Empty)
+        : PrivateAIHeading.For(_state, _copy);
 
     public string What => _copy?.OfferWhat ?? string.Empty;
 
@@ -427,7 +446,17 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     private string? _attemptId;
 
-    private bool _credentialBusy;
+    /// <summary>
+    /// The credential action in flight, shared with the spending prompt and
+    /// picker (<see cref="CredentialActivity"/>), which wait for it.
+    /// </summary>
+    public CredentialActivity Credential { get; }
+
+    private bool _credentialBusy
+    {
+        get => Credential.Busy;
+        set => Credential.Busy = value;
+    }
 
     public string CredentialTitle => _copy?.CredentialTitle ?? string.Empty;
 
@@ -960,7 +989,11 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// and that is unreported -- never a stale figure kept on screen, and
     /// never a claim that the account is empty.
     /// </remarks>
-    public async Task LoadBalanceAsync()
+    /// <param name="fresh">
+    /// Past the daemon's cache: after a spending switch, whose key the
+    /// balance is read with (AppModel.swift:1093, <c>fresh: true</c>).
+    /// </param>
+    public async Task LoadBalanceAsync(bool fresh = false)
     {
         if (_copy is null)
         {
@@ -970,7 +1003,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         try
         {
             DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.NearAiBalance)
+                .CallAsync(DaemonProtocol.Methods.NearAiBalance, NearAiBalanceSurface.ReadParams(fresh))
                 .ConfigureAwait(true);
 
             _balance = response.IsError || response.Result is null
@@ -1257,6 +1290,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     {
         Raise(nameof(Enabled));
         Raise(nameof(StateText));
+        Raise(nameof(Heading));
         Raise(nameof(ServingText));
         Raise(nameof(HasServingText));
         Raise(nameof(IsWorking));

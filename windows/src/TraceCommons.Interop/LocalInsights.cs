@@ -23,6 +23,29 @@ public sealed class LocalInsights : ILocalInsights
         // The analytics reads (Overview, Patterns, Sessions).
         "insights_not_found", "insights_tz_invalid", "insights_weeks_invalid"
     };
+    /// <summary>
+    /// The core's whole Insights table (<c>tc_insights_copy_json</c>), read
+    /// without a store, as the Mac reads it (TCInsights.swift:8). Empty when
+    /// the table cannot be read; a word is never replaced by its key.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> CoreCopy() => CoreCopyFrom(
+        NativeMethods.TakeOwnedString(NativeMethods.tc_insights_copy_json()));
+
+    internal static IReadOnlyDictionary<string, string> CoreCopyFrom(string? json)
+    {
+        var words = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(json)) return words;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return words;
+            foreach (var pair in document.RootElement.EnumerateObject())
+                if (pair.Value.ValueKind == JsonValueKind.String) words[pair.Name] = pair.Value.GetString()!;
+        }
+        catch (JsonException) { words.Clear(); }
+        return words;
+    }
+
     private static readonly SemaphoreSlim Calls = new(1, 1);
     private readonly string? _storeDirectory;
     public LocalInsights(string? storeDirectory = null) => _storeDirectory = storeDirectory;

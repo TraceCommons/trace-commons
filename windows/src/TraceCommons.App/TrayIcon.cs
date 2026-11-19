@@ -73,6 +73,9 @@ public sealed class TrayIcon : IDisposable
 
     public event Action? SettingsRequested;
 
+    /// <summary>The About row (spec W24-D1 (a)).</summary>
+    public event Action? AboutRequested;
+
     /// <summary>Raised when the contributor asks for the model-calls destination.</summary>
     public event Action? PrivateInferenceRequested;
 
@@ -127,6 +130,7 @@ public sealed class TrayIcon : IDisposable
     private const int MenuIdResume = 13;
     private const int MenuIdPrivateInference = 14;
     private const int MenuIdPrivateInferenceAction = 15;
+    private const int MenuIdAbout = 16;
 
     private readonly WndProc _wndProc;
     private readonly string _className;
@@ -616,6 +620,8 @@ public sealed class TrayIcon : IDisposable
 
             AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Near.ai");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
+            // About (spec W24-D1 (a)), in the core's words.
+            AppendMenu(menu, MF_STRING, MenuIdAbout, AboutLines.Title);
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit…");
@@ -646,6 +652,10 @@ public sealed class TrayIcon : IDisposable
 
                 case MenuIdSettings:
                     SettingsRequested?.Invoke();
+                    break;
+
+                case MenuIdAbout:
+                    AboutRequested?.Invoke();
                     break;
 
                 case MenuIdPrivateInference:
