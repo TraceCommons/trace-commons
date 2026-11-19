@@ -90,7 +90,11 @@ fn a_hostile_windows_folder_is_one_verbatim_argument() {
         let plan = wt_plan(&cwd).unwrap_or_else(|e| panic!("{cwd:?}: {e:?}"));
         let args = strings(&plan.args);
         // The folder is the `-d` value, whole, and nowhere else.
-        assert_eq!(&args[..4], ["new-tab", "--title", "NEAR AI", "-d"], "{cwd:?}");
+        assert_eq!(
+            &args[..4],
+            ["new-tab", "--title", "NEAR AI", "-d"],
+            "{cwd:?}"
+        );
         assert_eq!(Path::new(args[4]), cwd, "{cwd:?}");
         assert_eq!(args[5], HELPER, "{cwd:?}");
         assert_eq!(args.len(), 13, "{cwd:?}: {args:?}");
