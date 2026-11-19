@@ -47,6 +47,16 @@ public sealed class DaemonHost : IAsyncDisposable
     public event Action? StatusChanged;
 
     /// <summary>
+    /// <c>feature_flags_changed</c>: the window reads the snapshot again
+    /// (<see cref="FeatureFlagGate"/>). Declared on the subscription, since
+    /// the daemon sends it only to a subscriber that accepts it.
+    /// </summary>
+    public event Action? FeatureFlagsChanged;
+
+    /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
+    public event Action? Started;
+
+    /// <summary>
     /// Raised on the UI thread when the daemon says a digest is due, carrying
     /// the pending count it decided on.
     /// </summary>
@@ -222,7 +232,8 @@ public sealed class DaemonHost : IAsyncDisposable
 
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent);
+        _subscription = daemon.Subscribe(OnDaemonEvent, new[] { DaemonProtocol.Events.FeatureFlagsChanged });
+        Started?.Invoke();
     }
 
     /// <summary>
@@ -415,6 +426,10 @@ public sealed class DaemonHost : IAsyncDisposable
                     StatusChanged?.Invoke();
                     break;
 
+                case DaemonProtocol.Events.FeatureFlagsChanged:
+                    FeatureFlagsChanged?.Invoke();
+                    break;
+
                 case DaemonProtocol.Events.DigestDue:
                     DigestDue?.Invoke(new DigestFacts(
                         evt.PendingCount,
@@ -432,11 +447,13 @@ public sealed class DaemonHost : IAsyncDisposable
                     Lagged?.Invoke(evt.SkippedCount);
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.ResyncRequired:
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.PreviewReady:

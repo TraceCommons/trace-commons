@@ -1235,6 +1235,15 @@ internal static class NearMarkGeometry
 internal static class WindowMinimumSize
 {
     private const uint WM_GETMINMAXINFO = 0x0024;
+    private const uint WM_POWERBROADCAST = 0x0218;
+    private const int PBT_APMRESUMEAUTOMATIC = 0x0012;
+
+    /// <summary>
+    /// The machine woke (WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC), on the
+    /// window's thread: the window asks for its feature flags again, as the
+    /// Mac does on <c>didWakeNotification</c> (AppModel.swift:1808).
+    /// </summary>
+    public static event Action? Resumed;
     private static readonly Dictionary<IntPtr, (int Width, int Height)> Minimums = new();
     private static readonly SubclassProc Proc = WndProc;
     private static readonly HashSet<IntPtr> Installed = new();
@@ -1282,6 +1291,11 @@ internal static class WindowMinimumSize
             info.MinTrackSize.Y = minimum.Height;
             Marshal.StructureToPtr(info, lParam, false);
             return IntPtr.Zero;
+        }
+
+        if (msg == WM_POWERBROADCAST && (int)wParam == PBT_APMRESUMEAUTOMATIC)
+        {
+            Resumed?.Invoke();
         }
 
         return DefSubclassProc(hwnd, msg, wParam, lParam);
