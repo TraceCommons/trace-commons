@@ -37,6 +37,26 @@ public sealed class DaemonHost : IAsyncDisposable
 #endif
 
     /// <summary>
+    /// Where the shell keeps its own small marks (a closed card): the app's
+    /// local data, or the throwaway directory in a sample launch, so a sample
+    /// run writes nothing outside it.
+    /// </summary>
+    public string ShellStateDirectory
+    {
+        get
+        {
+#if DEBUG
+            if (_sample is not null)
+            {
+                return SampleDaemon.ThrowawayConfigDir();
+            }
+#endif
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TraceCommons");
+        }
+    }
+
+    /// <summary>
     /// Raised on the UI thread when the queue may have changed. Carries no
     /// payload deliberately: the event frame's own data is a delta, and the
     /// app refetches rather than patching, so there is nothing worth passing.
@@ -45,6 +65,12 @@ public sealed class DaemonHost : IAsyncDisposable
 
     /// <summary>Raised on the UI thread when daemon status may have changed.</summary>
     public event Action? StatusChanged;
+
+    /// <summary>
+    /// A model call was recorded (<c>inference_call_added</c>). The Private AI
+    /// tab re-reads its ledger on it, as the Mac's InferenceStore does.
+    /// </summary>
+    public event Action? InferenceCallAdded;
 
     /// <summary>
     /// Raised on the UI thread when the daemon says a digest is due, carrying
@@ -370,6 +396,10 @@ public sealed class DaemonHost : IAsyncDisposable
 
                 case DaemonProtocol.Events.StatusChanged:
                     StatusChanged?.Invoke();
+                    break;
+
+                case "inference_call_added":
+                    InferenceCallAdded?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.DigestDue:

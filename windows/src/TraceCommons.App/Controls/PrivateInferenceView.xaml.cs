@@ -39,6 +39,7 @@ public sealed partial class PrivateInferenceView : UserControl
         _host = host;
         _host.StatusChanged += ReadLoginMismatch;
         Loaded += (_, _) => ReadLoginMismatch();
+        WireMacSections();
     }
 
     private readonly DaemonHost _host;

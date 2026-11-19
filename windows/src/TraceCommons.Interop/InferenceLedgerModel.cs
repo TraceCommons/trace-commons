@@ -16,6 +16,8 @@ public sealed record LedgerCallRow(
     long Id, string Time, string Tool, string Model, string? TokenLine, string? TokenAccessibilityLine,
     string Priced, LedgerTag Proof)
 {
+    public bool HasTokens => TokenLine is not null;
+
     /// <summary>The row read out as one element, as <c>.accessibilityElement(children: .combine)</c> does.</summary>
     public string AccessibleName => string.Join(", ", new[] { Time, Tool, Model, TokenAccessibilityLine, Priced, Proof.Text }
         .Where(part => !string.IsNullOrEmpty(part)));

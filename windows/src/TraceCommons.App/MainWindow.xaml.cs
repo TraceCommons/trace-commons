@@ -1160,7 +1160,14 @@ public sealed partial class MainWindow : Window
 
     private void ShowPrivateInferencePane()
     {
-        PrivateInferencePane.Content ??= new PrivateInferenceView(_host);
+        if (PrivateInferencePane.Content is null)
+        {
+            var page = new PrivateInferenceView(_host);
+            // The spending-organization prompt's action opens Settings (W19-D2).
+            page.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
+            PrivateInferencePane.Content = page;
+        }
+
         ViewModel.ShowPrivateInference();
     }
 

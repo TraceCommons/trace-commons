@@ -23,6 +23,8 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:local="using:TraceCommons.App.Controls"
+    xmlns:interop="using:TraceCommons.Interop"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -43,7 +45,180 @@
 
         <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+                <!--
+                    How Private AI works (spec W19, PrivateAIGuideCard,
+                    InferenceViews.swift:369-405): first on the tab until it is
+                    closed with its X, in the managed table's words. Drawn as
+                    GetStartedCard draws it: a title, a line, numbered steps
+                    each in a card of its own. No step has a link. The Mac's
+                    pixel field behind it is not ported yet (listed in the PR).
+                -->
+                <Border x:Name="GuideCard"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(Guide.IsShown)}">
+                    <StackPanel Spacing="20">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{x:Bind Guide.Title}"
+                                           FontSize="22" FontWeight="Black"
+                                           Foreground="{ThemeResource TcInkPrimaryBrush}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind Guide.Lead}"
+                                           Style="{StaticResource TcBodyTextStyle}"
+                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Width="20" Height="20" Padding="0"
+                                    VerticalAlignment="Top"
+                                    Background="Transparent" BorderThickness="0"
+                                    AutomationProperties.Name="{x:Bind Guide.CloseName}"
+                                    ToolTipService.ToolTip="{x:Bind Guide.CloseName}"
+                                    Click="OnCloseGuide">
+                                <FontIcon Glyph="&#xE711;" FontSize="10" />
+                            </Button>
+                        </Grid>
+                        <ItemsControl ItemsSource="{x:Bind Guide.Steps}" IsTabStop="False">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><StackPanel Spacing="6" /></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:GuideStep">
+                                    <Border Background="{ThemeResource TcSurfaceInsetBrush}"
+                                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                                            Padding="12,8">
+                                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                            <Grid Width="18" Height="18" VerticalAlignment="Top">
+                                                <Ellipse Fill="{ThemeResource TcSurfaceCardBrush}" />
+                                                <TextBlock Text="{x:Bind NumberText}" FontSize="10" FontWeight="Bold"
+                                                           Foreground="{ThemeResource TcAccentTextBrush}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Grid>
+                                            <StackPanel Grid.Column="1" Spacing="2">
+                                                <TextBlock Text="{x:Bind Title}" FontSize="12" FontWeight="SemiBold"
+                                                           Foreground="{ThemeResource TcInkPrimaryBrush}" TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Line}" Style="{StaticResource TcCaptionTextStyle}"
+                                                           Foreground="{ThemeResource TcInkSecondaryBrush}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    Choose a spending organization (spec W19-D2 (a),
+                    SpendOrganizationPrompt.swift): only when the daemon asks,
+                    in its words. The action opens Settings; Not now keeps the
+                    organization in use.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(SpendPrompt.IsShown), Mode=OneWay}">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Bind SpendPrompt.Title, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind SpendPrompt.Line, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Button Content="{x:Bind SpendPrompt.Action, Mode=OneWay}"
+                                    AutomationProperties.Name="{x:Bind SpendPrompt.ActionName, Mode=OneWay}"
+                                    Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Click="OnSpendPromptAction" />
+                            <HyperlinkButton Content="{x:Bind SpendPrompt.Dismiss, Mode=OneWay}"
+                                             AutomationProperties.Name="{x:Bind SpendPrompt.DismissName, Mode=OneWay}"
+                                             Click="OnSpendPromptDismiss" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <ContentControl x:Name="ManagedContent" />
+
+                <!--
+                    The ledger (spec W19, InferenceTabView.ledgerSections,
+                    InferenceViews.swift:91-117): a failed read in the core's
+                    words, the window and its totals, then the calls. An
+                    unreadable ledger draws nothing, never an empty table.
+                -->
+                <TextBlock Text="{x:Bind Ledger.FailureLine, Mode=OneWay}"
+                           Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.HasFailure), Mode=OneWay}"
+                           Foreground="{ThemeResource TcStatusOutsideTextBrush}"
+                           Style="{StaticResource TcBodyTextStyle}"
+                           TextWrapping="Wrap"
+                           AutomationProperties.LiveSetting="Polite" />
+                <ProgressRing IsActive="{x:Bind Ledger.Loading, Mode=OneWay}"
+                              Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.Loading), Mode=OneWay}"
+                              Width="16" Height="16" HorizontalAlignment="Center" />
+                <StackPanel Spacing="4"
+                            Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.ShowsHeader), Mode=OneWay}">
+                    <TextBlock Text="{x:Bind Ledger.WindowLine, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.CallsWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.CallsFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.VerifiedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcStatusOnTextBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.VerifiedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.PricedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.PricedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.ShowsCalls), Mode=OneWay}">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Bind Ledger.CallsWord, Mode=OneWay}" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ItemsControl ItemsSource="{x:Bind Ledger.Calls, Mode=OneWay}" IsTabStop="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:LedgerCallRow">
+                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Padding="0,6"
+                                          BorderBrush="{ThemeResource TcHairlineDividerBrush}" BorderThickness="0,1,0,0"
+                                          AutomationProperties.Name="{x:Bind AccessibleName}">
+                                        <TextBlock Text="{x:Bind Time}" MinWidth="56"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                                        <StackPanel Grid.Column="1" Spacing="1">
+                                            <TextBlock Text="{x:Bind Tool}" FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="{ThemeResource TcInkPrimaryBrush}" />
+                                            <TextBlock Text="{x:Bind Model}" Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind TokenLine}" Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Visibility="{x:Bind local:PrivateInferenceView.Shown(HasTokens)}" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="2" Text="{x:Bind Priced}" Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                                        <TextBlock Grid.Column="3" Text="{x:Bind Proof.Text}" Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{x:Bind local:PrivateInferenceView.ToneBrush(Proof.Tone)}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
 
                 <!--
                     The credential this computer answers calls with, and it
