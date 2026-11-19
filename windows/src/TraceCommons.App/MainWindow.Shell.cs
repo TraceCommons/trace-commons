@@ -148,6 +148,7 @@ public sealed partial class MainWindow
         ViewModel.ArmingRewordingCards.CollectionChanged += (_, _) => RefreshNotices();
         Activated += OnShellFirstActivated;
 
+        InitializeMap();
         RefreshLocation();
     }
 
@@ -308,6 +309,7 @@ public sealed partial class MainWindow
 
         RenderBreadcrumb();
         RefreshNotices();
+        FollowTabOnMap(_at.Tab);
         ApplyPaneAvailability();
     }
 
@@ -459,13 +461,15 @@ public sealed partial class MainWindow
 
     /// <summary>
     /// What the panes should be on this tab: the person's choice where the
-    /// inspector is available (MonitorWindowView.swift:303). No map until W3.
+    /// inspector is available, and the map on every tab while it is wanted
+    /// (MonitorWindowView.swift:182, :303).
     /// </summary>
     private void ApplyPaneAvailability()
     {
         bool available = MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
         InspectorToggle.IsEnabled = available;
-        var wanted = new PaneVisibility(false, _wantsInspector && available);
+        var wanted = new PaneVisibility(_wantsMap, _wantsInspector && available);
+        ApplyMapToggle(wanted.Map);
         InspectorToggle.IsChecked = wanted.Inspector;
         string toggleName = MonitorWords.Toggle(PaneToggle.Inspector, wanted.Inspector);
         AutomationProperties.SetName(InspectorToggle, toggleName);
@@ -639,7 +643,7 @@ public sealed partial class MainWindow
         MapColumn.Width = new GridLength(layout.Map ?? 0);
         InspectorGapColumn.Width = new GridLength(layout.Inspector is null ? 0 : MonitorPaneLayout.PaneGap);
         InspectorColumn.Width = new GridLength(layout.Inspector ?? 0);
-        MapPane.Visibility = Visibility.Collapsed;
+        MapPane.Visibility = layout.Map is null ? Visibility.Collapsed : Visibility.Visible;
         InspectorPane.Visibility = layout.Inspector is null ? Visibility.Collapsed : Visibility.Visible;
         if (_moveRun is null)
         {
@@ -670,10 +674,11 @@ public sealed partial class MainWindow
         RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         double scale = Scale;
         PaneVisibility seed = MonitorPaneLayout.FirstLaunch(work.Width / scale);
+        _wantsMap = seed.Map;
         _wantsInspector = seed.Inspector || InspectorDemand.OpensOnAppear(InspectorDemand.Keys(ViewModel.Demand));
 
         bool inspector = _wantsInspector && MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
-        double width = MonitorPaneLayout.WindowWidth(showsMap: false, showsInspector: inspector);
+        double width = MonitorPaneLayout.WindowWidth(showsMap: _wantsMap, showsInspector: inspector);
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
@@ -684,7 +689,7 @@ public sealed partial class MainWindow
             MoveAndResize(frame with { Height = Math.Min(height, work.Height) });
         }
 
-        _presented = new PaneVisibility(false, inspector);
+        _presented = new PaneVisibility(_wantsMap, inspector);
         ApplyMinimumSize();
         LayoutPanes();
         ApplyDemand();

@@ -113,6 +113,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <!-- The map pane draws with Win2D (approved 2026-11-18, "Use Microsoft's package";
+         the version spike S1 chose and the render tests already use). -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.0" />
   </ItemGroup>
 
   <ItemGroup>

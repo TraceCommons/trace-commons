@@ -60,22 +60,28 @@ public static class MapFeed
     /// Reads everything through <paramref name="call"/> (method, params JSON
     /// to a response frame), each read independently.
     /// </summary>
-    public static async Task<MapSnapshot> ReadAsync(Func<string, string, Task<string>> call)
+    public static Task<MapSnapshot> ReadAsync(Func<string, string, Task<string>> call)
+    {
+        ArgumentNullException.ThrowIfNull(call);
+        return ReadAsync(async (method, parameters) => DaemonResponse.Parse(await call(method, parameters).ConfigureAwait(false)));
+    }
+
+    /// <summary>The same, over a call that answers a parsed response (the app's <c>DaemonHost.CallAsync</c>).</summary>
+    public static async Task<MapSnapshot> ReadAsync(Func<string, string, Task<DaemonResponse>> call)
     {
         ArgumentNullException.ThrowIfNull(call);
         async Task<string?> Result(string method, string parameters = "{}")
         {
-            string frame;
+            DaemonResponse response;
             try
             {
-                frame = await call(method, parameters).ConfigureAwait(false);
+                response = await call(method, parameters).ConfigureAwait(false);
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
                 return null;
             }
 
-            DaemonResponse response = DaemonResponse.Parse(frame);
             return response.IsError || response.Result is not { } result ? null : result.GetRawText();
         }
 
