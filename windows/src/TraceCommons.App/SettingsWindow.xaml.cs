@@ -1,7 +1,6 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop.Shell;
 using Windows.Graphics;
@@ -35,17 +34,45 @@ public sealed partial class SettingsWindow : Window
     /// Focus starts on the first control in reading order, at the top of the
     /// window, as an AppKit window's initial key view is its first. Left to
     /// itself WinUI put it on a button far down the page, off-screen and
-    /// with no ring to show where it was (box, 2026-11-19). Programmatic, so
-    /// no ring is drawn until a key is pressed.
+    /// with no ring to show where it was (box, 2026-11-19). The first in Tab
+    /// order is no better: Settings' Tab order is not its reading order, and
+    /// its first stop is off-screen too (box, 2026-11-19), so the visual tree
+    /// is walked in drawing order instead. Programmatic, so no ring is drawn
+    /// until a key is pressed.
     /// </summary>
     private static void FocusFirstOnce(object sender, RoutedEventArgs e)
     {
         var view = (FrameworkElement)sender;
         view.Loaded -= FocusFirstOnce;
-        if (FocusManager.FindFirstFocusableElement(view) is Control first)
+        if (FirstInReadingOrder(view) is Control first)
         {
             first.Focus(FocusState.Programmatic);
         }
+    }
+
+    private static Control? FirstInReadingOrder(DependencyObject root)
+    {
+        int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is UIElement { Visibility: not Visibility.Visible })
+            {
+                continue;
+            }
+
+            if (child is Control { IsTabStop: true, IsEnabled: true, ActualHeight: > 0 } control)
+            {
+                return control;
+            }
+
+            if (FirstInReadingOrder(child) is Control found)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
