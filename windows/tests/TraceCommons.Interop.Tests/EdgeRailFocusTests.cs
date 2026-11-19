@@ -77,6 +77,32 @@ public class EdgeRailFocusTests
         Assert.Equal(EdgeRailStep.None, rail.Pressed());
     }
 
+    /// <summary>
+    /// On tc-win-az10 (93ab9ea58) Escape started the close, WinUI reported
+    /// the pointer leaving while the rail slid out under a cursor still on it,
+    /// and the next move reopened the rail before it had shrunk. An exit
+    /// with the system cursor still on the window is not a leave.
+    /// </summary>
+    [Fact]
+    public void AnExitWithTheCursorStillOnTheRailDoesNotEndTheWaitAfterEscape()
+    {
+        var rail = new EdgeRailHover();
+        rail.PointerEntered(cursorInside: true);
+        rail.CloseNow();
+        rail.PointerExited(DateTimeOffset.UnixEpoch, cursorInside: true);
+        Assert.Equal(EdgeRailStep.None, rail.PointerEntered(cursorInside: true));
+    }
+
+    [Fact]
+    public void AnExitWithTheCursorStillOnTheOpenRailSchedulesNoClose()
+    {
+        var rail = new EdgeRailHover();
+        rail.PointerEntered(cursorInside: true);
+        rail.PointerExited(DateTimeOffset.UnixEpoch, cursorInside: true);
+        Assert.Equal(EdgeRailStep.None, rail.Tick(DateTimeOffset.UnixEpoch.AddSeconds(1)));
+        Assert.True(rail.Open);
+    }
+
     /// <summary>WinUI can report an enter from a stale pointer position; the cursor is not on the zone, so nothing opens.</summary>
     [Fact]
     public void AnEnterWithTheCursorElsewhereOpensNothing()

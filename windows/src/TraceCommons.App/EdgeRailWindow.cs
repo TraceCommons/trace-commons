@@ -84,8 +84,11 @@ internal sealed class EdgeRailWindow : Window
         _root.PointerEntered += (_, _) => Step(_hover.PointerEntered(ToolWindows.CursorInside(_hwnd)));
         _root.PointerExited += (_, _) =>
         {
-            _hover.PointerExited(DateTimeOffset.UtcNow);
-            _closeTimer.Start();
+            _hover.PointerExited(DateTimeOffset.UtcNow, ToolWindows.CursorInside(_hwnd));
+            if (_hover.CloseAt is not null)
+            {
+                _closeTimer.Start();
+            }
         };
         // A move on the closed zone opens it too: WinUI sends no new enter
         // while it still counts the pointer inside after the rail shrank
@@ -185,7 +188,8 @@ internal sealed class EdgeRailWindow : Window
                 break;
         }
 
-        if (!_hover.Open && _hover.CloseAt is null)
+        // The timer runs only while a close is pending (checklist O3).
+        if (_hover.CloseAt is null)
         {
             _closeTimer.Stop();
         }

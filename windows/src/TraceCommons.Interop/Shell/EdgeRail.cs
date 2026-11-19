@@ -145,8 +145,18 @@ public sealed class EdgeRailHover
     public void CursorAway() => _awaitingLeave = false;
 
     /// <summary>The pointer left the rail: a close is scheduled <see cref="CloseDelay"/> later.</summary>
-    public void PointerExited(DateTimeOffset now)
+    /// <remarks>
+    /// An exit with the system cursor still on the window is not a leave:
+    /// WinUI reports one as the rail slides out or resizes under a resting
+    /// cursor, and taking it reopened the rail after Escape (tc-win-az10).
+    /// </remarks>
+    public void PointerExited(DateTimeOffset now, bool cursorInside = false)
     {
+        if (cursorInside)
+        {
+            return;
+        }
+
         _awaitingLeave = false;
         if (Open)
         {
