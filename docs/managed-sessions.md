@@ -297,8 +297,9 @@ launch work, on this evidence: GNOME replaced GNOME Terminal with Ptyxis
 (Ubuntu 25.10 and later, Fedora), so a stock GNOME desktop had an offered
 terminal and still refused every launch; macOS never reaches the rule
 (Terminal ships with it) and still refuses a chosen app it cannot find
-(`launch_macos`: "Never falls back to another app"); Windows offers one
-terminal; and the Windows and macOS shells already propose the first
+(`launch_macos`: "Never falls back to another app"); on Windows, Windows
+PowerShell stands in for a missing Windows Terminal (W14-D1 (b),
+2026-11-19); and the Windows and macOS shells already propose the first
 offered terminal when the current id is not among them
 (`ProposedTerminalIndex`, `proposedTerminal`). The Linux picker order is
 therefore also the fallback order: GNOME Terminal, Ptyxis, Konsole, Xfce
@@ -317,6 +318,7 @@ offered nor a stand-in.
 | macOS | Rex | `rex` | Rex's own CLI, found inside the bundle LaunchServices names for `com.superlogical.rex` (`Contents/Helpers/Rex Server.rex/Contents/MacOS/rex`) or in the copy the app keeps under Application Support; never on `PATH`. `open -b com.superlogical.rex` starts or raises the app, `rex ls --json` finds the Rex session labelled "Near AI Gateway" (`rex new Near AI Gateway --json -c <folder>` makes it when it is missing), and `rex api call -s <session> session.new_window -` opens the tab, with the request on stdin: a terminal block with `shell: "none"`, the helper's argv as `command`, the folder as `cwd`, and `exit.on_completion: false`. Every session is a tab of that one Rex session. Show runs `rex focus -s <session> <block>` and `open -b` again. No Apple Event, so macOS asks for no permission. Rex has no option to set an environment variable, so the ticket is in argv, as for kitty (owner decision D2) | the installed beta (`Rex Beta 0.1.0 (1758)`, API revision 10), `docs/superpowers/specs/2026-11-03-rex-herdr-terminal-integration.md`. A private beta with no published CLI contract (D8): its `rex ls --json` is read by value, not by field name |
 | macOS | Alacritty | `alacritty` | `open -n -b org.alacritty --args --working-directory <folder> --hold -e <helper> <args>` | as Linux Alacritty below; bundle id from `extra/osx/Alacritty.app/Contents/Info.plist` |
 | Windows | Windows Terminal | `windows_terminal` | `wt.exe new-tab --title "NEAR AI" -d <folder> <helper> <args>` | `new-tab --startingDirectory, -d` and `commandline` ("Executable with optional arguments"), <https://learn.microsoft.com/en-us/windows/terminal/command-line-arguments> |
+| Windows | Windows PowerShell | `powershell` | Only where Windows Terminal is not installed (owner, W14-D1 (b), 2026-11-19). `powershell.exe -NoLogo -NoProfile -NoExit -Command <script>`, started with `CreateProcessW` in the folder (`lpCurrentDirectory`) and a console of its own (`CREATE_NEW_CONSOLE`, no standard handles passed, so the session reads and writes that console and never the daemon's). The script is one fixed text with nothing written into it: it reads the helper's path, the config folder and the session id from `NEAR_AI_LAUNCH_HELPER`, `NEAR_AI_LAUNCH_CONFIG` and `NEAR_AI_LAUNCH_SESSION`, removes them, and calls the helper with them as arguments; the ticket is in `NEAR_AI_LAUNCH_TICKET`, which `redeem-launch` reads and removes from the tool's environment, and which the script removes from the window's once the helper returns. A helper path or config folder ending in `\` is refused, because Windows PowerShell 5.1 quotes an argument holding a space without escaping a trailing backslash | `-NoExit` "Does not exit after running startup commands", `-NoProfile`, `-Command`, <https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe>; Windows PowerShell 5.1 has no `-WorkingDirectory` (PowerShell 7 only, <https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_pwsh>), so the folder is the process's |
 | Linux | GNOME Terminal | `gnome_terminal` | `gnome-terminal --working-directory=<folder> -- <helper> <args>` | `--working-directory=DIRNAME` "Set the terminal's working directory"; `--` is what the deprecated `-x, --execute` entry ("interpret all subsequent options as a program and arguments") says to use instead (`-e` is deprecated too), gnome-terminal(1), <https://manpages.debian.org/testing/gnome-terminal/gnome-terminal.1.en.html> |
 | Linux | Konsole | `konsole` | `konsole --workdir <folder> --hold -e <helper> <args>` | `--workdir dir` "Open with dir as the initial working directory"; `-e` "will catch all following arguments ... and execute it as command"; `--hold` "Do not close the initial session automatically when it ends", <https://docs.kde.org/stable_kf6/en/konsole/konsole/command-line-options.html> |
 | Linux | kitty | `kitty` | `kitty --directory <folder> --hold <helper> <args>` | synopsis `kitty [options] [program-to-run ...]`; `--directory` "Change to the specified directory when launching"; `--hold` "Remain open, at a shell prompt, after child process exits", kitty(1), <https://sw.kovidgoyal.net/kitty/invocation/> |
@@ -363,7 +365,10 @@ Server 2025 with Windows Terminal 1.25.3131.0 (2026-11-19), a config folder
 `cfg %USERNAME% x` reached the helper as `cfg tcdev x`. A helper path or
 config folder holding `%` is refused. The folder, told by `-d`, arrived
 unexpanded, as did spaces, `'`, `& ^ ( ) ! = ,`, a leading `-`, a backtick,
-`$`, non-ASCII text and the drive root, so none of those is refused. The
+`$`, non-ASCII text and the drive root, so none of those is refused. Windows PowerShell is offered only where Windows Terminal is not
+installed: never as a second choice beside it, so a computer with Windows
+Terminal is not asked which terminal on every launch, and a missing
+Windows Terminal is stood in for, as a missing Linux default is. The
 check is `windows/scripts/managed-terminal-launch-smoke.ps1`, which runs
 `managed::terminal::windows_tests::real_windows_terminals_receive_the_folder_and_every_argument`
 in the interactive session; any terminal added for Windows must pass it.
@@ -380,19 +385,12 @@ in the interactive session; any terminal added for Windows must pass it.
 (an xterm-only or Tilix-only desktop, say) could launch through
 `x-terminal-emulator` before and cannot now: the picker offers nothing and
 is not drawn, and the managed-sessions screen shows its "unavailable" line
-with Launch off, until another terminal is added by the test above. The
-same holds on Windows without Windows Terminal, as it did before. On macOS
-Launch is never turned off this way, because Terminal is always there.
-- The Windows console host, through PowerShell or directly: `powershell.exe`
-  takes a command only as PowerShell source (`-Command`, or `-EncodedCommand`
-  for the same text in base64), so the folder would have to be quoted into a
-  script; `-WorkingDirectory` exists only in PowerShell 7 (`pwsh`), which is
-  not on every Windows computer. Starting the helper directly with
-  `CREATE_NEW_CONSOLE` passes the test on paper, but whether the new console
-  or the daemon's own standard handles reach the session depends on how the
-  daemon was started, and that cannot be checked without a Windows run. It
-  can be added once a Windows smoke test shows the session gets the console.
-  `cmd.exe` takes its command only as one string.
+with Launch off, until another terminal is added by the test above. On
+macOS and Windows Launch is never turned off this way: Terminal is always
+there, and so is Windows PowerShell.
+- `cmd.exe`, which takes its command only as one string, and PowerShell 7
+  (`pwsh`), which is not on every Windows computer. Windows PowerShell is
+  offered instead (above), with nothing written into its script.
 - Tilix, as of 2026-11-17. Its only command option, `-e, --command`
   ("Execute all text after this parameter as a command", tilix(1),
   <https://manpages.debian.org/testing/tilix/tilix.1.en.html>), does not

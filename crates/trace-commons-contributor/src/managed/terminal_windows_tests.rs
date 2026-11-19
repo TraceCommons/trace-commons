@@ -1,7 +1,8 @@
-//! The argv check on Windows (W14-D1 (c)): every terminal offered on
+//! The argv check on Windows (W14-D1 (b)): every terminal offered on
 //! Windows must take a folder and the helper's command as argv elements
-//! that arrive intact. Windows Terminal is the one offered today; any
-//! terminal added to [`TerminalApp::WINDOWS`] is started by
+//! that arrive intact. Windows Terminal and, where it is not installed,
+//! Windows PowerShell are offered; any terminal added to
+//! [`TerminalApp::WINDOWS`] is started by
 //! `real_windows_terminals_receive_the_folder_and_every_argument` too, so
 //! it cannot join without passing it.
 //!
@@ -161,6 +162,32 @@ fn a_percent_in_the_command_is_refused_for_windows_terminal() {
     assert!(with(HELPER, CONFIG).is_ok());
 }
 
+/// W14-D1 (b): without Windows Terminal, and with no terminal chosen,
+/// launches open in Windows PowerShell; nothing is saved, so Windows
+/// Terminal is used again once installed. A chosen Windows Terminal is
+/// never replaced: its launch is refused as not found, as before.
+#[test]
+fn windows_powershell_stands_in_for_a_missing_windows_terminal() {
+    let default = TerminalSetting::default();
+    assert_eq!(default, TerminalSetting::WindowsTerminal);
+    assert_eq!(
+        effective(default, false, &[TerminalApp::Powershell]),
+        TerminalSetting::Powershell
+    );
+    assert_eq!(
+        effective(default, false, &[TerminalApp::WindowsTerminal]),
+        TerminalSetting::WindowsTerminal
+    );
+    assert_eq!(
+        effective(default, true, &[TerminalApp::Powershell]),
+        TerminalSetting::WindowsTerminal
+    );
+    assert_eq!(
+        TerminalApp::parse("powershell"),
+        Some(TerminalApp::Powershell)
+    );
+}
+
 /// A drive-relative folder (`C:proj`, relative to that drive's current
 /// folder) and a rooted one with no drive (`\proj`, on whichever drive is
 /// current) are not absolute on Windows, and are refused: a launch never
@@ -187,6 +214,8 @@ const STUB_SOURCE: &str = r#"
 #[link(name = "kernel32")]
 extern "system" {
     fn GetCommandLineW() -> *const u16;
+    fn GetStdHandle(id: u32) -> *mut core::ffi::c_void;
+    fn GetConsoleMode(handle: *mut core::ffi::c_void, mode: *mut u32) -> i32;
 }
 fn main() {
     let exe = std::env::current_exe().unwrap();
@@ -206,7 +235,17 @@ fn main() {
         .skip(1)
         .map(|a| a.into_string().unwrap_or_else(|_| "<not unicode>".into()))
         .collect();
-    let mut body = format!("{cwd}\n{raw}\n{}\n", args.len());
+    // Standard input is a console (not the daemon's handles), the ticket
+    // variable, and whether the launch's own variables were left set.
+    let console = unsafe {
+        let mut mode = 0u32;
+        GetConsoleMode(GetStdHandle(-10i32 as u32), &mut mode) != 0
+    };
+    let ticket = std::env::var("NEAR_AI_LAUNCH_TICKET").unwrap_or_default();
+    let leaked = ["NEAR_AI_LAUNCH_HELPER", "NEAR_AI_LAUNCH_CONFIG", "NEAR_AI_LAUNCH_SESSION"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some());
+    let mut body = format!("{cwd}\n{raw}\n{console} {leaked} {ticket}\n{}\n", args.len());
     for arg in args {
         body.push_str(&arg);
         body.push('\0');
@@ -222,20 +261,37 @@ fn main() {
 struct Arrived {
     cwd: String,
     raw: String,
+    /// Its standard input was a console.
+    console: bool,
+    /// A launch variable other than the ticket was still set.
+    leaked: bool,
+    /// `NEAR_AI_LAUNCH_TICKET`, empty when unset.
+    ticket: String,
     args: Vec<String>,
 }
 
 fn read_arrived(out: &Path) -> Option<Arrived> {
     let text = std::fs::read_to_string(out).ok()?;
-    let mut lines = text.splitn(4, '\n');
+    let mut lines = text.splitn(5, '\n');
     let cwd = lines.next()?.to_owned();
     let raw = lines.next()?.to_owned();
+    let mut state = lines.next()?.splitn(3, ' ');
+    let console = state.next()? == "true";
+    let leaked = state.next()? == "true";
+    let ticket = state.next().unwrap_or("").to_owned();
     let count: usize = lines.next()?.parse().ok()?;
     let rest = lines.next().unwrap_or("");
     let args: Vec<String> = rest.split('\0').map(str::to_owned).collect();
     // `split` yields one empty piece after the last NUL.
     let args = args[..args.len().saturating_sub(1)].to_vec();
-    (args.len() == count).then_some(Arrived { cwd, raw, args })
+    (args.len() == count).then_some(Arrived {
+        cwd,
+        raw,
+        console,
+        leaked,
+        ticket,
+        args,
+    })
 }
 
 /// Opens each offered terminal installed here with its real launch argv,
@@ -286,6 +342,11 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
         "-d",
         "back`tick $HOME",
         "a;b",
+        // PowerShell's quotes (curly ones too), subexpression, hash
+        // literal, wildcard brackets, pipe and stop-parsing token.
+        "it's \u{2018}curly\u{2019} \u{201c}q\u{201d}",
+        "$(whoami) @{a=1} [b] | c",
+        "--% x",
     ] {
         cases.push((root.join(name), config.clone()));
     }
@@ -308,6 +369,7 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
     let session = Uuid::new_v4();
     let ticket = "abcdef0123456789";
     let mut started = vec![];
+    let mut consoles = vec![];
     let mut refused = vec![];
     let mut failed = vec![];
     for (app, program) in &apps {
@@ -331,31 +393,53 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
                     continue;
                 }
             };
-            let mut child = plan
-                .command()
-                .stdin(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
+            // As `spawn_plan` starts it: Windows PowerShell in a console
+            // of its own, closed here once the stub has written.
+            let mut child = None;
+            if plan.new_console {
+                consoles.push(spawn_in_new_console(&plan).unwrap());
+            } else {
+                child = Some(
+                    plan.command()
+                        .stdin(std::process::Stdio::null())
+                        .spawn()
+                        .unwrap(),
+                );
+            }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !out.exists() && std::time::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
-            let _ = child.try_wait();
+            if let Some(child) = child.as_mut() {
+                let _ = child.try_wait();
+            }
             started.push(label.clone());
             let Some(arrived) = read_arrived(&out) else {
                 failed.push(format!("{label}: the stub never ran"));
                 continue;
             };
             eprintln!("arrived: {label}: command line {:?}", arrived.raw);
-            let want: Vec<String> = helper_args(config, session, ticket)
+            // Windows PowerShell hands the helper the ticket in its
+            // variable, never in argv; Windows Terminal in argv.
+            let (want_args, want_ticket) = if *app == TerminalApp::Powershell {
+                (helper_args_without_ticket(config, session), ticket)
+            } else {
+                (helper_args(config, session, ticket), "")
+            };
+            let want: Vec<String> = want_args
                 .into_iter()
                 .map(|a| a.into_string().unwrap())
                 .collect();
             let want_cwd = folder.to_str().unwrap().to_owned();
-            if arrived.cwd != want_cwd || arrived.args != want {
+            if arrived.cwd != want_cwd
+                || arrived.args != want
+                || arrived.ticket != want_ticket
+                || arrived.leaked
+                || !arrived.console
+            {
                 failed.push(format!(
-                    "{label}: got cwd {:?} args {:?} from {:?}; want cwd {want_cwd:?} args {want:?}",
-                    arrived.cwd, arrived.args, arrived.raw
+                    "{label}: got cwd {:?} args {:?} ticket {:?} leaked {} console {} from {:?}; want cwd {want_cwd:?} args {want:?} ticket {want_ticket:?}",
+                    arrived.cwd, arrived.args, arrived.ticket, arrived.leaked, arrived.console, arrived.raw
                 ));
             }
         }
@@ -402,6 +486,12 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
             }
         }
     }
+    // Each Windows PowerShell window holds at its prompt (-NoExit).
+    for pid in consoles {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .output();
+    }
     eprintln!("launched: {started:#?}");
     eprintln!("refused: {refused:#?}");
     assert!(!started.is_empty(), "no terminal was started");
@@ -413,6 +503,8 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
             .collect();
         if *app == TerminalApp::WindowsTerminal {
             assert_eq!(names, refused_for_wt, "Windows Terminal's refusals");
+        } else {
+            assert!(names.is_empty(), "{}'s refusals: {names:?}", app.name());
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");
