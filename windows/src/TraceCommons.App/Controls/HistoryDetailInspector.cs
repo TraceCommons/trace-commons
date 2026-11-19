@@ -81,6 +81,7 @@ public sealed class HistoryDetailInspector : UserControl
             IsTabStop = false,
         };
         Background = Res<Brush>("TcSurfaceCardBrush");
+        AutomationProperties.SetAutomationId((UIElement)Content, "HistoryDetailInspector");
         Loaded += OnLoaded;
         ActualThemeChanged += (_, _) => Render();
     }

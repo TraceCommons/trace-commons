@@ -51,6 +51,7 @@ public sealed class MissionsView : UserControl
         };
         KeyboardAccelerators.Add(escape);
         KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+        AutomationProperties.SetAutomationId((UIElement)Content, "MissionsPage");
         ActualThemeChanged += (_, _) => Render();
         Render();
     }
