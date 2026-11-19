@@ -569,6 +569,65 @@ class HeroTokensTests(unittest.TestCase):
         self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
 
 
+
+class SwitchTokensTests(unittest.TestCase):
+    """GlassToggleStyle in the flat theme, for every GTK switch."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_on_track_and_knobs_are_the_macs_flat_values(self):
+        for scheme, track, knob_on, knob_off in [("light", "#0558B6", "#FFFFFF", "#FFFFFF"),
+                                                 ("dark", "#7EBCFF", "#071A2E", "#071A2E")]:
+            css = generate.render_glass_css(self.tokens, scheme)
+            with self.subTest(scheme=scheme):
+                self.assertIn(f"@define-color tc_glass_toggle_on {track};".lower(), css.lower())
+                palette = generate.glass_palette(self.tokens, scheme)
+                self.assertEqual(palette["toggleOn"].upper(), track)
+                self.assertEqual(palette["toggleKnobOn"].upper(), knob_on)
+                self.assertEqual(palette["toggleKnobOff"].upper(), knob_off)
+
+    def test_off_track_is_the_macs_in_dark_and_the_smallest_lift_that_holds_3_in_light(self):
+        # Dark's 38% white holds 3:1 both ways on every ground. Light's 24%
+        # black is about 1.8:1 on its grounds; 43% is the first step at
+        # which the track clears 3:1 on every ground and the white knob
+        # 3:1 on the track.
+        self.assertEqual(generate.switch_off_track(self.tokens, "dark"),
+                         {"hex": "#ffffff", "alpha": 0.38})
+        self.assertEqual(generate.switch_off_track(self.tokens, "light"),
+                         {"hex": "#000000", "alpha": 0.43})
+        self.assertIn("@define-color tc_glass_toggle_off rgba(0, 0, 0, 0.43);",
+                      generate.render_glass_css(self.tokens, "light"))
+        self.assertIn("@define-color tc_glass_toggle_off rgba(255, 255, 255, 0.38);",
+                      generate.render_glass_css(self.tokens, "dark"))
+
+    def test_every_switch_state_clears_3_on_every_ground(self):
+        for scheme in generate.SCHEMES:
+            palette = generate.glass_palette(self.tokens, scheme)
+            off = generate.switch_off_track(self.tokens, scheme)
+            for ground in generate.SWITCH_GROUNDS:
+                under = palette[ground]
+                track = generate.opaque_over(off, under)
+                with self.subTest(scheme=scheme, ground=ground):
+                    self.assertGreaterEqual(generate.contrast(track, under), 3)
+                    self.assertGreaterEqual(generate.contrast(palette["toggleKnobOff"], track), 3)
+                    self.assertGreaterEqual(generate.contrast(palette["toggleOn"], under), 3)
+                    self.assertGreaterEqual(
+                        generate.contrast(palette["toggleKnobOn"], palette["toggleOn"]), 3)
+
+    def test_an_on_track_under_the_floor_is_rejected(self):
+        self.tokens["themes"]["flatLight"]["color"]["toggleOnSettings"] = {"hex": "#d0d4ff"}
+        with self.assertRaisesRegex(generate.TokenError, "switch"):
+            generate.render_glass_css(self.tokens, "light")
+
+    def test_the_secondary_ink_reaches_rust(self):
+        rendered = "\n".join(generate.render_glass_rust(self.tokens))
+        light = generate.glass_palette(self.tokens, "light")["inkSecondary"].upper()
+        dark = generate.glass_palette(self.tokens, "dark")["inkSecondary"].upper()
+        self.assertEqual(light, "#3C3C43")
+        self.assertIn(f'pub const SECONDARY_LIGHT: &str = "{light}";', rendered)
+        self.assertIn(f'pub const SECONDARY_DARK: &str = "{dark}";', rendered)
+
 class FirstRunStageTokensTests(unittest.TestCase):
     def setUp(self):
         self.tokens = json.loads(generate.SOURCE.read_text())

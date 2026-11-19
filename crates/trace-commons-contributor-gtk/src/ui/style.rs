@@ -1588,6 +1588,88 @@ mod tests {
         }
     }
 
+    /// The pairs the measured tables on `LIGHT_TOKENS` and `DARK_TOKENS`
+    /// state, in their order: foreground, ground.
+    const TABLE_PAIRS: [(&str, &str); 23] = [
+        ("tc_ink", "tc_bg"),
+        ("tc_ink", "tc_surface"),
+        ("tc_ink", "tc_surface2"),
+        ("tc_muted", "tc_bg"),
+        ("tc_muted", "tc_surface"),
+        ("tc_muted", "tc_surface2"),
+        ("tc_ink_tertiary", "tc_bg"),
+        ("tc_ink_tertiary", "tc_surface"),
+        ("tc_green_text", "tc_bg"),
+        ("tc_green_text", "tc_surface2"),
+        ("tc_gold_text", "tc_bg"),
+        ("tc_gold_text", "tc_surface2"),
+        ("tc_coral_text", "tc_bg"),
+        ("tc_blue_text", "tc_surface"),
+        ("tc_blue_icon", "tc_bg"),
+        ("tc_primary_label", "tc_primary_fill"),
+        ("tc_primary_fill", "tc_bg"),
+        ("tc_primary_fill", "tc_surface"),
+        ("tc_green", "tc_surface2"),
+        ("tc_gold", "tc_surface2"),
+        ("tc_redaction_fg", "tc_redaction_bg"),
+        ("tc_glass_toggle_knob_on", "tc_glass_toggle_on"),
+        ("tc_glass_toggle_on", "tc_glass_settings_card"),
+    ];
+
+    /// One row of a measured table, as the doc comment writes it.
+    fn table_row(colours: &HashMap<String, String>, fg: &str, bg: &str) -> String {
+        let get = |name: &str| {
+            colours
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not an opaque colour"))
+                .clone()
+        };
+        let (a, b) = (get(fg), get(bg));
+        format!("{:>6.2}:1  {fg:<23} {a} on {bg:<22} {b}", contrast(&a, &b))
+    }
+
+    /// The rows of the measured table in the doc comment on `constant`.
+    fn documented_table(constant: &str) -> Vec<String> {
+        let source = include_str!("style.rs");
+        let end = source
+            .find(&format!("\nconst {constant}: &str"))
+            .unwrap_or_else(|| panic!("no {constant}"));
+        let doc = &source[..end];
+        let open = doc.rfind("/// ```text\n").expect("a measured table") + 12;
+        let close = open + doc[open..].find("/// ```").expect("the table ends");
+        doc[open..close]
+            .lines()
+            .map(|line| line.trim_start_matches("///").trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// The measured tables are the live palette's: every row's colours
+    /// are what this file loads and every ratio is recomputed, so the
+    /// table cannot drift from the tokens again. On the branch before
+    /// this fix both tables still measured the olive grounds and inks
+    /// (#23251D, #E8EAE3, #A6AC9F) the shell no longer draws.
+    #[test]
+    fn the_measured_tables_are_the_live_palette() {
+        for (dark, constant) in [(false, "LIGHT_TOKENS"), (true, "DARK_TOKENS")] {
+            let colours = palette(dark);
+            let live: Vec<String> = TABLE_PAIRS
+                .iter()
+                .map(|(fg, bg)| table_row(&colours, fg, bg))
+                .collect();
+            let trimmed: Vec<String> = live.iter().map(|row| row.trim().to_string()).collect();
+            assert_eq!(
+                documented_table(constant),
+                trimmed,
+                "the table on {constant} is stale; it should read:\n{}",
+                live.iter()
+                    .map(|row| format!("///  {row}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+
     #[test]
     fn every_status_and_accent_text_clears_4_5_on_every_ground() {
         let text = on_every_ground(&[
@@ -1791,9 +1873,9 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            // 48, the edge rail's handle, and the Settings window's
-            // ground, card and hairline.
-            assert_eq!(glass, 52, "{name}");
+            // 48, the edge rail's handle, the Settings window's ground,
+            // card and hairline, and the switch's two tracks and knobs.
+            assert_eq!(glass, 56, "{name}");
             let omarchy::Rgb(r, g, b) = palette.ink;
             assert!(
                 css.contains(&format!(
@@ -1936,6 +2018,17 @@ mod tests {
             failures.extend(check_css(&name, &css, &labels, 4.5));
             failures.extend(check_css(&name, &css, &glass_text, 4.5));
             failures.extend(check_css(&name, &css, &glass_label, 4.5));
+            // The skin's switches: its accent pair on, its secondary ink
+            // under a surface knob off; each 3:1 both ways.
+            let switches = [
+                ("tc_glass_toggle_knob_on", "tc_glass_toggle_on"),
+                ("tc_glass_toggle_on", "tc_bg"),
+                ("tc_glass_toggle_on", "tc_surface"),
+                ("tc_glass_toggle_knob_off", "tc_glass_toggle_off"),
+                ("tc_glass_toggle_off", "tc_bg"),
+                ("tc_glass_toggle_off", "tc_surface"),
+            ];
+            failures.extend(check_css(&name, &css, &switches, 3.0));
             assert_eq!(failures, Vec::<String>::new());
         }
     }
@@ -2016,7 +2109,9 @@ mod tests {
         }
         let light = super::Inks::standard(false);
         assert_eq!(light.held_icon, "#315FBA");
-        assert_eq!(light.muted, "#5C635B");
+        // The secondary ink is the Mac's flat textSecondary, opaque over
+        // the pane, as `tc_muted` is; never the old olive #5C635B.
+        assert_eq!(light.muted, brand_tokens::glass::ink::SECONDARY_LIGHT);
         assert_eq!(light.outside_text, brand_tokens::light::STATUS_OUTSIDE_TEXT);
         assert_eq!(light.status_on, brand_tokens::light::STATUS_ON);
         assert_eq!(light.status_ask, brand_tokens::light::STATUS_ASK);
@@ -2031,7 +2126,15 @@ mod tests {
         );
         let dark = super::Inks::standard(true);
         assert_eq!(dark.held_icon, "#9DB6F1");
-        assert_eq!(dark.muted, "#A6AC9F");
+        assert_eq!(dark.muted, brand_tokens::glass::ink::SECONDARY_DARK);
+        // The drawn secondary ink is the sheet's `tc_muted`.
+        for (is_dark, inks) in [(false, &light), (true, &dark)] {
+            assert_eq!(
+                inks.muted.to_ascii_uppercase(),
+                palette(is_dark)["tc_muted"],
+                "dark={is_dark}"
+            );
+        }
         assert_eq!(
             (dark.redaction_bg.as_str(), dark.redaction_fg.as_str()),
             ("#4A3C18", "#F0EBDD")

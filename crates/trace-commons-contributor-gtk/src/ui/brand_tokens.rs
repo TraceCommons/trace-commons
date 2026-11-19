@@ -197,7 +197,11 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_settings_ground #e9ebef;
 @define-color tc_glass_settings_card #f6f7f9;
 @define-color tc_glass_settings_rule #cdcfd2;
+@define-color tc_glass_toggle_on #0558b6;
+@define-color tc_glass_toggle_knob_on #ffffff;
+@define-color tc_glass_toggle_knob_off #ffffff;
 @define-color tc_glass_edge_rail_handle rgba(29, 29, 31, 0.28);
+@define-color tc_glass_toggle_off rgba(0, 0, 0, 0.43);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -285,7 +289,11 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_settings_ground #0d1124;
 @define-color tc_glass_settings_card #0d1124;
 @define-color tc_glass_settings_rule #2a2e3e;
+@define-color tc_glass_toggle_on #7ebcff;
+@define-color tc_glass_toggle_knob_on #071a2e;
+@define-color tc_glass_toggle_knob_off #071a2e;
 @define-color tc_glass_edge_rail_handle rgba(255, 255, 255, 0.28);
+@define-color tc_glass_toggle_off rgba(255, 255, 255, 0.38);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -451,6 +459,13 @@ pub mod glass {
         pub const LABEL_DARK: &str = "#A9A9B0";
         /// `textPrimary`, dark.
         pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
+    }
+    /// The glass inks cairo draws with, opaque over the pane.
+    pub mod ink {
+        /// `textSecondary` over the pane, light.
+        pub const SECONDARY_LIGHT: &str = "#3C3C43";
+        /// `textSecondary` over the pane, dark.
+        pub const SECONDARY_DARK: &str = "#D8D9E0";
     }
     /// The tab strip's ember line and its halo, as colour and alpha.
     pub mod tabs {
