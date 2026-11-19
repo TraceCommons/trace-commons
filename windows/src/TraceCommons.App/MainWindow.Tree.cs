@@ -71,13 +71,20 @@ public sealed partial class MainWindow : ITracesTreeHost
                 break;
             case TreeSelection.Session session when TracesTreeRows.FolderOf(session.EntryId, tree) is { } projectId:
                 ViewModel.OpenFolder(projectId);
-                OpenInspectorForFolder();
                 break;
             default:
                 ViewModel.CloseFolder();
                 break;
         }
+
+        // A selected trace is a demand: its card is the inspector's
+        // (TracesInspectorHost.swift:182-185). A folder is not.
+        _treeReview = (selection as TreeSelection.Session)?.EntryId;
+        ApplyDemand();
     }
+
+    /// <summary>The trace selected in the tree, the inspector demand's <c>review</c> key.</summary>
+    private string? _treeReview;
 
     /// <summary>Return on a trace: select it and show the inspector its review lives in (TracesViews.swift:15-30).</summary>
     void ITracesTreeHost.Review(string entryId) =>

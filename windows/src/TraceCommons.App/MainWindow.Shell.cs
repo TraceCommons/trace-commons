@@ -435,9 +435,9 @@ public sealed partial class MainWindow
     /// </summary>
     private void ApplyDemand()
     {
-        var keys = new SortedSet<string>(InspectorDemand.Keys(ViewModel.Demand), StringComparer.Ordinal);
         string? arming = ViewModel.HasArmingOffer ? ViewModel.ArmingOfferProjectId : null;
-        keys.UnionWith(InspectorDemand.OfferKeys(_at.Tab, ViewModel.HasPrivateInferenceOffer, arming));
+        IReadOnlySet<string> keys = InspectorDemand.WindowKeys(
+            ViewModel.Demand with { Review = _treeReview }, _at, ViewModel.HasPrivateInferenceOffer, arming);
         if (_demand.Update(keys) && !_wantsInspector)
         {
             _wantsInspector = true;

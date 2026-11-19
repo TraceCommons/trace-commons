@@ -82,14 +82,17 @@ public static class InspectorDemand
 
     /// <summary>
     /// The offers' keys, counted only where the inspector draws the prompts
-    /// (<c>offerKeys</c>, TracesInspectorHost.swift:193-199, gated by
-    /// <see cref="MonitorNavigation.PromptsInInspector"/>): beside the Traces
-    /// tree an offer is already on screen.
+    /// and may open (<c>offerKeys</c>, TracesInspectorHost.swift:193-199,
+    /// gated as MonitorWindowView.swift:692-697 gates it, by
+    /// <see cref="MonitorNavigation.PromptsInInspector"/> and
+    /// <see cref="MonitorNavigation.InspectorAvailable"/>): beside the Traces
+    /// tree an offer is already on screen, and on Home's own page the
+    /// inspector cannot open, so an offer there is no new demand.
     /// </summary>
-    public static IReadOnlySet<string> OfferKeys(MonitorTab shown, bool privateAIOffer, string? armingOfferProject)
+    public static IReadOnlySet<string> OfferKeys(MonitorLocation at, bool privateAIOffer, string? armingOfferProject)
     {
         var keys = new SortedSet<string>(StringComparer.Ordinal);
-        if (!MonitorNavigation.PromptsInInspector(shown))
+        if (!MonitorNavigation.PromptsInInspector(at.Tab) || !MonitorNavigation.InspectorAvailable(at.Tab, at.HomePage))
         {
             return keys;
         }
@@ -104,6 +107,17 @@ public static class InspectorDemand
             keys.Add("offer:arming:" + project);
         }
 
+        return keys;
+    }
+
+    /// <summary>
+    /// Every key the window feeds its tracker: the sources' and the offers'
+    /// where they count (MonitorWindowView.swift:692-702).
+    /// </summary>
+    public static IReadOnlySet<string> WindowKeys(DemandSources sources, MonitorLocation at, bool privateAIOffer, string? armingOfferProject)
+    {
+        var keys = new SortedSet<string>(Keys(sources), StringComparer.Ordinal);
+        keys.UnionWith(OfferKeys(at, privateAIOffer, armingOfferProject));
         return keys;
     }
 
