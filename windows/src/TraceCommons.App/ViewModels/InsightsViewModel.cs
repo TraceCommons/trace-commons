@@ -66,6 +66,9 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public InsightsViewModel(ILocalInsights? service = null)
     {
         _service = service ?? new LocalInsights();
+        // The tab headers bind while the control is built, before any read:
+        // the core's table is there from the start, as on the Mac.
+        foreach (var pair in LocalInsights.CoreCopy()) _copy[pair.Key] = pair.Value;
         Func<string, string?> copy = key => _copy.TryGetValue(key, out var text) ? text : null;
         Overview = new InsightsOverviewViewModel(_service, copy);
         Patterns = new InsightsPatternsViewModel(_service, copy);
@@ -145,7 +148,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Outcomes[Math.Clamp(OutcomeIndex, 0, Outcomes.Length - 1)]);
     private void ResetAssessment() { CategoryIndex = 5; OutcomeIndex = 3; }
     public bool HasSavedSelection => CurrentId != null && Idle;
-    public string this[string key] => _copy.TryGetValue(key, out var text) ? text : key;
+    public string this[string key] => _copy.TryGetValue(key, out var text) ? text : "";
     public string Title => this["title"];
     public string Intro => this["intro"];
     public string SnapshotNotice => this["snapshot_notice"];

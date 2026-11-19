@@ -568,6 +568,30 @@ public sealed class InsightsAnalyticsTests
         Assert.False(Directory.Exists(store));
     }
 
+    // InsightsView.xaml binds each tab header to [analytics_tab_*] while the
+    // control is built, before ActivateAsync reads anything. The words must
+    // already be the core's then: the Mac reads the same table with
+    // tc_insights_copy_json and no store (TCInsights.swift:8), and Windows
+    // showed "analytics_tab_overview" when the lookup fell back to its key.
+    [Fact]
+    public void TheTabWordsAreTheCoresBeforeAnyRead()
+    {
+        var service = new Service();
+        using var model = new InsightsViewModel(service);
+        Assert.Equal("Overview", model["analytics_tab_overview"]);
+        Assert.Equal("Analyze", model["analytics_tab_analyze"]);
+        Assert.Equal("Insights", model.Title);
+        Assert.Empty(service.Calls);
+    }
+
+    // A word the table lacks is left empty, never drawn as its key.
+    [Fact]
+    public void AMissingWordIsEmptyNeverItsKey()
+    {
+        using var model = new InsightsViewModel(new Service());
+        Assert.Equal("", model["no_such_insights_word"]);
+    }
+
     [Fact]
     public void TheWindowShowsTheFourTabsAndNoSpendWithCoreWordsOnly()
     {
