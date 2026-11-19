@@ -525,6 +525,19 @@ public class InsightsSkillsTests
     }
 
     [Fact]
+    public void ASmallOrRelativelyWeakChangeIsNotRanked()
+    {
+        // Ranking keeps a usage change of at least 2 uses and 25% (InsightsSkillsHomeRanking.swift:46-48).
+        var feed = Feed(Array.Empty<InsightsSkillsHome.Update>(), new[]
+        {
+            Trend("one-more", 3, 4) with { PeriodEnd = DateTimeOffset.Parse("2026-11-15T00:00:00Z") },
+            Trend("small-share", 100, 110),
+            Trend("doubled", 2, 4),
+        }, Array.Empty<InsightsSkillsHome.CreatorUpdate>());
+        Assert.Equal(new[] { "trend:claude_code\0doubled" }, feed.RankedStories(Now, Utc).Select(s => s.Id));
+    }
+
+    [Fact]
     public void ActiveCountsAreCutNeverRoundedUp()
     {
         Assert.Equal(new[] { "0", "999", "1K", "1.9K", "12K", "100K", "1M", "1.2M" },
