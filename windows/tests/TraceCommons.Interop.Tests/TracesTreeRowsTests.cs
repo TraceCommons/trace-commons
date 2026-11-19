@@ -356,6 +356,42 @@ public class TracesTreeRowsTests
     }
 
     [Fact]
+    public async Task TheOrderMenuKeepsTheCoresOrderOrThePersonsAndHidesIgnoredFolders()
+    {
+        // TracesStore.swift:32-36, :113-120; TracesTree.swift:156-161, :196-203.
+        MapSnapshot snapshot = await FlowMapSceneTests.Read("busyQueue");
+        var state = new TracesTreeState();
+        state.Read(snapshot, MapFeed.CoreScansWhenUnset);
+        Assert.True(state.ShowsIgnored);
+        Assert.Equal(
+            TracesTree.Build(snapshot.Entries!, snapshot.Projects!, snapshot.SourceModes, MapFeed.CoreScansWhenUnset, showsIgnored: true).Folders.Select(f => f.Id),
+            state.Shown.Folders.Select(f => f.Id));
+
+        state.ChooseQueueOrder();
+        JsonElement mac = MapProbe.Set("busyQueue");
+        Assert.Equal(mac.GetProperty("treeKeepsOrder").EnumerateArray().Select(e => e.GetString()),
+            TracesTree.Build(snapshot.Entries!, snapshot.Projects!, snapshot.SourceModes, MapFeed.CoreScansWhenUnset, showsIgnored: false, keepsOrder: true).Folders.Select(f => f.Id));
+        Assert.Equal(
+            TracesTree.Build(snapshot.Entries!, snapshot.Projects!, snapshot.SourceModes, MapFeed.CoreScansWhenUnset, showsIgnored: true, keepsOrder: true).Folders.Select(f => f.Id),
+            state.Shown.Folders.Select(f => f.Id));
+
+        state.ShowIgnored(false);
+        Assert.Equal(mac.GetProperty("treeKeepsOrder").EnumerateArray().Select(e => e.GetString()), state.Shown.Folders.Select(f => f.Id));
+
+        // Your order, with nothing dragged yet: the folders as drawn.
+        var drawn = state.Shown.Folders.Select(f => f.Id).ToList();
+        state.ChooseArranged();
+        Assert.True(state.Arranged);
+        Assert.Equal(drawn, state.FolderOrder);
+        Assert.Equal(drawn, state.Shown.Folders.Select(f => f.Id));
+
+        // The core's words for the control.
+        Assert.Equal("Order of waiting traces", TreeOrderWords.Label);
+        Assert.Equal("Oldest first", TreeOrderWords.Queue);
+        Assert.Equal("Your order", TreeOrderWords.Arranged);
+    }
+
+    [Fact]
     public void OneRowMenuIsOpenAtATime()
     {
         // TracesViews.swift:107-122.

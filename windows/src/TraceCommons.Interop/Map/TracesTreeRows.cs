@@ -140,6 +140,48 @@ public sealed record TreeWords(IReadOnlyDictionary<string, string> Tree, IReadOn
 }
 
 /// <summary>
+/// The Traces order control's words, the core's nudge words
+/// (<c>tc_nudge_copy_json</c>, NudgeCopy.swift): its name, "Oldest first" and
+/// "Your order". Empty where the core said nothing.
+/// </summary>
+public static class TreeOrderWords
+{
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> Words = new(() =>
+    {
+        var words = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_nudge_copy_json());
+        if (!string.IsNullOrEmpty(json))
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(json);
+                foreach (JsonProperty p in doc.RootElement.EnumerateObject())
+                {
+                    if (p.Value.ValueKind == JsonValueKind.String)
+                    {
+                        words[p.Name] = p.Value.GetString() ?? string.Empty;
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // No words: the control is not drawn.
+            }
+        }
+
+        return words;
+    });
+
+    public static string Label => Word("LIST_ORDER_LABEL");
+
+    public static string Queue => Word("LIST_ORDER_QUEUE");
+
+    public static string Arranged => Word("LIST_ORDER_ARRANGED");
+
+    private static string Word(string key) => Words.Value.TryGetValue(key, out string? w) ? w : string.Empty;
+}
+
+/// <summary>
 /// The Traces tree's rules, as the Mac's <c>TracesTreeView</c> statics
 /// (macos/Sources/TraceCommonsApp/Views/Monitor/TracesViews.swift). Pure, so
 /// the window only draws what these return.
@@ -493,6 +535,65 @@ public sealed class TracesTreeState
 
     public IReadOnlyList<TreeRow> Rows => TracesTreeRows.DrawnRows(Shown, _expanded);
 
+    /// <summary>Whether ignored folders are drawn: the order menu's switch, on by default (TracesStore.swift:32).</summary>
+    public bool ShowsIgnored { get; private set; } = true;
+
+    /// <summary>Folders in the order the core listed them: "Oldest first" chosen (TracesTree.swift:156-161).</summary>
+    public bool KeepsOrder { get; private set; }
+
+    private MapSnapshot? _read;
+    private IReadOnlySet<string> _scans = new HashSet<string>();
+
+    /// <summary>A read from the core, built into the tree with this list's options (TracesStore.swift:194-199).</summary>
+    public void Read(MapSnapshot snapshot, IReadOnlySet<string> scansWhenUnset)
+    {
+        _read = snapshot;
+        _scans = scansWhenUnset;
+        Rebuild();
+    }
+
+    /// <summary>"Show ignored folders" (TracesStore.swift:32-36).</summary>
+    public void ShowIgnored(bool shown)
+    {
+        ShowsIgnored = shown;
+        Rebuild();
+    }
+
+    /// <summary>
+    /// "Oldest first": the core's queue order, folders by their first listed
+    /// trace, and the person's order off (TracesStore.swift setOrder). The
+    /// read is already in queue order, the core's default for <c>list_pending</c>.
+    /// </summary>
+    public void ChooseQueueOrder()
+    {
+        KeepsOrder = true;
+        Arranged = false;
+        Rebuild();
+    }
+
+    /// <summary>"Your order": the folders as drawn become the order if none was kept (TracesStore.swift:113-120).</summary>
+    public void ChooseArranged()
+    {
+        if (_folderOrder.Count == 0)
+        {
+            _folderOrder = Shown.Folders.Select(f => f.Id).ToList();
+        }
+
+        Arranged = true;
+    }
+
+    private void Rebuild()
+    {
+        if (_read is { Entries: { } entries, Projects: { } projects } read)
+        {
+            SetTree(TracesTree.Build(entries, projects, read.SourceModes, _scans, ShowsIgnored, KeepsOrder));
+        }
+        else if (_read is not null)
+        {
+            SetTree(TracesTree.Empty);
+        }
+    }
+
     /// <summary>A new read. A selection waiting for its trace is revealed now (TracesViews.swift:322-325).</summary>
     public void SetTree(TracesTree tree)
     {
@@ -586,6 +687,7 @@ public sealed class TracesTreeState
 
         _folderOrder = TracesTree.Moving(moved, target, shown, _folderOrder).ToList();
         Arranged = true;
+        KeepsOrder = false;
         return true;
     }
 
