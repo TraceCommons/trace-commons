@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace TraceCommons.Interop.Map;
 
@@ -150,6 +152,26 @@ public sealed record MapGeometry
         };
     }
 
+    /// <summary>
+    /// Every stroke the Mac draws for one arc, in order, at the map's
+    /// <paramref name="scale"/> (FlowMapView.swift:263-297): the line, and on
+    /// a healthy flowing arc its moving dash over it. Widths and dashes are in
+    /// points; <see cref="MapStroke.Moves"/> marks the dash whose phase runs.
+    /// </summary>
+    public static IReadOnlyList<MapStroke> ArcStrokes(MapArcStyle style, bool healthy, bool strong, double scale)
+    {
+        (string ink, double alpha, double[]? dash, bool round) = ArcStroke(style, healthy, strong);
+        double width = ArcWidth * scale;
+        var line = new MapStroke(ink, alpha, width, dash?.Select(d => d * scale).ToArray(), round, Moves: false);
+        if (style != MapArcStyle.Flowing || !healthy)
+        {
+            return new[] { line };
+        }
+
+        var flow = new MapStroke("statusOn", 1, width * FlowingWidthFactor, FlowingDash.Select(d => d * scale).ToArray(), Round: true, Moves: true);
+        return new[] { line, flow };
+    }
+
     /// <summary>The flowing arc's moving dash: [4, 8] at 1.3 times the line, round caps (:290-295).</summary>
     public static readonly double[] FlowingDash = { 4, 8 };
 
@@ -158,3 +180,6 @@ public sealed record MapGeometry
     /// <summary>Every arc's line width before scale (:269).</summary>
     public const double ArcWidth = 1.4;
 }
+
+/// <summary>One stroke of an arc: ink token and alpha (before the arc's dim), width and dash in points, round caps, and whether its dash moves.</summary>
+public sealed record MapStroke(string Ink, double Alpha, double Width, double[]? Dash, bool Round, bool Moves);

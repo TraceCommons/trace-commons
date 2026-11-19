@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Brushes;
@@ -194,23 +195,37 @@ internal static class MapPainter
     }
 
     /// <summary>
-    /// A flowing arc's moving dash over <paramref name="path"/>: [4, 8] at
-    /// 1.3 times the line, round caps, its phase 18 points a second from the
-    /// arc's start (FlowMapView.swift:290-295, <c>dashPhase: -phase * scale</c>).
-    /// Direct2D counts the dash and its offset in stroke widths.
+    /// A flowing arc's moving dash over <paramref name="path"/>: the second of
+    /// <see cref="MapGeometry.ArcStrokes"/> for a healthy flowing arc, its
+    /// phase 18 points a second from the arc's start (FlowMapView.swift:290-295,
+    /// <c>dashPhase: -phase * scale</c>).
     /// </summary>
     public static void FlowingDash(CanvasDrawingSession ds, CanvasGeometry path, double scale, double seconds, bool reduceMotion, Color colour)
     {
-        float width = (float)(MapGeometry.ArcWidth * scale * MapGeometry.FlowingWidthFactor);
-        using var flow = new CanvasStrokeStyle
+        MapStroke flow = MapGeometry.ArcStrokes(MapArcStyle.Flowing, healthy: true, strong: false, scale)[1];
+        Stroke(ds, path, flow, MapMotion.DashPhase(seconds, scale, reduceMotion), colour);
+    }
+
+    /// <summary>
+    /// Draws one arc stroke. Direct2D counts a dash and its offset in stroke
+    /// widths, so the stroke's point dash and <paramref name="phase"/> are
+    /// divided by its width.
+    /// </summary>
+    public static void Stroke(CanvasDrawingSession ds, CanvasGeometry path, MapStroke stroke, double phase, Color colour)
+    {
+        float width = (float)stroke.Width;
+        using var style = new CanvasStrokeStyle();
+        if (stroke.Round)
         {
-            StartCap = CanvasCapStyle.Round,
-            EndCap = CanvasCapStyle.Round,
-            DashCap = CanvasCapStyle.Round,
-            CustomDashStyle = new[] { (float)(MapGeometry.FlowingDash[0] * scale / width), (float)(MapGeometry.FlowingDash[1] * scale / width) },
-            DashOffset = (float)MapMotion.DashOffsetInWidths(MapMotion.DashPhase(seconds, scale, reduceMotion), width),
-        };
-        ds.DrawGeometry(path, colour, width, flow);
+            style.StartCap = style.EndCap = style.DashCap = CanvasCapStyle.Round;
+        }
+
+        if (stroke.Dash is { } dash)
+        {
+            style.CustomDashStyle = dash.Select(d => (float)(d / width)).ToArray();
+            style.DashOffset = (float)MapMotion.DashOffsetInWidths(phase, width);
+        }
+
+        ds.DrawGeometry(path, colour, width, style);
     }
 }
-

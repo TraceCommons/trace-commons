@@ -1190,7 +1190,6 @@ public sealed partial class TracesMapView : UserControl
     private void DrawArcs(CanvasDrawingSession ds, ICanvasResourceCreator device, MapGeometry fit, double seconds, bool motion)
     {
         bool strong = HighContrast;
-        float width = (float)(MapGeometry.ArcWidth * fit.Scale);
         foreach (MapArc arc in _scene.Arcs)
         {
             using var builder = new CanvasPathBuilder(device);
@@ -1199,23 +1198,13 @@ public sealed partial class TracesMapView : UserControl
             builder.AddCubicBezier(new Vector2((float)c1.X, (float)c1.Y), new Vector2((float)c2.X, (float)c2.Y), new Vector2((float)b.X, (float)b.Y));
             builder.EndFigure(CanvasFigureLoop.Open);
             using CanvasGeometry path = CanvasGeometry.CreatePath(builder);
-            (string ink, double alpha, double[]? dash, bool round) = MapGeometry.ArcStroke(arc.Style, Healthy, strong);
-            Color colour = ink == "white" ? Color.FromArgb((byte)Math.Round(255 * alpha * arc.Dim), 255, 255, 255) : Ink(ink, alpha * arc.Dim);
-            using var style = new CanvasStrokeStyle();
-            if (round)
+            foreach (MapStroke stroke in MapGeometry.ArcStrokes(arc.Style, Healthy, strong, fit.Scale))
             {
-                style.StartCap = style.EndCap = style.DashCap = CanvasCapStyle.Round;
-            }
-
-            if (dash is not null)
-            {
-                style.CustomDashStyle = dash.Select(d => (float)(d * fit.Scale / width)).ToArray();
-            }
-
-            ds.DrawGeometry(path, colour, width, style);
-            if (arc.Style == MapArcStyle.Flowing && Healthy)
-            {
-                MapPainter.FlowingDash(ds, path, fit.Scale, seconds, !motion, Ink("statusOn", arc.Dim));
+                Color colour = stroke.Ink == "white"
+                    ? Color.FromArgb((byte)Math.Round(255 * stroke.Alpha * arc.Dim), 255, 255, 255)
+                    : Ink(stroke.Ink, stroke.Alpha * arc.Dim);
+                double offset = stroke.Moves ? MapMotion.DashPhase(seconds, fit.Scale, !motion) : 0;
+                MapPainter.Stroke(ds, path, stroke, offset, colour);
             }
         }
     }
