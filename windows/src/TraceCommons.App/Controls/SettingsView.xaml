@@ -211,6 +211,24 @@
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
                               Toggled="OnStartAtLoginToggled" />
 
+                <!--
+                    Credit arrivals and the edge rail (W12, W13): the Mac's
+                    General section cards (GeneralSection.swift:35-51, :91-110),
+                    each its core heading, switch and caption, set from code
+                    (SettingsView.Shell.cs). The credit switch is on and the
+                    rail off until the person changes them, as on the Mac.
+                -->
+                <TextBlock x:Name="CreditAnimationTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                <ToggleSwitch x:Name="CreditAnimationSwitch" Toggled="OnCreditAnimationToggled" />
+                <TextBlock x:Name="CreditAnimationCaption"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="WrapWholeWords" />
+                <TextBlock x:Name="EdgeRailTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                <ToggleSwitch x:Name="EdgeRailSwitch" Toggled="OnEdgeRailToggled" />
+                <TextBlock x:Name="EdgeRailCaption"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="WrapWholeWords" />
+
                 <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
                            Style="{StaticResource TcEyebrowTextStyle}" />
                 <TextBlock Text="Applies to traces you send from now on."

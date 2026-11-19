@@ -1523,6 +1523,23 @@ def render_windows_home_tray(tokens: dict) -> str:
         out.append(f"    public const uint {pascal(name)} = {argb(colour, name)};")
     for name, hex_ in WINDOWS_COIN_GOLDS:
         out.append(f"    public const uint Coin{name} = {argb({'hex': hex_}, name)};")
+    # The measures Home's cards and the rail are laid out with, as the flat
+    # theme sets them (its radii override the classic ones in both
+    # appearances alike).
+    out.append("")
+    out.append("    /// <summary>Radii and spacing in points (DIPs), as the flat theme sets them.</summary>")
+    out.append("    public static class Measures")
+    out.append("    {")
+    for section, names in (("radius", ["card", "cardQuiet", "control", "pill"]),
+                           ("space", ["s1", "s2", "s3", "s4", "cardGap", "cardPaddingHorizontal", "panePadding"])):
+        for name in names:
+            value = flat_value(tokens, section, name, "dark")
+            if value != flat_value(tokens, section, name, "light"):
+                raise TokenError(f"{section}.{name}: expected one value in both appearances")
+            number(value, f"{section}.{name}")
+            label = f"{pascal(name)}Radius" if section == "radius" else pascal(name)
+            out.append(f"        public const double {label} = {float(value)!r};")
+    out.append("    }")
     for scheme in ("dark", "light"):
         out.append("")
         out.append(f"    /// <summary>The {scheme} appearance.</summary>")

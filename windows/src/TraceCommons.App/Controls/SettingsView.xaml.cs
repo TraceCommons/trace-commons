@@ -30,6 +30,7 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
+        InitializeShellSwitches();
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);

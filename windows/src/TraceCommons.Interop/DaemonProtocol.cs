@@ -783,6 +783,16 @@ public sealed class DaemonStatus
     public JsonElement? AutomaticContributionHeld { get; set; }
 
     /// <summary>
+    /// The core's re-engagement nudge, kept as the daemon sent it. The tray
+    /// reads only its <c>mark</c> and <c>mark_text</c>
+    /// (<see cref="TraceCommons.Interop.Shell.TrayStrip.FromStatus"/>): the
+    /// core lights the mark after its own mute, cooldowns and news window.
+    /// Null from a daemon older than the field, which lights nothing.
+    /// </summary>
+    [JsonPropertyName("nudge")]
+    public JsonElement? Nudge { get; set; }
+
+    /// <summary>
     /// Whether there is nothing to report.
     /// </summary>
     /// <remarks>

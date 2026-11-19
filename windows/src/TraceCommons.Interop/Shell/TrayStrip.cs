@@ -182,6 +182,42 @@ public static class TrayStrip
     public static string MarkAccessibility(string baseSentence, StripMarkWords? words) =>
         words is { Accessibility.Length: > 0 } w ? baseSentence + " " + w.Accessibility : baseSentence;
 
+    /// <summary>
+    /// The strip and the drawn mark's words from one status read
+    /// (<c>MenuBarStripInputs.of</c> and <c>MenuBarStripLabel.body</c>,
+    /// MenuBarGlassPanel.swift:663-675): a status that could not be read is
+    /// unavailable, never the last one drawn.
+    /// </summary>
+    public static (Strip Strip, StripMarkWords? Words) FromStatus(DaemonStatus? status)
+    {
+        if (status is null)
+        {
+            return (new Strip(StripCondition.Unavailable, null, StripMark.None), null);
+        }
+
+        StripCondition condition = Condition(status.DecisionsOwed, !status.IsHealthy, status.Paused, available: true, stale: false, statusAnswered: true);
+        int? badge = Badge(status.DecisionsOwed);
+        string? mark = null;
+        StripMarkWords? words = null;
+        if (status.Nudge is { ValueKind: System.Text.Json.JsonValueKind.Object } nudge)
+        {
+            if (nudge.TryGetProperty("mark", out var m) && m.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                mark = m.GetString();
+            }
+
+            if (nudge.TryGetProperty("mark_text", out var t) && t.ValueKind == System.Text.Json.JsonValueKind.Object
+                && t.TryGetProperty("accessibility", out var a) && a.ValueKind == System.Text.Json.JsonValueKind.String
+                && t.TryGetProperty("tooltip", out var tip) && tip.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                words = new StripMarkWords(a.GetString() ?? string.Empty, tip.GetString() ?? string.Empty);
+            }
+        }
+
+        var strip = new Strip(condition, badge, LitMark(mark, available: true));
+        return (strip, MarkWords(mark, words, available: true, badge, condition));
+    }
+
     /// <summary>The pixel face of a badge character, rows top to bottom, a set bit per lit cell from the left.</summary>
     internal static int[]? Face(char c) => c switch
     {

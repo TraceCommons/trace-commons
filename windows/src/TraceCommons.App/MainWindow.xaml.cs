@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App;
 
@@ -151,6 +152,7 @@ public sealed partial class MainWindow : Window
         _tray.PauseRequested += OnTrayPauseRequested;
         _tray.ResumeRequested += OnTrayResumeRequested;
         _tray.QuitRequested += OnTrayQuitRequested;
+        InitializeHome();
 
         AppWindow.Closing += OnAppWindowClosing;
         Closed += OnClosed;
@@ -442,11 +444,21 @@ public sealed partial class MainWindow : Window
             Task<DaemonResponse> rollupTask = _host.CallAsync(DaemonProtocol.Methods.HistoryRollup);
             Task<DaemonResponse> projectsTask = _host.CallAsync(DaemonProtocol.Methods.ListProjects);
 
-            await Task.WhenAll(statusTask, pendingTask, rollupTask, projectsTask)
+            // The NEAR AI balance, for credit arriving live (W12): read with
+            // the tray's other reads, so an arrival is noticed whichever page
+            // is on screen (AppModel.recordBalanceStatus).
+            Task<DaemonResponse> balanceTask = _host.CallAsync(DaemonProtocol.Methods.NearAiBalance);
+
+            await Task.WhenAll(statusTask, pendingTask, rollupTask, projectsTask, balanceTask)
                 .ConfigureAwait(true);
+            ObserveBalance(balanceTask.Result);
 
             if (statusTask.Result.ResultAs<DaemonStatus>() is not DaemonStatus status)
             {
+                // A status that could not be read draws the unavailable
+                // strip, never the last one (MenuPanelStatus.condition).
+                (Strip down, StripMarkWords? none) = TrayStrip.FromStatus(null);
+                _tray.ShowStrip(down, none);
                 return;
             }
 
@@ -470,7 +482,16 @@ public sealed partial class MainWindow : Window
                 _trayPending,
                 _trayRollup,
                 _trayProjects);
-            _tray.Update(menu, status.IsHealthy);
+            (Strip strip, StripMarkWords? words) = TrayStrip.FromStatus(status);
+            _tray.Update(menu, status.IsHealthy, strip, words);
+            FeedHome(status, _trayRollup, _trayPending);
+
+            // Settled Trace credit arriving live (BalanceArrival.Tracker,
+            // AppModel.swift:2168): even when not signed in to NEAR AI.
+            if (rollupTask.Result.ResultAs<HistoryRollup>() is { } settled)
+            {
+                ObserveCreditFinal(settled.CreditFinal);
+            }
         }
         finally
         {
@@ -1721,6 +1742,8 @@ public sealed partial class MainWindow : Window
         _clockGate.SetClosed();
         StopMoveTicks();
         _settingsWindow?.Close();
+        StopCredit();
+        CloseToolWindows();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;

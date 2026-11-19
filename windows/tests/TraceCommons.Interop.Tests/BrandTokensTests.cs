@@ -165,16 +165,16 @@ public class BrandTokensTests
     [Fact]
     public void TheTrayDotsAreTheTokenColours()
     {
+        // The tray now draws the Mac's strip (W12): every ink is a generated
+        // token in HomeTrayInks, which TrayStripTests pins pixel by pixel.
+        // What nothing else can witness is that the tray's own code adds no
+        // colour of its own beside them (one-pass checklist D1), so this
+        // reads the source for a colour literal and for the one renderer.
         string tray = Source("TrayIcon.cs.txt");
-        Dictionary<string, string> light = Palette(BrandTokens, "Light");
-        Dictionary<string, string> dark = Palette(BrandTokens, "Default");
-
-        Assert.Contains(
-            $"TrayIconState.Attention => lightTaskbar ? {Argb(light["TcAccentBrush"])} : {Argb(dark["TcAccentBrush"])},",
-            tray);
-        Assert.Contains(
-            $"TrayIconState.Unhealthy => lightTaskbar ? {Argb(light["TcStatusOutsideBrush"])} : {Argb(dark["TcStatusOutsideBrush"])},",
-            tray);
+        Assert.Contains("TrayStrip.Render(_strip", tray);
+        Assert.DoesNotMatch(@"0x[0-9A-Fa-f]{8}U", tray);
+        Assert.Equal(0xFFFFFFFFu, TraceCommons.Interop.Generated.HomeTrayInks.Dark.MenuItemMark);
+        Assert.Equal(0xFF000000u, TraceCommons.Interop.Generated.HomeTrayInks.Light.MenuItemMark);
     }
 
     [Fact]

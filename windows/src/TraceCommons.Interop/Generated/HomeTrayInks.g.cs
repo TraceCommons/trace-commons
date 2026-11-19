@@ -25,6 +25,22 @@ public static class HomeTrayInks
     public const uint CoinGoldRim = 0xFF8F5E0AU;
     public const uint CoinSpark = 0xFFFFD45CU;
 
+    /// <summary>Radii and spacing in points (DIPs), as the flat theme sets them.</summary>
+    public static class Measures
+    {
+        public const double CardRadius = 16.0;
+        public const double CardQuietRadius = 14.0;
+        public const double ControlRadius = 11.0;
+        public const double PillRadius = 999.0;
+        public const double S1 = 2.0;
+        public const double S2 = 4.0;
+        public const double S3 = 6.0;
+        public const double S4 = 8.0;
+        public const double CardGap = 10.0;
+        public const double CardPaddingHorizontal = 14.0;
+        public const double PanePadding = 12.0;
+    }
+
     /// <summary>The dark appearance.</summary>
     public static class Dark
     {

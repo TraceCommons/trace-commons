@@ -915,24 +915,25 @@
 
 
                     <!--
-                        Home's overview. Its cards (heroes, tiles, recent
-                        activity) are W11's; until then it holds the two ways
-                        the Mac's Home leads that this shell has: to Traces,
-                        and to Mission drafts while missions are shown. Both
-                        words are the core's, set from code.
+                        Home's overview (W11): Controls/HomeView, inserted
+                        from code (MainWindow.Home.cs) as this grid's first
+                        child, with its tiles and hero cards leading to
+                        Traces, History, Private AI, Insights and Mission
+                        drafts. The W2 placeholder's two buttons stay, never
+                        shown, because the shell's code still names them.
                     -->
-                    <StackPanel x:Name="HomePane"
-                                Visibility="{x:Bind ViewModel.ShowingHome, Mode=OneWay}"
-                                Padding="22,24,22,22"
-                                Spacing="10">
-                        <Button x:Name="HomeOpenTraces"
-                                Style="{StaticResource TcSecondaryButtonStyle}"
-                                Click="OnShowQueue" />
-                        <Button x:Name="HomeOpenMissionDrafts"
-                                Style="{StaticResource TcSecondaryButtonStyle}"
-                                Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}"
-                                Click="OnShowMissionDrafts" />
-                    </StackPanel>
+                    <Grid x:Name="HomePane"
+                          Visibility="{x:Bind ViewModel.ShowingHome, Mode=OneWay}">
+                        <StackPanel Visibility="Collapsed">
+                            <Button x:Name="HomeOpenTraces"
+                                    Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Click="OnShowQueue" />
+                            <Button x:Name="HomeOpenMissionDrafts"
+                                    Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}"
+                                    Click="OnShowMissionDrafts" />
+                        </StackPanel>
+                    </Grid>
 
                 <!--
                     The History pane.
