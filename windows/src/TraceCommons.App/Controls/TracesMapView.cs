@@ -808,7 +808,9 @@ public sealed partial class TracesMapView : UserControl
             _canvas.Invalidate();
             bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
-            if (fieldMoves || _fieldMoved)
+            // The pile moves between the layers as it starts and stops.
+            bool pileMoving = PileMoves(now);
+            if (fieldMoves || _fieldMoved || pileMoving == _pileInStill)
             {
                 _still.Invalidate();
             }
@@ -949,9 +951,16 @@ public sealed partial class TracesMapView : UserControl
                 DrawRocket(ds, sender, fit.Point(TransferDrawing.RocketRest(hub.At)), -Math.PI / 2, fit.Scale, null, 0, null);
             }
 
-            DrawPile(ds, sender, stack, fit, run, t, now, motion);
+            if (PileMoves(now))
+            {
+                DrawPile(ds, sender, stack, fit, run, t, now, motion);
+            }
         }
     }
+
+    /// <summary>Whether the pile is moving now: a run playing through it, or its hover stages or coins in motion.</summary>
+    private bool PileMoves(double now) =>
+        Motion && WindowClocks.Running && ((_player.Run is { } run && run.Moving(now - run.Start)) || _pile.Moving(now));
 
     /// <summary>The field, the nodes and the overflow counts: redrawn on a change, a pointer move or a shimmer pass.</summary>
     private void OnDrawStill(CanvasControl sender, CanvasDrawEventArgs args)
@@ -979,7 +988,21 @@ public sealed partial class TracesMapView : UserControl
         {
             DrawText(ds, "+" + overflow.Count, fit.Point(overflow.At), 11, Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: false);
         }
+
+        // A pile at rest is drawn here, once, not on every tick.
+        double now = Now;
+        if (_scene.Stack is { } stack && !PileMoves(now))
+        {
+            _pileInStill = true;
+            DrawPile(ds, sender, stack, fit, null, 0, now, Motion && WindowClocks.Running);
+        }
+        else
+        {
+            _pileInStill = false;
+        }
     }
+
+    private bool _pileInStill;
 
     private void DrawField(CanvasDrawingSession ds, ICanvasResourceCreator device, Size size, double now, bool motion)
     {
@@ -1816,6 +1839,9 @@ public sealed partial class TracesMapView : UserControl
 
     // ---- Text ---------------------------------------------------------
 
+    /// <summary>Text formats by size and weight, made once (checklist O3).</summary>
+    private static readonly Dictionary<string, CanvasTextFormat> Formats = new(StringComparer.Ordinal);
+
     private static void DrawText(CanvasDrawingSession ds, string text, MapPoint at, double size, Color colour, CanvasHorizontalAlignment align, bool bold, bool mono = false, bool icons = false)
     {
         if (string.IsNullOrEmpty(text))
@@ -1823,15 +1849,21 @@ public sealed partial class TracesMapView : UserControl
             return;
         }
 
-        using var format = new CanvasTextFormat
+        string key = $"{size:F2}|{bold}|{mono}|{icons}";
+        if (!Formats.TryGetValue(key, out CanvasTextFormat? format))
         {
-            FontFamily = icons ? "Segoe Fluent Icons, Segoe MDL2 Assets" : mono ? "Cascadia Mono, Consolas" : "Segoe UI Variable Text, Segoe UI",
-            FontSize = (float)size,
-            FontWeight = bold ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
-            WordWrapping = CanvasWordWrapping.NoWrap,
-            HorizontalAlignment = CanvasHorizontalAlignment.Left,
-            VerticalAlignment = CanvasVerticalAlignment.Center,
-        };
+            format = new CanvasTextFormat
+            {
+                FontFamily = icons ? "Segoe Fluent Icons, Segoe MDL2 Assets" : mono ? "Cascadia Mono, Consolas" : "Segoe UI Variable Text, Segoe UI",
+                FontSize = (float)size,
+                FontWeight = bold ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+                WordWrapping = CanvasWordWrapping.NoWrap,
+                HorizontalAlignment = CanvasHorizontalAlignment.Left,
+                VerticalAlignment = CanvasVerticalAlignment.Center,
+            };
+            Formats[key] = format;
+        }
+
         using var layout = new CanvasTextLayout(ds, text, format, 0, 0);
         double width = layout.LayoutBounds.Width;
         double x = align switch
