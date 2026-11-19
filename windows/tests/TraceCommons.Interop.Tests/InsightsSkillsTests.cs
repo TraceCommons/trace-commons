@@ -279,6 +279,32 @@ public class InsightsSkillsTests
     }
 
     [Fact]
+    public async Task ADefinitionIsReadOncePerIdUntilTheDetailsAreDropped()
+    {
+        var reply = new TaskCompletionSource<SkillDefinition>();
+        var asked = new List<string>();
+        var model = new InsightsSkillsModel(definitionReader: id =>
+        {
+            asked.Add(id);
+            return reply.Task;
+        });
+        // A view asks on every redraw while the read is in flight: one read goes out.
+        Task[] reads = { model.LoadDefinitionAsync("a"), model.LoadDefinitionAsync("a"), model.LoadDefinitionAsync("a") };
+        Assert.Equal(new[] { "a" }, asked);
+        reply.SetResult(new SkillDefinition("a", "available", "body"));
+        await Task.WhenAll(reads);
+        await model.LoadDefinitionAsync("a");
+        Assert.Equal(new[] { "a" }, asked);
+        Assert.Equal("body", model.Definition?.Definition);
+        Assert.False(model.DefinitionFailure);
+
+        // Dropped details (a new snapshot, another section) read it again.
+        model.InvalidateDetails();
+        await model.LoadDefinitionAsync("a");
+        Assert.Equal(new[] { "a", "a" }, asked);
+    }
+
+    [Fact]
     public void ThePollsAreTheMacs()
     {
         Assert.Equal(TimeSpan.FromMinutes(5), InsightsSkillsModel.IdlePollInterval);

@@ -158,8 +158,14 @@ public sealed class InsightsSkillsModel : INotifyPropertyChanged
         Changed();
     }
 
+    /// <summary>
+    /// Reads one installed skill's definition, once per id until the details
+    /// are dropped (the Mac's <c>.task(id: "\(id):\(detailEpoch)")</c>):
+    /// asking again for the id already asked for sends nothing.
+    /// </summary>
     public async Task LoadDefinitionAsync(string id)
     {
+        if (_selectedDefinition == id) return;
         long generation = ++_definitionGeneration;
         _selectedDefinition = id;
         Definition = null;

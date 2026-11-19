@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Hosting;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
@@ -75,6 +76,15 @@ public sealed class InsightsSkillsView : UserControl
         WindowClocks.Changed += OnClocksChanged;
         Unloaded += (_, _) => _model.InvalidateDetails();
         Render();
+    }
+
+    /// <summary>The tab was removed: this view stops listening, so a removed view sends nothing.</summary>
+    public void Close()
+    {
+        _model.PropertyChanged -= OnModelChanged;
+        WindowClocks.Changed -= OnClocksChanged;
+        foreach (RollingNumber roll in _rolls) roll.Finish();
+        _rolls.Clear();
     }
 
     /// <summary>What may move: the system's animation setting, and only while the window's clocks run.</summary>
@@ -193,6 +203,15 @@ public sealed class InsightsSkillsView : UserControl
     {
         if (_rendering) return;
         _rendering = true;
+        // A rebuild replaces the controls: the focused one is found again
+        // afterwards by its name, and a search box keeps its caret.
+        (string? Name, Type? Kind, int Caret) focused = (null, null, 0);
+        if (XamlRoot is not null && FocusManager.GetFocusedElement(XamlRoot) is FrameworkElement had && IsInside(had))
+        {
+            focused = (had is TextBox box ? "\u0000" + (ReferenceEquals(box, _inventoryQuery) ? "inventory" : "catalog")
+                : AutomationProperties.GetName(had), had.GetType(), had is TextBox caret ? caret.SelectionStart : 0);
+        }
+
         try
         {
             _scrollCards.Clear();
@@ -236,11 +255,49 @@ public sealed class InsightsSkillsView : UserControl
             }
 
             DispatcherQueue?.TryEnqueue(ApplyScrollMotion);
+            if (focused.Name is { Length: > 0 } name) DispatcherQueue?.TryEnqueue(() => Refocus(name, focused.Kind, focused.Caret));
         }
         finally
         {
             _rendering = false;
         }
+    }
+
+    private bool IsInside(DependencyObject element)
+    {
+        for (DependencyObject? at = element; at is not null; at = VisualTreeHelper.GetParent(at))
+        {
+            if (ReferenceEquals(at, this)) return true;
+        }
+
+        return false;
+    }
+
+    private void Refocus(string name, Type? kind, int caret)
+    {
+        if (name == "\u0000inventory" || name == "\u0000catalog")
+        {
+            TextBox box = name == "\u0000inventory" ? _inventoryQuery : _catalogQuery;
+            if (box.Parent is null) return;
+            box.Focus(FocusState.Programmatic);
+            box.SelectionStart = Math.Min(caret, box.Text.Length);
+            return;
+        }
+
+        if (Find(_page, name, kind) is Control control) control.Focus(FocusState.Programmatic);
+    }
+
+    private static DependencyObject? Find(DependencyObject root, string name, Type? kind)
+    {
+        if (root is FrameworkElement element && (kind is null || element.GetType() == kind) && AutomationProperties.GetName(element) == name)
+            return root;
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            if (Find(VisualTreeHelper.GetChild(root, i), name, kind) is { } found) return found;
+        }
+
+        return null;
     }
 
     private static void Detach(FrameworkElement element)
@@ -1199,7 +1256,9 @@ public sealed class InsightsSkillsView : UserControl
             else
             {
                 row.Children.Add(Note(T("skills_loading")));
-                if (_model.Definition is null) DispatcherQueue.TryEnqueue(async () => await _model.LoadDefinitionAsync(definitionSkill.Id));
+                // Once per id until the details are dropped: the model sends nothing for a repeat.
+                string id = definitionSkill.Id;
+                DispatcherQueue.TryEnqueue(async () => await _model.LoadDefinitionAsync(id));
             }
         }
 

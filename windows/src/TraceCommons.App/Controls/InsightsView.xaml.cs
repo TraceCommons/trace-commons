@@ -63,6 +63,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
             bool shown = ReferenceEquals(Tabs.SelectedItem, _skillsItem);
             PivotItem item = _skillsItem;
             _skillsItem = null;
+            (item.Content as InsightsSkillsView)?.Close();
             _ = ViewModel.SetSkillsEnabled(false);
             if (shown) Tabs.SelectedIndex = 0;
             Tabs.Items.Remove(item);
