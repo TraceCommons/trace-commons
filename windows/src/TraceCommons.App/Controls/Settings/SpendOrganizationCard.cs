@@ -44,6 +44,7 @@ public sealed class SpendOrganizationCard : UserControl
     private readonly TextBlock _noticeText = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, FontWeight = FontWeights.SemiBold };
     private bool _filling;
     private bool _bringIntoView;
+    private bool _renderQueued;
 
     public SpendOrganizationCard(SpendOrganizationModel model)
     {
@@ -134,8 +135,17 @@ public sealed class SpendOrganizationCard : UserControl
 
     private void OnModelChanged(object? sender, PropertyChangedEventArgs e)
     {
-        Render();
-        if (_bringIntoView && IsLoaded) Settle();
+        // Queued, not inline: a pick raises this from inside the picker's own
+        // SelectionChanged, and setting its selection there leaves the
+        // closed picker drawing an empty box.
+        if (_renderQueued) return;
+        _renderQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _renderQueued = false;
+            Render();
+            if (_bringIntoView && IsLoaded) Settle();
+        });
     }
 
     private void Render()
