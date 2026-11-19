@@ -2066,6 +2066,18 @@ fn routing_port_value(app: &Rc<App>) -> u16 {
         .clamp(1, i32::from(u16::MAX)) as u16
 }
 
+/// The folder rows alone, from a fresh `get_settings`: what the main window
+/// reads when it comes to the front, since a folder declared from a
+/// terminal (the old-portal command) changes the daemon and sends this
+/// window nothing.
+pub fn refresh_folders(app: &Rc<App>) {
+    app.call("get_settings", serde_json::json!({}), |app, result| {
+        if let Ok(Ok(settings)) = result.map(serde_json::from_value::<Settings>) {
+            render_connection_checks(app, &settings);
+        }
+    });
+}
+
 pub fn refresh(app: &Rc<App>) {
     // Asked before anything is offered, and asked once rather than on
     // every daemon event: this reads a file, and a settings screen that
@@ -2339,11 +2351,41 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     }
 }
 
+/// A folder's mode written from the Traces tab's folder list, as this
+/// table writes it.
+pub(crate) fn set_folder_mode(app: &Rc<App>, project_id: &str, mode: &str) {
+    set_mode(app, project_id, mode);
+}
+
+/// Arming a folder from the Traces tab's folder list asks as this table
+/// does (`confirm_arming`); `declined` runs when it is not armed.
+pub(crate) fn confirm_arming_folder(
+    app: &Rc<App>,
+    project_id: &str,
+    project_label: &str,
+    declined: impl Fn() + 'static,
+) {
+    ask_arming(app, project_id, project_label, declined);
+}
+
 /// Arming is allowed from the app, but never silently.
 fn confirm_arming(app: &Rc<App>, project: &Project, dropdown: gtk::DropDown) {
+    let previous = match project.mode.as_str() {
+        "ignore" => 2u32,
+        _ => 0u32,
+    };
+    ask_arming(
+        app,
+        &project.project_id,
+        &project.project_label,
+        move || dropdown.set_selected(previous),
+    );
+}
+
+fn ask_arming(app: &Rc<App>, project_id: &str, project_label: &str, declined: impl Fn() + 'static) {
     let dialog = adw::MessageDialog::new(
         Some(&app.window),
-        Some(&copy::arming_heading(&project.project_label)),
+        Some(&copy::arming_heading(project_label)),
         Some(copy::ARMING_BODY),
     );
     dialog.add_responses(&[("cancel", copy::NOT_NOW), ("arm", copy::ARMING_CONFIRM)]);
@@ -2351,17 +2393,13 @@ fn confirm_arming(app: &Rc<App>, project: &Project, dropdown: gtk::DropDown) {
     dialog.set_close_response("cancel");
 
     let app = Rc::clone(app);
-    let project_id = project.project_id.clone();
-    let previous = match project.mode.as_str() {
-        "ignore" => 2u32,
-        _ => 0u32,
-    };
+    let project_id = project_id.to_string();
     dialog.connect_response(None, move |dialog, response| {
         dialog.close();
         if response == "arm" {
             set_mode(&app, &project_id, "auto_upload");
         } else {
-            dropdown.set_selected(previous);
+            declined();
         }
     });
     dialog.present();

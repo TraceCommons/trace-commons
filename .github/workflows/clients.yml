@@ -591,6 +591,9 @@ jobs:
       - name: Run weston + portal verification
         env:
           WESTON_SHOT_OUT: ${{ runner.temp }}/weston-insights.png
+          # Offscreen renders (GSK textures, not screenshots) that mounted
+          # tests write for review, such as the Traces folder list.
+          TC_RENDER_DIR: ${{ runner.temp }}/tc-renders
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
       - name: Upload the captured frame
         if: ${{ !cancelled() }}
@@ -598,6 +601,14 @@ jobs:
         with:
           name: weston-insights-frame
           path: ${{ runner.temp }}/weston-insights.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload the offscreen renders
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gtk-offscreen-renders
+          path: ${{ runner.temp }}/tc-renders
           if-no-files-found: ignore
           retention-days: 7
 

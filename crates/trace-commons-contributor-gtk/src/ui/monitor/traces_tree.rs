@@ -6,7 +6,7 @@
 //! newest waiting session first, and each tool with the folders most of
 //! whose sessions came from it. Built only from what the core reports
 //! (`list_pending`, `list_projects`, `get_settings`); nothing is estimated.
-//! The tree pane itself is still the Queue page's own list.
+//! The Traces tab's folder list draws its folders (`traces_list`).
 //!
 //! Deliberate platform difference: folders with nothing waiting are ordered
 //! by a plain comparison of their names, where the Mac uses Foundation's
@@ -148,6 +148,9 @@ pub struct FolderNode {
     /// The folder's path from `list_projects`; `None` for one it does not
     /// list.
     pub path: Option<String>,
+    /// Traces with no project (`is_unresolved_bucket`): it can be silenced
+    /// but never armed (`TracesTree.FolderNode.isBucket`).
+    pub is_bucket: bool,
 }
 
 impl FolderNode {
@@ -176,6 +179,7 @@ impl PartialEq for FolderNode {
             && self.label == other.label
             && self.mode == other.mode
             && self.path == other.path
+            && self.is_bucket == other.is_bucket
             && self.sessions.len() == other.sessions.len()
             && self
                 .sessions
@@ -265,6 +269,7 @@ impl TracesTree {
                     mode: ProjectMode::from_wire(&project.mode),
                     sessions: Vec::new(),
                     path: Some(project.project_path.clone()),
+                    is_bucket: project.is_unresolved_bucket,
                 },
                 &mut folders,
             );

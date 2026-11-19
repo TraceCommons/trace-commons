@@ -14,9 +14,16 @@ pub(crate) mod consent_settings;
 pub mod credential;
 mod css_contract;
 mod first_run;
+mod first_run_marker_check;
+mod first_run_screens;
+mod first_run_stage;
+mod first_run_stage_paint;
+mod first_run_stage_view;
 mod first_run_terms;
+mod first_run_tools;
 pub mod folder_handoff;
 pub mod funding;
+pub mod glass_backdrop;
 pub mod glass_feedback;
 pub mod glass_motion;
 pub mod hero_art;
@@ -26,14 +33,14 @@ pub(crate) mod history_detail;
 pub mod home;
 pub mod insights;
 pub mod legacy_move;
+mod lift;
 mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod monitor;
 pub mod omarchy;
 pub mod onboarding;
-mod onboarding_nearai;
-mod onboarding_wallet;
+mod payout_link;
 pub mod popover_stack;
 pub mod preview;
 pub mod private_inference;
@@ -41,8 +48,10 @@ pub(crate) mod projects_bulk;
 pub mod queue;
 pub mod roots;
 pub(crate) mod sent_training;
+pub mod service_dialog;
 pub mod settings;
 pub(crate) mod shortcuts;
+mod stage;
 pub mod style;
 mod terminal_choice;
 pub(crate) mod terms_hold;
@@ -257,6 +266,13 @@ pub struct App {
     /// `history` so the queue can draw the band without depending on which
     /// screen the contributor happens to be looking at.
     pub rollup: RefCell<HistoryRollup>,
+    /// The last `history_rollup` read that worked, as Home reads it (a
+    /// count it did not give stays unknown); `None` before the first answer
+    /// and after a failed read, so the summary never shows a stale figure.
+    pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
+    /// The commons' statement of what pending credit waits on, from the
+    /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
+    pub credit_condition: RefCell<Option<String>>,
     /// The approval the undo bar is currently offering to take back, if any.
     pub undo: RefCell<Option<PendingUndo>>,
     /// The Undo presses whose `cancel` is still out (`queue::begin_undo_write`).
@@ -327,6 +343,9 @@ pub struct App {
     /// screen they just switched to.
     pub history_location: RefCell<crate::queue_folders::Location>,
     quit_confirmed: Cell<bool>,
+    /// The folders screen was shown for the daemon this window is attached
+    /// to; cleared when the backend is replaced.
+    folders_asked: Cell<bool>,
 }
 
 /// How long a scroll must sit still before `preview_visible` is sent.
@@ -336,6 +355,10 @@ pub struct App {
 /// single call after it stops is enough. There is no throughput reason to
 /// tune it further -- see the design's "Priority" section.
 const SCROLL_SETTLE_DEBOUNCE_MS: u64 = 250;
+
+/// How often a Flatpak window attached to the host daemon checks that the
+/// host part is still there.
+const FALLBACK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl App {
     pub fn build(application: &adw::Application, worker: Worker) -> Rc<Self> {
@@ -526,6 +549,8 @@ impl App {
             last_dismissed: RefCell::new(None),
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
+            summary_rollup: RefCell::new(None),
+            credit_condition: RefCell::new(None),
             undo: RefCell::new(None),
             undo_writing: RefCell::new(Default::default()),
             submitting_folder: RefCell::new(None),
@@ -541,6 +566,7 @@ impl App {
             queue_location: RefCell::new(crate::queue_folders::Location::Root),
             history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
+            folders_asked: Cell::new(false),
         });
 
         app.home.bind(&app);
@@ -551,6 +577,8 @@ impl App {
         app.wire_quit();
         app.wire_health_action();
         app.wire_tray();
+        app.wire_service_fallback();
+        app.wire_folder_refresh();
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -654,6 +682,9 @@ impl App {
                     // sweep still belongs -- it runs once per resync, not
                     // once per card resolved.
                     "resync_required" => {
+                        // The daemon may have restarted, counting its
+                        // managed revisions afresh.
+                        managed_sessions::backend_changed(&app.private_inference.managed_revision);
                         app.refresh();
                         app.poll_outstanding_previews();
                     }
@@ -719,12 +750,53 @@ impl App {
     /// including plain GNOME) never reaches this at all.
     fn wire_tray(self: &Rc<Self>) {
         let rx = crate::tray::spawn(self.tray.clone());
+        // The icon is drawn in the desktop's ink; draw it again when that
+        // flips. The tray lives as long as the process, as the window does.
+        let tray = self.tray.clone();
+        adw::StyleManager::default()
+            .connect_dark_notify(move |_| tray.redraw(self::mark::current_scheme()));
         let app = Rc::clone(self);
         glib::spawn_future_local(async move {
             while let Ok(request) = rx.recv().await {
                 apply_tray_request(&app, request);
             }
         });
+    }
+
+    /// Draw the tray icon from a status reply, or from its absence: a
+    /// status that did not answer or could not be read is unavailable,
+    /// never the last state as current (`MenuBarStripInputs.of`).
+    fn render_tray(self: &Rc<Self>, status: Option<&Status>) {
+        use crate::tray_icon as icon;
+        let available = status.is_some();
+        let (condition, badge, nudge) = match status {
+            Some(status) => (
+                icon::condition(
+                    status.decisions_owed,
+                    status.unhealthy(),
+                    status.paused,
+                    true,
+                    false,
+                    true,
+                ),
+                icon::badge(status.decisions_owed),
+                status.nudge.as_ref(),
+            ),
+            None => (
+                icon::condition(None, false, false, false, false, true),
+                None,
+                None,
+            ),
+        };
+        let words = icon::mark_words(nudge, available, badge, condition)
+            .map(|words| words.tooltip.as_str())
+            .unwrap_or_default();
+        let strip = icon::Strip {
+            condition,
+            badge,
+            mark: icon::lit_mark(nudge, available),
+        };
+        self.tray.show(strip, self::mark::current_scheme(), words);
     }
 
     /// One daemon call, with its answer delivered back on the main loop.
@@ -755,6 +827,121 @@ impl App {
             Box::new(move |app, outcome| {
                 if let Outcome::Call(result) = outcome {
                     callback(app, result)
+                }
+            }),
+        );
+    }
+
+    /// In a Flatpak attached to the host daemon: when the host part is gone
+    /// (uninstalled, or the login's runtime directory cleared), quietly go
+    /// back to running the daemon in the sandbox. Private AI then shows its
+    /// unavailable line again. Nothing is shown about it.
+    fn wire_service_fallback(self: &Rc<Self>) {
+        if !trace_commons_contributor::daemon::host_link::runs_sandboxed() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let busy = Rc::new(Cell::new(false));
+        let failed = Rc::new(Cell::new(false));
+        glib::timeout_add_local(FALLBACK_INTERVAL, move || {
+            let Some(app) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if busy.get() {
+                return glib::ControlFlow::Continue;
+            }
+            let link = trace_commons_contributor::daemon::host_link::socket_path()
+                .map(|sock| trace_commons_contributor::daemon::host_link::probe(&sock))
+                .unwrap_or(trace_commons_contributor::daemon::host_link::LinkState::Absent);
+            if link != trace_commons_contributor::daemon::host_link::LinkState::Absent {
+                failed.set(false);
+            }
+            if crate::service::falls_back(app.worker.via_host_link(), link, failed.get()) {
+                busy.set(true);
+                let busy = Rc::clone(&busy);
+                let failed = Rc::clone(&failed);
+                app.reopen(false, move |app| {
+                    busy.set(false);
+                    // Still on the host link: the sandbox could not start
+                    // its own daemon (no folders declared there). Quiet
+                    // until the link changes.
+                    failed.set(app.worker.via_host_link());
+                });
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Read the folder rows again whenever the window comes to the front,
+    /// as the Mac reads its state again when the app becomes active: a
+    /// folder declared from a terminal changes the daemon without a word to
+    /// this window, which otherwise showed the old folders until a relaunch.
+    fn wire_folder_refresh(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.window.connect_is_active_notify(move |window| {
+            if let Some(app) = weak.upgrade()
+                && window.is_active()
+            {
+                settings::refresh_folders(&app);
+            }
+        });
+    }
+
+    /// Show the folders screen when the attached daemon has none declared
+    /// (`service::asks_for_folders`). Sign-in and enrollment stay with first
+    /// run, which asks the same question at its own Tools step.
+    fn ask_for_folders_if_needed(self: &Rc<Self>, settings: &serde_json::Value) {
+        // Camera runs, as `onboarding::present_if_needed`.
+        if std::env::var_os("TC_SUPPRESS_ONBOARDING").is_some() {
+            return;
+        }
+        if crate::service::asks_for_folders(
+            self.worker.hosts_the_loop(),
+            settings,
+            self.folders_asked.get(),
+            onboarding::automatic_window_open(),
+        ) {
+            self.folders_asked.set(true);
+            roots::present_connected(self);
+        }
+    }
+
+    /// Classify the background service from this window's backend.
+    pub fn service_state<F>(self: &Rc<Self>, callback: F)
+    where
+        F: FnOnce(&Rc<App>, trace_commons_contributor::daemon::service::ServiceState) + 'static,
+    {
+        let id = self.worker.service_state();
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::ServiceState(state) = outcome {
+                    callback(app, state)
+                }
+            }),
+        );
+    }
+
+    /// Replace the backend (`worker::Job::Reopen`), then read everything
+    /// again from the daemon now in use. `callback` runs either way.
+    pub fn reopen<F>(self: &Rc<Self>, restart_unit: bool, callback: F)
+    where
+        F: FnOnce(&Rc<App>) + 'static,
+    {
+        let id = self.worker.reopen(restart_unit);
+        self.callbacks.borrow_mut().insert(
+            id,
+            Box::new(move |app, outcome| {
+                if let Outcome::Reopened { attachment, .. } = outcome {
+                    app.worker.set_attachment(attachment);
+                    // Another daemon, with revisions and folders of its own.
+                    managed_sessions::backend_changed(&app.private_inference.managed_revision);
+                    app.folders_asked.set(false);
+                    // Whatever happened, the daemon may have changed: the
+                    // same "look again" as `resync_required`.
+                    app.refresh();
+                    app.poll_outstanding_previews();
+                    callback(app);
                 }
             }),
         );
@@ -803,6 +990,7 @@ impl App {
             let result = result.map(serde_json::from_value::<Status>);
             app.home
                 .render_status(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
+            app.render_tray(result.as_ref().ok().and_then(|r| r.as_ref().ok()));
             if let Ok(Ok(status)) = result {
                 app.render_health(&status);
                 app.render_grant_voids(&status);
@@ -843,6 +1031,9 @@ impl App {
         // re-ask on the next launch, which is the nagging the marker exists
         // to prevent.
         self.call("get_settings", serde_json::json!({}), |app, result| {
+            if let Ok(raw) = result.as_ref() {
+                app.ask_for_folders_if_needed(raw);
+            }
             let read = result.map(serde_json::from_value::<crate::model::Settings>);
             // The map's tools are unknown, never unset, without this read.
             app.shell
@@ -894,6 +1085,7 @@ impl App {
         self.call("tool_destinations", serde_json::json!({}), |app, result| {
             app.shell.map.set_destinations(result.as_ref().ok());
             app.shell.map.render(app);
+            app.shell.inspector.render_summary(app);
         });
         // Why sessions are no longer waiting, as counts.
         //
@@ -923,12 +1115,28 @@ impl App {
                 serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
             });
             app.home.render_rollup(home_rollup.as_ref());
+            *app.summary_rollup.borrow_mut() = home_rollup;
+            app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
             if let Ok(Ok(rollup)) = result {
                 *app.rollup.borrow_mut() = rollup;
                 queue::render(app);
             }
         });
+        // What pending credit waits on, for the summary's pending line
+        // (D6): the same read the Mac's Home store makes. The daemon
+        // caches the answer, so a refresh does not reach the commons each
+        // time.
+        self.call(
+            "commons_credit_summary",
+            serde_json::json!({}),
+            |app, result| {
+                *app.credit_condition.borrow_mut() = result
+                    .ok()
+                    .and_then(|value| monitor::summary::pending_condition(&value));
+                app.shell.inspector.render_summary(app);
+            },
+        );
         history::refresh(self);
         home::refresh(self);
         private_inference::refresh(self);
