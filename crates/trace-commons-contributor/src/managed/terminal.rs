@@ -3718,7 +3718,7 @@ mod tests {
         let script = powershell(r"C:\plain").unwrap().args;
         for cwd in [
             "C:\\Users\\x\\it's \u{2018}curly\u{2019} q",
-            r"C:\Users\x\$(whoami) `n @{a=1} [b] | c",
+            r"C:\Users\x\$(whoami) `n @{a=1} [b] & c",
             r"C:\Users\x\--% & ; 100% %USERPROFILE%",
             r"C:\Users\x\a b\",
             r"C:\",

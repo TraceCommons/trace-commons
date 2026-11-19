@@ -343,9 +343,9 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
         "back`tick $HOME",
         "a;b",
         // PowerShell's quotes (curly ones too), subexpression, hash
-        // literal, wildcard brackets, pipe and stop-parsing token.
+        // literal, wildcard brackets, call operator and stop-parsing token (a Windows file name cannot hold `|`).
         "it's \u{2018}curly\u{2019} \u{201c}q\u{201d}",
-        "$(whoami) @{a=1} [b] | c",
+        "$(whoami) @{a=1} [b] & c",
         "--% x",
     ] {
         cases.push((root.join(name), config.clone()));
