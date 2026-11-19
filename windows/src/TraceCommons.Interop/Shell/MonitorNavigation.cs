@@ -19,8 +19,10 @@ public enum MonitorTab
 
 /// <summary>Home's pages (<c>HomePage</c>, MonitorNavigation.swift:6-21).</summary>
 /// <remarks>
-/// The Mac's Missions catalogue page is not here: this shell's only mission
-/// screen is the local drafts inbox, as on Linux.
+/// Both mission screens are here, as on the Mac: Mission drafts, which
+/// Home's Missions card opens, and the commons catalogue (W23), which only
+/// its own card opens, and only once the catalogue was read
+/// (HomeViews.swift:87-98, 274-277).
 /// </remarks>
 public enum HomePage
 {
@@ -31,6 +33,8 @@ public enum HomePage
     /// </summary>
     History,
     MissionDrafts,
+    /// <summary>The commons catalogue (W23, <c>MissionsPage</c>).</summary>
+    Missions,
 }
 
 /// <summary>The Traces tab's pages (<c>TracesPage</c>, MonitorNavigation.swift:26-29).</summary>
@@ -66,6 +70,8 @@ public enum CrumbWord
     History,
     /// <summary>The core's <c>missions</c> word (<c>HomeTabView.hostedHeading</c>, HomeViews.swift:69-74).</summary>
     Missions,
+    /// <summary>The core's <c>home_history.mission_catalogue</c> (MonitorWindowView.swift:763-765).</summary>
+    MissionCatalogue,
 }
 
 /// <summary>
@@ -191,7 +197,7 @@ public static class MonitorNavigation
 
     /// <summary>A mission page falls back to the overview while missions are hidden (MonitorNavigation.swift:17-20).</summary>
     public static HomePage Shown(this HomePage page, bool missions) =>
-        page == HomePage.MissionDrafts && !missions ? HomePage.Overview : page;
+        (page is HomePage.MissionDrafts or HomePage.Missions) && !missions ? HomePage.Overview : page;
 
     /// <summary>
     /// Whether the inspector may open on what is shown
@@ -230,8 +236,7 @@ public static class MonitorNavigation
 
     /// <summary>
     /// The breadcrumb above a sub-page, or null on a tab's first page
-    /// (MonitorWindowView.swift:749-769). Home's Missions catalogue has no
-    /// page here.
+    /// (MonitorWindowView.swift:749-769).
     /// </summary>
     public static IReadOnlyList<Crumb>? Breadcrumb(MonitorLocation at, bool missions)
     {
@@ -249,6 +254,7 @@ public static class MonitorNavigation
         {
             HomePage.History => new[] { new Crumb(CrumbWord.Tab, MonitorTab.Home, true), new Crumb(CrumbWord.History, MonitorTab.Home, false) },
             HomePage.MissionDrafts => new[] { new Crumb(CrumbWord.Tab, MonitorTab.Home, true), new Crumb(CrumbWord.Missions, MonitorTab.Home, false) },
+            HomePage.Missions => new[] { new Crumb(CrumbWord.Tab, MonitorTab.Home, true), new Crumb(CrumbWord.MissionCatalogue, MonitorTab.Home, false) },
             _ => null,
         };
     }

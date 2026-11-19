@@ -1089,13 +1089,19 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
 
-    private void OnShowMissionDrafts(object sender, RoutedEventArgs e)
+    private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
         if (!ViewModel.MissionsShown)
             return;
-        // W23-D1 (a): the Mac's Missions page replaces Mission drafts here
-        // (MainWindow.Missions.cs).
-        ShowMissionsPage();
+#if DEBUG
+        // Mission drafts read the local store too; recorded samples never do.
+        if (_host.IsSample)
+            return;
+#endif
+        if (MissionDraftsPane.Content is not MissionDraftsView)
+            MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        ViewModel.ShowMissionDrafts();
+        await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
     }
 
     private async void ShowInsightsPane()
