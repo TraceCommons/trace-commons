@@ -1,0 +1,9 @@
+{
+  "id": 1,
+  "result": {
+    "consent_scopes": [
+      "debugging_evaluation",
+      "model_training"
+    ]
+  }
+}

@@ -59,6 +59,8 @@ pub(crate) mod credential_store {
 }
 pub mod eligibility;
 pub mod enroll;
+#[cfg(test)]
+mod first_run_fixtures_tests;
 pub(crate) mod first_trace;
 pub mod grant_terms;
 pub mod harness;

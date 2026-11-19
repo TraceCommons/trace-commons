@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.App.FirstRun;
@@ -41,7 +42,7 @@ namespace TraceCommons.App;
 /// time at its own Mac timeline's rate. With animations off nothing ticks
 /// and every state change still redraws the final frame.
 /// </remarks>
-public sealed partial class FirstRunWindow : Window
+public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 {
     private const double DesignWidth = FirstRunStageLayout.CanvasWidth, DesignHeight = FirstRunStageLayout.CanvasHeight;
 
@@ -50,6 +51,8 @@ public sealed partial class FirstRunWindow : Window
     private readonly FirstRunCopy? _copy;
     private readonly PrivateInferenceCopy? _privateCopy = PrivateInferenceSurface.Copy();
     private readonly FirstRunRunner _runner;
+    private readonly FirstRunController _controller;
+    private readonly FirstRunFocus _focus = new();
     private readonly FirstRunStageModel _model = new();
     private readonly FirstRunStagePainter _painter;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
@@ -59,7 +62,6 @@ public sealed partial class FirstRunWindow : Window
     private readonly Dictionary<string, string> _names = new(StringComparer.Ordinal);
     private IReadOnlyList<SourceCandidate> _discovered = Array.Empty<SourceCandidate>();
     private List<ConsentOption> _options = new();
-    private FetchedTerms? _terms;
     private string? _termsLabel;
     private bool _ticking;
     private double _lastFrame = double.NegativeInfinity;
@@ -131,6 +133,9 @@ public sealed partial class FirstRunWindow : Window
         _runner = previewAt is FirstRunStep step
             ? new FirstRunRunner(new FirstRunState { Step = step }, new RefusingFirstRunDaemon())
             : new FirstRunRunner(new FirstRunState(), daemon);
+        string configDir = _host.ConfigDir;
+        _controller = new FirstRunController(_runner, this, () => Task.Run(() => AutomaticGrantCopy.Load(configDir)), _copy?.Uses ?? new UsesWords());
+        CurrentStep.GotFocus += (_, e) => _focus.Focused((e.OriginalSource as FrameworkElement) is { } f ? AutomationProperties.GetAutomationId(f) : null);
         _runner.Changed += () => DispatcherQueue.TryEnqueue(() =>
         {
             if (!_closed)
@@ -332,7 +337,7 @@ public sealed partial class FirstRunWindow : Window
         }
 
         var fetched = await Task.Run(FetchedTerms.Fetch).ConfigureAwait(true);
-        _terms = fetched.Terms;
+        _controller.Terms = fetched.Terms;
         _termsLabel = fetched.Label;
         if (_runner.State.Step == FirstRunStep.Terms)
         {
@@ -345,7 +350,6 @@ public sealed partial class FirstRunWindow : Window
         Render();
     }
 
-    private string? RequiredScope => _options.FirstOrDefault(o => o.AlwaysOn)?.Name;
 
     /// <summary>
     /// <c>consent_options</c>, read again until the daemon answers: on a new
@@ -361,6 +365,7 @@ public sealed partial class FirstRunWindow : Window
 
         DaemonResponse options = await _host.CallAsync(DaemonProtocol.Methods.ConsentOptions).ConfigureAwait(true);
         _options = options.ResultAs<ConsentOptionsPayload>()?.Scopes ?? new List<ConsentOption>();
+        _controller.RequiredScope = _options.FirstOrDefault(o => o.AlwaysOn)?.Name;
         if (_options.Count > 0 && _runner.State.Step is FirstRunStep.Uses or FirstRunStep.Join)
         {
             _contentStale = true;
@@ -587,6 +592,19 @@ public sealed partial class FirstRunWindow : Window
                 DispatcherQueue.TryEnqueue(async () => await RefreshOptionsAsync());
             }
 
+            _focus.StepChanged();
+            if (state.Step is FirstRunStep.Uses or FirstRunStep.Join && !_controller.GrantCopyRead)
+            {
+                // Uses and Join read the automatic contribution copy as they
+                // appear (UsesScreen.swift:665-669, JoinScreen.swift:410-414).
+                DispatcherQueue.TryEnqueue(async () =>
+                {
+                    await _controller.ReadGrantCopy();
+                    _contentStale = true;
+                    Render();
+                });
+            }
+
             ApplyMotions(_reduceMotion ? now + 1e6 : now);
             DispatcherQueue.TryEnqueue(MeasureGraphic);
             _shownKey = ContentKey(state);
@@ -600,7 +618,15 @@ public sealed partial class FirstRunWindow : Window
             // thread keep their motion.
             _shownKey = ContentKey(state);
             _contentStale = false;
+            bool hadFocus = FocusWithin(CurrentStep);
             CurrentStep.Content = BuildStep(state.Step);
+            if (hadFocus && CurrentStep.Content is FrameworkElement rebuilt)
+            {
+                // Focus goes back where it was, by its key, or to the
+                // heading (checklist O2, copy guide rule 13).
+                rebuilt.Loaded += RestoreFocusOnce;
+            }
+
             ApplyMotions(_reduceMotion ? Now + 1e6 : Now);
             DispatcherQueue.TryEnqueue(MeasureGraphic);
         }
@@ -608,9 +634,9 @@ public sealed partial class FirstRunWindow : Window
         Footer.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
         BackButton.Content = Copy.Frame.Back;
         BackButton.Visibility = state.Step == FirstRunStep.Welcome ? Visibility.Collapsed : Visibility.Visible;
-        BackButton.IsEnabled = !_runner.IsCommitting || BackWhileCommitting(state);
+        BackButton.IsEnabled = _controller.BackEnabled;
         ContinueButton.Content = state.Step == FirstRunStep.Join ? Copy.Uses.Start : Copy.Frame.ContinueButton;
-        ContinueButton.IsEnabled = !_runner.IsCommitting && CanContinue(state);
+        ContinueButton.IsEnabled = _controller.CanContinue;
         AutomationProperties.SetName(ContinueButton, (string)ContinueButton.Content);
         AutomationProperties.SetName(BackButton, Copy.Frame.Back);
         Stage.Invalidate();
@@ -624,7 +650,8 @@ public sealed partial class FirstRunWindow : Window
     private string ContentKey(FirstRunState state) => string.Join("|",
         Notice(state) ?? "", _runner.IsCommitting, _runner.SignInWaiting, state.SignedIn, state.Account,
         state.Invite, state.EnrolledInvite ?? "-", _runner.Failure?.GetType().Name ?? "",
-        _pendingFolder?.Path ?? "", _addRefused, _inviteRefused, state.AddedFolders.Count);
+        _pendingFolder?.Path ?? "", _addRefused, _inviteRefused, state.AddedFolders.Count,
+        state.SharingChosen, state.Sharing, _controller.GrantCopyRead);
 
     /// <summary>
     /// The failed request's line under the step's content
@@ -648,129 +675,103 @@ public sealed partial class FirstRunWindow : Window
         };
     }
 
-    /// <summary>
-    /// Back while the browser sign-in waits takes the person back, ending
-    /// that sign-in as Cancel does (JoinScreenLayout.backWhileCommitting);
-    /// any other commit withdraws Back.
-    /// </summary>
-    private bool BackWhileCommitting(FirstRunState state) =>
-        state.Step == FirstRunStep.Join && _runner.Committing == CommitPoint.SignIn && _runner.SignInWaiting;
-
-    private bool CanContinue(FirstRunState state) => state.Step switch
-    {
-        FirstRunStep.Terms => _runner.HasAcceptedTerms(true, _terms?.Version, _terms?.ContentSha256),
-        // Automatic goes through both sharing disclosures and the core's
-        // answer when Start is pressed (StartAsync), as on the Mac.
-        FirstRunStep.Join => FirstRunNavigation.CanContinue(JoinStartState(state), RequiredScope) && !_starting,
-        _ => FirstRunNavigation.CanContinue(state, RequiredScope),
-    };
-
-    /// <summary>JoinScreenLayout.startState: the required use included, an account held read as enrolled.</summary>
-    private FirstRunState JoinStartState(FirstRunState state)
-    {
-        FirstRunState ready = state.Clone();
-        bool canForward = (ready.Account == AccountAnswer.NearAI || (ready.NearAIEnrolled && !ready.SignedOutOfEnrolment))
-            && (ready.Account != AccountAnswer.NearAI || ready.SignedIn);
-        if (canForward && ready.Account != AccountAnswer.NearAI)
-        {
-            ready.Account = AccountAnswer.Enrolled;
-        }
-
-        return ready.IncludingRequiredScope(RequiredScope);
-    }
-
     private async void OnContinue(object sender, RoutedEventArgs e)
     {
-        FirstRunState state = _runner.State;
-        switch (state.Step)
-        {
-            case FirstRunStep.Tools:
-                await _runner.Commit(CommitPoint.LeaveTools);
-                break;
-            case FirstRunStep.Terms:
-                _runner.ContinueFromTerms(true, _terms?.Version, _terms?.ContentSha256);
-                break;
-            case FirstRunStep.Join:
-                await StartAsync();
-                break;
-            default:
-                _runner.State = FirstRunNavigation.Next(state);
-                break;
-        }
-
+        Task moving = _controller.Continue();
+        Render();
+        await moving;
         Render();
     }
 
-    private bool _starting;
+    // ---- IFirstRunSheets: what Start asks of the window -------------------
 
-    /// <summary>A refusal decided before a Start that then failed, said once one succeeds (UsesStart, UsesScreen.swift:275-309).</summary>
-    private FirstRunFailure? _pendingRefusal;
+    Task<bool> IFirstRunSheets.ShowDisclosures(SharingDisclosureFlow flow, AutomaticGrantCopy grant) => ShowDisclosuresAsync(flow, grant);
 
-    private AutomaticGrantCopy? _grantCopy;
-    private bool _grantCopyRead;
-
-    /// <summary>
-    /// Start sharing (JoinScreen.swift:712-760): the required use included;
-    /// on Automatic, the scrub and witness disclosures first, then the
-    /// core's answer decides the state Start commits (Automatic with the
-    /// grant ready, or Ask with the refusal said). Cancel on either sheet
-    /// grants nothing and starts nothing.
-    /// </summary>
-    private async Task StartAsync()
+    async Task<bool> IFirstRunSheets.Connected()
     {
-        _starting = true;
-        Render();
-        try
+        DaemonResponse status = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+        return status.ResultAs<DaemonStatus>()?.LoggedIn == true;
+    }
+
+    Task<Flow1GrantRequest?> IFirstRunSheets.GrantRequest(string progressJson) => Task.Run(() => Flow1GrantRequest.Ask(progressJson));
+
+    // ---- Focus across a rebuild ---------------------------------------------
+
+    /// <summary>Whether keyboard focus is inside <paramref name="root"/>.</summary>
+    private bool FocusWithin(DependencyObject root)
+    {
+        if (Content?.XamlRoot is not { } xamlRoot || FocusManager.GetFocusedElement(xamlRoot) is not DependencyObject focused)
         {
-            _runner.State = JoinStartState(_runner.State);
-            FirstRunFailure? refused = null;
-            bool decidedNow = false;
-            if (SharingDisclosureFlow.IsNeeded(_runner.State))
-            {
-                if (!_grantCopyRead)
-                {
-                    string dir = _host.ConfigDir;
-                    _grantCopy = await Task.Run(() => AutomaticGrantCopy.Load(dir)).ConfigureAwait(true);
-                    _grantCopyRead = true;
-                }
-
-                var flow = new SharingDisclosureFlow();
-                Flow1GrantRequest? request = null;
-                if (_grantCopy is { } grant)
-                {
-                    if (!await ShowDisclosuresAsync(flow, grant))
-                    {
-                        return;
-                    }
-
-                    DaemonResponse status = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
-                    bool connected = status.ResultAs<DaemonStatus>()?.LoggedIn == true;
-                    string progress = flow.ProgressJson(connected, _runner.State.Scopes);
-                    request = await Task.Run(() => Flow1GrantRequest.Ask(progress)).ConfigureAwait(true);
-                }
-
-                (FirstRunState next, refused) = SharingDisclosureFlow.Resolve(_runner.State, request);
-                _runner.State = next;
-                decidedNow = true;
-            }
-
-            FirstRunFailure? carried = decidedNow ? refused : _pendingRefusal;
-            await _runner.Commit(CommitPoint.Start, carried);
-            if (_runner.Completed)
-            {
-                _pendingRefusal = null;
-                return;
-            }
-
-            // A Start that failed keeps the refusal for the retry; the
-            // failure it stopped on is what the step says now.
-            _pendingRefusal = _runner.Failure is FirstRunFailure.CompleteFailed ? _runner.RefusedGrant ?? carried : carried;
+            return false;
         }
-        finally
+
+        for (DependencyObject? at = focused; at is not null; at = VisualTreeHelper.GetParent(at))
         {
-            _starting = false;
-            Render();
+            if (ReferenceEquals(at, root))
+            {
+                return true;
+            }
         }
+
+        return false;
+    }
+
+    private void RestoreFocusOnce(object sender, RoutedEventArgs e)
+    {
+        var rebuilt = (FrameworkElement)sender;
+        rebuilt.Loaded -= RestoreFocusOnce;
+        if (!ReferenceEquals(CurrentStep.Content, rebuilt))
+        {
+            return;
+        }
+
+        string target = _focus.Target(key => Keyed(rebuilt, key) is Control { IsEnabled: true, IsTabStop: true, Visibility: Visibility.Visible });
+        if (Keyed(rebuilt, target) is Control control && target != FirstRunFocus.Heading)
+        {
+            control.Focus(FocusState.Keyboard);
+        }
+        else if (Keyed(rebuilt, FirstRunFocus.Heading) is Control heading)
+        {
+            // The heading takes focus only for this: it is no Tab stop.
+            heading.IsTabStop = true;
+            heading.LostFocus += Untab;
+            heading.Focus(FocusState.Keyboard);
+        }
+
+        static void Untab(object s, RoutedEventArgs _)
+        {
+            var c = (Control)s;
+            c.IsTabStop = false;
+            c.LostFocus -= Untab;
+        }
+    }
+
+    /// <summary>The element under <paramref name="root"/> with this automation id.</summary>
+    private static DependencyObject? Keyed(DependencyObject root, string key)
+    {
+        if (root is FrameworkElement f && AutomationProperties.GetAutomationId(f) == key)
+        {
+            return root;
+        }
+
+        int n = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+        {
+            if (Keyed(VisualTreeHelper.GetChild(root, i), key) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Give a control its stable key: the automation id the rebuild finds it by.</summary>
+    private static T Key<T>(T element, string key)
+        where T : FrameworkElement
+    {
+        AutomationProperties.SetAutomationId(element, key);
+        return element;
     }
 
     /// <summary>
@@ -836,18 +837,7 @@ public sealed partial class FirstRunWindow : Window
 
     private async void OnBack(object sender, RoutedEventArgs e)
     {
-        if (_runner.IsCommitting)
-        {
-            if (BackWhileCommitting(_runner.State))
-            {
-                await _runner.BackFromSignIn();
-                Render();
-            }
-
-            return;
-        }
-
-        _runner.State = FirstRunNavigation.Back(_runner.State);
+        await _controller.Back();
         Render();
     }
 
@@ -910,9 +900,12 @@ public sealed partial class FirstRunWindow : Window
         var title = new TextBlock { FontSize = 26, TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(40, 0, 40, 20) };
         title.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = light, Foreground = Brush(FirstRunTokens.TextSecondary) });
         title.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = bold, FontWeight = FontWeights.Bold, Foreground = Brush(FirstRunTokens.TextPrimary) });
-        AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level1);
-        AutomationProperties.SetName(title, light + bold);
-        panel.Children.Add(title);
+        AutomationProperties.SetAccessibilityView(title, AccessibilityView.Raw);
+        // The heading, focusable only when a rebuild hands it focus.
+        var heading = Key(new ContentControl { Content = title, IsTabStop = false, UseSystemFocusVisuals = true, HorizontalAlignment = HorizontalAlignment.Center, HorizontalContentAlignment = HorizontalAlignment.Center }, FirstRunFocus.Heading);
+        AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level1);
+        AutomationProperties.SetName(heading, light + bold);
+        panel.Children.Add(heading);
         panel.Children.Add(content);
         if (Notice(_runner.State) is { } notice)
         {
@@ -963,7 +956,7 @@ public sealed partial class FirstRunWindow : Window
         body.Margin = new Thickness(0, 0, 0, 38);
         Rise(body, WelcomeMotion.BodyDelay, focusable: false);
         panel.Children.Add(body);
-        var start = new Button { Content = Copy.Welcome.Start, Style = (Style)Application.Current.Resources["AccentButtonStyle"], HorizontalAlignment = HorizontalAlignment.Center };
+        var start = Key(new Button { Content = Copy.Welcome.Start, Style = (Style)Application.Current.Resources["AccentButtonStyle"], HorizontalAlignment = HorizontalAlignment.Center }, "get-started");
         AutomationProperties.SetName(start, Copy.Welcome.Start);
         start.Click += (_, _) => GetStarted();
         Rise(start, WelcomeMotion.ButtonDelay, focusable: true);
@@ -1057,11 +1050,11 @@ public sealed partial class FirstRunWindow : Window
             label.MinWidth = 150;
             line.Children.Add(label);
             string question = FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name });
-            MarkerCheckButton check = MarkerCheck(question, state.RowAnswer(row.Source).Kind == ToolChoiceKind.Watch, on =>
+            MarkerCheckButton check = Key(MarkerCheck(question, state.RowAnswer(row.Source).Kind == ToolChoiceKind.Watch, on =>
             {
-                _runner.State.Answer(row.Source, on ? ToolChoice.Watch(row.Path) : ToolChoice.Off);
+                _controller.AnswerTool(row.Source, row.Path, on);
                 WatchedChanged();
-            });
+            }), "tool:" + row.Source);
             check.IsEnabled = enabled;
             Grid.SetColumn(check, 1);
             line.Children.Add(check);
@@ -1073,7 +1066,7 @@ public sealed partial class FirstRunWindow : Window
         {
             string name = ToolsAdding.FolderName(folder.Path);
             AddedFolder f = folder;
-            list.Children.Add(FolderRow(name, folder.Path, Copy.Tools.AddedByYou, MarkerCheckFor(
+            list.Children.Add(FolderRow(name, folder.Path, Copy.Tools.AddedByYou, KeyedCheck("folder:" + folder.Path,
                 FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name }), folder.Watched == true,
                 on =>
                 {
@@ -1093,7 +1086,7 @@ public sealed partial class FirstRunWindow : Window
         if (ToolsAdding.TrajectoryFolder(state) is { } trajectory)
         {
             string name = ToolsAdding.Name(null, Copy.Tools, ToolName);
-            list.Children.Add(FolderRow(name, trajectory.Path, Copy.Tools.AddedByYou, MarkerCheckFor(
+            list.Children.Add(FolderRow(name, trajectory.Path, Copy.Tools.AddedByYou, KeyedCheck("trajectory",
                 FirstRunCopy.Fill(Copy.Folders.WatchQuestion, new Dictionary<string, string> { ["tool"] = name }), true,
                 on =>
                 {
@@ -1105,7 +1098,7 @@ public sealed partial class FirstRunWindow : Window
 
         if (_pendingFolder is { } pending)
         {
-            var picker = new ComboBox { PlaceholderText = Copy.Frame.Choose, IsEnabled = enabled, VerticalAlignment = VerticalAlignment.Center };
+            var picker = Key(new ComboBox { PlaceholderText = Copy.Frame.Choose, IsEnabled = enabled, VerticalAlignment = VerticalAlignment.Center }, "pick-kind");
             string question = ToolsAdding.Question(pending.Path, Copy.Tools);
             AutomationProperties.SetName(picker, question);
             ToolTipService.SetToolTip(picker, question);
@@ -1160,6 +1153,9 @@ public sealed partial class FirstRunWindow : Window
         Render();
     }
 
+    private MarkerCheckButton KeyedCheck(string key, string name, bool on, Action<bool> changed, bool enabled) =>
+        Key(MarkerCheckFor(name, on, changed, enabled), key);
+
     private MarkerCheckButton MarkerCheckFor(string name, bool on, Action<bool> changed, bool enabled)
     {
         MarkerCheckButton check = MarkerCheck(name, on, changed);
@@ -1202,7 +1198,9 @@ public sealed partial class FirstRunWindow : Window
     /// </summary>
     private FrameworkElement AddToolTile(bool enabled)
     {
-        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+        // The words are inset, not the tile: the dashed outline, the hover
+        // fill and the focus ring are one rounded shape, as the Mac's tile.
+        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(32, 0, 32, 0) };
         var plus = new FontIcon { Glyph = "\uE710", FontSize = 11, FontFamily = new FontFamily(FirstRunStagePainter.IconFamily), Foreground = Brush(FirstRunTokens.TextSecondary) };
         AutomationProperties.SetAccessibilityView(plus, AccessibilityView.Raw);
         label.Children.Add(plus);
@@ -1216,19 +1214,28 @@ public sealed partial class FirstRunWindow : Window
             StrokeDashArray = new DoubleCollection { 4, 3 },
             IsHitTestVisible = false,
         };
-        var face = new Grid { Height = 36, Padding = new Thickness(32, 0, 32, 0) };
+        var face = new Grid { Height = 36 };
         face.Children.Add(outline);
         face.Children.Add(label);
-        var button = new Button
+        var button = Key(new Button
         {
             Content = face,
             Padding = new Thickness(0),
+            CornerRadius = new CornerRadius(12),
             Background = new SolidColorBrush(Colors.Transparent),
             BorderThickness = new Thickness(0),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             IsEnabled = enabled,
-        };
+        }, "add-tool");
+        // A plain button, as the Mac's (.buttonStyle(.plain)): no fill on
+        // hover or press; hovering shows the caption's tooltip (.help).
+        foreach (string state in new[] { "PointerOver", "Pressed", "Disabled" })
+        {
+            button.Resources["ButtonBackground" + state] = new SolidColorBrush(Colors.Transparent);
+            button.Resources["ButtonBorderBrush" + state] = new SolidColorBrush(Colors.Transparent);
+        }
+
         AutomationProperties.SetName(button, Copy.Tools.AddTool);
         AutomationProperties.SetHelpText(button, Copy.Tools.AddToolCaption);
         ToolTipService.SetToolTip(button, Copy.Tools.AddToolCaption);
@@ -1321,7 +1328,7 @@ public sealed partial class FirstRunWindow : Window
         figure.Children.Add(Text(Copy.PrivateAi.OfTotal(found), 14, FirstRunTokens.TextSecondary));
         panel.Children.Add(figure);
         panel.Children.Add(Text(Copy.PrivateAi.OfferLead, 14, FirstRunTokens.TextSecondary));
-        var more = new Expander { Header = Copy.PrivateAi.LearnMore, Content = Text(Copy.PrivateAi.OfferMore, 13, FirstRunTokens.TextSecondary) };
+        var more = Key(new Expander { Header = Copy.PrivateAi.LearnMore, Content = Text(Copy.PrivateAi.OfferMore, 13, FirstRunTokens.TextSecondary) }, "learn-more");
         panel.Children.Add(more);
         double opened = _model.PrivateCounted ? double.NegativeInfinity : Now;
         _motions.Add((t => count.Text = PrivateAIDiagram.Counted(tools.Count, t - opened, _reduceMotion).ToString(System.Globalization.CultureInfo.CurrentCulture),
@@ -1385,14 +1392,29 @@ public sealed partial class FirstRunWindow : Window
         optional = optional.Where(o => o.Name == Copy.Uses.CreditScope).Concat(optional.Where(o => o.Name != Copy.Uses.CreditScope)).ToList();
         foreach (ConsentOption option in optional)
         {
-            var box = new CheckBox { Content = option.Title, IsChecked = _runner.State.Scopes.Contains(option.Name) };
+            var box = Key(new CheckBox { Content = option.Title, IsChecked = _runner.State.Scopes.Contains(option.Name) }, "scope:" + option.Name);
             ToolTipService.SetToolTip(box, option.Description);
-            box.Checked += (_, _) => { _runner.State.Scopes.Add(option.Name); Render(); };
-            box.Unchecked += (_, _) => { _runner.State.Scopes.Remove(option.Name); Render(); };
+            box.Checked += (_, _) => { _controller.SetScope(option.Name, true); Render(); };
+            box.Unchecked += (_, _) => { _controller.SetScope(option.Name, false); Render(); };
             panel.Children.Add(box);
         }
 
-        panel.Children.Add(Text(Copy.Uses.Sharing, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
+        // The Sharing eyebrow, its info button with the chosen path's words
+        // (UsesScreen.swift:699-704), and the fallback line when the copy
+        // would not decode (UsesScreen.swift:705-709).
+        var eyebrow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center };
+        eyebrow.Children.Add(Text(Copy.Uses.Sharing, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
+        if (_controller.SharingDetail is { } detail)
+        {
+            eyebrow.Children.Add(InfoButton(FirstRunCopy.Fill(Copy.Uses.MoreAbout, new Dictionary<string, string> { ["title"] = Copy.Uses.Sharing }), detail, "sharing-info"));
+        }
+
+        panel.Children.Add(eyebrow);
+        if (_controller.SharingUnavailable)
+        {
+            panel.Children.Add(Text(Copy.Uses.SharingUnavailable, 12, FirstRunTokens.TextSecondary));
+        }
+
         // The Mac's titles and lines (UsesSharing): Automatic by the core's
         // mode name, its scope and sign-in lines under the choices.
         IReadOnlyList<UsesSharing.Option> sharing = UsesSharing.Options(_runner.State, Copy.Uses, WatchCopy.Armed);
@@ -1426,12 +1448,12 @@ public sealed partial class FirstRunWindow : Window
                 words.Children.Add(sub);
             }
 
-            var radio = new RadioButton
+            var radio = Key(new RadioButton
             {
                 Content = words,
                 GroupName = groupName,
                 IsChecked = _runner.State.SharingChosen && _runner.State.Sharing == option.Path,
-            };
+            }, "sharing:" + option.Path);
             AutomationProperties.SetName(radio, option.Title);
             if (option.Lines.Count > 0)
             {
@@ -1441,21 +1463,42 @@ public sealed partial class FirstRunWindow : Window
             SharingPath path = option.Path;
             radio.Checked += (_, _) =>
             {
-                FirstRunState s = _runner.State;
-                if (s.SharingChosen && s.Sharing == path)
+                if (_controller.ChooseSharing(path))
                 {
-                    return;
+                    _model.SetSharing(path, Now);
+                    Render();
                 }
-
-                s.Sharing = path;
-                s.SharingChosen = true;
-                _model.SetSharing(path, Now);
-                Render();
             };
             group.Children.Add(radio);
         }
 
         return group;
+    }
+
+    /// <summary>
+    /// GlassInfoButton (InfoButton.swift:17-60): an "i" whose words show on
+    /// hover and stay while pinned by a press; named "More about" the title,
+    /// its words its help text.
+    /// </summary>
+    private static Button InfoButton(string name, string text, string key)
+    {
+        var glyph = new FontIcon { Glyph = "\uE946", FontSize = 12, FontFamily = new FontFamily(FirstRunStagePainter.IconFamily), Foreground = Brush(FirstRunTokens.TextTertiary) };
+        var words = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, MaxWidth = 260 };
+        var button = Key(new Button
+        {
+            Content = glyph,
+            Padding = new Thickness(2),
+            MinWidth = 0,
+            MinHeight = 0,
+            Background = new SolidColorBrush(Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Flyout = new Flyout { Content = words, Placement = FlyoutPlacementMode.Bottom },
+        }, key);
+        ToolTipService.SetToolTip(button, text);
+        AutomationProperties.SetName(button, name);
+        AutomationProperties.SetHelpText(button, text);
+        return button;
     }
 
     private static Windows.UI.Color Lerp(uint a, uint b, double p)
@@ -1471,13 +1514,13 @@ public sealed partial class FirstRunWindow : Window
     {
         LegalWords legal = Copy.Welcome.Legal;
         var panel = new StackPanel { Spacing = 8, MaxWidth = 600 };
-        if (_terms is null)
+        if (_controller.Terms is null)
         {
             panel.Children.Add(Text(_termsLabel is null ? legal.Loading : legal.Failed, 14, FirstRunTokens.TextSecondary));
             return Card(panel, 24, 12);
         }
 
-        FetchedTerms terms = _terms;
+        FetchedTerms terms = _controller.Terms;
         var body = new StackPanel { Spacing = 8 };
         body.Children.Add(Text(terms.Title, 17, FirstRunTokens.TextPrimary, FontWeights.SemiBold));
         if (!terms.InEffect)
@@ -1514,7 +1557,7 @@ public sealed partial class FirstRunWindow : Window
         }
 
         var scroll = new ScrollViewer { Content = body, Height = 260 };
-        var accept = new CheckBox { Content = legal.Accept, IsEnabled = _runner.AcceptedTerms is not null, IsChecked = _runner.AcceptedTerms is not null };
+        var accept = Key(new CheckBox { Content = legal.Accept, IsEnabled = _runner.AcceptedTerms is not null, IsChecked = _runner.AcceptedTerms is not null }, "accept");
         AutomationProperties.SetName(accept, legal.Accept);
         scroll.ViewChanged += (_, _) =>
         {
@@ -1523,8 +1566,8 @@ public sealed partial class FirstRunWindow : Window
                 accept.IsEnabled = true;
             }
         };
-        accept.Checked += (_, _) => { _runner.AcceptedTerms = new AcceptedTerms(terms.Version, terms.ContentSha256, DateTimeOffset.UtcNow); Render(); };
-        accept.Unchecked += (_, _) => { _runner.AcceptedTerms = null; Render(); };
+        accept.Checked += (_, _) => { _controller.AcceptTerms(true, DateTimeOffset.UtcNow); Render(); };
+        accept.Unchecked += (_, _) => { _controller.AcceptTerms(false, DateTimeOffset.UtcNow); Render(); };
         panel.Children.Add(scroll);
         panel.Children.Add(Text(legal.ScrollHint, 12, FirstRunTokens.TextSecondary));
         panel.Children.Add(accept);
@@ -1561,22 +1604,21 @@ public sealed partial class FirstRunWindow : Window
             var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
             if (_runner.SignInWaiting)
             {
-                var cancel = new Button { Content = Copy.Frame.Cancel };
+                var cancel = Key(new Button { Content = Copy.Frame.Cancel }, "cancel-sign-in");
                 AutomationProperties.SetName(cancel, Copy.Frame.Cancel);
                 cancel.Click += async (_, _) =>
                 {
-                    await _runner.CancelSignIn();
+                    await _controller.CancelSignIn();
                     Render();
                 };
                 actions.Children.Add(cancel);
             }
 
-            var signIn = new Button { Content = join.NearAiSignIn, IsEnabled = !_runner.IsCommitting };
+            var signIn = Key(new Button { Content = join.NearAiSignIn, IsEnabled = !_runner.IsCommitting }, "sign-in");
             AutomationProperties.SetName(signIn, join.NearAiSignIn);
             signIn.Click += async (_, _) =>
             {
-                _runner.State.Account = AccountAnswer.NearAI;
-                await _runner.Commit(CommitPoint.SignIn);
+                await _controller.SignIn();
                 if (_runner.State.SignedIn)
                 {
                     _model.SignedIn(Now);
@@ -1626,9 +1668,9 @@ public sealed partial class FirstRunWindow : Window
             var row = new Grid { ColumnSpacing = 8 };
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var field = new TextBox { Header = join.InviteEyebrow, PlaceholderText = join.InvitePlaceholder, Text = _inviteDraft ?? state.Invite, IsEnabled = editable };
+            var field = Key(new TextBox { Header = join.InviteEyebrow, PlaceholderText = join.InvitePlaceholder, Text = _inviteDraft ?? state.Invite, IsEnabled = editable }, "invite");
             AutomationProperties.SetName(field, join.InviteEyebrow);
-            var lookUp = new Button { Content = join.LookUp, VerticalAlignment = VerticalAlignment.Bottom, IsEnabled = editable && JoinInvite.CanLookUp(field.Text, state) };
+            var lookUp = Key(new Button { Content = join.LookUp, VerticalAlignment = VerticalAlignment.Bottom, IsEnabled = editable && JoinInvite.CanLookUp(field.Text, state) }, "look-up");
             AutomationProperties.SetName(lookUp, join.LookUp);
             field.TextChanged += (_, _) =>
             {
@@ -1750,7 +1792,7 @@ public sealed partial class FirstRunWindow : Window
                     AutomationProperties.SetName(back, labels[i]);
                     back.Click += (_, _) =>
                     {
-                        _runner.State = FirstRunNavigation.BackTo(FirstRunNavigation.ThreadSteps[at], _runner.State);
+                        _controller.BackTo(FirstRunNavigation.ThreadSteps[at]);
                         Render();
                     };
                     Thread.Children.Add(back);

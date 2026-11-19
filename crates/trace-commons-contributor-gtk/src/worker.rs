@@ -126,9 +126,24 @@ impl Worker {
         mpsc::Receiver<(u64, Job)>,
         async_channel::Sender<(u64, Outcome)>,
     ) {
+        let (worker, requests, responses, _) = Self::fixture_with_events(dir);
+        (worker, requests, responses)
+    }
+
+    /// [`Self::fixture`], keeping the sender a test delivers daemon events
+    /// through.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn fixture_with_events(
+        dir: std::path::PathBuf,
+    ) -> (
+        Self,
+        mpsc::Receiver<(u64, Job)>,
+        async_channel::Sender<(u64, Outcome)>,
+        async_channel::Sender<DaemonEvent>,
+    ) {
         let (jobs, requests) = mpsc::channel();
         let (responses, results) = async_channel::unbounded();
-        let (_, events) = async_channel::unbounded();
+        let (event_sender, events) = async_channel::unbounded();
         (
             Self {
                 jobs,
@@ -142,6 +157,7 @@ impl Worker {
             },
             requests,
             responses,
+            event_sender,
         )
     }
 
