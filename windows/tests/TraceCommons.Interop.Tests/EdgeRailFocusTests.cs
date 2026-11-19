@@ -60,6 +60,23 @@ public class EdgeRailFocusTests
         Assert.Equal(EdgeRailStep.GrowThenOpen, rail.PointerEntered(cursorInside: true));
     }
 
+    /// <summary>
+    /// A press on the closed zone opens the rail even after Escape and with no
+    /// enter seen: on tc-win-az10, 2026-11-19, WinUI still counted the pointer
+    /// inside after the rail shrank under it, sent no new enter, and a click
+    /// on the zone activated the rail without opening it.
+    /// </summary>
+    [Fact]
+    public void APressOnTheZoneOpensTheRail()
+    {
+        var rail = new EdgeRailHover();
+        rail.PointerEntered(cursorInside: true);
+        rail.CloseNow();
+        Assert.Equal(EdgeRailStep.GrowThenOpen, rail.Pressed());
+        Assert.True(rail.HoldsKeyboard);
+        Assert.Equal(EdgeRailStep.None, rail.Pressed());
+    }
+
     /// <summary>WinUI can report an enter from a stale pointer position; the cursor is not on the zone, so nothing opens.</summary>
     [Fact]
     public void AnEnterWithTheCursorElsewhereOpensNothing()

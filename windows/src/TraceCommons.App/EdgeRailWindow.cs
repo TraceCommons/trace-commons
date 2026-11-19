@@ -87,32 +87,45 @@ internal sealed class EdgeRailWindow : Window
             _hover.PointerExited(DateTimeOffset.UtcNow);
             _closeTimer.Start();
         };
+        // A move on the closed zone opens it too: WinUI sends no new enter
+        // while it still counts the pointer inside after the rail shrank
+        // under it (tc-win-az10).
+        _root.PointerMoved += (_, _) =>
+        {
+            if (!_hover.Open)
+            {
+                Step(_hover.PointerEntered(ToolWindows.CursorInside(_hwnd)));
+            }
+        };
         _root.PointerPressed += (_, _) =>
         {
-            if (_hover.Open && !_hover.HoldsKeyboard)
+            if (_hover.HoldsKeyboard)
             {
-                // WinUI focuses its input site on the press, which activates
-                // the rail before this handler runs; the foreground trail
-                // still names the window before it (tc-win-az5: the rail
-                // handed the keyboard to 0x0).
-                _focus.Opening(ToolWindows.Foreground());
-                _hover.Clicked();
-                ToolWindows.TakeKeyboard(_hwnd);
-
-                // A click on the card or the zone focuses nothing, and with
-                // nothing focused Escape never reaches the rail (tc-win-az5:
-                // the rail stayed open). The first control takes focus
-                // without a ring, as a pointer click gives it, once the rail
-                // is laid out and active: a click on the zone opens it in the
-                // same gesture.
-                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
-                {
-                    if (_hover.HoldsKeyboard && FocusManager.FindFirstFocusableElement(_open) is Control first)
-                    {
-                        first.Focus(FocusState.Pointer);
-                    }
-                });
+                return;
             }
+
+            // WinUI focuses its input site on the press, which activates the
+            // rail before this handler runs; the foreground trail still names
+            // the window before it (tc-win-az5: the rail handed the keyboard
+            // to 0x0). A press on the closed zone opens the rail (a touch or
+            // pen tap has no hover; tc-win-az10: a click after Escape
+            // activated the 4 px zone and opened nothing).
+            _focus.Opening(ToolWindows.Foreground());
+            Step(_hover.Pressed());
+            ToolWindows.TakeKeyboard(_hwnd);
+
+            // A click on the card or the zone focuses nothing, and with
+            // nothing focused Escape never reaches the rail (tc-win-az5: the
+            // rail stayed open). The first control takes focus without a
+            // ring, as a pointer click gives it, once the rail is laid out
+            // and active.
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (_hover.HoldsKeyboard && FocusManager.FindFirstFocusableElement(_open) is Control first)
+                {
+                    first.Focus(FocusState.Pointer);
+                }
+            });
         };
         _root.KeyDown += (_, e) =>
         {

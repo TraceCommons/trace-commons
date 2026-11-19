@@ -154,6 +154,24 @@ public sealed class EdgeRailHover
         }
     }
 
+    /// <summary>
+    /// A press on the rail: a closed rail opens (a touch or pen tap has no
+    /// hover, and WinUI sends no new enter while it still counts the pointer
+    /// inside), and from now it holds the keyboard.
+    /// </summary>
+    public EdgeRailStep Pressed()
+    {
+        EdgeRailStep step = EdgeRailStep.None;
+        if (!Open)
+        {
+            _awaitingLeave = false;
+            step = PointerEntered(cursorInside: true);
+        }
+
+        Clicked();
+        return step;
+    }
+
     /// <summary>A click inside the open rail: from now it holds the keyboard.</summary>
     public void Clicked()
     {
