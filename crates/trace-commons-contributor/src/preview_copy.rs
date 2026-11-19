@@ -1277,6 +1277,9 @@ pub struct MonitorSettingsNavCopy {
     /// macOS's section for NEAR AI credit payouts. Owner-approved 2026-11-04
     /// (D2).
     pub payouts: &'static str,
+    /// macOS's General: the appearance, the edge rail, the Traces map's
+    /// style and Home's promotions (`SettingsWords.general`).
+    pub general: &'static str,
     pub startup: &'static str,
     pub watching: &'static str,
     /// Approved 2026-10-08 (button rule).
@@ -1884,6 +1887,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             connection: "Connection",
             account: "Account",
             payouts: "Payouts",
+            general: "General",
             startup: "Startup & notifications",
             watching: "Watching",
             uses: "Data uses",
@@ -2283,8 +2287,10 @@ mod tests {
         let screens = monitor_screens_copy();
         let nav = &screens.settings_nav;
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
-        // #1146's twelve, plus macOS's Account and Payouts (2026-11-04).
-        assert_eq!(names.len(), 14, "#1146's twelve and two more: {names:?}");
+        // #1146's twelve, plus macOS's Account and Payouts (2026-11-04)
+        // and its General.
+        assert_eq!(names.len(), 15, "#1146's twelve and three more: {names:?}");
+        assert_eq!(nav.general, "General");
         assert_eq!(nav.connection, "Connection");
         assert_eq!(nav.account, "Account");
         assert_eq!(nav.payouts, "Payouts");

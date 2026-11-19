@@ -395,6 +395,7 @@ pub async fn launch_with_tty(
 ) -> anyhow::Result<i32> {
     let (sandbox, initial_prompt) = validate_launch_args(&args)?;
     if !args.new_terminal && !interactive {
+        // Owner-approved wording, 2026-11-19.
         anyhow::bail!(
             "managed launch requires an interactive terminal (pass --new-terminal to open one)"
         );
