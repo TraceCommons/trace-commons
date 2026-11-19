@@ -183,6 +183,14 @@ public sealed partial class MainWindow
             _homeGlance = glance.Result.IsError ? null : glance.Result.Result;
             ObserveBalance(balance.Result);
 
+            // Every rollup read notes a settled credit arriving, as the Mac's
+            // does (AppModel.recordHistoryRollup, AppModel.swift:2160-2174),
+            // not only the tray's.
+            if (_homeRollup is HistoryRollup settled)
+            {
+                ObserveCreditFinal(settled.CreditFinal);
+            }
+
             // A sample launch reads only the recorded set: never the local
             // Insights store (Program.IsSampleLaunch).
             if (_insightsHeading is null && !Program.IsSampleLaunch)
