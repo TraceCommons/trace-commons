@@ -182,8 +182,8 @@ fn present_with(app: &Rc<App>) -> (adw::Window, Rc<Coordinator>) {
         .vexpand(true)
         .vhomogeneous(false)
         // Each step as wide as its own page needs: homogeneous, the stack
-        // measured every hidden page's width for its own height, where a
-        // wrapped line needs the most width, and asked for 729 to 848.
+        // sized itself for its hidden pages too and asked GNOME 46's clamp
+        // for 729 to 848, past the column.
         .hhomogeneous(false)
         // Steps fade into each other, as the Mac's do, so the stage's N and
         // tiles carry the move between them.
@@ -2469,9 +2469,9 @@ mod window_tests {
     /// computer's own discovery with real-length paths and counts added,
     /// and its column is drawn the Mac's 560 wide (`frame(maxWidth: 560)`)
     /// and centred. Before this fix the column was drawn 729 wide on
-    /// Tools and 848 on Traces on GNOME 46 (the stack measured its hidden
-    /// pages' widths for its own height) and about 490 on KDE (the clamp
-    /// counted 560 in text-scaled units).
+    /// Tools and 848 on Traces on GNOME 46 (libadwaita 1.5): the stack
+    /// sized itself for its hidden pages too. KDE (libadwaita 1.9) drew
+    /// 560 before and after.
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
