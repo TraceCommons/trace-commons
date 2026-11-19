@@ -2,6 +2,7 @@
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": false,
   "setup_complete": false,
+  "setup_scope": null,
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "first_trace_at": null,
   "account_state": "ok",
