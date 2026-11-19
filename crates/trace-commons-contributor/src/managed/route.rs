@@ -45,6 +45,64 @@ pub fn home_for(store: &ConfigStore, id: Uuid) -> PathBuf {
     store.dir().join("managed-routes").join(id.to_string())
 }
 
+/// Build the IronWire `config.toml` used by managed NEAR AI routes.
+pub(crate) fn ironwire_config(bodies: bool, base_url: &str) -> String {
+    format!(
+        r#"[capture]
+enabled = true
+bodies = {bodies}
+receipts = true
+[privacy]
+mode = "full"
+trusted_backends = ["nearai"]
+[[backends]]
+id = "nearai"
+kind = "nearai"
+base_url = {base_url}
+"#,
+        base_url = toml::Value::String(base_url.into()),
+        bodies = bodies,
+    )
+}
+
+/// Attach our daemon/helper NEAR AI signer attestor to `options` when one is
+/// configured for `store`.
+pub(crate) fn attach_signer_attestor(
+    store: &ConfigStore,
+    key: &str,
+    options: EmbedOptions,
+) -> EmbedOptions {
+    let attestor = crate::daemon::ipc::signer_attestor_for(
+        store,
+        Some(key.to_owned()),
+        Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
+            if cfg!(test) {
+                None
+            } else {
+                Some(store.clone())
+            },
+            &|name| std::env::var(name).ok(),
+        )),
+    );
+    match attestor {
+        Some(attestor) => options.with_signer_attestor(attestor),
+        None => options,
+    }
+}
+
+/// Build the standard [`EmbedOptions`] for a managed NEAR AI session route.
+pub(crate) fn embed_options(store: &ConfigStore, key: &str) -> EmbedOptions {
+    let key_owned = key.to_owned();
+    let mut options = EmbedOptions::default()
+        .with_update_checks(UpdateChecks::Off)
+        .with_startup_probes(StartupProbes::Configured)
+        .with_credentials(move |name| {
+            (name == "NEARAI_API_KEY").then(|| HostSecret::from(key_owned.clone()))
+        });
+    options.token_capture_enabled = Some(false);
+    attach_signer_attestor(store, key, options)
+}
+
 /// How long a route waits for NEAR AI's catalogue and then for its proxy
 /// to serve the selected model.
 const READY_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
@@ -271,47 +329,10 @@ impl ManagedRoute {
                 // The private ledger retains provider errors locally, including
                 // possible quoted request text. Readers expose only safe fields.
                 // Receipt checking never grants body or token consent.
-                format!(
-                    r#"[capture]
-enabled = true
-bodies = {bodies}
-receipts = true
-[privacy]
-mode = "full"
-trusted_backends = ["nearai"]
-[[backends]]
-id = "nearai"
-kind = "nearai"
-base_url = {base_url}
-"#,
-                    base_url = toml::Value::String(base_url.into()),
-                    bodies = bodies,
-                )
-                .as_bytes(),
+                ironwire_config(bodies, base_url).as_bytes(),
             )
             .map_err(|_| ManagedError::StorageUnavailable)?;
-        let attestor = crate::daemon::ipc::signer_attestor_for(
-            store,
-            Some(key.expose().to_owned()),
-            Arc::new(crate::routing::proof_attestor::PinProvider::for_daemon(
-                if cfg!(test) {
-                    None
-                } else {
-                    Some(store.clone())
-                },
-                &|name| std::env::var(name).ok(),
-            )),
-        );
-        let mut options = EmbedOptions::default()
-            .with_update_checks(UpdateChecks::Off)
-            .with_startup_probes(StartupProbes::Configured)
-            .with_credentials(move |name| {
-                (name == "NEARAI_API_KEY").then(|| HostSecret::from(key.expose().to_owned()))
-            });
-        options.token_capture_enabled = Some(false);
-        if let Some(attestor) = attestor {
-            options = options.with_signer_attestor(attestor);
-        }
+        let mut options = embed_options(store, key.expose());
         if let Some(binding) = desktop {
             options = options.with_vertex_gateway(
                 embed::VertexGateway::new(

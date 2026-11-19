@@ -353,6 +353,12 @@ pub fn refresh(app: &Rc<App>) {
             Ok(snapshot) => {
                 let revision = snapshot["revision"].as_u64().unwrap_or_default();
                 if !accepts_revision(&app.private_inference.managed_revision, revision) { return; }
+                // Only a real answer moves the rail's sign-in state; an
+                // unreachable daemon leaves the last one standing.
+                let signed_in = Some(snapshot["capabilities"]["near_ai_signin"] == true);
+                if app.private_inference.near_ai_signed_in.replace(signed_in) != signed_in {
+                    super::edge_surfaces::data_changed(app);
+                }
                 snapshot
             }
             // No revision to compare: the next answer is drawn whatever it is.

@@ -4,10 +4,11 @@
 //! appear anywhere in the app ... not in any user visible place." The
 //! contributor crate holds the same guard over the shared copy
 //! (`tests/no_commons_name_in_copy.rs`); this one covers what GTK holds
-//! itself: its own `copy.rs` and widgets, the desktop entry, and the
-//! AppStream metainfo that GNOME Software shows, and the `.flatpakref`
-//! that `scripts/flatpak/publish-repo.sh` writes, whose `Title=` the
-//! software centre shows when the app is installed from it.
+//! itself: its own `copy.rs` and widgets, the desktop entry, the AppStream
+//! metainfo that GNOME Software shows, the `.flatpakref` that
+//! `scripts/flatpak/publish-repo.sh` writes, whose `Title=` the software
+//! centre shows when the app is installed from it, and the GNOME Shell
+//! extension.
 //!
 //! Comment lines are skipped, Rust `\`-continued literals are joined, a
 //! name wrapped across two lines of prose counts, and a use of
@@ -118,6 +119,14 @@ fn nothing_this_shell_shows_names_the_commons() {
     files.push(root.join("flatpak/ai.tracecommons.Contributor.desktop"));
     files.push(root.join("flatpak/ai.tracecommons.Contributor.metainfo.xml"));
     files.push(repo_root().join("scripts/flatpak/publish-repo.sh"));
+    // The GNOME Shell extension: GNOME's Extensions app shows its name and
+    // description, and its code is shipped beside the app.
+    for name in ["metadata.json", "extension.js", "placement.js"] {
+        files.push(
+            root.join("gnome-shell-extension/edge-surfaces@tracecommons.ai")
+                .join(name),
+        );
+    }
 
     let repo = repo_root();
     let mut offenders = Vec::new();

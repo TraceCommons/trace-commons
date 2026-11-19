@@ -124,4 +124,81 @@ final class BalanceArrivalTests: XCTestCase {
         XCTAssertEqual(note?.defaultIntent, .review(.nearAiCredit))
         XCTAssertEqual(note?.actions.count, 2)
     }
+
+    func testIconArrivalTrackerFiresOnlyOnLiveIncreases() {
+        var tracker = BalanceArrival.Tracker()
+        // Nil before any reading does nothing.
+        XCTAssertFalse(tracker.observe(nil))
+        XCTAssertNil(tracker.lastReceivedNanos)
+        // First known reading establishes the baseline without firing.
+        XCTAssertFalse(tracker.observe(4 * dollar))
+        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
+        // Same total does not fire.
+        XCTAssertFalse(tracker.observe(4 * dollar))
+        // Transient unavailable preserves the baseline.
+        XCTAssertFalse(tracker.observe(nil))
+        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
+        XCTAssertFalse(tracker.observe(4 * dollar))
+        // Sub-threshold NEAR AI increases accumulate until reaching 1 credit.
+        XCTAssertFalse(tracker.observe(4 * dollar + 400_000_000))
+        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
+        XCTAssertFalse(tracker.observe(4 * dollar + 900_000_000))
+        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
+        // Reaching >= 1 credit fires and advances the baseline.
+        XCTAssertTrue(tracker.observe(6 * dollar))
+        XCTAssertEqual(tracker.lastReceivedNanos, 6 * dollar)
+        XCTAssertFalse(tracker.observe(6 * dollar))
+        // Smaller total (e.g. switched organization) updates baseline without firing.
+        XCTAssertFalse(tracker.observe(2 * dollar))
+        XCTAssertEqual(tracker.lastReceivedNanos, 2 * dollar)
+        // Subsequent increase of 1 credit from the new baseline fires.
+        XCTAssertTrue(tracker.observe(3 * dollar))
+
+        // Trace Commons settled credits work independently (even without NEAR AI sign-in)
+        // and accumulate until at least 1.0 credit has arrived.
+        XCTAssertFalse(tracker.observeCreditFinal(nil))
+        XCTAssertFalse(tracker.observeCreditFinal(1.5))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
+        XCTAssertFalse(tracker.observeCreditFinal(1.5))
+        XCTAssertFalse(tracker.observeCreditFinal(nil))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
+        // +0.4 then +0.4 does not fire yet, keeping baseline at 1.5.
+        XCTAssertFalse(tracker.observeCreditFinal(1.9))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
+        XCTAssertFalse(tracker.observeCreditFinal(2.3))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
+        // +0.2 more reaches 2.5 (+1.0 total) -> fires and advances baseline.
+        XCTAssertTrue(tracker.observeCreditFinal(2.5))
+        XCTAssertEqual(tracker.lastCreditFinal, 2.5)
+        // Smaller total resets baseline without firing.
+        XCTAssertFalse(tracker.observeCreditFinal(1.0))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.0)
+        XCTAssertFalse(tracker.observeCreditFinal(1.5))
+        XCTAssertTrue(tracker.observeCreditFinal(2.0))
+    }
+
+    func testIconAnimationFrameSchedule() {
+        let still = BalanceArrival.IconAnimation.frameTimes(reduceMotion: true)
+        XCTAssertEqual(still, [BalanceArrival.IconAnimation.stillAt])
+
+        let animated = BalanceArrival.IconAnimation.frameTimes(reduceMotion: false)
+        XCTAssertGreaterThan(animated.count, 20)
+        XCTAssertEqual(animated.first, 0)
+        for pair in zip(animated, animated.dropFirst()) {
+            XCTAssertLessThan(pair.0, pair.1)
+        }
+        XCTAssertLessThan(animated.last ?? .infinity, BalanceArrival.IconAnimation.duration)
+    }
+
+    func testIconAnimationPreferenceDefaultsOnAndHonorsOff() {
+        let suite = "BalanceArrivalIconPrefTest-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertTrue(BalanceArrival.IconAnimation.isEnabled(in: defaults))
+        defaults.set(false, forKey: BalanceArrival.IconAnimation.preferenceKey)
+        XCTAssertFalse(BalanceArrival.IconAnimation.isEnabled(in: defaults))
+        defaults.set(true, forKey: BalanceArrival.IconAnimation.preferenceKey)
+        XCTAssertTrue(BalanceArrival.IconAnimation.isEnabled(in: defaults))
+    }
 }

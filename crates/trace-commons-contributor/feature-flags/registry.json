@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "registry_version": 4,
+  "registry_version": 5,
   "flags": {
     "claude_desktop_private_ai": {
       "description": "Claude Desktop Code setup and dedicated Private AI routing",
@@ -19,6 +19,16 @@
       "default": false,
       "required_capabilities": [
         "insights_skills_v1"
+      ],
+      "timing": "live"
+    },
+    "red_team_sessions": {
+      "description": "Sandboxed Red Team sessions on NEAR AI Red SandBox, with file inputs and a network allowlist.",
+      "owner": "private-ai",
+      "class": "product",
+      "default": false,
+      "required_capabilities": [
+        "red_team_sessions_v1"
       ],
       "timing": "live"
     },

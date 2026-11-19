@@ -459,6 +459,9 @@ private struct Launcher: View {
             .onChange(of: model.launchOpening, initial: true) { _, opening in
                 openAtLaunch(opening)
             }
+            .onChange(of: model.creditArrivalCount) { _, count in
+                if count > 0 { DockCreditAnimator.shared.celebrate() }
+            }
     }
 
     @MainActor
@@ -536,7 +539,10 @@ private struct Launcher: View {
             object: nil,
             queue: .main
         ) { _ in
-            MainActor.assumeIsolated { model.shutdown() }
+            MainActor.assumeIsolated {
+                DockCreditAnimator.shared.stop()
+                model.shutdown()
+            }
         }
 
         // Development hook, same family as TRACE_COMMONS_SHOW_WINDOW below:

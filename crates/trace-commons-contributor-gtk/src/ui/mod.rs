@@ -13,6 +13,7 @@ pub mod community_brand;
 pub(crate) mod consent_settings;
 pub mod credential;
 mod css_contract;
+pub mod edge_surfaces;
 mod first_run;
 mod first_run_marker_check;
 mod first_run_screens;
@@ -173,6 +174,8 @@ pub struct PendingUndo {
 
 pub struct App {
     pub worker: Worker,
+    /// The edge rail and the menu-bar panel (`edge_surfaces`).
+    pub edge: edge_surfaces::Surfaces,
     /// Where the model-calls switch stands, as the tray reads it.
     ///
     /// Written on every settings read (see `private_inference::render`) and
@@ -523,6 +526,7 @@ impl App {
         let app = Rc::new(Self {
             worker,
             tray: crate::tray::TrayState::default(),
+            edge: edge_surfaces::Surfaces::default(),
             window,
             toasts,
             shell,
@@ -579,6 +583,7 @@ impl App {
         app.wire_tray();
         app.wire_service_fallback();
         app.wire_folder_refresh();
+        edge_surfaces::wire(&app);
         // After `wire_tray`, and reaching the same handler it does. GNOME
         // has no tray, so on most Linux desktops this is the only surface
         // besides the window's own controls -- and it is still an
@@ -735,8 +740,10 @@ impl App {
     /// that was pressed, and one row can stop this computer answering model
     /// calls.
     ///
-    /// That last one is the only write anything outside this window can ask
-    /// for, and it goes in one direction. There is no request that turns
+    /// That last one is the only write the tray's menu can ask for, and it
+    /// goes in one direction (the edge rail and the popover the tray opens
+    /// offer one more, the watcher's pause and resume, as the Mac's do; see
+    /// `edge_surfaces`). There is no request that turns
     /// model calls ON -- `tray.rs` has no word for it -- because enabling it
     /// changes what anything else running here may send through, and the
     /// sentence saying so is on the screen the off-state row opens instead.
@@ -995,6 +1002,8 @@ impl App {
                 app.render_health(&status);
                 app.render_grant_voids(&status);
                 settings::render_status(app, &status);
+                // Watching's state on the rail and the panel.
+                edge_surfaces::data_changed(app);
                 // The witness lives in the contributor's config rather than
                 // in daemon settings, so nothing in the settings answer
                 // carries it and it is repainted here instead -- including
@@ -1977,6 +1986,11 @@ pub(crate) fn apply_tray_request(app: &Rc<App>, request: crate::tray::TrayReques
         crate::tray::TrayRequest::StopAnsweringModelCalls => {
             app.open_screen(PRIVATE_INFERENCE_SCREEN);
             private_inference::turn_off(app);
+        }
+        // The panel, not the window: it has its own way into the window.
+        crate::tray::TrayRequest::Panel(at) => {
+            edge_surfaces::toggle_panel(app, at);
+            return;
         }
     }
     app.window.present();

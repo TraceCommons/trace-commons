@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config \
       libgtk-4-dev \
       libadwaita-1-dev \
+      libgtk4-layer-shell-dev \
       libnotify-dev \
       xvfb \
       xauth \

@@ -15,19 +15,6 @@ use std::process::Command;
 
 /// Tier 1: zero `unsafe` anywhere in source or tests.
 const FORBID_CRATES: &[&str] = &[
-    // The vendored IronWire crates inherit `[workspace.lints.rust]
-    // unsafe_code = "forbid"` through `[lints] workspace = true`.
-    "ironwire_agents",
-    "ironwire_catalog",
-    "ironwire_core",
-    "ironwire_creds",
-    "ironwire_ledger",
-    "ironwire_privacy",
-    "ironwire_proxy",
-    "ironwire_translate",
-    "ironwire_update",
-    "ironwire_upstream",
-    "ironwire_usage",
     "trace-commons-attestation",
     "trace-commons-build-info",
     "trace-commons-client-server-tests",
@@ -460,7 +447,7 @@ fn tiers_are_disjoint_and_cover_every_first_party_crate() {
             "crate `{name}` appears in more than one unsafe_boundary tier"
         );
     }
-    assert_eq!(all.len(), 29, "expected 29 first-party Rust crates");
+    assert_eq!(all.len(), 18, "expected 18 first-party Rust crates");
 }
 
 #[test]
@@ -506,18 +493,18 @@ fn unclassified_or_weakened_crates_are_caught() {
     // 2b. A crate that inherits `[workspace.lints]` is held to the workspace
     // value: weakening the root's `unsafe_code` from `forbid` fails it.
     let mut weakened_workspace = baseline.clone();
-    let core = weakened_workspace
+    let mark = weakened_workspace
         .iter_mut()
-        .find(|c| c.name == "ironwire_core")
-        .expect("ironwire_core present");
-    core.workspace_manifest_text = core
-        .workspace_manifest_text
-        .replace("unsafe_code = \"forbid\"", "unsafe_code = \"deny\"");
+        .find(|c| c.name == "trace-commons-mark")
+        .expect("trace-commons-mark present");
+    mark.manifest_text =
+        "[package]\nname = \"trace-commons-mark\"\n[lints]\nworkspace = true\n".to_string();
+    mark.workspace_manifest_text = "[workspace.lints.rust]\nunsafe_code = \"deny\"\n".to_string();
     let found = policy_violations(&weakened_workspace);
     assert!(
         found
             .iter()
-            .any(|v| v.starts_with("ironwire_core is in FORBID_CRATES")),
+            .any(|v| v.starts_with("trace-commons-mark is in FORBID_CRATES")),
         "expected an inherited-lint violation, got {found:?}"
     );
 

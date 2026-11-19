@@ -1038,4 +1038,39 @@ final class ManagedSessionsTests: XCTestCase {
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-rex-not-ready", message: "managed-rex-not-ready"), "rex_not_ready")
         XCTAssertEqual(ManagedSurface.errorKey(code: "managed-terminal-call-failed", message: "managed-terminal-call-failed"), "action_failed")
     }
+
+    func testSnapshotDecodesRedTeamToolAndRefusalKeys() throws {
+        let json = """
+        {
+            "tools": [
+                {"tool": "claude", "installed": true, "install_url": "https://claude.ai"},
+                {"tool": "codex", "installed": true, "install_url": "https://chatgpt.com"},
+                {"tool": "opencode", "installed": true, "install_url": "https://opencode.ai"},
+                {"tool": "red_team", "installed": true, "install_url": null}
+            ],
+            "copy": {"red_team": "Red Team", "start_red_team": "Start Red Team"},
+            "revision": 7,
+            "accounts": [],
+            "sign_in_accounts": [
+                {"id": "6e656172-2d61-4900-8000-000000000004", "tool": "red_team", "connection": "near_ai_signin", "label": "NEAR AI", "auth_state": "ready"}
+            ],
+            "defaults": [],
+            "generations": {"claude": 0, "codex": 0, "opencode": 0, "red_team": 0},
+            "sessions": [],
+            "capabilities": {
+                "managed_launch": true,
+                "terminal_launch": true,
+                "near_ai_signin": true
+            }
+        }
+        """
+        let snap = try JSONDecoder().decode(ManagedSnapshot.self, from: Data(json.utf8))
+        XCTAssertTrue(snap.visibleTools.contains { $0.tool == "red_team" && $0.installed })
+        XCTAssertTrue(snap.canLaunch(tool: "red_team"))
+        XCTAssertTrue(snap.signInStartTools.contains("red_team"))
+        XCTAssertEqual(ManagedSurface.toolKey("red_team"), "red_team")
+        XCTAssertEqual(ManagedSurface.startKey("red_team"), "start_red_team")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "red_team_unavailable", message: "red_team_unavailable"), "red_team_unavailable")
+        XCTAssertEqual(ManagedSurface.errorKey(code: "red_team_needs_near_ai", message: "red_team_needs_near_ai"), "red_team_needs_near_ai")
+    }
 }

@@ -51,10 +51,9 @@ attribute is legal Rust.
 - `crates/trace-commons-client-server-tests` (unpublished, tests only)
 - `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`, a separate Cargo
   workspace)
-- `crates/ironwire_*` (11 crates, the in-process inference proxy). These are
-  copyright NEAR AI, imported from nearai/ironwire under MIT OR Apache-2.0;
-  keep each crate's `LICENSE-MIT` and `LICENSE-APACHE` and their `authors`.
-  Their own working rules are in `docs/ironwire/AGENTS.md`.
+
+IronWire (`ironwire_*`) is a git dependency on `nearai/ironwire` (copyright NEAR
+AI, `MIT OR Apache-2.0`); see `docs/ironwire/README.md`.
 
 These stay permissive deliberately. The contributor CLI, the desktop apps, and
 the envelope protocol are meant to be embedded in proprietary agent harnesses;
