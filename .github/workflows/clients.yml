@@ -45,7 +45,6 @@ on:
       - "crates/trace-commons-contributor-ffi/**"
       - "crates/trace-commons-contributor-gtk/**"
       - "crates/trace-commons-protocol/**"
-      - "crates/ironwire_*/**"
       - ".github/workflows/clients.yml"
       - ".github/actions/**"
 
@@ -785,6 +784,28 @@ jobs:
           msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Debug -p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Debug --filter "FullyQualifiedName~SampleDaemonTests|FullyQualifiedName~NativeBindingTests" --logger "console;verbosity=normal"
+
+      # The Win2D render tests (spec W1-D2 (a)). Win2D cannot create a device
+      # in session 0, so the harness prints the runner's session id and
+      # whether it is interactive before anything else, then either runs the
+      # tests or skips them with that reason. That first line is the record
+      # of whether GitHub's runner can render; the test box runs the same
+      # executable through an /IT task with TC_RENDER_TESTS_REQUIRED=1.
+      # GitHub's windows-latest runner is interactive (session 2 on #2196),
+      # so the tests are required here too: a runner image that landed in
+      # session 0 would otherwise skip them and the job would stay green
+      # with nothing rendered.
+      - name: Build and run the Win2D render tests
+        working-directory: windows
+        shell: pwsh
+        env:
+          TC_RENDER_TESTS_REQUIRED: "1"
+        run: |
+          msbuild tests/TraceCommons.RenderTests/TraceCommons.RenderTests.csproj -restore -p:Configuration=Release -p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $exe = "tests/TraceCommons.RenderTests/bin/x64/Release/net8.0-windows10.0.19041.0/win-x64/TraceCommons.RenderTests.exe"
+          & $exe "$env:RUNNER_TEMP/render-out"
+          exit $LASTEXITCODE
 
       - name: Confirm exactly one package was produced
         working-directory: windows

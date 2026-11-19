@@ -19,9 +19,16 @@ public class LegacyMigrationShellWiringTests
         string main = ShellSource("TraceCommons.App/MainWindow.xaml");
         string settings = ShellSource("TraceCommons.App/Controls/SettingsView.xaml");
 
+        // In the notice stack the card's own Dismiss button goes and the
+        // stack's X dismisses it, named with the offer's own word
+        // (MonitorNotices.swift:244-247).
         Assert.Matches(
-            new Regex(@"<controls:LegacyMigrationOfferView[^>]*ShowsDismiss=""True""[^>]*ViewModel\.LegacyOffer\.ShowsCard", RegexOptions.Singleline),
+            new Regex(@"<controls:LegacyMigrationOfferView[^>]*x:Name=""LegacyOfferCard""[^>]*ShowsDismiss=""False""", RegexOptions.Singleline),
             main);
+        string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
+        Assert.Contains("if (ViewModel.LegacyOffer.ShowsCard) yield return (NoticeCatalog.LegacyOffer, LegacyOfferCard);", shell);
+        Assert.Contains("ViewModel.LegacyOffer.DismissCard();", shell);
+        Assert.Contains("ViewModel.LegacyOffer.Dismiss", shell);
         Assert.Matches(
             new Regex(@"<controls:LegacyMigrationOfferView[^>]*ShowsDismiss=""False""[^>]*LegacyOffer\.IsAvailable", RegexOptions.Singleline),
             settings);
@@ -32,7 +39,7 @@ public class LegacyMigrationShellWiringTests
     {
         Assert.Contains(
             "new SettingsView(_host, ViewModel.LegacyOffer)",
-            ShellSource("TraceCommons.App/MainWindow.xaml.cs"));
+            ShellSource("TraceCommons.App/MainWindow.Shell.cs"));
 
         string main = ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs");
         Assert.Contains("LegacyOffer.SetStatus(parsedStatus.LegacyInviteMigration, parsedStatus.TenantId)", main);

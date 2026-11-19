@@ -1496,6 +1496,12 @@ WINDOWS_LEGACY_KEYS = [
     ("TcCoralBrandBrush", "statusOutside", None),
     ("TcCoralTextBrush", "statusOutsideText", None),
 ]
+# Glass tokens only the Windows shell names as brushes, outside the shared
+# roles: (key, token). The Private AI tab's grey dot (GlassStatus.off) is
+# statusOff, as on the Mac (PrivateInferenceView.swift:38).
+WINDOWS_TOKEN_KEYS = [
+    ("TcStatusOffBrush", "statusOff"),
+]
 # Under a high contrast theme every brand colour gives way to the system's:
 # a fill or ink aliases the primary text brush and a label on a fill the
 # page ground, as DesignSystem.xaml does for the rest of the palette.
@@ -1537,6 +1543,8 @@ def render_windows(tokens: dict) -> str:
             hex_ = by_role[role]
             color = f"#{alphas[scheme]}{hex_[1:]}" if alphas else hex_
             out.append(f'            <SolidColorBrush x:Key="{name}" Color="{color}" />')
+        for name, token in WINDOWS_TOKEN_KEYS:
+            out.append(f'            <SolidColorBrush x:Key="{name}" Color="{scheme_hex(tokens, token, scheme)}" />')
         out.append("        </ResourceDictionary>")
     out.append("")
     out.append("        <!-- High contrast: the system's colours, as in DesignSystem.xaml. -->")
@@ -1546,6 +1554,8 @@ def render_windows(tokens: dict) -> str:
         out.append(f'            <StaticResource x:Key="Tc{pascal(role)}Brush" ResourceKey="{stock}" />')
     out.append("")
     for name, _, _ in WINDOWS_LEGACY_KEYS:
+        out.append(f'            <StaticResource x:Key="{name}" ResourceKey="TextFillColorPrimaryBrush" />')
+    for name, _ in WINDOWS_TOKEN_KEYS:
         out.append(f'            <StaticResource x:Key="{name}" ResourceKey="TextFillColorPrimaryBrush" />')
     out.append("        </ResourceDictionary>")
     out.append("    </ResourceDictionary.ThemeDictionaries>")

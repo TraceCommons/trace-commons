@@ -42,6 +42,7 @@
             <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#99F5C142" />
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#FF6B6B" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#FF9494" />
+            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#A9A9B0" />
         </ResourceDictionary>
 
         <!-- Light. -->
@@ -69,6 +70,7 @@
             <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8CA8690F" />
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D0342C" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#A3221C" />
+            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#8A8A90" />
         </ResourceDictionary>
 
         <!-- High contrast: the system's colours, as in DesignSystem.xaml. -->
@@ -96,6 +98,7 @@
             <StaticResource x:Key="TcGoldAttentionBorderBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcCoralBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcCoralTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcStatusOffBrush" ResourceKey="TextFillColorPrimaryBrush" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>

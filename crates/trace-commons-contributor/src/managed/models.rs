@@ -192,7 +192,7 @@ fn preference(tool: ToolId) -> Option<(&'static str, &'static str)> {
     match tool {
         ToolId::Claude => Some(("anthropic/claude-sonnet-", "anthropic/")),
         ToolId::Codex => Some(("openai/gpt-", "openai/")),
-        ToolId::Opencode => None,
+        ToolId::Opencode | ToolId::RedTeam => None,
     }
 }
 
@@ -391,7 +391,7 @@ fn tier_background(tool: ToolId, tier: ModelTier, models: &[ChatModel]) -> Optio
     let same = models.iter().filter(move |m| m.tier == Some(tier));
     let haiku = match tool {
         ToolId::Claude => newest_in("anthropic/claude-haiku-", same.clone()),
-        ToolId::Codex | ToolId::Opencode => None,
+        ToolId::Codex | ToolId::Opencode | ToolId::RedTeam => None,
     };
     haiku.or_else(|| listed(BACKGROUND_PREFERRED, same))
 }

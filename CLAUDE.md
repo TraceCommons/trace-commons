@@ -26,12 +26,31 @@ holds both sides of Trace Commons.
 
 **Native SwiftUI (`macos/`) is the main client on macOS** (#1173 D1): no new
 Tauri work on macOS, and the Tauri app is retired there once the native
-screens match. Windows stays on Tauri, frozen, until macOS ships (#1173
-D13, a default for now). The Linux GTK app is unfrozen for development
-(owner, 2026-11-11): GTK work is in scope again. Its releases stay off until
-it catches up, so an `app-v*` tag still builds macOS only. Native macOS is
-also the lead client and the parity target: GTK, Windows and Tauri match its
-terminology, states, flows and affordances, and Tauri drift is low priority.
+screens match. The WinUI app in `windows/` is unfrozen for Mac-parity work
+(owner, 2026-11-18) and replaces Tauri on Windows once it matches; Tauri on
+Windows retires then, as on macOS. The Linux GTK app reached Mac parity on
+`main` (#2159-#2188) and is unreleased: its releases stay off, so an
+`app-v*` tag still builds macOS only. Native macOS is also the lead client
+and the parity target: GTK, Windows and Tauri match its terminology, states,
+flows and affordances, and Tauri drift is low priority.
+
+### Client parity work
+
+- **Windows.** The parity spec and one-pass checklist are
+  `docs/superpowers/specs/2026-11-18-windows-mac-parity-design.md` and
+  `docs/superpowers/specs/2026-11-18-windows-one-pass-checklist.md`. They are
+  on branch `windows-parity-spec` until #2192 lands. The Windows test boxes
+  run on Azure: `windows/scripts/provision-azure-vm.sh`,
+  `windows/scripts/win-exec-az.sh` and `windows/docs/dev-vm.md`, all on #2194
+  until it lands. Windows render tests (Win2D, in an interactive session) are
+  not on `main` yet.
+- **Linux.** GTK now has the Mac three-pane Monitor window, the trace map and
+  its animated transfers, the Mac glass tokens and glyphs, the first run and
+  its animated stage, the consent controls, Home decoration and tool tiles,
+  and the edge rail and menu-bar panel, plus an Omarchy skin and Flatpak
+  host-daemon attach. The GCP Linux test VMs are described in
+  `linux/README.md`. The `linux-shell desktop integration (weston + portal)`
+  job renders the app under headless weston.
 
 Ironclaw is a separate project and does not live in this tree; the surface it
 shares with this repo is `crates/trace-commons-protocol`. There is **no
@@ -407,10 +426,10 @@ carries the full statement and working rules; the essentials are repeated here.
 - **MIT OR Apache-2.0**: everything else (`-protocol`, `-contributor`,
   `-contributor-sources`, `-contributor-insights`, `-contributor-platform`,
   `-contributor-ffi`, `-contributor-gtk`, `-operator-client`, `-mark`,
-  `-build-info`, `-attestation`, the unpublished `-client-server-tests`,
-  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`), and the 11
-  `ironwire_*` crates (copyright NEAR AI, imported from nearai/ironwire; see
-  `docs/ironwire/README.md`)). The shipped
+  `-build-info`, `-attestation`, the unpublished `-client-server-tests`, and
+  `tauri-desktop/src-tauri` (`trace-commons-tauri-desktop`). IronWire
+  (`ironwire_*`) is a git dependency on `nearai/ironwire` (copyright NEAR AI,
+  `MIT OR Apache-2.0`; see `docs/ironwire/README.md`). The shipped
   clients can be embedded in proprietary agent harnesses and must stay
   permissive.
 

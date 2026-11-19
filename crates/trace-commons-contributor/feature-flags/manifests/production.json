@@ -6,6 +6,7 @@
   "expires_at": "2026-11-06T00:00:00Z",
   "flags": {
     "claude_desktop_private_ai": false,
-    "insights_skills": false
+    "insights_skills": false,
+    "red_team_sessions": false
   }
 }

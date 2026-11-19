@@ -933,6 +933,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "dcap-qvl"
+version = "0.7.0"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=4323ab4f6ee7682a7c96cc0e2cf64f3ac2b9d2c5#4323ab4f6ee7682a7c96cc0e2cf64f3ac2b9d2c5"
+dependencies = [
+ "anyhow",
+ "asn1_der",
+ "base64 0.23.1",
+ "borsh",
+ "byteorder",
+ "chrono",
+ "const-oid 0.10.2",
+ "dcap-qvl-webpki",
+ "der 0.8.1",
+ "derive_more 2.1.1",
+ "hex",
+ "log",
+ "parity-scale-codec",
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "scale-info",
+ "serde",
+ "serde-human-bytes",
+ "serde_json",
+ "urlencoding",
+ "x509-cert",
+]
+
+[[package]]
 name = "dcap-qvl-webpki"
 version = "0.103.15+dcap.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2013,9 +2042,9 @@ dependencies = [
 
 [[package]]
 name = "http-body-util"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f41fd6a08e4d4ec69df65976da761afd5ad5e58a9d4acb46bd1c953a9e3ff2"
+checksum = "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2047,9 +2076,9 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "2c3e324da4c95177d6291d4c8730197c0d1822f8a9766814a4a44fa5ab797c9c"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2085,16 +2114,17 @@ dependencies = [
 
 [[package]]
 name = "hyper-util"
-version = "0.1.20"
+version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+checksum = "ddc03d96684f9226b8a787cdb71488417b53ab5ea8fdb1dac946cb9431cc8bff"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "futures-channel",
  "futures-util",
  "http",
  "http-body",
+ "httparse",
  "hyper",
  "ipnet",
  "libc",
@@ -2295,7 +2325,7 @@ checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 [[package]]
 name = "ironclaw_common"
 version = "0.4.2"
-source = "git+https://github.com/nearai/ironclaw?branch=main#6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9"
+source = "git+https://github.com/nearai/ironclaw?branch=main#b0b999d96781516ee05e6ba961d6f3ead900da96"
 dependencies = [
  "base64 0.23.1",
  "chrono-tz",
@@ -2306,15 +2336,32 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "thiserror 2.0.20",
  "tracing",
 ]
 
 [[package]]
+name = "ironclaw_host_api"
+version = "0.1.0"
+source = "git+https://github.com/nearai/ironclaw?branch=main#b0b999d96781516ee05e6ba961d6f3ead900da96"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "ironclaw_llm"
 version = "0.1.0"
-source = "git+https://github.com/nearai/ironclaw?branch=main#6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9"
+source = "git+https://github.com/nearai/ironclaw?branch=main#b0b999d96781516ee05e6ba961d6f3ead900da96"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2326,6 +2373,7 @@ dependencies = [
  "futures",
  "hex",
  "ironclaw_common",
+ "ironclaw_host_api",
  "ironclaw_safety",
  "open",
  "rand 0.10.2",
@@ -2337,7 +2385,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2349,7 +2397,7 @@ dependencies = [
 [[package]]
 name = "ironclaw_safety"
 version = "0.2.2"
-source = "git+https://github.com/nearai/ironclaw?branch=main#6dccbfbcbddfdfb53c11d3876f94bf3e716b55f9"
+source = "git+https://github.com/nearai/ironclaw?branch=main#b0b999d96781516ee05e6ba961d6f3ead900da96"
 dependencies = [
  "aho-corasick",
  "regex",
@@ -2363,6 +2411,7 @@ dependencies = [
 [[package]]
 name = "ironwire_agents"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "dirs",
  "ironwire_catalog",
@@ -2374,6 +2423,7 @@ dependencies = [
 [[package]]
 name = "ironwire_catalog"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "chrono",
  "ed25519-dalek",
@@ -2388,6 +2438,7 @@ dependencies = [
 [[package]]
 name = "ironwire_core"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "chrono",
  "dirs",
@@ -2401,6 +2452,7 @@ dependencies = [
 [[package]]
 name = "ironwire_creds"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2420,6 +2472,7 @@ dependencies = [
 [[package]]
 name = "ironwire_ledger"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "chrono",
  "ironclaw_common",
@@ -2435,6 +2488,7 @@ dependencies = [
 [[package]]
 name = "ironwire_privacy"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "getrandom 0.4.3",
  "hmac 0.12.1",
@@ -2450,6 +2504,7 @@ dependencies = [
 [[package]]
 name = "ironwire_proxy"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2485,6 +2540,7 @@ dependencies = [
 [[package]]
 name = "ironwire_translate"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "ironwire_core",
  "serde",
@@ -2496,6 +2552,7 @@ dependencies = [
 [[package]]
 name = "ironwire_update"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "chrono",
  "semver",
@@ -2508,6 +2565,7 @@ dependencies = [
 [[package]]
 name = "ironwire_upstream"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2533,6 +2591,7 @@ dependencies = [
 [[package]]
 name = "ironwire_usage"
 version = "0.1.0"
+source = "git+https://github.com/nearai/ironwire?rev=b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6#b77dafca667ace9cd3b839df84a2ef0eeb7ffdc6"
 dependencies = [
  "chrono",
  "ironwire_ledger",
@@ -3585,6 +3644,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -3675,9 +3735,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.33.0"
+version = "0.36.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a529b9b72f51a46a9ea87c9ba8031e36593de7a89461983f01d8c24462f9eb06"
+checksum = "9ac7d75266ac1f79b1faeff611c85cb40be00a0a983db10036591424f0433dc1"
 dependencies = [
  "as-any",
  "async-stream",
@@ -3727,6 +3787,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
 dependencies = [
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "rts"
+version = "0.1.5"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=4323ab4f6ee7682a7c96cc0e2cf64f3ac2b9d2c5#4323ab4f6ee7682a7c96cc0e2cf64f3ac2b9d2c5"
+dependencies = [
+ "apple-native-keyring-store",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "dcap-qvl 0.7.0",
+ "ed25519-dalek",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ironwire_proxy",
+ "ironwire_update",
+ "ironwire_upstream",
+ "keyring-core",
+ "libc",
+ "reqwest 0.12.28",
+ "ring",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-webpki",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "url",
+ "zbus-secret-service-keyring-store",
+ "zeroize",
 ]
 
 [[package]]
@@ -3816,9 +3912,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-native-certs"
-version = "0.8.4"
+version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+checksum = "4a073f5dc7469f984c52ad2752b63b0807745133b6de880b7b64c1ac4c48aec4"
 dependencies = [
  "openssl-probe",
  "rustls-pki-types",
@@ -4000,7 +4096,7 @@ dependencies = [
  "num",
  "once_cell",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "zbus",
 ]
 
@@ -4087,10 +4183,11 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash",
  "indexmap",
  "itoa",
  "memchr",
@@ -4172,9 +4269,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -4732,7 +4829,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 name = "trace-commons-attestation"
 version = "0.1.0"
 dependencies = [
- "dcap-qvl",
+ "dcap-qvl 0.6.6",
  "hex",
  "k256",
  "ring",
@@ -4765,6 +4862,7 @@ dependencies = [
  "notify",
  "reqwest 0.12.28",
  "ring",
+ "rts",
  "rusqlite",
  "serde",
  "serde_json",
@@ -5126,9 +5224,9 @@ dependencies = [
 
 [[package]]
 name = "want"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
+checksum = "ec4cdd0dd910afe868b7ef477227d8d538b46b3075031afee8a9f2acb0a2ed0b"
 dependencies = [
  "try-lock",
 ]

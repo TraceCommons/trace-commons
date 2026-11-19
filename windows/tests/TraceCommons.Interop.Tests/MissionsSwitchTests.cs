@@ -31,8 +31,10 @@ public sealed class MissionsSwitchTests
         string markup = Read("MainWindow.xaml.txt");
         string source = Read("MainViewModel.cs.txt");
 
+        // Mission drafts is Home's page now (spec W2-D1 (a)); Home's way to it
+        // follows the switch.
         Assert.Matches(
-            @"Content=""Mission drafts""[^>]*Visibility=""\{x:Bind ViewModel\.MissionsShown, Mode=OneWay\}""",
+            @"x:Name=""HomeOpenMissionDrafts""[^>]*Visibility=""\{x:Bind ViewModel\.MissionsShown, Mode=OneWay\}""",
             markup);
         Assert.Contains("bool missionsShown = settings.MissionsShown;", source, StringComparison.Ordinal);
         Assert.Contains("_missionsShown && _pane == MainPane.MissionDrafts", source, StringComparison.Ordinal);

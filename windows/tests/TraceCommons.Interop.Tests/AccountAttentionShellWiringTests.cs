@@ -56,7 +56,7 @@ public class AccountAttentionShellWiringTests
 
         Assert.Contains(
             "settings.SetUpAgainRequested += async (_, _) =>",
-            ShellSource("TraceCommons.App/MainWindow.xaml.cs"),
+            ShellSource("TraceCommons.App/MainWindow.Shell.cs"),
             StringComparison.Ordinal);
         Assert.Equal("unenroll", DaemonProtocol.Methods.Unenroll);
     }

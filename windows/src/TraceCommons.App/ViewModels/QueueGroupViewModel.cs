@@ -37,6 +37,12 @@ public sealed class QueueGroupViewModel
     public string ProjectLabel => _group.ProjectLabel;
 
     /// <summary>
+    /// The folder's own name. A ListViewItem's accessible name falls back to
+    /// its item's ToString(), which was this type's full name.
+    /// </summary>
+    public override string ToString() => ProjectLabel;
+
+    /// <summary>
     /// The project's folder, <c>~</c>-abbreviated, beneath the label.
     /// </summary>
     /// <remarks>

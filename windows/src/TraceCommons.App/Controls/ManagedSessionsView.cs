@@ -38,9 +38,36 @@ public sealed class ManagedSessionsView : UserControl
         _host = host;
         _signIn = signIn;
         Content = _root;
-        Loaded += async (_, _) => { await RefreshAsync(); _timer.Start(); };
-        Unloaded += (_, _) => _timer.Stop();
+        // The 10 s poll stops while the window is hidden to the tray or
+        // minimised (WindowClocks), and resumes with a read when it is back.
+        // The subscription lives while the view is loaded: WindowClocks is
+        // static, and a handler left on it would keep this view alive.
+        Loaded += async (_, _) =>
+        {
+            WindowClocks.Changed -= OnClocksChanged;
+            WindowClocks.Changed += OnClocksChanged;
+            await RefreshAsync();
+            if (WindowClocks.Running) _timer.Start();
+        };
+        Unloaded += (_, _) =>
+        {
+            WindowClocks.Changed -= OnClocksChanged;
+            _timer.Stop();
+        };
         _timer.Tick += async (_, _) => await RefreshAsync();
+    }
+
+    private async void OnClocksChanged(bool running)
+    {
+        if (!running)
+        {
+            _timer.Stop();
+        }
+        else if (IsLoaded)
+        {
+            await RefreshAsync();
+            _timer.Start();
+        }
     }
 
     private string T(string key) => _snapshot?.Text(key) ?? string.Empty;

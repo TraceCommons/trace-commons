@@ -978,7 +978,7 @@ impl SourceRoots {
 
     /// Explicit per-session exports do not enable broad native discovery.
     pub fn with_managed_native_root(mut self, name: &'static str, root: PathBuf) -> Self {
-        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX) && root.is_dir() {
+        if matches!(name, SOURCE_CLAUDE_CODE | SOURCE_CODEX | SOURCE_OPENCODE) && root.is_dir() {
             let paths = self.managed_native.entry(name).or_default();
             paths.push(root);
             paths.sort();
@@ -1222,6 +1222,7 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
 
     for spec in NATIVE_SOURCES {
         if spec.name == SOURCE_OPENCODE {
+            let mut opencode_sources: Vec<Box<dyn TraceSource>> = Vec::new();
             if let Some(managed) = &roots.managed_opencode {
                 let source = match roots.declared.get(spec.name) {
                     Some(SourceDeclaration::Watch { path }) => {
@@ -1229,9 +1230,27 @@ pub fn all_sources(roots: &SourceRoots) -> Vec<Box<dyn TraceSource>> {
                     }
                     _ => opencode::OpenCodeSource::managed(managed.clone()),
                 };
-                sources.push(Box::new(source));
-                continue;
+                opencode_sources.push(Box::new(source));
+            } else if let Some(SourceDeclaration::Watch { path }) = roots.declared.get(spec.name) {
+                opencode_sources.push(Box::new(opencode::OpenCodeSource::new(path.clone())));
             }
+            if let Some(managed_dbs) = roots.managed_native.get(spec.name) {
+                for dir in managed_dbs {
+                    let db = dir.join("opencode.db");
+                    if db.is_file() {
+                        opencode_sources.push(Box::new(opencode::OpenCodeSource::new(db)));
+                    }
+                }
+            }
+            match opencode_sources.len() {
+                0 => {}
+                1 => sources.push(opencode_sources.remove(0)),
+                _ => sources.push(Box::new(multi_root::MultiRootSource::new(
+                    spec.name,
+                    opencode_sources,
+                ))),
+            }
+            continue;
         }
         let primary = match roots.declared.get(spec.name) {
             Some(SourceDeclaration::Off) => None,

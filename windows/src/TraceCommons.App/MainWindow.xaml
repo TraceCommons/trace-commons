@@ -1,17 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    The queue window, drawn to the "1a Main window / queue" frame of the design
-    spec (section 5.1, Windows column).
+    The Monitor window: the Mac's three-pane window
+    (macos/Sources/TCDesign/Components/ThreePane.swift, GlassThreePane;
+    TraceCommonsApp/Views/MonitorWindowView.swift) on Windows.
 
-    Where the design shows a field this app cannot yet fill, the element is
-    left out rather than filled with the mockup's sample text. The mockup's
-    session names, byte counts and match counts are fixtures; its labels,
-    headings and disclaimers are product copy and appear here verbatim.
+    The toolbar row is the title bar, with the system caption buttons: the
+    mark, the four tabs, the staging tag, the pane toggles and the gear. Under
+    it the main pane (the tab, its breadcrumb and its notices), the map (W3)
+    and the inspector. Opening or closing a pane grows or shrinks the window on
+    its right and slides it left at the work area's edge (MonitorPaneLayout,
+    MonitorWindowGrowth). Settings is its own window (SettingsWindow).
 
-    The frame is now drawn in full: header, health banner, session cards with
-    their manifest strip and per row actions, the recovery bar, the standing
-    disclaimer and the week band. What each piece is still missing, and why,
-    is recorded beside that piece rather than here.
+    Every word the shell itself draws is the core's, set from code through
+    MonitorWords. The window title is the app's name from brand.rs.
 
     XML comments cannot contain a double hyphen, so the prose here uses commas
     and parentheses where the C# files use dashes.
@@ -25,29 +26,18 @@
     xmlns:controls="using:TraceCommons.App.Controls"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    mc:Ignorable="d"
-    Title="Near.ai">
+    mc:Ignorable="d">
 
-    <Grid RowDefinitions="Auto,*" Background="{ThemeResource TcWindowBackgroundBrush}">
+    <Grid x:Name="WindowRoot" RowDefinitions="Auto,*" Background="{ThemeResource TcWindowBackgroundBrush}">
 
         <!--
-            In app shortcuts: one per rail destination, plus the switch on the
-            fourth.
-
-            KeyboardAccelerator rather than RegisterHotKey, and the difference
-            is the whole point. These fire only while this window has focus. A
-            global hot key takes a chord away from every other application on
-            the machine whether or not this app is running, which was cut
-            deliberately and is not to be reinstated here.
+            The keyboard map (spec W2-D5 (a)) is registered from code
+            (MainWindow.RegisterAccelerators): Ctrl+1 to Ctrl+4 open the tab at
+            that position in the strip, Home first; Ctrl+comma opens Settings;
+            Ctrl+Shift+M sets Private AI. In app only, on this window's own
+            tree: a global hot key would take a chord from every other app.
         -->
-        <Grid.KeyboardAccelerators>
-            <KeyboardAccelerator Modifiers="Control" Key="Number1" Invoked="OnQueueAccelerator" />
-            <KeyboardAccelerator Modifiers="Control" Key="Number2" Invoked="OnHistoryAccelerator" />
-            <KeyboardAccelerator Modifiers="Control" Key="Number3" Invoked="OnPrivateInferenceAccelerator" />
-            <KeyboardAccelerator Modifiers="Control" Key="Number4" Invoked="OnSettingsAccelerator" />
-            <KeyboardAccelerator Modifiers="Control" Key="Number5" Invoked="OnInsightsAccelerator" />
-            <KeyboardAccelerator Modifiers="Control,Shift" Key="M" Invoked="OnTogglePrivateInferenceAccelerator" />
-        </Grid.KeyboardAccelerators>
+
 
         <Grid.Resources>
             <!--
@@ -69,501 +59,350 @@
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="HorizontalContentAlignment" Value="Stretch" />
             </Style>
+
+            <!-- The toolbar's toggles and the gear: a quiet button, the
+                 checked state a scrim, as the Mac's capsule draws it. -->
+            <Style x:Key="TcToolbarToggleStyle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="8,5" />
+                <Setter Property="MinWidth" Value="32" />
+                <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+            </Style>
+            <Style x:Key="TcToolbarButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="8,5" />
+                <Setter Property="MinWidth" Value="32" />
+                <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+            </Style>
+            <!-- A tab: its title, with a rule under the one shown
+                 (GlassRuleTabs, MonitorWindowView.swift:979). -->
+            <Style x:Key="TcTabStyle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderThickness" Value="0" />
+                <Setter Property="Padding" Value="10,0" />
+                <Setter Property="VerticalAlignment" Value="Stretch" />
+                <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+            </Style>
         </Grid.Resources>
 
         <!--
-            Title bar: 34px of chrome holding the 16px mark and the app name.
-
-            The window extends its content into the title bar and hands this
-            grid over as the drag region (see MainWindow.xaml.cs), which is the
-            supported way to put a mark in a WinUI title bar. The minimise,
-            maximise and close cells the spec draws are left to the system
-            rather than redrawn here: real caption buttons carry snap layouts,
-            the window menu and the platform's own accessibility behaviour,
-            and three XAML cells that only look like them carry none of it.
-            The right-hand padding is the space they occupy.
+            The toolbar row, extended into the title bar (decided for W2): the
+            Mac's top row of the main pane (MonitorWindowView.swift:919-971),
+            the staging tag, the capsule of pane toggles and the Settings
+            button, with the N where Windows puts a window's mark. The system
+            draws the caption buttons in the right inset; this row keeps that
+            room free (RightInsetColumn, set from the title bar's own
+            RightInset). The toggles and the gear take the pointer through
+            passthrough regions set from code; the rest of the row drags the
+            window.
         -->
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
-              Height="34"
-              Padding="12,0,144,0"
-              ColumnDefinitions="Auto,Auto"
+              Height="48"
               Background="{ThemeResource TcChromeBackgroundBrush}">
-            <controls:BrandMark Grid.Column="0"
-                                Size="16"
-                                Margin="0,0,8,0"
-                                VerticalAlignment="Center" />
-            <TextBlock Grid.Column="1"
-                       Text="Near.ai"
-                       Style="{StaticResource TcChromeTitleTextStyle}"
-                       VerticalAlignment="Center" />
-        </Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="LeftInsetColumn" Width="0" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition x:Name="RightInsetColumn" Width="138" />
+            </Grid.ColumnDefinitions>
 
-        <!--
-            The rail spans both rows; the content column is split so the health
-            banner can sit above whichever pane is showing. See the banner
-            itself for why it lives here rather than inside the queue.
-        -->
-        <Grid Grid.Row="1" ColumnDefinitions="184,*" RowDefinitions="Auto,Auto,*">
+            <!-- The NEAR AI N (G-3 (a)), from the Mac's path data
+                 (NearMarkPath). Decorative: not a tab stop, no name. -->
+            <Path x:Name="TitleMark"
+                  Grid.Column="1"
+                  Width="16" Height="16"
+                  Margin="14,0,12,0"
+                  Stretch="Uniform"
+                  VerticalAlignment="Center"
+                  Fill="{ThemeResource TcMarkAccentBrush}"
+                  IsHitTestVisible="False"
+                  AutomationProperties.AccessibilityView="Raw" />
 
-            <!--
-                Nav rail.
+            <!-- The staging tag (tc_channel_window_label); empty and
+                 collapsed on a production build. -->
+            <TextBlock x:Name="ChannelTag"
+                       Grid.Column="3"
+                       Margin="0,0,10,0"
+                       VerticalAlignment="Center"
+                       Style="{StaticResource TcCaptionTextStyle}"
+                       Foreground="{ThemeResource TcGoldTextBrush}"
+                       Visibility="Collapsed" />
 
-                Four destinations now that there are four views. Settings
-                carries only the public profile panel so far; the rest of what
-                the spec puts on that screen is absent from the screen rather
-                than drawn disabled, for the same reason the row itself was
-                absent until now. A rail is a promise about where the app can
-                go, and a row that leads nowhere would be the window's first
-                untrue statement.
-
-                Each row is a Button with its chrome removed rather than a
-                Border with a tapped handler. The rail is the app's primary
-                navigation, and a Button is what carries keyboard focus, the
-                invoke pattern and a narrator announcement for free; a Border
-                that merely looks like one carries none of it.
-            -->
-            <Border Grid.Column="0"
-                    Grid.RowSpan="2"
-                    Padding="8,10"
-                    Background="{ThemeResource TcChromeBackgroundBrush}">
-                <StackPanel VerticalAlignment="Top" Spacing="4">
-
-                    <Button HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="0"
-                            Click="OnShowQueue">
-                        <Grid>
-                            <Border Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                                    Background="{ThemeResource TcSurfaceScrimBrush}"
-                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
-                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
-                                <!-- The monitor glyph from the spec's nav
-                                     inventory, on its own 16-unit grid. The
-                                     spec gives the geometry but not a stroke
-                                     width for nav glyphs; 1.5 matches the
-                                     other 16-unit icons it does specify. -->
-                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
-                                    <Canvas Width="16" Height="16">
-                                        <Rectangle Canvas.Left="2" Canvas.Top="3.5"
-                                                   Width="12" Height="9.5"
-                                                   RadiusX="1.5" RadiusY="1.5"
-                                                   Stroke="{ThemeResource TcGreenTextBrush}"
-                                                   StrokeThickness="1.5" />
-                                        <Path Data="M2 9h3l1.5 2h3L11 9h3"
-                                              Stroke="{ThemeResource TcGreenTextBrush}"
-                                              StrokeThickness="1.5" />
-                                    </Canvas>
-                                </Viewbox>
-                                <TextBlock Text="Waiting"
-                                           Style="{StaticResource TcNavLabelTextStyle}"
-                                           VerticalAlignment="Center" />
-
-                                <!--
-                                    The shield, in three states, and the count
-                                    BESIDE it rather than replaced by it. The
-                                    ask was to swap the count for an icon; at
-                                    149 waiting sessions the count is the
-                                    signal a contributor is actually reading,
-                                    and an icon meaning "some" is a downgrade
-                                    exactly at the scale that produced the
-                                    feedback. The shield adds the state the
-                                    count could never carry: something waiting
-                                    matched nothing, or was trimmed to fit.
-
-                                    Three elements each bound to the condition
-                                    under which it belongs on screen, rather
-                                    than one with a converted foreground, which
-                                    is how every other either/or on this window
-                                    is drawn. QueueShield.For decides which,
-                                    in TraceCommons.Interop, where it is
-                                    tested.
-                                -->
-                                <FontIcon Glyph="&#xE72E;"
-                                          FontSize="12"
-                                          Visibility="{x:Bind ViewModel.ShieldIsClear, Mode=OneWay}"
-                                          Foreground="{ThemeResource TcInkTertiaryBrush}"
-                                          VerticalAlignment="Center" />
-                                <FontIcon Glyph="&#xE72E;"
-                                          FontSize="12"
-                                          Visibility="{x:Bind ViewModel.ShieldIsWaiting, Mode=OneWay}"
-                                          Foreground="{ThemeResource TcGreenTextBrush}"
-                                          VerticalAlignment="Center" />
-                                <FontIcon Glyph="&#xE7BA;"
-                                          FontSize="12"
-                                          Visibility="{x:Bind ViewModel.ShieldIsAttention, Mode=OneWay}"
-                                          Foreground="{ThemeResource TcGoldTextBrush}"
-                                          VerticalAlignment="Center" />
-
-                                <TextBlock Text="{x:Bind ViewModel.QueueCountText, Mode=OneWay}"
-                                           ToolTipService.ToolTip="{x:Bind ViewModel.QueueCountToolTip, Mode=OneWay}"
-                                           Visibility="{x:Bind ViewModel.HasQueueCount, Mode=OneWay}"
-                                           Style="{StaticResource TcMonoBadgeTextStyle}"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
-
-                            <!-- The selection bar: 3px, inset 8px top and bottom. -->
-                            <Rectangle Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                                       Width="3"
-                                       HorizontalAlignment="Left"
-                                       Margin="0,8,0,8"
-                                       RadiusX="2" RadiusY="2"
-                                       Fill="{ThemeResource TcGreenFillBrush}" />
-                        </Grid>
-                    </Button>
-
-                    <Button HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="0"
-                            Click="OnShowHistory">
-                        <Grid>
-                            <Border Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
-                                    Background="{ThemeResource TcSurfaceScrimBrush}"
-                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
-                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
-                                <!-- A clock face, on the same 16-unit grid as
-                                     the monitor above and at the same stroke
-                                     width. History is a record of what has
-                                     already happened. -->
-                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
-                                    <Canvas Width="16" Height="16">
-                                        <Ellipse Canvas.Left="2" Canvas.Top="2"
-                                                 Width="12" Height="12"
-                                                 Stroke="{ThemeResource TcGreenTextBrush}"
-                                                 StrokeThickness="1.5" />
-                                        <Path Data="M8 4.8V8l2.3 1.4"
-                                              Stroke="{ThemeResource TcGreenTextBrush}"
-                                              StrokeThickness="1.5" />
-                                    </Canvas>
-                                </Viewbox>
-                                <TextBlock Text="History"
-                                           Style="{StaticResource TcNavLabelTextStyle}"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
-
-                            <Rectangle Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}"
-                                       Width="3"
-                                       HorizontalAlignment="Left"
-                                       Margin="0,8,0,8"
-                                       RadiusX="2" RadiusY="2"
-                                       Fill="{ThemeResource TcGreenFillBrush}" />
-                        </Grid>
-                    </Button>
-
-                    <!--
-                        Model calls.
-
-                        The label is NOT typed here. It arrives from
-                        crates/trace-commons-contributor/src/private_inference_copy.rs
-                        across the C ABI, like every other word on this
-                        surface: the rail label is the one word a contributor
-                        navigates by, and a shell that spelled it itself would
-                        go on spelling the old one after a rename in the Rust.
-
-                        The badge is bound to the reported STATE, never to the
-                        switch. The switch says what was asked for; the badge
-                        says what is true, and the two disagree exactly when it
-                        matters (the switch on, the port already taken). Only
-                        the clear tone gets the green dot; attention and
-                        refusal get the gold one, which is visibly a different
-                        claim; everything else gets nothing at all.
-                    -->
-                    <Button HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="0"
-                            Click="OnShowPrivateInference">
-                        <Grid>
-                            <Border Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}"
-                                    Background="{ThemeResource TcSurfaceScrimBrush}"
-                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
-                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
-                                <!-- Two arrows passing each other, on the same
-                                     16 unit grid as the three above and at the
-                                     same stroke width. A call arriving and an
-                                     answer going back, which is what this
-                                     screen is about. Deliberately not the
-                                     monitor or the clock: a rail that reused a
-                                     glyph would be ambiguous at a glance. -->
-                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
-                                    <Canvas Width="16" Height="16">
-                                        <Path Data="M2.5 5.5h9M9 3l2.5 2.5L9 8"
-                                              Stroke="{ThemeResource TcGreenTextBrush}"
-                                              StrokeThickness="1.5" />
-                                        <Path Data="M13.5 10.5h-9M7 8l-2.5 2.5L7 13"
-                                              Stroke="{ThemeResource TcGreenTextBrush}"
-                                              StrokeThickness="1.5" />
-                                    </Canvas>
-                                </Viewbox>
-                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceDestination, Mode=OneWay}"
-                                           Style="{StaticResource TcNavLabelTextStyle}"
-                                           VerticalAlignment="Center" />
-
-                                <Ellipse Width="7" Height="7"
-                                         Visibility="{x:Bind ViewModel.PrivateInferenceIsWorking, Mode=OneWay}"
-                                         Fill="{ThemeResource TcGreenFillBrush}"
-                                         VerticalAlignment="Center" />
-                                <FontIcon Glyph="&#xE7BA;"
-                                          FontSize="12"
-                                          Visibility="{x:Bind ViewModel.PrivateInferenceNeedsAttention, Mode=OneWay}"
-                                          Foreground="{ThemeResource TcGoldTextBrush}"
-                                          VerticalAlignment="Center" />
-                            </StackPanel>
-
-                            <Rectangle Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}"
-                                       Width="3"
-                                       HorizontalAlignment="Left"
-                                       Margin="0,8,0,8"
-                                       RadiusX="2" RadiusY="2"
-                                       Fill="{ThemeResource TcGreenFillBrush}" />
-                        </Grid>
-                    </Button>
-
-                    <Button Content="Insights" Click="OnShowInsights" HorizontalAlignment="Stretch" />
-                    <Button Content="Mission drafts" Click="OnShowMissionDrafts" HorizontalAlignment="Stretch"
-                            Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}" />
-
-                    <Button HorizontalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Padding="0"
-                            Click="OnShowSettings">
-                        <Grid>
-                            <Border Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}"
-                                    Background="{ThemeResource TcSurfaceScrimBrush}"
-                                    CornerRadius="{StaticResource TcControlCornerRadius}" />
-                            <StackPanel Orientation="Horizontal" Spacing="10" Padding="10,7">
-                                <!-- Sliders, on the same 16 unit grid as the
-                                     two above and at the same stroke width.
-                                     Settings is a set of positions rather
-                                     than a moment. The knobs are filled with
-                                     the rail's own ground so each one reads
-                                     as sitting on its track. -->
-                                <Viewbox Width="13" Height="13" VerticalAlignment="Center">
-                                    <Canvas Width="16" Height="16">
-                                        <Path Data="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"
-                                              Stroke="{ThemeResource TcGreenTextBrush}"
-                                              StrokeThickness="1.5" />
-                                        <Ellipse Canvas.Left="8.5" Canvas.Top="3"
-                                                 Width="3" Height="3"
-                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
-                                                 Stroke="{ThemeResource TcGreenTextBrush}"
-                                                 StrokeThickness="1.5" />
-                                        <Ellipse Canvas.Left="4" Canvas.Top="6.5"
-                                                 Width="3" Height="3"
-                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
-                                                 Stroke="{ThemeResource TcGreenTextBrush}"
-                                                 StrokeThickness="1.5" />
-                                        <Ellipse Canvas.Left="9.5" Canvas.Top="10"
-                                                 Width="3" Height="3"
-                                                 Fill="{ThemeResource TcChromeBackgroundBrush}"
-                                                 Stroke="{ThemeResource TcGreenTextBrush}"
-                                                 StrokeThickness="1.5" />
-                                    </Canvas>
-                                </Viewbox>
-                                <TextBlock Text="Settings"
-                                           Style="{StaticResource TcNavLabelTextStyle}"
-                                           VerticalAlignment="Center" />
-                            </StackPanel>
-
-                            <Rectangle Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}"
-                                       Width="3"
-                                       HorizontalAlignment="Left"
-                                       Margin="0,8,0,8"
-                                       RadiusX="2" RadiusY="2"
-                                       Fill="{ThemeResource TcGreenFillBrush}" />
-                        </Grid>
-                    </Button>
+            <!-- One capsule of the Graph, Map and Inspector toggles
+                 (MonitorWindowView.swift:923-940). The graph footer and the
+                 map land with their content; until then their toggles are
+                 collapsed, not drawn as dead controls. -->
+            <Border x:Name="ToolbarCapsule"
+                    Grid.Column="4"
+                    VerticalAlignment="Center"
+                    Margin="0,0,6,0"
+                    Padding="2"
+                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{StaticResource TcPillCornerRadius}">
+                <StackPanel Orientation="Horizontal" Spacing="2">
+                    <StackPanel.Resources>
+                        <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcSurfaceScrimBrush" />
+                        <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcSurfaceScrimBrush" />
+                        <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcSurfaceScrimBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                    </StackPanel.Resources>
+                    <ToggleButton x:Name="GraphToggle"
+                                  Style="{StaticResource TcToolbarToggleStyle}"
+                                  Visibility="Collapsed">
+                        <FontIcon Glyph="&#xE9D2;" FontSize="14" />
+                    </ToggleButton>
+                    <ToggleButton x:Name="MapToggle"
+                                  Style="{StaticResource TcToolbarToggleStyle}"
+                                  Visibility="Collapsed">
+                        <FontIcon Glyph="&#xE826;" FontSize="14" />
+                    </ToggleButton>
+                    <ToggleButton x:Name="InspectorToggle"
+                                  Style="{StaticResource TcToolbarToggleStyle}"
+                                  Click="OnInspectorToggleClick">
+                        <FontIcon Glyph="&#xE89F;" FontSize="14" />
+                    </ToggleButton>
                 </StackPanel>
             </Border>
 
-            <!--
-                The update offer.
+            <!-- The gear: Settings, in its own window. -->
+            <Button x:Name="SettingsGear"
+                    Grid.Column="5"
+                    VerticalAlignment="Center"
+                    Style="{StaticResource TcToolbarButtonStyle}"
+                    Click="OnShowSettings">
+                <FontIcon Glyph="&#xE713;" FontSize="14" />
+            </Button>
+        </Grid>
 
-                An InfoBar rather than a dialog: an available update is
-                not an interruption, and a contributor who came here to
-                approve a session should be able to finish doing that.
-                IsClosable is false because the banner is already
-                conditional on a real offer (see
-                UpdateProtocol.ShouldOfferUpdate), and a dismissed
-                banner is an update that quietly never happens.
-            -->
-            <InfoBar Grid.Row="1"
-                    Grid.Column="1"
-                     IsOpen="{x:Bind ViewModel.IsUpdateBannerVisible, Mode=OneWay}"
-                     IsClosable="False"
-                     Severity="Informational"
-                     Title="Update available"
-                     Message="{x:Bind ViewModel.UpdateStatusText, Mode=OneWay}">
-                <InfoBar.ActionButton>
-                    <Button Content="Update and restart"
-                            Style="{StaticResource TcPrimaryButtonStyle}"
-                            Click="OnApplyUpdateClick"
-                            IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}"
-                            AutomationProperties.Name="Install the update and restart Near.ai" />
-                </InfoBar.ActionButton>
-            </InfoBar>
 
-            <!--
-                The health banner.
+        <!--
+            The panes (GlassThreePane): the main pane, the map and the
+            inspector, with 10 between them. Their widths are set from code
+            on every size change from MonitorPaneLayout, the Mac's arithmetic.
+        -->
+        <Grid x:Name="PaneRow" Grid.Row="1" SizeChanged="OnPaneRowSizeChanged">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="MainColumn" Width="*" />
+                <ColumnDefinition x:Name="MapGapColumn" Width="0" />
+                <ColumnDefinition x:Name="MapColumn" Width="0" />
+                <ColumnDefinition x:Name="InspectorGapColumn" Width="0" />
+                <ColumnDefinition x:Name="InspectorColumn" Width="0" />
+            </Grid.ColumnDefinitions>
 
-                It sits above both panes rather than inside the queue, so a
-                contributor reading History still learns that contributions
-                are held up, and so it is drawn once rather than once per
-                screen. The design draws it on the queue (section 5.1 item 3)
-                because the queue is the only screen that frame draws; the
-                Linux shell moved it above its view stack for this reason and
-                records the same note, and the two shells should not disagree
-                about where a blocking condition is announced.
+            <Grid x:Name="MainPane" Grid.Column="0" RowDefinitions="Auto,Auto,*">
 
-                Its whole content is the daemon's own health label, rendered
-                through TraceCommons.Interop.HealthCopy. Nothing here ranks or
-                combines conditions: last_error_label carries exactly one
-                label, already resolved by the daemon's precedence order, and
-                a client that rebuilt that order would eventually disagree
-                with the tray about what is wrong.
-            -->
-            <StackPanel Grid.Row="0"
-                        Grid.Column="1"
-                        Margin="22,16,22,0"
-                        Spacing="8">
+                <!--
+                    The tabs (GlassRuleTabs, MonitorWindowView.swift:972-995),
+                    under the toolbar row: put in the person's order from code
+                    with Home first, each named with its own title, the core's
+                    word. Traces carries the decisions-owed count and Private AI
+                    its status dot (6 across, GlassStatusDot), from the same
+                    reads the rail drew.
+                -->
+                <StackPanel x:Name="TabStrip"
+                            Grid.Row="0"
+                            Orientation="Horizontal"
+                            Spacing="2"
+                            Padding="12,0,12,0"
+                            Height="36"
+                            BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                            BorderThickness="0,0,0,1">
+                    <StackPanel.Resources>
+                        <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent" />
+                        <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent" />
+                        <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent" />
+                        <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                        <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                    </StackPanel.Resources>
+                    <controls:MonitorTabButton x:Name="TabHome" Style="{StaticResource TcTabStyle}">
+                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6">
+                            <TextBlock x:Name="TabHomeLabel" Grid.Column="0" VerticalAlignment="Center" />
+                            <Rectangle x:Name="TabHomeRule"
+                                       Grid.ColumnSpan="2"
+                                       Height="2"
+                                       Margin="0,0,0,-6"
+                                       VerticalAlignment="Bottom"
+                                       Fill="{ThemeResource TcAccentBrush}"
+                                       IsHitTestVisible="False"
+                                       Visibility="Collapsed" />
+                        </Grid>
+                    </controls:MonitorTabButton>
+                    <controls:MonitorTabButton x:Name="TabInference" Style="{StaticResource TcTabStyle}">
+                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6">
+                            <TextBlock x:Name="TabInferenceLabel" Grid.Column="0" VerticalAlignment="Center" />
+                            <!-- The reported state, never the switch, in the
+                                 Mac's four states (PrivateAIDot): green, amber,
+                                 red or grey, and no dot without a state. One
+                                 6 across per state, each on its own token so
+                                 the theme follows; which one shows and the
+                                 tab's text equivalent are set from code
+                                 (ApplyTabDescriptions). -->
+                            <Ellipse x:Name="InferenceDotOn" Grid.Column="1" Width="6" Height="6" VerticalAlignment="Center"
+                                     Visibility="Collapsed" Fill="{ThemeResource TcStatusOnBrush}" />
+                            <Ellipse x:Name="InferenceDotAsk" Grid.Column="1" Width="6" Height="6" VerticalAlignment="Center"
+                                     Visibility="Collapsed" Fill="{ThemeResource TcStatusAskBrush}" />
+                            <Ellipse x:Name="InferenceDotOutside" Grid.Column="1" Width="6" Height="6" VerticalAlignment="Center"
+                                     Visibility="Collapsed" Fill="{ThemeResource TcStatusOutsideBrush}" />
+                            <Ellipse x:Name="InferenceDotOff" Grid.Column="1" Width="6" Height="6" VerticalAlignment="Center"
+                                     Visibility="Collapsed" Fill="{ThemeResource TcStatusOffBrush}" />
+                            <Rectangle x:Name="TabInferenceRule"
+                                       Grid.ColumnSpan="2"
+                                       Height="2"
+                                       Margin="0,0,0,-6"
+                                       VerticalAlignment="Bottom"
+                                       Fill="{ThemeResource TcAccentBrush}"
+                                       IsHitTestVisible="False"
+                                       Visibility="Collapsed" />
+                        </Grid>
+                    </controls:MonitorTabButton>
+                    <controls:MonitorTabButton x:Name="TabTraces" Style="{StaticResource TcTabStyle}">
+                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6">
+                            <TextBlock x:Name="TabTracesLabel" Grid.Column="0" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1"
+                                       Text="{x:Bind ViewModel.QueueCountText, Mode=OneWay}"
+                                       ToolTipService.ToolTip="{x:Bind ViewModel.QueueCountToolTip, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.HasQueueCount, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoBadgeTextStyle}"
+                                       VerticalAlignment="Center" />
+                            <Rectangle x:Name="TabTracesRule"
+                                       Grid.ColumnSpan="2"
+                                       Height="2"
+                                       Margin="0,0,0,-6"
+                                       VerticalAlignment="Bottom"
+                                       Fill="{ThemeResource TcAccentBrush}"
+                                       IsHitTestVisible="False"
+                                       Visibility="Collapsed" />
+                        </Grid>
+                    </controls:MonitorTabButton>
+                    <controls:MonitorTabButton x:Name="TabInsights" Style="{StaticResource TcTabStyle}">
+                        <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6">
+                            <TextBlock x:Name="TabInsightsLabel" Grid.Column="0" VerticalAlignment="Center" />
+                            <Rectangle x:Name="TabInsightsRule"
+                                       Grid.ColumnSpan="2"
+                                       Height="2"
+                                       Margin="0,0,0,-6"
+                                       VerticalAlignment="Bottom"
+                                       Fill="{ThemeResource TcAccentBrush}"
+                                       IsHitTestVisible="False"
+                                       Visibility="Collapsed" />
+                        </Grid>
+                    </controls:MonitorTabButton>
+                </StackPanel>
 
-            <Border Visibility="{x:Bind ViewModel.HasHealthBanner, Mode=OneWay}"
-                    Padding="14,12"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
-                    <!-- The warning triangle from the spec's 1a inventory, on
-                         its own 16 unit grid. It is what carries "weigh this"
-                         into greyscale; the gold border is the colour half of
-                         the same statement, and neither is load bearing on
-                         its own. -->
-                    <Viewbox Grid.Column="0"
-                             Width="14" Height="14"
-                             VerticalAlignment="Top"
-                             Margin="0,2,0,0">
-                        <Canvas Width="16" Height="16">
-                            <Path Data="M8 2.2 14.6 13.4H1.4Z"
-                                  Stroke="{ThemeResource TcGoldTextBrush}"
-                                  StrokeThickness="1.4" />
-                            <Path Data="M8 6.6v3"
-                                  Stroke="{ThemeResource TcGoldTextBrush}"
-                                  StrokeThickness="1.4" />
-                            <Ellipse Canvas.Left="7.5" Canvas.Top="11.2"
-                                     Width="1" Height="1"
-                                     Fill="{ThemeResource TcGoldTextBrush}" />
-                        </Canvas>
-                    </Viewbox>
+                <!-- The breadcrumb on a sub-page (MonitorWindowView.swift:749-769),
+                     built from code with the core's words. -->
+                <StackPanel x:Name="Breadcrumb"
+                            Grid.Row="1"
+                            Orientation="Horizontal"
+                            Spacing="6"
+                            Padding="22,10,22,0"
+                            Visibility="Collapsed" />
 
-                    <StackPanel Grid.Column="1" Spacing="2">
-                        <TextBlock Text="{x:Bind ViewModel.HealthTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.HealthDetail, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-
-                    <!-- Only the two labels the design gives an action get a
-                         button. Every other condition clears on its own, and
-                         a button that cannot change what it sits beside
-                         teaches people that the buttons in this app do
-                         nothing. -->
-                    <Button Grid.Column="2"
-                            Visibility="{x:Bind ViewModel.HasHealthAction, Mode=OneWay}"
-                            Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="{x:Bind ViewModel.HealthActionLabel, Mode=OneWay}"
-                            VerticalAlignment="Center"
-                            Click="OnHealthAction" />
-                </Grid>
-            </Border>
-
-            <!--
-                Every grant the daemon voided that no shell has shown yet (R6
-                of the connect and forget design). Beside the health banner
-                rather than in it: the health slot carries one label, and a
-                void must neither hide an outage nor be hidden by one.
-
-                EVERY STRING HERE IS BOUND, and all of it comes from the Rust
-                through tc_grant_void_notice. The button records that the
-                notice was shown and nothing else.
-            -->
-            <!--
-                Every armed folder whose arming wording no longer claims a
-                model scrubs it (K5), not yet shown by any shell. Every string
-                is bound and comes from the Rust through
-                tc_arming_reworded_notice. Got it records that the notice was
-                shown; Ask is the Settings call.
-            -->
-            <ItemsControl ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="interop:ArmingRewordingCard">
-                        <Border Padding="14,12"
-                                Margin="0,0,0,8"
+                <Grid x:Name="TabContent" Grid.Row="2">
+                    <!--
+                        The notices: one stack over the top of the tab, under
+                        the tab bar, pushing nothing down (MonitorNotices.swift:6-37,
+                        PopoverNotice.swift:182-262). Only the front card is
+                        drawn; up to two plates the front card's size peek out
+                        8 below it, each 4 percent narrower and at 0.9 then
+                        0.7 opacity (NoticeStack). Which cards a tab shows,
+                        their order and what each X does are NoticeCatalog's.
+                        Every card here is one this window already had.
+                        First in the tab, so it is first in tab order, as it is drawn over the top.
+                    -->
+                    <Grid x:Name="NoticeStackHost"
+                          VerticalAlignment="Top"
+                          Margin="22,16,22,0"
+                          Canvas.ZIndex="10"
+                          Visibility="Collapsed">
+                        <Border x:Name="NoticePlate2"
+                                VerticalAlignment="Top"
+                                IsHitTestVisible="False"
                                 Background="{ThemeResource TcSurfaceCardBrush}"
-                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
                                 BorderThickness="1"
-                                CornerRadius="{StaticResource TcCardCornerRadius}">
-                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                                <StackPanel Grid.Column="0" Spacing="2">
-                                    <TextBlock Text="{x:Bind Notice.Title}"
-                                               Style="{StaticResource TcTitleCardTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.Body}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.NowHeading}"
-                                               Style="{StaticResource TcTitleCardTextStyle}"
-                                               Margin="0,6,0,0"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.Scope}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.Limit}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.NoReview}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                                <StackPanel Grid.Column="1"
-                                            Spacing="6"
-                                            VerticalAlignment="Center">
-                                    <Button Visibility="{x:Bind CanAskFirst}"
-                                            Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind Notice.AskFirstAction}"
-                                            Tag="{x:Bind}"
-                                            Click="OnAskFirstArmingRewording" />
-                                    <Button Visibility="{x:Bind CanAcknowledge}"
-                                            Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind Notice.Acknowledge}"
-                                            Tag="{x:Bind}"
-                                            Click="OnAcknowledgeArmingRewording" />
-                                </StackPanel>
-                            </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                                CornerRadius="{StaticResource TcCardCornerRadius}"
+                                Visibility="Collapsed" />
+                        <Border x:Name="NoticePlate1"
+                                VerticalAlignment="Top"
+                                IsHitTestVisible="False"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}"
+                                Visibility="Collapsed" />
+                        <Grid x:Name="NoticeFront" VerticalAlignment="Top" SizeChanged="OnNoticeFrontSizeChanged">
 
-            <ItemsControl ItemsSource="{x:Bind ViewModel.GrantVoidCards, Mode=OneWay}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate x:DataType="interop:GrantVoidCard">
-                        <Border Padding="14,12"
-                                Margin="0,0,0,8"
+                        <!--
+                            The update offer.
+
+                            An InfoBar rather than a dialog: an available update is
+                            not an interruption, and a contributor who came here to
+                            approve a session should be able to finish doing that.
+                            IsClosable is false because the banner is already
+                            conditional on a real offer (see
+                            UpdateProtocol.ShouldOfferUpdate), and a dismissed
+                            banner is an update that quietly never happens.
+                        -->
+                        <InfoBar x:Name="UpdateCard"
+                                 Visibility="Collapsed"
+                                 IsOpen="{x:Bind ViewModel.IsUpdateBannerVisible, Mode=OneWay}"
+                                 IsClosable="False"
+                                 Severity="Informational"
+                                 Title="Update available"
+                                 Message="{x:Bind ViewModel.UpdateStatusText, Mode=OneWay}">
+                            <InfoBar.ActionButton>
+                                <Button Content="Update and restart"
+                                        Style="{StaticResource TcPrimaryButtonStyle}"
+                                        Click="OnApplyUpdateClick"
+                                        IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}" />
+                            </InfoBar.ActionButton>
+                        </InfoBar>
+                        <!--
+                            The health banner.
+
+                            It sits above both panes rather than inside the queue, so a
+                            contributor reading History still learns that contributions
+                            are held up, and so it is drawn once rather than once per
+                            screen. The design draws it on the queue (section 5.1 item 3)
+                            because the queue is the only screen that frame draws; the
+                            Linux shell moved it above its view stack for this reason and
+                            records the same note, and the two shells should not disagree
+                            about where a blocking condition is announced.
+
+                            Its whole content is the daemon's own health label, rendered
+                            through TraceCommons.Interop.HealthCopy. Nothing here ranks or
+                            combines conditions: last_error_label carries exactly one
+                            label, already resolved by the daemon's precedence order, and
+                            a client that rebuilt that order would eventually disagree
+                            with the tray about what is wrong.
+                        -->
+                        <Border x:Name="HealthCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
                                 Background="{ThemeResource TcSurfaceCardBrush}"
                                 BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource TcCardCornerRadius}">
                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                                <!-- The warning triangle from the spec's 1a inventory, on
+                                     its own 16 unit grid. It is what carries "weigh this"
+                                     into greyscale; the gold border is the colour half of
+                                     the same statement, and neither is load bearing on
+                                     its own. -->
                                 <Viewbox Grid.Column="0"
                                          Width="14" Height="14"
                                          VerticalAlignment="Top"
@@ -582,722 +421,1095 @@
                                 </Viewbox>
 
                                 <StackPanel Grid.Column="1" Spacing="2">
-                                    <TextBlock Text="{x:Bind Notice.Title}"
+                                    <TextBlock Text="{x:Bind ViewModel.HealthTitle, Mode=OneWay}"
                                                Style="{StaticResource TcTitleCardTextStyle}"
                                                TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.Body}"
+                                    <TextBlock Text="{x:Bind ViewModel.HealthDetail, Mode=OneWay}"
                                                Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <TextBlock Text="{x:Bind Notice.ReasonsHeading}"
-                                               Style="{StaticResource TcTitleCardTextStyle}"
-                                               Margin="0,6,0,0"
-                                               TextWrapping="Wrap" />
-                                    <ItemsControl ItemsSource="{x:Bind Notice.Reasons}">
-                                        <ItemsControl.ItemTemplate>
-                                            <DataTemplate x:DataType="x:String">
-                                                <TextBlock Text="{x:Bind}"
-                                                           Style="{StaticResource TcCaptionTextStyle}"
-                                                           Margin="12,0,0,0"
-                                                           TextWrapping="Wrap" />
-                                            </DataTemplate>
-                                        </ItemsControl.ItemTemplate>
-                                    </ItemsControl>
-                                    <TextBlock Text="{x:Bind Notice.Rearm}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               Margin="0,6,0,0"
                                                TextWrapping="Wrap" />
                                 </StackPanel>
 
-                                <!-- Turn back on sits beside the sentence saying
-                                     that doing so agrees to the new settings.
-                                     It is the Settings arming call. -->
-                                <StackPanel Grid.Column="2"
-                                            Spacing="6"
-                                            VerticalAlignment="Center">
-                                    <Button Visibility="{x:Bind CanRearm}"
-                                            Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind Notice.RearmAction}"
-                                            Tag="{x:Bind}"
-                                            Click="OnRearmGrantVoid" />
-                                    <Button Visibility="{x:Bind CanAcknowledge}"
-                                            Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind Notice.Acknowledge}"
-                                            Tag="{x:Bind}"
-                                            Click="OnAcknowledgeGrantVoid" />
+                                <!-- Only the two labels the design gives an action get a
+                                     button. Every other condition clears on its own, and
+                                     a button that cannot change what it sits beside
+                                     teaches people that the buttons in this app do
+                                     nothing. -->
+                                <Button Grid.Column="2"
+                                        Visibility="{x:Bind ViewModel.HasHealthAction, Mode=OneWay}"
+                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                        Content="{x:Bind ViewModel.HealthActionLabel, Mode=OneWay}"
+                                        VerticalAlignment="Center"
+                                        Click="OnHealthAction" />
+                            </Grid>
+                        </Border>
+                        <!--
+                            Every grant the daemon voided that no shell has shown yet (R6
+                            of the connect and forget design). Beside the health banner
+                            rather than in it: the health slot carries one label, and a
+                            void must neither hide an outage nor be hidden by one.
+
+                            EVERY STRING HERE IS BOUND, and all of it comes from the Rust
+                            through tc_grant_void_notice. The button records that the
+                            notice was shown and nothing else.
+                        -->
+                        <!--
+                            Every armed folder whose arming wording no longer claims a
+                            model scrubs it (K5), not yet shown by any shell. Every string
+                            is bound and comes from the Rust through
+                            tc_arming_reworded_notice. Got it records that the notice was
+                            shown; Ask is the Settings call.
+                        -->
+                        <ItemsControl x:Name="RewordingCards" Visibility="Collapsed" ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:ArmingRewordingCard">
+                                    <Border Padding="14,12"
+                                            Margin="0,0,0,8"
+                                            Background="{ThemeResource TcSurfaceCardBrush}"
+                                            BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="{StaticResource TcCardCornerRadius}">
+                                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                            <StackPanel Grid.Column="0" Spacing="2">
+                                                <TextBlock Text="{x:Bind Notice.Title}"
+                                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.Body}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.NowHeading}"
+                                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                                           Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.Scope}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.Limit}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.NoReview}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1"
+                                                        Spacing="6"
+                                                        VerticalAlignment="Center">
+                                                <Button Visibility="{x:Bind CanAskFirst}"
+                                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="{x:Bind Notice.AskFirstAction}"
+                                                        Tag="{x:Bind}"
+                                                        Click="OnAskFirstArmingRewording" />
+                                                <Button Visibility="{x:Bind CanAcknowledge}"
+                                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="{x:Bind Notice.Acknowledge}"
+                                                        Tag="{x:Bind}"
+                                                        Click="OnAcknowledgeArmingRewording" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <ItemsControl x:Name="VoidCards" Visibility="Collapsed" ItemsSource="{x:Bind ViewModel.GrantVoidCards, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:GrantVoidCard">
+                                    <Border Padding="14,12"
+                                            Margin="0,0,0,8"
+                                            Background="{ThemeResource TcSurfaceCardBrush}"
+                                            BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="{StaticResource TcCardCornerRadius}">
+                                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                                            <Viewbox Grid.Column="0"
+                                                     Width="14" Height="14"
+                                                     VerticalAlignment="Top"
+                                                     Margin="0,2,0,0">
+                                                <Canvas Width="16" Height="16">
+                                                    <Path Data="M8 2.2 14.6 13.4H1.4Z"
+                                                          Stroke="{ThemeResource TcGoldTextBrush}"
+                                                          StrokeThickness="1.4" />
+                                                    <Path Data="M8 6.6v3"
+                                                          Stroke="{ThemeResource TcGoldTextBrush}"
+                                                          StrokeThickness="1.4" />
+                                                    <Ellipse Canvas.Left="7.5" Canvas.Top="11.2"
+                                                             Width="1" Height="1"
+                                                             Fill="{ThemeResource TcGoldTextBrush}" />
+                                                </Canvas>
+                                            </Viewbox>
+
+                                            <StackPanel Grid.Column="1" Spacing="2">
+                                                <TextBlock Text="{x:Bind Notice.Title}"
+                                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.Body}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Notice.ReasonsHeading}"
+                                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                                           Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                                <ItemsControl ItemsSource="{x:Bind Notice.Reasons}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate x:DataType="x:String">
+                                                            <TextBlock Text="{x:Bind}"
+                                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                                       Margin="12,0,0,0"
+                                                                       TextWrapping="Wrap" />
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                                <TextBlock Text="{x:Bind Notice.Rearm}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+
+                                            <!-- Turn back on sits beside the sentence saying
+                                                 that doing so agrees to the new settings.
+                                                 It is the Settings arming call. -->
+                                            <StackPanel Grid.Column="2"
+                                                        Spacing="6"
+                                                        VerticalAlignment="Center">
+                                                <Button Visibility="{x:Bind CanRearm}"
+                                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="{x:Bind Notice.RearmAction}"
+                                                        Tag="{x:Bind}"
+                                                        Click="OnRearmGrantVoid" />
+                                                <Button Visibility="{x:Bind CanAcknowledge}"
+                                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="{x:Bind Notice.Acknowledge}"
+                                                        Tag="{x:Bind}"
+                                                        Click="OnAcknowledgeGrantVoid" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <!--
+                            The notice after a legacy invite identity moved to the
+                            contributor's NEAR AI account, beside the void notices for the
+                            same reason: it changes what their sessions go under, and the
+                            consent spec requires every shell to say so.
+
+                            EVERY STRING HERE IS BOUND, from the Rust through
+                            tc_legacy_migration_notice. The stack's X records that the notice was
+                            shown and nothing else (MonitorNotices.swift:230-233).
+                        -->
+                        <Border x:Name="LegacyNoticeCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Margin="0,0,0,8"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid>
+                                <StackPanel Spacing="2" Margin="0,0,28,0">
+                                    <TextBlock Text="{x:Bind ViewModel.LegacyMigrationTitle, Mode=OneWay}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.LegacyMigrationBody, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.LegacyMigrationFolders, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
                                 </StackPanel>
                             </Grid>
                         </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+                        <!--
+                            The offer to move a legacy invite identity to the
+                            contributor's NEAR AI account, among the notices for the same
+                            reason the notice after the move sits here. It can be put away
+                            for good on this device; Settings keeps the move. Every string
+                            is bound, from the Rust.
+                        -->
+                        <controls:LegacyMigrationOfferView x:Name="LegacyOfferCard"
+                                                           Offer="{x:Bind ViewModel.LegacyOffer}"
+                                                           ShowsDismiss="False"
+                                                           Margin="0,0,0,8"
+                                                           Visibility="Collapsed" />
+                        <!--
+                            The offer to answer model calls on this computer.
 
-            <!--
-                The notice after a legacy invite identity moved to the
-                contributor's NEAR AI account, beside the void notices for the
-                same reason: it changes what their sessions go under, and the
-                consent spec requires every shell to say so.
+                            Shown once, on the screen this window opens on. Both answers
+                            go to the daemon, so "Not now" is remembered across relaunches
+                            and across shells rather than being a dismissal this window
+                            forgets.
 
-                EVERY STRING HERE IS BOUND, from the Rust through
-                tc_legacy_migration_notice. The button records that the notice
-                was shown and nothing else.
-            -->
-            <Border Visibility="{x:Bind ViewModel.HasLegacyMigrationNotice, Mode=OneWay}"
-                    Padding="14,12"
-                    Margin="0,0,0,8"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                    <StackPanel Grid.Column="0" Spacing="2">
-                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationBody, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.LegacyMigrationFolders, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                    <Button Grid.Column="1"
-                            VerticalAlignment="Center"
-                            Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="{x:Bind ViewModel.LegacyMigrationAcknowledge, Mode=OneWay}"
-                            Click="OnAcknowledgeLegacyMigration" />
-                </Grid>
-            </Border>
+                            EVERY STRING HERE IS BOUND. Unlike the arming offer below,
+                            which still carries wording authored in this shell, not one
+                            sentence on this card is written here: the three shells print
+                            one offer, and the paragraph most at risk of being paraphrased
+                            is the one saying what turning the switch on exposes.
 
-            <!--
-                The offer to move a legacy invite identity to the
-                contributor's NEAR AI account, among the notices for the same
-                reason the notice after the move sits here. It can be put away
-                for good on this device; Settings keeps the move. Every string
-                is bound, from the Rust.
-            -->
-            <controls:LegacyMigrationOfferView Offer="{x:Bind ViewModel.LegacyOffer}"
-                                               ShowsDismiss="True"
-                                               Margin="0,0,0,8"
-                                               Visibility="{x:Bind ViewModel.LegacyOffer.ShowsCard, Mode=OneWay}" />
-
-            <!--
-                The offer to answer model calls on this computer.
-
-                Shown once, on the screen this window opens on. Both answers
-                go to the daemon, so "Not now" is remembered across relaunches
-                and across shells rather than being a dismissal this window
-                forgets.
-
-                EVERY STRING HERE IS BOUND. Unlike the arming offer below,
-                which still carries wording authored in this shell, not one
-                sentence on this card is written here: the three shells print
-                one offer, and the paragraph most at risk of being paraphrased
-                is the one saying what turning the switch on exposes.
-
-                Neither button is TcPrimaryButtonStyle, for the reason the
-                arming card gives and more so: this question opens a listener
-                anything on this machine can use. Decline comes first.
-            -->
-            <Border Visibility="{x:Bind ViewModel.HasPrivateInferenceOffer, Mode=OneWay}"
-                    Padding="14,12"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcHairlineBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <StackPanel Spacing="8">
-                    <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferTitle}"
-                               Style="{StaticResource TcTitleCardTextStyle}"
-                               TextWrapping="Wrap" />
-                    <!-- What it does, what it exposes, then what it does NOT
-                         do. The middle one is never folded into a caption. -->
-                    <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferWhat}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferExposure}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferNoRepoint}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferAskedOnce}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="12">
-                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                Content="{x:Bind ViewModel.PrivateInferenceOfferDecline}"
-                                Click="OnDeclinePrivateInference" />
-                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                Content="{x:Bind ViewModel.PrivateInferenceOfferAccept}"
-                                Click="OnAcceptPrivateInference" />
-                    </StackPanel>
-                </StackPanel>
-            </Border>
-
-            <!--
-                The offer to stop being asked about one project.
-
-                Drawn above the cards it is about: the contributor is looking
-                at the very thing the offer would remove, and has just
-                approved several of them.
-
-                Not a warning, so no gold border and no triangle: nothing is
-                wrong and nothing needs weighing up in the health sense. It is
-                a question, and it wears the plain card border every other
-                question in this window wears.
-
-                Neither button is TcPrimaryButtonStyle. Arming is a real
-                choice with a real cost (previews from this project stop),
-                and a card that leads the eye to "yes" is not asking a
-                question. Decline comes first for the same reason.
-            -->
-            <Border Visibility="{x:Bind ViewModel.HasArmingOffer, Mode=OneWay}"
-                    Padding="14,12"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcHairlineBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <StackPanel Spacing="8">
-                    <!-- Evidence first, question second: someone who reads
-                         only the first line still learns why they are being
-                         asked. -->
-                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
-                               Style="{StaticResource TcTitleCardTextStyle}"
-                               TextWrapping="Wrap" />
-                    <StackPanel Orientation="Horizontal" Spacing="12">
-                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                Content="{x:Bind ViewModel.ArmingOfferDecline}"
-                                Click="OnDeclineArming" />
-                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                Content="{x:Bind ViewModel.ArmingOfferConfirm}"
-                                Click="OnAcceptArming" />
-                    </StackPanel>
-                </StackPanel>
-            </Border>
-
-            <!--
-                Approved sessions held because the privacy witness is busy,
-                from status.witness_capacity in the Rust's words. A banner of
-                its own rather than a case of the health one, because a higher
-                label can hold the health slot while these sessions are still
-                waiting.
-
-                A clock and no action button: nothing is wrong, nothing was
-                lost, and the daemon retries on its own.
-            -->
-            <Border Visibility="{x:Bind ViewModel.HasWitnessBanner, Mode=OneWay}"
-                    Padding="14,12"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
-                    <Viewbox Grid.Column="0"
-                             Width="14" Height="14"
-                             VerticalAlignment="Top"
-                             Margin="0,2,0,0">
-                        <Canvas Width="16" Height="16">
-                            <Ellipse Canvas.Left="1.4" Canvas.Top="1.4"
-                                     Width="13.2" Height="13.2"
-                                     Stroke="{ThemeResource TcGoldTextBrush}"
-                                     StrokeThickness="1.4" />
-                            <Path Data="M8 4.4V8l2.6 1.8"
-                                  Stroke="{ThemeResource TcGoldTextBrush}"
-                                  StrokeThickness="1.4" />
-                        </Canvas>
-                    </Viewbox>
-
-                    <StackPanel Grid.Column="1" Spacing="2">
-                        <TextBlock Text="{x:Bind ViewModel.WitnessTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleCardTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.WitnessDetail, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <!--
-                Armed folders the automatic contribution gate is holding, from
-                status.automatic_contribution_held in the Rust's words. A
-                banner of its own for the reason the witness banner is: a
-                higher label can hold the health slot while folders are held.
-                No dismiss button: it goes when the hold does. Each folder has
-                an Ask button, the Settings call.
-            -->
-            <Border Visibility="{x:Bind ViewModel.HasGateHeldBanner, Mode=OneWay}"
-                    Padding="14,12"
-                    Background="{ThemeResource TcSurfaceCardBrush}"
-                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                    BorderThickness="1"
-                    CornerRadius="{StaticResource TcCardCornerRadius}">
-                <StackPanel Spacing="2">
-                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Title, Mode=OneWay, FallbackValue=''}"
-                               Style="{StaticResource TcTitleCardTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Body, Mode=OneWay, FallbackValue=''}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Reasons, Mode=OneWay}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="x:String">
-                                <TextBlock Text="{x:Bind}"
+                            Neither button is TcPrimaryButtonStyle, for the reason the
+                            arming card gives and more so: this question opens a listener
+                            anything on this machine can use. Decline comes first.
+                        -->
+                        <Border x:Name="PrivateAIOfferCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <StackPanel Spacing="8">
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferTitle}"
+                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <!-- What it does, what it exposes, then what it does NOT
+                                     do. The middle one is never folded into a caption. -->
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferWhat}"
                                            Style="{StaticResource TcCaptionTextStyle}"
-                                           Margin="12,0,0,0"
                                            TextWrapping="Wrap" />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <TextBlock Text="{x:Bind ViewModel.GateHeld.Release, Mode=OneWay, FallbackValue=''}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.GateHeld.AskFirst, Mode=OneWay, FallbackValue=''}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               Margin="0,6,0,0"
-                               TextWrapping="Wrap" />
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Projects, Mode=OneWay}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="interop:GateHeldProjectNotice">
-                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0,4,0,0">
-                                    <TextBlock Grid.Column="0"
-                                               Text="{x:Bind Line}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               VerticalAlignment="Center"
-                                               TextWrapping="Wrap" />
-                                    <Button Grid.Column="1"
-                                            Visibility="{x:Bind CanAskFirst}"
-                                            Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind AskFirstAction}"
-                                            Tag="{x:Bind}"
-                                            Click="OnAskFirstHeldProject" />
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </StackPanel>
-            </Border>
-
-            </StackPanel>
-
-            <!--
-                The History pane.
-
-                It is created once and kept rather than rebuilt on each nav
-                click, because it holds the per submission record of what a
-                withdrawal actually did. list_history reports a record's
-                status, never the tier a withdrawal resolved to, so rebuilding
-                the pane would throw that away: a contributor who withdrew a
-                trace, glanced at the queue and came back would find the
-                sentence naming the tier the server applied replaced by a bare
-                chip. That is the contract's first withdrawal rule broken by a
-                navigation.
-            -->
-            <ContentPresenter x:Name="HistoryPane"
-                              Grid.Row="2"
-                              Grid.Column="1"
-                              Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
-
-            <!--
-                The Settings pane, created once and kept for the same reason
-                History is: it holds the handle and bio boxes as the
-                contributor has edited them, and rebuilding it on every nav
-                click would silently discard an unsaved edit. It also holds
-                the sentence saying what the last claim or withdrawal actually
-                did, and that sentence is the only report of an outward facing
-                act this window ever gives.
-            -->
-            <!--
-                The model calls pane, created once and kept for the same
-                reason History and Settings are: it holds the daemon's last
-                report about the listener, and rebuilding it on every nav
-                click would replace the sentence naming a refusal with a
-                blank until the next read landed.
-            -->
-            <ContentPresenter x:Name="PrivateInferencePane"
-                              Grid.Row="2"
-                              Grid.Column="1"
-                              Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}" />
-
-            <ContentPresenter x:Name="InsightsPane" Grid.Row="2" Grid.Column="1"
-                              Visibility="{x:Bind ViewModel.ShowingInsights, Mode=OneWay}" />
-
-            <ContentPresenter x:Name="MissionDraftsPane" Grid.Row="2" Grid.Column="1"
-                              Visibility="{x:Bind ViewModel.ShowingMissionDrafts, Mode=OneWay}" />
-
-            <ContentPresenter x:Name="SettingsPane"
-                              Grid.Row="2"
-                              Grid.Column="1"
-                              Visibility="{x:Bind ViewModel.ShowingSettings, Mode=OneWay}" />
-
-            <!-- Header, queue, recovery bar, decision notice, caveat, week
-                 band, progress. -->
-            <Grid Grid.Row="2"
-                  Grid.Column="1"
-                  Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                  RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto">
-
-                <!--
-                    Content header.
-
-                    The subtitle is the app's central promise, so it is the one
-                    thing on this row that may never be cut. It wraps rather
-                    than clips, and everything beside it gives way first.
-
-                    That needs the pill to sit in an elastic column rather than
-                    an Auto one. An Auto column asks a child how wide it wants
-                    to be and grants it, so a capped, trimming pill still takes
-                    its whole cap and squeezes the sentence out; the trimming
-                    never engages because nothing ever constrains it. Two star
-                    columns at 2:1 make the split proportional instead, so the
-                    sentence gets the larger share at every width, the pill
-                    trims into what is left (its tooltip carries the full text,
-                    so nothing is lost), and the row grows taller rather than
-                    clipping if even that is not enough.
-
-                    A MinWidth on the text stack is the wrong instrument and
-                    was tried first: it does not reserve space, it lets the
-                    stack overflow its column and be painted over, which is the
-                    same clipped sentence by a different route.
-                -->
-                <Grid Grid.Row="0"
-                      ColumnDefinitions="2*,*,Auto,Auto"
-                      ColumnSpacing="12"
-                      Padding="20,9"
-                      BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                      BorderThickness="0,0,0,1">
-                    <StackPanel Grid.Column="0"
-                                Spacing="2"
-                                VerticalAlignment="Center">
-                        <TextBlock Text="Waiting" Style="{StaticResource TcTitleScreenTextStyle}" />
-                        <TextBlock Text="Nothing is sent unless you say so."
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-
-                    <!--
-                        The spec's Watching chip states that the watcher is
-                        running. This app cannot assert that on its own, so the
-                        chip carries the daemon's own status line instead: the
-                        same fact, sourced rather than claimed. It drops the eye
-                        glyph, which would assert it again in a second voice.
-                        The pause control beside it calls the daemon, so a
-                        timed pause survives this process closing and resumes
-                        on the same deadline every other shell uses.
-                    -->
-                    <Border Grid.Column="1"
-                            BorderBrush="{ThemeResource TcHairlineBrush}"
-                            BorderThickness="1"
-                            CornerRadius="{StaticResource TcPillCornerRadius}"
-                            Padding="8,2"
-                            MaxWidth="200"
-                            HorizontalAlignment="Right"
-                            VerticalAlignment="Center"
-                            ToolTipService.ToolTip="{x:Bind ViewModel.StatusText, Mode=OneWay}">
-                        <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
-                                   Style="{StaticResource TcMonoChipTextStyle}"
-                                   TextTrimming="CharacterEllipsis" />
-                    </Border>
-
-                    <Button Grid.Column="2"
-                            Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="{x:Bind interop:MonitorShellCopy.PauseWatcher}"
-                            Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
-                            IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                            VerticalAlignment="Center"
-                            AutomationProperties.Name="Pause watching">
-                        <Button.Flyout>
-                            <MenuFlyout>
-                                <MenuFlyoutItem Text="1 hour" Click="OnPauseForHour" />
-                                <MenuFlyoutItem Text="Until morning"
-                                                Click="OnPauseUntilTomorrow" />
-                                <MenuFlyoutItem Text="Until resumed"
-                                                Click="OnPauseUntilResumed" />
-                            </MenuFlyout>
-                        </Button.Flyout>
-                    </Button>
-
-                    <Button Grid.Column="2"
-                            Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="{x:Bind interop:MonitorShellCopy.ResumeWatcher}"
-                            Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
-                            IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                            Click="OnResumeWatching"
-                            VerticalAlignment="Center" />
-
-                    <!-- The Refresh button keeps an Auto column: it is a
-                         control with a fixed label, and a squeezed button with
-                         an ellipsised caption is not a thing worth having.
-
-                         Events drive refreshes on their own; the button is for
-                         the case where a contributor wants to confirm the view
-                         is current, which is a reasonable thing to want from
-                         something that uploads on their behalf. -->
-                    <Button Grid.Column="3"
-                            Style="{StaticResource TcSecondaryButtonStyle}"
-                            Click="OnRefreshClick"
-                            IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                            VerticalAlignment="Center"
-                            AutomationProperties.Name="Refresh the queue">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE72C;" FontSize="12" />
-                            <TextBlock Text="Refresh" />
-                        </StackPanel>
-                    </Button>
-                </Grid>
-
-
-                <!--
-                    The queue, folders first.
-
-                    Two levels, and the grouping RULE for both (which entries
-                    share a folder, folder order, whether "Submit all" appears)
-                    is QueueGrouping.ByProject's, in TraceCommons.Interop,
-                    covered by QueueGroupingTests there. WHICH level is on
-                    screen is QueueNavigation.Resolve's, in the same assembly
-                    and covered by QueueNavigationTests. Neither decision is
-                    made in this markup; it only renders them.
-
-                    Why folders at all: at 149 waiting sessions the queue stops
-                    being a list and becomes a haystack, and a flat list of
-                    cards is the wrong shape for it. The folder name is the
-                    row's largest text here, where it used to be the SMALLEST
-                    text on its line beside an accented "Submit all". The line
-                    read as a button with a caption, and it should read as a
-                    place with actions.
-
-                    The preview scheduler's visibility signal reads the session
-                    ItemsRepeater in the detail pane below, through its own
-                    ElementPrepared and ElementClearing. See
-                    OnSessionElementPrepared and RecomputeVisiblePreviews in
-                    MainWindow.xaml.cs: those are ItemsRepeater's own per-row
-                    realization signals, which is the only thing that reports
-                    what is genuinely windowed into view.
-                -->
-                <ListView x:Name="QueueListView"
-                          Grid.Row="2"
-                          Visibility="{x:Bind ViewModel.IsAtQueueRoot, Mode=OneWay}"
-                          ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
-                          ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
-                          SelectionMode="None"
-                          Padding="22,18,22,22"
-                          ScrollViewer.HorizontalScrollMode="Disabled">
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="vm:QueueGroupViewModel">
-                            <!--
-                                One folder. The row itself is a Button with its
-                                chrome removed rather than a Border with a
-                                tapped handler, the same choice the navigation
-                                rail makes and for the same reason: a Button
-                                carries keyboard focus, the invoke pattern and a
-                                narrator announcement for free.
-
-                                The three actions sit UNDER the name and path
-                                rather than beside them, so the row reads as a
-                                place first. "Ignore project" stays to the RIGHT
-                                of "Submit all", matching macOS and GTK. Which
-                                side each is on is muscle memory for two
-                                adjacent controls acting on one set of traces in
-                                opposite directions, so it is not a per-shell
-                                choice.
-
-                                Every label and tooltip is bound, not typed
-                                here: they live in ProjectIgnoreCopy and
-                                VerdictCopy, which is where three shells are
-                                kept from drifting.
-                            -->
-                            <StackPanel Spacing="10" Margin="0,0,0,18">
-                                <Button HorizontalAlignment="Stretch"
-                                        HorizontalContentAlignment="Stretch"
-                                        Background="Transparent"
-                                        BorderThickness="0"
-                                        Padding="0"
-                                        Tag="{x:Bind}"
-                                        Click="OnOpenFolder">
-                                    <Grid ColumnDefinitions="*,Auto,Auto,Auto"
-                                          ColumnSpacing="12">
-                                        <StackPanel Grid.Column="0" Spacing="2">
-                                            <TextBlock Text="{x:Bind ProjectLabel}"
-                                                       Style="{StaticResource TcTitleCardTextStyle}"
-                                                       TextTrimming="CharacterEllipsis" />
-                                            <!-- The path is the reason this
-                                                 layout exists: a disambiguated
-                                                 label keeps two projects
-                                                 distinct and can never make
-                                                 them identifiable. Absent
-                                                 against a daemon that does not
-                                                 send one, rather than a blank
-                                                 line. -->
-                                            <TextBlock Text="{x:Bind ProjectPath}"
-                                                       Visibility="{x:Bind HasProjectPath}"
-                                                       Style="{StaticResource TcCaptionTextStyle}"
-                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                       TextTrimming="CharacterEllipsis" />
-                                        </StackPanel>
-                                        <TextBlock Grid.Column="1"
-                                                   Text="{x:Bind CountText}"
-                                                   Style="{StaticResource TcCaptionTextStyle}"
-                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                   VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="2"
-                                                   Text="{x:Bind SizeText}"
-                                                   Style="{StaticResource TcMonoFigureTextStyle}"
-                                                   VerticalAlignment="Center" />
-                                        <FontIcon Grid.Column="3"
-                                                  Glyph="&#xE76C;"
-                                                  FontSize="12"
-                                                  Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                  VerticalAlignment="Center" />
-                                    </Grid>
-                                </Button>
-
-                                <!--
-                                    Emphasis goes to opening the folder, not
-                                    to sending it. One-click submit added
-                                    AVAILABILITY; accent styling is a
-                                    RECOMMENDATION, and the recommendation is
-                                    to look first. The row above opens the
-                                    folder too; this button is the same act
-                                    with the accent on it.
-                                -->
-                                <!--
-                                    How many of this folder's sessions a
-                                    "Submit all" would leave behind, BEFORE
-                                    the press. The daemon publishes the count
-                                    on the project row for exactly this: the
-                                    number used to be discoverable only from
-                                    approve's excluded_ineligible, which is
-                                    after the fact.
-
-                                    Absent entirely for an invited
-                                    contributor, whose group offers everything
-                                    it holds. It says how many and NOT why:
-                                    the reason a particular session cannot be
-                                    sent is that row's own sentence, one level
-                                    in, and a summary here would stand for up
-                                    to thirteen different reasons and say
-                                    nothing true about any of them.
-                                -->
-                                <TextBlock Text="{x:Bind WithheldText}"
-                                           Visibility="{x:Bind HasWithheldText}"
-                                           Style="{StaticResource TcCaptionSmallTextStyle}"
-                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferExposure}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
                                            TextWrapping="Wrap" />
-
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Style="{StaticResource TcPrimaryButtonStyle}"
-                                            Content="Look inside"
-                                            Tag="{x:Bind}"
-                                            Click="OnOpenFolder" />
-                                    <!--
-                                        GONE, not greyed, when nothing in this
-                                        folder can be sent. The withheld line
-                                        above already SAYS SO IN WORDS, and an
-                                        inert button beside that sentence is an
-                                        inert control with its own explanation
-                                        standing next to it proving it
-                                        redundant.
-
-                                        ShowSubmitAll is the shared branch
-                                        table's answer, reached with an absent
-                                        count spelled as a NEGATIVE. See
-                                        ProjectQueueGroup.
-                                    -->
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferNoRepoint}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.PrivateInferenceOfferAskedOnce}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
                                     <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind SubmitAllText}"
-                                            Visibility="{x:Bind ShowSubmitAll}"
-                                            Tag="{x:Bind}"
-                                            ToolTipService.ToolTip="Sends every trace waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
-                                            Click="OnSubmitAll" />
-                                    <!--
-                                        The opt-in path for answering the
-                                        verdict question once for the whole
-                                        folder. "Submit all" beside it is
-                                        untouched and still sends no outcome:
-                                        this is a separate control, never a
-                                        confirmation step in front of it, so the
-                                        common one-click path does not get
-                                        slower for a question nobody has to
-                                        answer.
-                                    -->
+                                            Content="{x:Bind ViewModel.PrivateInferenceOfferDecline}"
+                                            Click="OnDeclinePrivateInference" />
                                     <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind SubmitAllAsText}"
-                                            Visibility="{x:Bind ShowSubmitAll}"
-                                            Tag="{x:Bind}"
-                                            ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
-                                        <Button.Flyout>
-                                            <MenuFlyout>
-                                                <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
-                                                                Tag="{x:Bind}"
-                                                                Click="OnSubmitAllWorked" />
-                                                <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
-                                                                Tag="{x:Bind}"
-                                                                Click="OnSubmitAllPartly" />
-                                                <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
-                                                                Tag="{x:Bind}"
-                                                                Click="OnSubmitAllFailed" />
-                                            </MenuFlyout>
-                                        </Button.Flyout>
-                                    </Button>
-                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind IgnoreProjectText}"
-                                            Visibility="{x:Bind ShowIgnoreProject}"
-                                            Tag="{x:Bind}"
-                                            ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
-                                            Click="OnIgnoreProject" />
+                                            Content="{x:Bind ViewModel.PrivateInferenceOfferAccept}"
+                                            Click="OnAcceptPrivateInference" />
                                 </StackPanel>
                             </StackPanel>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
+                        </Border>
+                        <!--
+                            The offer to stop being asked about one project.
+
+                            Drawn above the cards it is about: the contributor is looking
+                            at the very thing the offer would remove, and has just
+                            approved several of them.
+
+                            Not a warning, so no gold border and no triangle: nothing is
+                            wrong and nothing needs weighing up in the health sense. It is
+                            a question, and it wears the plain card border every other
+                            question in this window wears.
+
+                            Neither button is TcPrimaryButtonStyle. Arming is a real
+                            choice with a real cost (previews from this project stop),
+                            and a card that leads the eye to "yes" is not asking a
+                            question. Decline comes first for the same reason.
+                        -->
+                        <Border x:Name="ArmingOfferCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <StackPanel Spacing="8">
+                                <!-- Evidence first, question second: someone who reads
+                                     only the first line still learns why they are being
+                                     asked. -->
+                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
+                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind ViewModel.ArmingOfferDecline}"
+                                            Click="OnDeclineArming" />
+                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                            Content="{x:Bind ViewModel.ArmingOfferConfirm}"
+                                            Click="OnAcceptArming" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                        <!--
+                            Approved sessions held because the privacy witness is busy,
+                            from status.witness_capacity in the Rust's words. A banner of
+                            its own rather than a case of the health one, because a higher
+                            label can hold the health slot while these sessions are still
+                            waiting.
+
+                            A clock and no action button: nothing is wrong, nothing was
+                            lost, and the daemon retries on its own.
+                        -->
+                        <Border x:Name="WitnessCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                                <Viewbox Grid.Column="0"
+                                         Width="14" Height="14"
+                                         VerticalAlignment="Top"
+                                         Margin="0,2,0,0">
+                                    <Canvas Width="16" Height="16">
+                                        <Ellipse Canvas.Left="1.4" Canvas.Top="1.4"
+                                                 Width="13.2" Height="13.2"
+                                                 Stroke="{ThemeResource TcGoldTextBrush}"
+                                                 StrokeThickness="1.4" />
+                                        <Path Data="M8 4.4V8l2.6 1.8"
+                                              Stroke="{ThemeResource TcGoldTextBrush}"
+                                              StrokeThickness="1.4" />
+                                    </Canvas>
+                                </Viewbox>
+
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="{x:Bind ViewModel.WitnessTitle, Mode=OneWay}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.WitnessDetail, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                        <!--
+                            Armed folders the automatic contribution gate is holding, from
+                            status.automatic_contribution_held in the Rust's words. A
+                            banner of its own for the reason the witness banner is: a
+                            higher label can hold the health slot while folders are held.
+                            No dismiss button: it goes when the hold does. Each folder has
+                            an Ask button, the Settings call.
+                        -->
+                        <Border x:Name="GateHeldCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <StackPanel Spacing="2">
+                                <TextBlock Text="{x:Bind ViewModel.GateHeld.Title, Mode=OneWay, FallbackValue=''}"
+                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.GateHeld.Body, Mode=OneWay, FallbackValue=''}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Reasons, Mode=OneWay}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="x:String">
+                                            <TextBlock Text="{x:Bind}"
+                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                       Margin="12,0,0,0"
+                                                       TextWrapping="Wrap" />
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <TextBlock Text="{x:Bind ViewModel.GateHeld.Release, Mode=OneWay, FallbackValue=''}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind ViewModel.GateHeld.AskFirst, Mode=OneWay, FallbackValue=''}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           Margin="0,6,0,0"
+                                           TextWrapping="Wrap" />
+                                <ItemsControl ItemsSource="{x:Bind ViewModel.GateHeld.Projects, Mode=OneWay}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="interop:GateHeldProjectNotice">
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" Margin="0,4,0,0">
+                                                <TextBlock Grid.Column="0"
+                                                           Text="{x:Bind Line}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           VerticalAlignment="Center"
+                                                           TextWrapping="Wrap" />
+                                                <Button Grid.Column="1"
+                                                        Visibility="{x:Bind CanAskFirst}"
+                                                        Style="{StaticResource TcSecondaryButtonStyle}"
+                                                        Content="{x:Bind AskFirstAction}"
+                                                        Tag="{x:Bind}"
+                                                        Click="OnAskFirstHeldProject" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="FirstContributionCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                        <StackPanel Spacing="6" Margin="0,0,28,0">
+                            <TextBlock Text="{x:Bind ViewModel.FirstContributionHeading}" Style="{StaticResource TcTitleCardTextStyle}" />
+                            <TextBlock Text="{x:Bind ViewModel.FirstContributionStart}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                            <TextBlock Text="{x:Bind ViewModel.FirstContributionReview}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                            <TextBlock Text="{x:Bind ViewModel.FirstContributionFollowUp}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
+                            <Expander Header="Agent setup" HorizontalAlignment="Stretch">
+                                <TextBlock Text="{x:Bind ViewModel.FirstContributionAgentSetup}" TextWrapping="Wrap" />
+                            </Expander>
+                        </StackPanel>
+                        </Border>
+                        <!--
+                            The recovery bar.
+
+                            It lives here, on the queue, rather than in the sheet that
+                            approved: recovery has to be on the screen a contributor
+                            lands on after deciding, not behind a window that has
+                            already closed. The countdown is the daemon's own hold,
+                            read off the approve response, so the bar cannot outlive
+                            the reprieve it is offering or retire one that is still
+                            good.
+
+                            The stack's X closes the notice without changing the
+                            approval: Dismiss is the X (MonitorNotices.swift:658-662).
+                        -->
+                        <Border x:Name="UndoCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10" Margin="0,0,28,0">
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind ViewModel.UndoHeadline, Mode=OneWay}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="Approved traces will send automatically. You can undo until uploading starts."
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button Grid.Column="1"
+                                        Style="{StaticResource TcPrimaryButtonStyle}"
+                                        Content="{x:Bind ViewModel.UndoButtonText, Mode=OneWay}"
+                                        VerticalAlignment="Center"
+                                        Click="OnUndo" />
+                            </Grid>
+                        </Border>
+                        <!-- One fixed sentence about the last decision, for the cases
+                             with no undo to offer: a hold of zero, a refusal, or a
+                             recall that came too late. -->
+                        <Border x:Name="ActionNoticeCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       TextWrapping="Wrap"
+                                       Margin="0,0,28,0" />
+                        </Border>
+                            <!-- The front card's X (NoticeClose): what it does
+                                 and its name follow the card's rule. -->
+                            <Button x:Name="NoticeClose"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Margin="0,6,6,0"
+                                    Style="{StaticResource TcToolbarButtonStyle}"
+                                    Visibility="Collapsed"
+                                    Click="OnNoticeCloseClick">
+                                <FontIcon Glyph="&#xE711;" FontSize="10" />
+                            </Button>
+                        </Grid>
+                    </Grid>
+
+
+
+                    <!--
+                        Home's overview. Its cards (heroes, tiles, recent
+                        activity) are W11's; until then it holds the two ways
+                        the Mac's Home leads that this shell has: to Traces,
+                        and to Mission drafts while missions are shown. Both
+                        words are the core's, set from code.
+                    -->
+                    <StackPanel x:Name="HomePane"
+                                Visibility="{x:Bind ViewModel.ShowingHome, Mode=OneWay}"
+                                Padding="22,24,22,22"
+                                Spacing="10">
+                        <Button x:Name="HomeOpenTraces"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Click="OnShowQueue" />
+                        <Button x:Name="HomeOpenMissionDrafts"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}"
+                                Click="OnShowMissionDrafts" />
+                    </StackPanel>
 
                 <!--
-                    The sessions a witness certificate is held for, gathered
-                    above the folders they are scattered across.
+                    The History pane.
 
-                    Drawn on every render including when it is empty. A
-                    filtered section that renders as nothing when nothing
-                    matches cannot be told apart from one that failed to load,
-                    and System.Text.Json defaults a missing holds_certificate
-                    to false on every row, which produces exactly that. The
-                    empty sentence is what says which one a contributor is
-                    looking at.
-
-                    Every word is bound. The heading and the row sentence come
-                    back from the shared crate through CertificateSurface, and
-                    the choice between the two readings is behind the ABI: no
-                    shell decides it. Nothing here is typed out.
+                    It is created once and kept rather than rebuilt on each nav
+                    click, because it holds the per submission record of what a
+                    withdrawal actually did. list_history reports a record's
+                    status, never the tier a withdrawal resolved to, so rebuilding
+                    the pane would throw that away: a contributor who withdrew a
+                    trace, glanced at the queue and came back would find the
+                    sentence naming the tier the server applied replaced by a bare
+                    chip. That is the contract's first withdrawal rule broken by a
+                    navigation.
                 -->
-                <StackPanel Grid.Row="2"
-                            Spacing="6"
-                            Margin="0,0,0,12"
-                            Visibility="{x:Bind ViewModel.IsAtQueueRoot, Mode=OneWay}">
-                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
-                               Style="{StaticResource TcTitleCardTextStyle}"
-                               TextWrapping="Wrap" />
-                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldEmptyText, Mode=OneWay}"
-                               Visibility="{x:Bind ViewModel.CertificateHeldIsEmpty, Mode=OneWay}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               Foreground="{ThemeResource TcInkSecondaryBrush}"
-                               TextWrapping="Wrap" />
-                    <ItemsControl ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate x:DataType="vm:QueueEntryViewModel">
-                                <StackPanel Spacing="2" Margin="0,0,0,6">
-                                    <TextBlock Text="{x:Bind ProjectLabel}" TextWrapping="Wrap" />
+                <ContentPresenter x:Name="HistoryPane"
+                                  Visibility="{x:Bind ViewModel.ShowingHistory, Mode=OneWay}" />
+
+                <!--
+                    The model calls pane, created once and kept for the same
+                    reason History and Settings are: it holds the daemon's last
+                    report about the listener, and rebuilding it on every nav
+                    click would replace the sentence naming a refusal with a
+                    blank until the next read landed.
+                -->
+                <ContentPresenter x:Name="PrivateInferencePane"
+                                  Visibility="{x:Bind ViewModel.ShowingPrivateInference, Mode=OneWay}" />
+
+                <ContentPresenter x:Name="InsightsPane"
+                                  Visibility="{x:Bind ViewModel.ShowingInsights, Mode=OneWay}" />
+
+                <ContentPresenter x:Name="MissionDraftsPane"
+                                  Visibility="{x:Bind ViewModel.ShowingMissionDrafts, Mode=OneWay}" />
+
+                <!-- Header, queue, recovery bar, decision notice, caveat, week
+                     band, progress. -->
+                <Grid Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                      RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto">
+
+                    <!--
+                        Content header.
+
+                        The subtitle is the app's central promise, so it is the one
+                        thing on this row that may never be cut. It wraps rather
+                        than clips, and everything beside it gives way first.
+
+                        That needs the pill to sit in an elastic column rather than
+                        an Auto one. An Auto column asks a child how wide it wants
+                        to be and grants it, so a capped, trimming pill still takes
+                        its whole cap and squeezes the sentence out; the trimming
+                        never engages because nothing ever constrains it. Two star
+                        columns at 2:1 make the split proportional instead, so the
+                        sentence gets the larger share at every width, the pill
+                        trims into what is left (its tooltip carries the full text,
+                        so nothing is lost), and the row grows taller rather than
+                        clipping if even that is not enough.
+
+                        A MinWidth on the text stack is the wrong instrument and
+                        was tried first: it does not reserve space, it lets the
+                        stack overflow its column and be painted over, which is the
+                        same clipped sentence by a different route.
+                    -->
+                    <!-- The status chip has its own row under the title,
+                         full width and wrapping: at the 440 pane it was
+                         squeezed between the title and the buttons and cut
+                         to its first word (M4: overflow is impossible). -->
+                    <Grid Grid.Row="0"
+                          ColumnDefinitions="*,Auto,Auto,Auto"
+                          RowDefinitions="Auto,Auto"
+                          ColumnSpacing="12"
+                          Padding="20,9"
+                          BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                          BorderThickness="0,0,0,1">
+                        <StackPanel Grid.Column="0"
+                                    Spacing="2"
+                                    VerticalAlignment="Center">
+                            <TextBlock Text="Waiting" Style="{StaticResource TcTitleScreenTextStyle}" />
+                            <TextBlock Text="Nothing is sent unless you say so."
+                                       Style="{StaticResource TcCaptionTextStyle}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <!--
+                            The spec's Watching chip states that the watcher is
+                            running. This app cannot assert that on its own, so the
+                            chip carries the daemon's own status line instead: the
+                            same fact, sourced rather than claimed. It drops the eye
+                            glyph, which would assert it again in a second voice.
+                            The pause control beside it calls the daemon, so a
+                            timed pause survives this process closing and resumes
+                            on the same deadline every other shell uses.
+                        -->
+                        <Border Grid.Row="1"
+                                Grid.ColumnSpan="4"
+                                Margin="0,8,0,0"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcPillCornerRadius}"
+                                Padding="8,2"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
+                                ToolTipService.ToolTip="{x:Bind ViewModel.StatusText, Mode=OneWay}">
+                            <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                       TextWrapping="Wrap" />
+                        </Border>
+
+                        <Button Grid.Column="1"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="{x:Bind interop:MonitorShellCopy.PauseWatcher}"
+                                Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="Pause watching">
+                            <Button.Flyout>
+                                <MenuFlyout>
+                                    <MenuFlyoutItem Text="1 hour" Click="OnPauseForHour" />
+                                    <MenuFlyoutItem Text="Until morning"
+                                                    Click="OnPauseUntilTomorrow" />
+                                    <MenuFlyoutItem Text="Until resumed"
+                                                    Click="OnPauseUntilResumed" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
+
+                        <Button Grid.Column="1"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="{x:Bind interop:MonitorShellCopy.ResumeWatcher}"
+                                Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                Click="OnResumeWatching"
+                                VerticalAlignment="Center" />
+
+                        <!-- The Refresh button keeps an Auto column: it is a
+                             control with a fixed label, and a squeezed button with
+                             an ellipsised caption is not a thing worth having.
+
+                             Events drive refreshes on their own; the button is for
+                             the case where a contributor wants to confirm the view
+                             is current, which is a reasonable thing to want from
+                             something that uploads on their behalf. -->
+                        <Button Grid.Column="2"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Click="OnRefreshClick"
+                                IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                VerticalAlignment="Center"
+                                AutomationProperties.Name="Refresh the queue">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon Glyph="&#xE72C;" FontSize="12" />
+                                <TextBlock Text="Refresh" />
+                            </StackPanel>
+                        </Button>
+
+                        <!-- History, the Traces tab's other page, behind the
+                             breadcrumb (MonitorNavigation.swift:23-29). Its word
+                             is the core's, set from code. -->
+                        <Button x:Name="TracesHistoryButton"
+                                Grid.Column="3"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                VerticalAlignment="Center"
+                                Click="OnShowHistory" />
+                    </Grid>
+
+
+                    <!--
+                        The queue, folders first.
+
+                        Two levels, and the grouping RULE for both (which entries
+                        share a folder, folder order, whether "Submit all" appears)
+                        is QueueGrouping.ByProject's, in TraceCommons.Interop,
+                        covered by QueueGroupingTests there. WHICH level is on
+                        screen is QueueNavigation.Resolve's, in the same assembly
+                        and covered by QueueNavigationTests. Neither decision is
+                        made in this markup; it only renders them.
+
+                        Why folders at all: at 149 waiting sessions the queue stops
+                        being a list and becomes a haystack, and a flat list of
+                        cards is the wrong shape for it. The folder name is the
+                        row's largest text here, where it used to be the SMALLEST
+                        text on its line beside an accented "Submit all". The line
+                        read as a button with a caption, and it should read as a
+                        place with actions.
+
+                        The preview scheduler's visibility signal reads the session
+                        ItemsRepeater in the detail pane below, through its own
+                        ElementPrepared and ElementClearing. See
+                        OnSessionElementPrepared and RecomputeVisiblePreviews in
+                        MainWindow.xaml.cs: those are ItemsRepeater's own per-row
+                        realization signals, which is the only thing that reports
+                        what is genuinely windowed into view.
+                    -->
+                    <ListView x:Name="QueueListView"
+                              Grid.Row="2"
+                              ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
+                              ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
+                              SelectionMode="None"
+                              Padding="22,18,22,22"
+                              ScrollViewer.HorizontalScrollMode="Disabled">
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="vm:QueueGroupViewModel">
+                                <!--
+                                    One folder. The row itself is a Button with its
+                                    chrome removed rather than a Border with a
+                                    tapped handler, the same choice the navigation
+                                    rail makes and for the same reason: a Button
+                                    carries keyboard focus, the invoke pattern and a
+                                    narrator announcement for free.
+
+                                    The three actions sit UNDER the name and path
+                                    rather than beside them, so the row reads as a
+                                    place first. "Ignore project" stays to the RIGHT
+                                    of "Submit all", matching macOS and GTK. Which
+                                    side each is on is muscle memory for two
+                                    adjacent controls acting on one set of traces in
+                                    opposite directions, so it is not a per-shell
+                                    choice.
+
+                                    Every label and tooltip is bound, not typed
+                                    here: they live in ProjectIgnoreCopy and
+                                    VerdictCopy, which is where three shells are
+                                    kept from drifting.
+                                -->
+                                <StackPanel Spacing="10" Margin="0,0,0,18">
+                                    <Button HorizontalAlignment="Stretch"
+                                            HorizontalContentAlignment="Stretch"
+                                            Background="Transparent"
+                                            BorderThickness="0"
+                                            Padding="0"
+                                            Tag="{x:Bind}"
+                                            AutomationProperties.Name="{x:Bind ProjectLabel}"
+                                            Click="OnOpenFolder">
+                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto"
+                                              ColumnSpacing="12">
+                                            <StackPanel Grid.Column="0" Spacing="2">
+                                                <TextBlock Text="{x:Bind ProjectLabel}"
+                                                           Style="{StaticResource TcTitleCardTextStyle}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                                <!-- The path is the reason this
+                                                     layout exists: a disambiguated
+                                                     label keeps two projects
+                                                     distinct and can never make
+                                                     them identifiable. Absent
+                                                     against a daemon that does not
+                                                     send one, rather than a blank
+                                                     line. -->
+                                                <TextBlock Text="{x:Bind ProjectPath}"
+                                                           Visibility="{x:Bind HasProjectPath}"
+                                                           Style="{StaticResource TcCaptionTextStyle}"
+                                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                           TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1"
+                                                       Text="{x:Bind CountText}"
+                                                       Style="{StaticResource TcCaptionTextStyle}"
+                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                       VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="2"
+                                                       Text="{x:Bind SizeText}"
+                                                       Style="{StaticResource TcMonoFigureTextStyle}"
+                                                       VerticalAlignment="Center" />
+                                            <FontIcon Grid.Column="3"
+                                                      Glyph="&#xE76C;"
+                                                      FontSize="12"
+                                                      Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                      VerticalAlignment="Center" />
+                                        </Grid>
+                                    </Button>
+
+                                    <!--
+                                        Emphasis goes to opening the folder, not
+                                        to sending it. One-click submit added
+                                        AVAILABILITY; accent styling is a
+                                        RECOMMENDATION, and the recommendation is
+                                        to look first. The row above opens the
+                                        folder too; this button is the same act
+                                        with the accent on it.
+                                    -->
+                                    <!--
+                                        How many of this folder's sessions a
+                                        "Submit all" would leave behind, BEFORE
+                                        the press. The daemon publishes the count
+                                        on the project row for exactly this: the
+                                        number used to be discoverable only from
+                                        approve's excluded_ineligible, which is
+                                        after the fact.
+
+                                        Absent entirely for an invited
+                                        contributor, whose group offers everything
+                                        it holds. It says how many and NOT why:
+                                        the reason a particular session cannot be
+                                        sent is that row's own sentence, one level
+                                        in, and a summary here would stand for up
+                                        to thirteen different reasons and say
+                                        nothing true about any of them.
+                                    -->
+                                    <TextBlock Text="{x:Bind WithheldText}"
+                                               Visibility="{x:Bind HasWithheldText}"
+                                               Style="{StaticResource TcCaptionSmallTextStyle}"
+                                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                                Content="Look inside"
+                                                Tag="{x:Bind}"
+                                                Click="OnOpenFolder" />
+                                        <!--
+                                            GONE, not greyed, when nothing in this
+                                            folder can be sent. The withheld line
+                                            above already SAYS SO IN WORDS, and an
+                                            inert button beside that sentence is an
+                                            inert control with its own explanation
+                                            standing next to it proving it
+                                            redundant.
+
+                                            ShowSubmitAll is the shared branch
+                                            table's answer, reached with an absent
+                                            count spelled as a NEGATIVE. See
+                                            ProjectQueueGroup.
+                                        -->
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind SubmitAllText}"
+                                                Visibility="{x:Bind ShowSubmitAll}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="Sends every trace waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
+                                                Click="OnSubmitAll" />
+                                        <!--
+                                            The opt-in path for answering the
+                                            verdict question once for the whole
+                                            folder. "Submit all" beside it is
+                                            untouched and still sends no outcome:
+                                            this is a separate control, never a
+                                            confirmation step in front of it, so the
+                                            common one-click path does not get
+                                            slower for a question nobody has to
+                                            answer.
+                                        -->
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind SubmitAllAsText}"
+                                                Visibility="{x:Bind ShowSubmitAll}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
+                                            <Button.Flyout>
+                                                <MenuFlyout>
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllWorked" />
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllPartly" />
+                                                    <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
+                                                                    Tag="{x:Bind}"
+                                                                    Click="OnSubmitAllFailed" />
+                                                </MenuFlyout>
+                                            </Button.Flyout>
+                                        </Button>
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind IgnoreProjectText}"
+                                                Visibility="{x:Bind ShowIgnoreProject}"
+                                                Tag="{x:Bind}"
+                                                ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
+                                                Click="OnIgnoreProject" />
+                                    </StackPanel>
                                 </StackPanel>
                             </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                    <TextBlock Text="{x:Bind ViewModel.CertificateHeldLine, Mode=OneWay}"
-                               Visibility="{x:Bind ViewModel.CertificateHeldIsNotEmpty, Mode=OneWay}"
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               Foreground="{ThemeResource TcInkSecondaryBrush}"
-                               TextWrapping="Wrap" />
-                </StackPanel>
+                        </ListView.ItemTemplate>
+                    </ListView>
 
+                    <!--
+                        The sessions a witness certificate is held for, gathered
+                        above the folders they are scattered across.
+
+                        Drawn on every render including when it is empty. A
+                        filtered section that renders as nothing when nothing
+                        matches cannot be told apart from one that failed to load,
+                        and System.Text.Json defaults a missing holds_certificate
+                        to false on every row, which produces exactly that. The
+                        empty sentence is what says which one a contributor is
+                        looking at.
+
+                        Every word is bound. The heading and the row sentence come
+                        back from the shared crate through CertificateSurface, and
+                        the choice between the two readings is behind the ABI: no
+                        shell decides it. Nothing here is typed out.
+                    -->
+                    <StackPanel Grid.Row="2"
+                                Spacing="6"
+                                Margin="0,0,0,12">
+                        <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CertificateHeldEmptyText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CertificateHeldIsEmpty, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                        <ItemsControl ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:QueueEntryViewModel">
+                                    <StackPanel Spacing="2" Margin="0,0,0,6">
+                                        <TextBlock Text="{x:Bind ProjectLabel}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock Text="{x:Bind ViewModel.CertificateHeldLine, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CertificateHeldIsNotEmpty, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+
+
+                    <!-- Empty state, layered over the same row as the list so the
+                         two cannot both take space.
+
+                         The copy is the macOS and Linux clients' empty state, not
+                         the one this window shipped with: all three say the same
+                         thing, and this app's own wording ("Sessions appear here
+                         after they settle") was the only one of the three that
+                         did not also say nothing is sent unless you say so. -->
+                    <StackPanel Grid.Row="2"
+                                Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Center"
+                                Spacing="8"
+                                Padding="32">
+                        <controls:BrandMark Size="40" HorizontalAlignment="Center" />
+                        <TextBlock Text="Nothing waiting"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                   HorizontalAlignment="Center" />
+                        <TextBlock Text="When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap"
+                                   MaxWidth="360"
+                                   TextAlignment="Center"
+                                   HorizontalAlignment="Center" />
+                    </StackPanel>
+
+
+                    <!--
+                        The scrubbing caveat, once per screen, attached to the
+                        queue rather than to any row: it is a statement about the
+                        mechanism, and the mechanism is a property of the list.
+
+                        The sentence is the canonical one the macOS and Linux
+                        clients both print in this exact position, not the design's
+                        longer 5.1 variant. Those two clients record the reasoning
+                        at length: the caveat has to be word-for-word identical
+                        everywhere it appears, so that a person who has read it
+                        under the list recognises it later above Contribute rather
+                        than reading a second, weaker message. A third client
+                        saying it differently would break precisely that.
+
+                        It sits in a fixed band below the queue rather than at the
+                        end of the scroll stack, so it is visible on an empty queue
+                        and on a long one alike.
+                    -->
+
+                    <TextBlock Grid.Row="4"
+                               Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               TextWrapping="Wrap"
+                               Padding="22,10,22,14" />
+
+                    <!--
+                        The week band, section 5.1 item 9: an eyebrow and a rule,
+                        then three equal stat cards.
+
+                        Its figures come from history_rollup, which History
+                        already reads. The queue asks for it in its own refresh
+                        rather than taking it from the History screen, so the band
+                        is filled whether or not History has ever been opened.
+                        That is one extra read of counters the daemon already
+                        holds, and it is the same choice the Linux shell records
+                        in App::refresh.
+
+                        Two of the three labels are HistoryCopy's own constants
+                        rather than restatements: a contributor who reads "Held
+                        for privacy review" here and something else on the next
+                        screen has been told two different things about one state.
+
+                        The cards are built like History's three, not like the
+                        design's: this shell's stat card carries its tone in the
+                        border rather than in an icon, and one screen introducing
+                        glyphs the sibling screen does not have would read as two
+                        designs rather than one.
+                    -->
+                    <StackPanel Grid.Row="5" Padding="22,4,22,16" Spacing="8">
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                            <TextBlock Grid.Column="0"
+                                       Text="{x:Bind ViewModel.ThisWeekLabel}"
+                                       Style="{StaticResource TcEyebrowTextStyle}"
+                                       Foreground="{ThemeResource TcGreenTextBrush}"
+                                       VerticalAlignment="Center" />
+                            <Rectangle Grid.Column="1"
+                                       Height="1"
+                                       VerticalAlignment="Center"
+                                       Fill="{ThemeResource TcHairlineBrush}" />
+                        </Grid>
+
+                        <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
+                            <Border Grid.Column="0"
+                                    Background="{ThemeResource TcSurfaceCardBrush}"
+                                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="{StaticResource TcCardCornerRadius}"
+                                    Padding="14,12">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="{x:Bind ViewModel.ContributedLabel}"
+                                               Style="{StaticResource TcEyebrowTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.ContributedCountText, Mode=OneWay}"
+                                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Held takes the gold border, exactly as it does on
+                                 History. It is not a failure and is never drawn as
+                                 one; it is the one figure here that is waiting on
+                                 a person. -->
+                            <Border Grid.Column="1"
+                                    Background="{ThemeResource TcSurfaceCardBrush}"
+                                    BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="{StaticResource TcCardCornerRadius}"
+                                    Padding="14,12">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="{x:Bind ViewModel.HeldLabel}"
+                                               Style="{StaticResource TcEyebrowTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.HeldCountText, Mode=OneWay}"
+                                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                                </StackPanel>
+                            </Border>
+
+                            <Border Grid.Column="2"
+                                    Background="{ThemeResource TcSurfaceCardBrush}"
+                                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="{StaticResource TcCardCornerRadius}"
+                                    Padding="14,12">
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="{x:Bind ViewModel.InTheCommonsLabel}"
+                                               Style="{StaticResource TcEyebrowTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.InTheCommonsCountText, Mode=OneWay}"
+                                               Style="{StaticResource TcMonoFigureTextStyle}" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+
+                    <ProgressBar Grid.Row="6"
+                                 IsIndeterminate="True"
+                                 Foreground="{ThemeResource TcGreenFillBrush}"
+                                 Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                </Grid>
+
+
+                </Grid>
+            </Grid>
+
+            <!-- The map's place (W3 draws it). -->
+            <Border x:Name="MapPane" Grid.Column="2" Visibility="Collapsed" />
+
+            <!--
+                The inspector (293 wide, two thirds of the main pane). In this
+                slice it holds the open folder's sessions, which the Traces
+                tree will show in place (W3); the folder's cards are as they
+                were, scoped to the folder, with its back control and heading.
+            -->
+            <Border x:Name="InspectorPane"
+                    Grid.Column="4"
+                    Visibility="Collapsed"
+                    Background="{ThemeResource TcSurfaceCardBrush}"
+                    BorderBrush="{ThemeResource TcHairlineBrush}"
+                    BorderThickness="1,0,0,0">
                 <!--
                     One folder's sessions.
 
@@ -1308,8 +1520,7 @@
                     reached 500), and an ItemsControl would realize every card
                     the moment the folder opened.
                 -->
-                <Grid Grid.Row="2"
-                      Visibility="{x:Bind ViewModel.IsInQueueFolder, Mode=OneWay}"
+                <Grid Visibility="{x:Bind ViewModel.IsInQueueFolder, Mode=OneWay}"
                       RowDefinitions="Auto,*">
                     <Grid Grid.Row="0"
                           ColumnDefinitions="Auto,*"
@@ -1339,6 +1550,7 @@
 
                     <ScrollViewer x:Name="QueueDetailScroller"
                                   Grid.Row="1"
+                                  AutomationProperties.Name="{x:Bind ViewModel.OpenFolderLabel, Mode=OneWay}"
                                   Padding="22,0,22,22"
                                   HorizontalScrollMode="Disabled"
                                   ViewChanged="OnQueueDetailScrolled">
@@ -1858,214 +2070,7 @@
                         </ItemsRepeater>
                     </ScrollViewer>
                 </Grid>
-
-                <!-- Empty state, layered over the same row as the list so the
-                     two cannot both take space.
-
-                     The copy is the macOS and Linux clients' empty state, not
-                     the one this window shipped with: all three say the same
-                     thing, and this app's own wording ("Sessions appear here
-                     after they settle") was the only one of the three that
-                     did not also say nothing is sent unless you say so. -->
-                <StackPanel Grid.Row="2"
-                            Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
-                            VerticalAlignment="Center"
-                            HorizontalAlignment="Center"
-                            Spacing="8"
-                            Padding="32">
-                    <controls:BrandMark Size="40" HorizontalAlignment="Center" />
-                    <TextBlock Text="Nothing waiting"
-                               Style="{StaticResource TcTitleCardTextStyle}"
-                               HorizontalAlignment="Center" />
-                    <TextBlock Text="When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
-                               Style="{StaticResource TcCaptionTextStyle}"
-                               TextWrapping="Wrap"
-                               MaxWidth="360"
-                               TextAlignment="Center"
-                               HorizontalAlignment="Center" />
-                </StackPanel>
-
-                <StackPanel Grid.Row="7" Visibility="{x:Bind ViewModel.ShowFirstContribution, Mode=OneWay}"
-                            Spacing="6" Padding="20,8">
-                    <TextBlock Text="{x:Bind ViewModel.FirstContributionHeading}" Style="{StaticResource TcTitleCardTextStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.FirstContributionStart}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.FirstContributionReview}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.FirstContributionFollowUp}" TextWrapping="Wrap" Style="{StaticResource TcCaptionTextStyle}" />
-                    <Expander Header="Agent setup" HorizontalAlignment="Stretch">
-                        <TextBlock Text="{x:Bind ViewModel.FirstContributionAgentSetup}" TextWrapping="Wrap" />
-                    </Expander>
-                </StackPanel>
-
-                <!--
-                    The scrubbing caveat, once per screen, attached to the
-                    queue rather than to any row: it is a statement about the
-                    mechanism, and the mechanism is a property of the list.
-
-                    The sentence is the canonical one the macOS and Linux
-                    clients both print in this exact position, not the design's
-                    longer 5.1 variant. Those two clients record the reasoning
-                    at length: the caveat has to be word-for-word identical
-                    everywhere it appears, so that a person who has read it
-                    under the list recognises it later above Contribute rather
-                    than reading a second, weaker message. A third client
-                    saying it differently would break precisely that.
-
-                    It sits in a fixed band below the queue rather than at the
-                    end of the scroll stack, so it is visible on an empty queue
-                    and on a long one alike.
-                -->
-                <!--
-                    The recovery bar.
-
-                    It lives here, on the queue, rather than in the sheet that
-                    approved: recovery has to be on the screen a contributor
-                    lands on after deciding, not behind a window that has
-                    already closed. The countdown is the daemon's own hold,
-                    read off the approve response, so the bar cannot outlive
-                    the reprieve it is offering or retire one that is still
-                    good.
-
-                    Dismiss closes the notice without changing the approval.
-                -->
-                <Border Grid.Row="2"
-                        Visibility="{x:Bind ViewModel.HasUndo, Mode=OneWay}"
-                        Margin="22,0,22,12"
-                        Padding="14,12"
-                        Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}">
-                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10">
-                        <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="{x:Bind ViewModel.UndoHeadline, Mode=OneWay}"
-                                       Style="{StaticResource TcTitleCardTextStyle}"
-                                       TextWrapping="Wrap" />
-                            <TextBlock Text="Approved traces will send automatically. You can undo until uploading starts."
-                                       Style="{StaticResource TcCaptionTextStyle}"
-                                       TextWrapping="Wrap" />
-                        </StackPanel>
-                        <Button Grid.Column="1"
-                                Style="{StaticResource TcSecondaryButtonStyle}"
-                                Content="Dismiss"
-                                VerticalAlignment="Center"
-                                Click="OnLetItSend" />
-                        <Button Grid.Column="2"
-                                Style="{StaticResource TcPrimaryButtonStyle}"
-                                Content="{x:Bind ViewModel.UndoButtonText, Mode=OneWay}"
-                                VerticalAlignment="Center"
-                                Click="OnUndo" />
-                    </Grid>
-                </Border>
-
-                <!-- One fixed sentence about the last decision, for the cases
-                     with no undo to offer: a hold of zero, a refusal, or a
-                     recall that came too late. -->
-                <TextBlock Grid.Row="3"
-                           Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap"
-                           Padding="22,0,22,8" />
-
-                <TextBlock Grid.Row="4"
-                           Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap"
-                           Padding="22,10,22,14" />
-
-                <!--
-                    The week band, section 5.1 item 9: an eyebrow and a rule,
-                    then three equal stat cards.
-
-                    Its figures come from history_rollup, which History
-                    already reads. The queue asks for it in its own refresh
-                    rather than taking it from the History screen, so the band
-                    is filled whether or not History has ever been opened.
-                    That is one extra read of counters the daemon already
-                    holds, and it is the same choice the Linux shell records
-                    in App::refresh.
-
-                    Two of the three labels are HistoryCopy's own constants
-                    rather than restatements: a contributor who reads "Held
-                    for privacy review" here and something else on the next
-                    screen has been told two different things about one state.
-
-                    The cards are built like History's three, not like the
-                    design's: this shell's stat card carries its tone in the
-                    border rather than in an icon, and one screen introducing
-                    glyphs the sibling screen does not have would read as two
-                    designs rather than one.
-                -->
-                <StackPanel Grid.Row="5" Padding="22,4,22,16" Spacing="8">
-                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
-                        <TextBlock Grid.Column="0"
-                                   Text="{x:Bind ViewModel.ThisWeekLabel}"
-                                   Style="{StaticResource TcEyebrowTextStyle}"
-                                   Foreground="{ThemeResource TcGreenTextBrush}"
-                                   VerticalAlignment="Center" />
-                        <Rectangle Grid.Column="1"
-                                   Height="1"
-                                   VerticalAlignment="Center"
-                                   Fill="{ThemeResource TcHairlineBrush}" />
-                    </Grid>
-
-                    <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
-                        <Border Grid.Column="0"
-                                Background="{ThemeResource TcSurfaceCardBrush}"
-                                BorderBrush="{ThemeResource TcHairlineBrush}"
-                                BorderThickness="1"
-                                CornerRadius="{StaticResource TcCardCornerRadius}"
-                                Padding="14,12">
-                            <StackPanel Spacing="4">
-                                <TextBlock Text="{x:Bind ViewModel.ContributedLabel}"
-                                           Style="{StaticResource TcEyebrowTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind ViewModel.ContributedCountText, Mode=OneWay}"
-                                           Style="{StaticResource TcMonoFigureTextStyle}" />
-                            </StackPanel>
-                        </Border>
-
-                        <!-- Held takes the gold border, exactly as it does on
-                             History. It is not a failure and is never drawn as
-                             one; it is the one figure here that is waiting on
-                             a person. -->
-                        <Border Grid.Column="1"
-                                Background="{ThemeResource TcSurfaceCardBrush}"
-                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                                BorderThickness="1"
-                                CornerRadius="{StaticResource TcCardCornerRadius}"
-                                Padding="14,12">
-                            <StackPanel Spacing="4">
-                                <TextBlock Text="{x:Bind ViewModel.HeldLabel}"
-                                           Style="{StaticResource TcEyebrowTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind ViewModel.HeldCountText, Mode=OneWay}"
-                                           Style="{StaticResource TcMonoFigureTextStyle}" />
-                            </StackPanel>
-                        </Border>
-
-                        <Border Grid.Column="2"
-                                Background="{ThemeResource TcSurfaceCardBrush}"
-                                BorderBrush="{ThemeResource TcHairlineBrush}"
-                                BorderThickness="1"
-                                CornerRadius="{StaticResource TcCardCornerRadius}"
-                                Padding="14,12">
-                            <StackPanel Spacing="4">
-                                <TextBlock Text="{x:Bind ViewModel.InTheCommonsLabel}"
-                                           Style="{StaticResource TcEyebrowTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind ViewModel.InTheCommonsCountText, Mode=OneWay}"
-                                           Style="{StaticResource TcMonoFigureTextStyle}" />
-                            </StackPanel>
-                        </Border>
-                    </Grid>
-                </StackPanel>
-
-                <ProgressBar Grid.Row="6"
-                             IsIndeterminate="True"
-                             Foreground="{ThemeResource TcGreenFillBrush}"
-                             Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
-            </Grid>
+            </Border>
         </Grid>
     </Grid>
 </Window>
