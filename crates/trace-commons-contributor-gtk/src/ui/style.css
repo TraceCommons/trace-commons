@@ -461,6 +461,15 @@ row:selected {
   color: @tc_glass_ink;
 }
 
+/* The legend's words at the map's foot: the Mac's `legendItem`,
+   `TypeScale.micro` at regular weight (10) in textTertiary, so the four
+   rules fit one line beside the zoom at a narrow pane, as on the Mac. */
+.tc-map-legend {
+  font-size: 10px;
+  font-weight: 400;
+  color: @tc_glass_ink_tertiary;
+}
+
 /* A node's card, on hover or keyboard focus: the node-card tier. */
 .tc-map-card {
   color: @tc_glass_ink;

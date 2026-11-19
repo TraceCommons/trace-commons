@@ -2530,8 +2530,7 @@ fn memory_legend_item() -> gtk::Box {
     let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let lock = lock_icon();
     let label = gtk::Label::new(Some(memory_legend_word()));
-    label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("tc-map-legend");
     item.append(&lock);
     item.append(&label);
     item
@@ -3122,8 +3121,7 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
         let _ = cr.stroke();
     });
     let label = gtk::Label::new(Some(word));
-    label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("tc-map-legend");
     item.append(&dot);
     item.append(&label);
     item
@@ -4251,6 +4249,56 @@ mod tests {
             child = next.next_sibling();
         }
         false
+    }
+
+    /// The legend's four rule items on one line beside the zoom at the
+    /// map pane's width in the Omarchy screenshot (358 px), where "Not
+    /// watched" had wrapped: the Mac's legend type (`TypeScale.micro`,
+    /// regular, 10) and textTertiary, not the theme's larger caption.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_legend_fits_one_line_at_the_narrow_map_width() {
+        gtk::init().expect("GTK display");
+        crate::ui::style::install();
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(358)
+            .default_height(560)
+            .child(&map.root)
+            .build();
+        window.present();
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        let mut items = Vec::new();
+        let mut stack = vec![map.root.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            // Each item is its dot, or the lock, and its word.
+            if widget.has_css_class("tc-map-legend") {
+                let item = widget.parent().expect("an item");
+                if item.is_visible() {
+                    items.push(item);
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                stack.push(next.clone());
+                child = next.next_sibling();
+            }
+        }
+        assert_eq!(items.len(), 4, "Automatic, Ask, Never and Not watched");
+        let first = items[0].clone();
+        settle_until(move || first.height() > 0);
+        let tops: Vec<f32> = items
+            .iter()
+            .map(|item| item.compute_bounds(&window).expect("laid out").y())
+            .collect();
+        assert!(
+            tops.iter().all(|top| (top - tops[0]).abs() < 1.0),
+            "the legend wrapped: {tops:?}"
+        );
+        window.close();
     }
 
     #[test]
