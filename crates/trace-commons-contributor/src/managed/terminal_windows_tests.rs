@@ -131,6 +131,36 @@ fn a_semicolon_is_refused_in_every_windows_terminal_argument() {
     );
 }
 
+/// Windows Terminal expands `%NAME%` in the command it starts (measured on
+/// Windows Server 2025 with Windows Terminal 1.25.3131.0, 2026-11-19: a
+/// config folder `cfg %USERNAME% x` reached the helper as `cfg tcdev x`),
+/// and has no escape for it. A helper path or config folder holding `%` is
+/// refused. The folder, told by `-d`, arrived unexpanded
+/// (`100% %USERPROFILE% x`), so it is not refused.
+#[test]
+fn a_percent_in_the_command_is_refused_for_windows_terminal() {
+    let with = |helper: &str, config: &str| {
+        plan(
+            TerminalApp::WindowsTerminal,
+            Path::new(WT),
+            Path::new(helper),
+            Path::new(config),
+            Path::new(r"C:\Users\x\100% %USERPROFILE% x"),
+            Uuid::nil(),
+            "abcdef01",
+        )
+    };
+    assert_eq!(
+        with(HELPER, r"C:\Users\x\cfg %USERNAME% x"),
+        Err(ManagedError::InvalidRequest)
+    );
+    assert_eq!(
+        with(r"C:\Program Files\100%\near-ai.exe", CONFIG),
+        Err(ManagedError::InvalidRequest)
+    );
+    assert!(with(HELPER, CONFIG).is_ok());
+}
+
 /// A drive-relative folder (`C:proj`, relative to that drive's current
 /// folder) and a rooted one with no drive (`\proj`, on whichever drive is
 /// current) are not absolute on Windows, and are refused: a launch never
@@ -268,8 +298,9 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
     // A config folder holding `%NAME%`, inside the command Windows Terminal
     // writes for the helper.
     cases.push((root.join("plain"), root.join("cfg %USERNAME% x")));
-    // The folders `plan` refuses for Windows Terminal, by name.
-    let refused_for_wt = ["a;b"];
+    // The folders `plan` refuses for Windows Terminal, by name: `;` in the
+    // folder, and the case whose config folder holds `%NAME%`.
+    let refused_for_wt = ["a;b", "plain"];
 
     let session = Uuid::new_v4();
     let ticket = "abcdef0123456789";
