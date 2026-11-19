@@ -509,6 +509,46 @@ mod tests {
         window.close();
     }
 
+    /// Minimised, the layout check comes off the clock: narrowed
+    /// meanwhile, the window keeps its wide layout. Shown again, the check
+    /// is back on the clock and takes the narrow one.
+    #[test]
+    #[ignore = "requires a GTK display; run separately with --ignored --test-threads=1"]
+    fn mounted_the_layout_check_holds_while_minimised_and_resumes() {
+        use crate::ui::glass_motion::minimise_for_test;
+        adw::init().expect("GTK display unavailable");
+        let sections = Sections::new();
+        for section in Section::ALL {
+            sections.body(section).set_size_request(-1, 240);
+        }
+        let navigation = Navigation::new(sections);
+        let window = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(600)
+            .child(&navigation.root)
+            .build();
+        window.present();
+        wait_for_layout(&navigation, true);
+
+        minimise_for_test(&window, true);
+        settle();
+        window.set_default_size(550, 600);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while navigation.root.width() >= 760 && std::time::Instant::now() < end {
+            settle();
+        }
+        assert!(navigation.root.width() < 760, "the window did not narrow");
+        settle();
+        assert!(
+            navigation.sidebar.is_visible() && !navigation.compact.is_visible(),
+            "the layout check ran while minimised"
+        );
+
+        minimise_for_test(&window, false);
+        wait_for_layout(&navigation, false);
+        window.close();
+    }
+
     // Wayland configure/allocate and the responsive tick are asynchronous.
     // A default size is a request, not evidence a frame has that size. The
     // hosted failure occurred before that old fixed 180ms wait observed a

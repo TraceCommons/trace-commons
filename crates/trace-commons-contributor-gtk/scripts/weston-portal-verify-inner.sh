@@ -197,6 +197,7 @@ else
     ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::settings::navigation::tests::mounted_settings_opened_at_a_section_scrolls_there_on_first_show \
+    ui::settings::navigation::tests::mounted_the_layout_check_holds_while_minimised_and_resumes \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
