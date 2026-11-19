@@ -53,6 +53,13 @@ public sealed class DaemonSettingsSnapshot
     [JsonPropertyName("queue_ttl_days")]
     public long QueueTtlDays { get; set; }
 
+    /// <summary>
+    /// The Insights weekly summary card's switch; null when the daemon did
+    /// not report one, and then no switch is drawn (InsightsSettingsCard.swift:37-40).
+    /// </summary>
+    [JsonPropertyName("insights_recap_card_enabled")]
+    public bool? InsightsRecapCardEnabled { get; set; }
+
     [JsonPropertyName("local_notifications")]
     public bool LocalNotifications { get; set; }
 

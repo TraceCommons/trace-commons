@@ -504,6 +504,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleInsights" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyInsights" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="InsightsHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
                 <TextBlock x:Name="RuleProjects" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyProjects" Spacing="12">
@@ -813,6 +814,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleUpdates" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyUpdates" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="UpdatesHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
                 <TextBlock x:Name="RuleWitness" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyWitness" Spacing="12">

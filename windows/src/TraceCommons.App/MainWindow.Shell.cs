@@ -875,6 +875,9 @@ public sealed partial class MainWindow
                 OpenOnboarding(OnboardingState.Default()).Activate();
                 await ViewModel.RefreshAsync();
             };
+            // Updates' Check Now asks the deployment service through the
+            // window's updater, which raises the update banner here.
+            settings.CheckForUpdatesRequested += async (_, _) => await ViewModel.CheckForUpdateAsync();
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }

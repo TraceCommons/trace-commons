@@ -30,10 +30,13 @@ public sealed partial class SettingsView
     private static readonly HashSet<SettingsSection> Drawn = new()
     {
         SettingsSection.Account, SettingsSection.Payouts, SettingsSection.Referrals, SettingsSection.Watching, SettingsSection.Tools,
-        SettingsSection.Projects, SettingsSection.Consent, SettingsSection.PublicProfile, SettingsSection.Changes,
-        SettingsSection.PrivateAI, SettingsSection.General, SettingsSection.Startup, SettingsSection.Witness,
+        SettingsSection.Insights, SettingsSection.Projects, SettingsSection.Consent, SettingsSection.PublicProfile, SettingsSection.Changes,
+        SettingsSection.PrivateAI, SettingsSection.General, SettingsSection.Startup, SettingsSection.Updates, SettingsSection.Witness,
         SettingsSection.Compute,
     };
+
+    /// <summary>Updates' Check Now: the window checks through its updater.</summary>
+    public event System.EventHandler? CheckForUpdatesRequested;
 
     private readonly Dictionary<SettingsSection, TextBlock> _rules = new();
     private readonly Dictionary<SettingsSection, StackPanel> _bodies = new();
@@ -109,6 +112,8 @@ public sealed partial class SettingsView
         PayoutsHost.Content = _payouts;
         ReferralsHost.Content = new ReferralsSection(host);
         GeneralHost.Content = new GeneralSection();
+        InsightsHost.Content = new InsightsSection(host);
+        UpdatesHost.Content = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty));
         var watcher = new WatchingSection(host);
         watcher.PausedChanged += DrawHeaderChip;
         WatcherHost.Content = watcher;
