@@ -210,7 +210,17 @@ fn launch_without_daemon_refuses_instead_of_starting_an_untracked_tool() {
     let output = Command::new(env!("CARGO_BIN_EXE_near-ai"))
         .arg("--config-dir")
         .arg(home.path())
-        .args(["--json", "launch", "claude", "--account", "Personal"])
+        // The test's stdin is not a terminal, and a launch without one is
+        // refused before the daemon is contacted unless it names
+        // --new-terminal. Name it, so this still reaches the daemon.
+        .args([
+            "--json",
+            "launch",
+            "claude",
+            "--account",
+            "Personal",
+            "--new-terminal",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success());
