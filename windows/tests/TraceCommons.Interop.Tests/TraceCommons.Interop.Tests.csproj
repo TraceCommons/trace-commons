@@ -52,6 +52,16 @@
   </ItemGroup>
 
   <!--
+    The daemon's replies to the first run's calls, recorded from the
+    contributor daemon itself; see the README beside them.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../../tests/fixtures/first-run/*.json"
+          Link="first-run/%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Copy the Rust cdylib next to the test assembly so .NET's default probing
     finds it without an NATIVE_DLL_SEARCH_DIRECTORIES dance.
 
