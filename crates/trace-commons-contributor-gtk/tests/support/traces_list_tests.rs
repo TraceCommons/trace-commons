@@ -396,7 +396,7 @@ fn glass_colour(dark: bool, name: &str) -> [u8; 3] {
         .trim_start_matches('#')
         .to_owned();
     let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
-    [byte(0), byte(1), byte(2)]
+    [byte(0), byte(2), byte(4)]
 }
 
 fn luminance([r, g, b]: [u8; 3]) -> f64 {

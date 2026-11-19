@@ -4274,8 +4274,13 @@ mod tests {
         let mut items = Vec::new();
         let mut stack = vec![map.root.clone().upcast::<gtk::Widget>()];
         while let Some(widget) = stack.pop() {
-            // Each item is its dot, or the lock, and its word.
-            if widget.has_css_class("tc-map-legend") {
+            // Each rule item is its dot and its word. The lock's memory
+            // item shares the class and the flow but is not one of the
+            // four rules, so it is left out of the count.
+            let memory = widget
+                .downcast_ref::<gtk::Label>()
+                .is_some_and(|label| label.text() == memory_legend_word());
+            if widget.has_css_class("tc-map-legend") && !memory {
                 let item = widget.parent().expect("an item");
                 if item.is_visible() {
                     items.push(item);

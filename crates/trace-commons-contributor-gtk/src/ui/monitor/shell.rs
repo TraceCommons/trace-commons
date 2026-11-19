@@ -3044,7 +3044,7 @@ mod tests {
             .trim()
             .to_owned();
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
-        [byte(0), byte(1), byte(2)]
+        [byte(0), byte(2), byte(4)]
     }
 
     /// The Settings window and a sheet are drawn on the Monitor's own
