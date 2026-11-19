@@ -56,6 +56,25 @@ public sealed class FirstRunStagePainter : IDisposable
     /// <paramref name="height"/> device-independent pixels; the design's
     /// 860 by 760 stage is fitted into it (<c>FirstRunStageFit</c>).
     /// </summary>
+    /// <summary>
+    /// The icon font: Segoe Fluent Icons where installed (Windows 11), else
+    /// Segoe MDL2 Assets. Win2D takes one family name, not XAML's fallback
+    /// list: "Segoe Fluent Icons, Segoe MDL2 Assets" named no installed font
+    /// and drew the Uses thumbs-up as a missing-glyph box (box tc-win-az3,
+    /// 2026-11-19).
+    /// </summary>
+    public static string IconFamily { get; } =
+        Array.IndexOf(CanvasTextFormat.GetSystemFontFamilies(), "Segoe Fluent Icons") >= 0 ? "Segoe Fluent Icons" : "Segoe MDL2 Assets";
+
+    /// <summary>A centred icon glyph's format at <paramref name="size"/>.</summary>
+    public static CanvasTextFormat IconFormat(double size) => new()
+    {
+        FontFamily = IconFamily,
+        FontSize = (float)size,
+        HorizontalAlignment = CanvasHorizontalAlignment.Center,
+        VerticalAlignment = CanvasVerticalAlignment.Center,
+    };
+
     public void Draw(CanvasDrawingSession ds, ICanvasResourceCreator rc, FirstRunStageModel model, double now, double width, double height, string? tracesCountText = null, string? tracesCaption = null, string? privateAIPill = null, IReadOnlyList<string>? usesCaptions = null)
     {
         Prepare(rc);
@@ -69,6 +88,15 @@ public sealed class FirstRunStagePainter : IDisposable
         Matrix3x2 fit = scale < 1
             ? Matrix3x2.CreateScale((float)scale) * Matrix3x2.CreateTranslation((float)((width - stageWidth * scale) / 2), (float)((height - stageHeight * scale) / 2))
             : Matrix3x2.Identity;
+        if (scale < 1)
+        {
+            // The scene at the window's size behind the scaled stage, as the
+            // Mac's window draws FirstRunBackdrop under FirstRunStageFit
+            // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
+            ds.Transform = Matrix3x2.Identity;
+            Backdrop(ds, rc, width, height, now, reduce);
+        }
+
         ds.Transform = fit;
         Backdrop(ds, rc, stageWidth, stageHeight, now, reduce);
         Matrix3x2 graphic = Matrix3x2.CreateTranslation((float)left, 0) * fit;
@@ -727,7 +755,7 @@ public sealed class FirstRunStagePainter : IDisposable
         Matrix3x2 saved = ds.Transform;
         var anchor = V(gate.X, gate.Y - 29 + 58 * 0.6);
         ds.Transform = Matrix3x2.CreateScale((float)look.Scale, anchor) * Matrix3x2.CreateRotation((float)(look.Turn * Math.PI / 180), anchor) * saved;
-        using (var glyph = new CanvasTextFormat { FontFamily = "Segoe Fluent Icons, Segoe MDL2 Assets", FontSize = 22, HorizontalAlignment = CanvasHorizontalAlignment.Center, VerticalAlignment = CanvasVerticalAlignment.Center })
+        using (CanvasTextFormat glyph = IconFormat(22))
         {
             var box = new Rect(gate.X - 29, gate.Y - 29, 58, 58);
             ds.DrawText("", box, Argb(FirstRunTokens.TextSecondary, 0.6 * (1 - look.White)), glyph);

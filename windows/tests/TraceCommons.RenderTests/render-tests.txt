@@ -3,3 +3,5 @@
 NearMarkMatchesTheMacsRender
 FirstRunDashesMoveForwardUnderANegativePhase
 FirstRunWelcomeFinalFrameDrawsTheNOnTheScene
+FirstRunScaledStagePaintsToEveryEdge
+FirstRunThumbDrawsFromTheIconFont
