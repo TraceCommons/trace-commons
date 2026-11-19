@@ -179,8 +179,12 @@ public sealed partial class TracesMapView : UserControl
         Content = _root;
 
         _player.Changed += () => { Rebuild(); Kick(); };
-        // Reduce motion followed live where the system reports changes.
-        _uiSettings.AnimationsEnabledChanged += (_, _) => DispatcherQueue.TryEnqueue(Recheck);
+        // Reduce motion followed live where the system reports changes
+        // (Windows 10 2004 and later); elsewhere on activation and on every tick.
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
+        {
+            _uiSettings.AnimationsEnabledChanged += (_, _) => DispatcherQueue.TryEnqueue(Recheck);
+        }
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         ActualThemeChanged += (_, _) => { DropResources(); Redraw(); };
