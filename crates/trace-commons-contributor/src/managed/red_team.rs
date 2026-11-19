@@ -315,19 +315,76 @@ pub(crate) fn spec_for(
     })
 }
 
+/// Result of a completed Red Team session run, including the final session
+/// state and collection state derived from whether the OpenCode store was
+/// published.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunOutcome {
+    pub exit_code: i32,
+    pub state: super::sessions::SessionState,
+    pub collection: Option<super::sessions::CollectionState>,
+}
+
+/// Publish the preserved OpenCode store when `collect_traces` is set and
+/// compute the final `(SessionState, Option<CollectionState>)` for the row.
+pub(crate) fn finalize_outcome(
+    store: &ConfigStore,
+    context: &LaunchContext,
+    exit_code: i32,
+    session_dir: &Path,
+) -> RunOutcome {
+    use super::sessions::{CollectionState, SessionState};
+    if !context.session.collect_traces {
+        return RunOutcome {
+            exit_code,
+            state: if exit_code == 0 {
+                SessionState::Exited
+            } else {
+                SessionState::Failed
+            },
+            collection: None,
+        };
+    }
+    match super::native_collection::publish_opencode_store(
+        store,
+        context.session.id,
+        &session_dir.join("opencode"),
+    ) {
+        Ok(()) => RunOutcome {
+            exit_code,
+            state: if exit_code == 0 {
+                SessionState::Exited
+            } else {
+                SessionState::Failed
+            },
+            collection: Some(CollectionState::Collected),
+        },
+        Err(_) => RunOutcome {
+            exit_code: if exit_code == 0 { 1 } else { exit_code },
+            state: SessionState::Failed,
+            collection: Some(CollectionState::Failed),
+        },
+    }
+}
+
 /// Run a Red Team managed session through `rts::launch::run`.
 #[cfg(target_os = "macos")]
-pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<i32> {
+pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     let spec = spec_for(store, context, None)?;
     let outcome = tokio::task::spawn_blocking(move || rts::launch::run(spec))
         .await
         .map_err(|e| anyhow::anyhow!("red-team session task failed: {e}"))?
         .map_err(anyhow::Error::msg)?;
-    Ok(outcome.exit_code)
+    Ok(finalize_outcome(
+        store,
+        context,
+        outcome.exit_code,
+        &outcome.session_dir,
+    ))
 }
 
 #[cfg(not(target_os = "macos"))]
-pub async fn run(_store: &ConfigStore, _context: &LaunchContext) -> anyhow::Result<i32> {
+pub async fn run(_store: &ConfigStore, _context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     Err(ManagedError::RedTeamUnavailable.into())
 }
 

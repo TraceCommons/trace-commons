@@ -31,6 +31,7 @@ fn tool_directory(tool: ToolId) -> Result<&'static str, ManagedError> {
     match tool {
         ToolId::Claude => Ok("claude"),
         ToolId::Codex => Ok("codex"),
+        ToolId::RedTeam => Ok("opencode"),
         _ => Err(ManagedError::InvalidRequest),
     }
 }
@@ -381,6 +382,54 @@ pub fn published(store: &ConfigStore, tool: ToolId, id: Uuid) -> bool {
             .join(id.to_string()),
     )
     .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+}
+
+/// Publish a Red Team session's preserved OpenCode store (`<opencode_dir>/opencode.db`)
+/// into `<store>/managed-native-exports/opencode/<id>/` atomically.
+///
+/// Refuses missing, symlinked, or empty stores so a session whose OpenCode
+/// never started publishes nothing.
+pub fn publish_opencode_store(
+    store: &ConfigStore,
+    id: Uuid,
+    opencode_dir: &Path,
+) -> Result<(), ManagedError> {
+    let db = opencode_dir.join("opencode.db");
+    let meta = std::fs::symlink_metadata(&db).map_err(|_| ManagedError::NotFound)?;
+    if !meta.is_file() || meta.file_type().is_symlink() || meta.len() == 0 {
+        return Err(ManagedError::NotFound);
+    }
+
+    let staged_root = store.dir().join(STAGING);
+    private_directory(&staged_root)?;
+    let tool_root = staged_root.join(tool_directory(ToolId::RedTeam)?);
+    private_directory(&tool_root)?;
+    let final_root = tool_root.join(id.to_string());
+    if final_root.exists() {
+        return Err(ManagedError::Conflict);
+    }
+    let pending = tool_root.join(format!("{id}.pending"));
+    private_directory(&pending)?;
+
+    let result = (|| {
+        std::fs::copy(&db, pending.join("opencode.db"))
+            .map_err(|_| ManagedError::StorageUnavailable)?;
+        for sidecar in ["opencode.db-wal", "opencode.db-shm"] {
+            let src = opencode_dir.join(sidecar);
+            if let Ok(m) = std::fs::symlink_metadata(&src)
+                && m.is_file()
+                && !m.file_type().is_symlink()
+            {
+                std::fs::copy(&src, pending.join(sidecar))
+                    .map_err(|_| ManagedError::StorageUnavailable)?;
+            }
+        }
+        std::fs::rename(&pending, &final_root).map_err(|_| ManagedError::StorageUnavailable)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&pending);
+    }
+    result
 }
 
 /// Explicit staged roots are separate from automatic native discovery. Only

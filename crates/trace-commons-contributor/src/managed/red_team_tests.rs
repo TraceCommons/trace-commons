@@ -338,3 +338,83 @@ fn the_release_pin_is_well_formed() {
         "release sha256 digest must be non-zero"
     );
 }
+
+#[test]
+fn a_finished_red_team_session_publishes_its_opencode_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-collect-test");
+    let session_dir = dir.path().join("session-out");
+    let opencode_dir = session_dir.join("opencode");
+    std::fs::create_dir_all(&opencode_dir).unwrap();
+    std::fs::write(opencode_dir.join("opencode.db"), b"SQLite format 3\0test").unwrap();
+
+    let outcome = finalize_outcome(&store, &ctx, 0, &session_dir);
+    assert_eq!(outcome.state, SessionState::Exited);
+    assert_eq!(outcome.collection, Some(CollectionState::Collected));
+    assert!(crate::managed::native_collection::published(
+        &store,
+        ToolId::RedTeam,
+        ctx.session.id
+    ));
+    let staged_db = store
+        .dir()
+        .join(crate::managed::native_collection::STAGING)
+        .join("opencode")
+        .join(ctx.session.id.to_string())
+        .join("opencode.db");
+    assert!(staged_db.is_file());
+}
+
+#[test]
+fn a_session_that_never_started_opencode_publishes_nothing_and_ends_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-no-opencode");
+    let session_dir = dir.path().join("session-empty");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let outcome = finalize_outcome(&store, &ctx, 0, &session_dir);
+    assert_eq!(outcome.state, SessionState::Failed);
+    assert_eq!(outcome.collection, Some(CollectionState::Failed));
+    assert!(!crate::managed::native_collection::published(
+        &store,
+        ToolId::RedTeam,
+        ctx.session.id
+    ));
+}
+
+#[test]
+fn collection_off_publishes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let mut ctx = test_context(dir.path(), vec![], "sk-off");
+    ctx.session.collect_traces = false;
+    let session_dir = dir.path().join("session-off");
+    let opencode_dir = session_dir.join("opencode");
+    std::fs::create_dir_all(&opencode_dir).unwrap();
+    std::fs::write(opencode_dir.join("opencode.db"), b"SQLite format 3\0test").unwrap();
+
+    let outcome = finalize_outcome(&store, &ctx, 0, &session_dir);
+    assert_eq!(outcome.state, SessionState::Exited);
+    assert_eq!(outcome.collection, None);
+    assert!(!crate::managed::native_collection::published(
+        &store,
+        ToolId::RedTeam,
+        ctx.session.id
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_ledger_is_in_the_managed_route_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-ledger");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    let expected_home = store
+        .dir()
+        .join("managed-routes")
+        .join(ctx.session.id.to_string());
+    assert_eq!(spec.ironwire.home, Some(expected_home));
+}

@@ -164,24 +164,24 @@ async fn run_native(
             exit_code: None,
         };
         let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(running));
-        let exit_code = super::red_team::run(store, context).await?;
+        let outcome = super::red_team::run(store, context).await?;
         *spawned = true;
         let report = LifecycleReport {
             model: row.model.clone(),
-            collection: None,
+            collection: outcome.collection,
             session_id: row.id,
             proof: context.proof.clone(),
-            state: SessionState::Exited,
+            state: outcome.state,
             process_id: None,
             process_identity: None,
-            exit_code: Some(exit_code),
+            exit_code: Some(outcome.exit_code),
         };
         let _ = super::sessions::persist_exit(store, &report);
         let response: anyhow::Result<Value> = call(store, "managed_session_report", json!(report));
         if response.is_ok() {
             super::sessions::clear_exit(store, row.id);
         }
-        return Ok(exit_code);
+        return Ok(outcome.exit_code);
     }
     let account = AccountView {
         id: row.account_id,

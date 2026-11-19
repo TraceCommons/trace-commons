@@ -321,10 +321,10 @@ pub fn collect(store: &ConfigStore, plan: &CollectionPlan) -> Result<(), Managed
 /// tool's collection publishes it, which happens only once it verified.
 pub fn staged(store: &ConfigStore, plan: &CollectionPlan) -> bool {
     match plan.tool {
-        ToolId::Claude | ToolId::Codex => {
+        ToolId::Claude | ToolId::Codex | ToolId::RedTeam => {
             super::native_collection::published(store, plan.tool, plan.session_id)
         }
-        ToolId::Opencode | ToolId::RedTeam => super::opencode::exported(store, plan.session_id),
+        ToolId::Opencode => super::opencode::exported(store, plan.session_id),
     }
 }
 

@@ -1776,6 +1776,10 @@ impl DaemonSettings {
                 crate::source::SOURCE_CLAUDE_CODE,
             ),
             (crate::managed::ToolId::Codex, crate::source::SOURCE_CODEX),
+            (
+                crate::managed::ToolId::RedTeam,
+                crate::source::SOURCE_OPENCODE,
+            ),
         ] {
             for path in crate::managed::native_collection::roots(store, tool) {
                 roots = roots.with_managed_native_root(source, path);
