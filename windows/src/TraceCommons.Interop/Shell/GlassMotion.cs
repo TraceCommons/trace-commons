@@ -466,6 +466,24 @@ public static class TabEmberGlide
         : sameFrame ? EmberMove.Stay
         : EmberMove.Place;
 
+    /// <summary>
+    /// The start of a glide that begins while another is under way: from
+    /// where the ember is drawn now, not from the tab it was gliding to
+    /// (SwiftUI's matchedGeometryEffect retargets from the current
+    /// presentation). <paramref name="restX"/> and <paramref name="restWidth"/>
+    /// are the frame the running glide rests on, <paramref name="translateX"/>
+    /// and <paramref name="scaleX"/> where it started, <paramref name="seconds"/>
+    /// how long it has run.
+    /// </summary>
+    public static (double TranslateX, double ScaleX) Retarget(
+        double restX, double restWidth, double translateX, double scaleX, double seconds, double newX, double newWidth)
+    {
+        (double tx, double sx) = At(translateX, scaleX, seconds);
+        double drawnWidth = restWidth * sx;
+        double drawnX = restX + restWidth / 2 + tx - drawnWidth / 2;
+        return From(drawnX, drawnWidth, newX, newWidth);
+    }
+
     /// <summary>The glide <paramref name="seconds"/> in: translation and scale, on the Mac's spring.</summary>
     public static (double TranslateX, double ScaleX) At(double translateX, double scaleX, double seconds)
     {

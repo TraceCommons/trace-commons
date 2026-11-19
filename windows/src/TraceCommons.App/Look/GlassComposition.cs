@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Hosting;
@@ -10,10 +12,14 @@ namespace TraceCommons.App.Look;
 /// Runs a <see cref="MotionSpec"/> on a composition property: the Mac's
 /// curve or spring sampled 60 times a second into key frames, which the
 /// compositor plays at the display's rate. When things may not move, the
-/// property is set to its end at once.
+/// property is set to its end at once. Each run or settle of a property
+/// takes a new generation, so a run cut short by the next one never writes
+/// its end over the new run when its batch completes (MotionRuns).
 /// </summary>
 internal static class GlassComposition
 {
+    private static readonly ConditionalWeakTable<Visual, MotionRuns<string>> Runs = new();
+
     /// <summary>
     /// Animates <paramref name="property"/> (a scalar: "Opacity",
     /// "RotationAngleInDegrees", "Translation.X", "Scale.X") of the
@@ -23,8 +29,9 @@ internal static class GlassComposition
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(element);
         EnsureTranslation(visual, property);
+        int run = Runs.GetOrCreateValue(visual).Begin(property);
         visual.StopAnimation(property);
-        if (!GlassMotionSettings.MayMove)
+        if (!GlassMotionSettings.MayMoveFor(element))
         {
             Set(visual, property, to);
             completed?.Invoke();
@@ -45,6 +52,11 @@ internal static class GlassComposition
         batch.End();
         batch.Completed += (_, _) =>
         {
+            if (!Runs.GetOrCreateValue(visual).IsCurrent(property, run))
+            {
+                return;
+            }
+
             Set(visual, property, to);
             completed?.Invoke();
         };
@@ -55,6 +67,7 @@ internal static class GlassComposition
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(element);
         EnsureTranslation(visual, property);
+        Runs.GetOrCreateValue(visual).Begin(property);
         visual.StopAnimation(property);
         Set(visual, property, value);
     }

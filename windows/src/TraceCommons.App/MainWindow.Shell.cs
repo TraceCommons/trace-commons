@@ -803,7 +803,7 @@ public sealed partial class MainWindow
     private void OnClocksChanged(bool mayTick)
     {
         ViewModel.SetClocksRunning(mayTick);
-        WindowClocks.Set(mayTick);
+        WindowClocks.Set(mayTick, Content?.XamlRoot);
         if (!mayTick)
         {
             _visibilityDebounceTimer.Stop();

@@ -29,6 +29,7 @@ public sealed partial class OnboardingWindow : Window
     public OnboardingWindow(DaemonHost host, OnboardingState state)
     {
         InitializeComponent();
+        WindowClocks.Watch(this);
 
         ViewModel = new OnboardingViewModel(host, state);
         ViewModel.Finished += OnFinished;

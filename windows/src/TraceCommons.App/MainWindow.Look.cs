@@ -25,6 +25,7 @@ public sealed partial class MainWindow
     private WindowMaterial _material = WindowMaterial.Painted;
     private bool _windowActive = true;
     private (ToggleButton Tab, double X, double Width)? _emberAt;
+    private (double TranslateX, double ScaleX, double StartedAt)? _emberGlide;
 
     // ---- The material (W5-D1 (b)) -------------------------------------------
 
@@ -61,7 +62,7 @@ public sealed partial class MainWindow
         // the foreground (SystemMotionWatch), and logged for the test box.
         SystemMotionWatch.Install(WinRT.Interop.WindowNative.GetWindowHandle(this));
         GlassMotionSettings.Changed += () =>
-            LookLog($"motion: animations={GlassMotionSettings.AnimationsEnabled} mayMove={GlassMotionSettings.MayMove}");
+            LookLog($"motion: animations={GlassMotionSettings.AnimationsEnabled} mayMove={GlassMotionSettings.MayMoveFor(WindowRoot)}");
         // A strip laid out again (a tab's count, a scale change) puts the
         // ember under its tab at once (TabEmberGlide.Decide); only a change
         // of tab glides.
@@ -189,14 +190,23 @@ public sealed partial class MainWindow
 
         if (move == EmberMove.Glide && _emberAt is (_, double oldX, double oldWidth))
         {
-            (double translate, double scale) = TabEmberGlide.From(oldX, oldWidth, x, width);
-            LookLog($"ember: glide {translate:F1} scale {scale:F3} mayMove={GlassMotionSettings.MayMove}");
+            // A switch while a glide is under way starts from where the
+            // ember is drawn, not from the tab it was gliding to.
+            double now = GlassClock.Now;
+            (double translate, double scale) =
+                _emberGlide is (double fromX, double fromScale, double startedAt)
+                && now - startedAt < GlassControlMotion.TabEmberGlide.Duration
+                    ? TabEmberGlide.Retarget(oldX, oldWidth, fromX, fromScale, now - startedAt, x, width)
+                    : TabEmberGlide.From(oldX, oldWidth, x, width);
+            _emberGlide = GlassMotionSettings.MayMoveFor(TabEmber) ? (translate, scale, now) : null;
+            LookLog($"ember: glide {translate:F1} scale {scale:F3} mayMove={GlassMotionSettings.MayMoveFor(TabEmber)}");
             GlassComposition.Run(TabEmber, "Translation.X", (float)translate, 0, GlassControlMotion.TabEmberGlide);
             GlassComposition.Run(TabEmber, "Scale.X", (float)scale, 1, GlassControlMotion.TabEmberGlide);
         }
         else
         {
             LookLog($"ember: place x={x:F1} width={width:F1}");
+            _emberGlide = null;
             GlassComposition.Settle(TabEmber, "Translation.X", 0);
             GlassComposition.Settle(TabEmber, "Scale.X", 1);
         }
