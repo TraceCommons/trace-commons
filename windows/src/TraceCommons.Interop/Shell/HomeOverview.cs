@@ -45,6 +45,13 @@ public sealed record HomePrivateAI(string Heading, IReadOnlyList<HomeTile>? Figu
     public override int GetHashCode() => HashCode.Combine(Heading, SignIn, SignInName);
 }
 
+/// <summary>
+/// Beside the Account heading while its figures wait on a sign-in
+/// (<c>HomeAccountSignIn</c>, HomeViews.swift:445-470, :626-649): the core's
+/// "No data", then Sign in (<see cref="SignInName"/> its accessible name).
+/// </summary>
+public sealed record HomeAccountSignIn(string NoData, string SignIn, string? SignInName);
+
 /// <summary>Which hero ground, mirrored from <see cref="HeroGround"/> so the record stays a plain value.</summary>
 public enum HomeGround
 {
@@ -65,7 +72,8 @@ public enum HomeGround
 /// three hero cards on the Mac's solid navy grounds (the compiled campaign,
 /// Missions while missions are on, Insights once its heading has loaded).
 /// Also the Private AI section first on Home, the no-credit line under the
-/// Traces heading and the mission catalogue's card, ported with the Mac's
+/// Traces heading, the mission catalogue's card and the Account heading's
+/// NEAR AI sign-in, ported with the Mac's
 /// conditions (cards new to Windows,
 /// approved as a class 2026-11-19). The walkthrough card is left out
 /// (W11-D2 (a)).
@@ -80,7 +88,8 @@ public sealed record HomeOverviewModel(
     string? InsightsLine,
     HomeNotice? NoCredit = null,
     HomeCard? Catalogue = null,
-    HomePrivateAI? PrivateAI = null)
+    HomePrivateAI? PrivateAI = null,
+    HomeAccountSignIn? AccountSignIn = null)
 {
     /// <summary>The figure rules, the core's (<c>tc_count_figure</c>, <c>tc_credit_figure</c>), handed in so tests need no library.</summary>
     public sealed record Figures(Func<ulong, string?> Count, Func<double, string?> Credit, Func<long?, byte?, string> Amount);
@@ -207,6 +216,19 @@ public sealed record HomeOverviewModel(
             }
         }
 
+        // Beside the Account heading while its figures wait on a sign-in
+        // (HomeViews.swift:445-470): the NEAR AI half, while the balance
+        // offers one (HomeFacts.BalanceOffersSignIn). The account-session
+        // half has no sign-in on Windows, so it draws nothing here.
+        HomeAccountSignIn? accountSignIn = null;
+        if (reads.Balance is NearAiBalance balance && HomeFacts.BalanceOffersSignIn(balance.State)
+            && reads.Managed is ManagedSnapshot snapshot
+            && HomeFacts.CardHeading(home("account_no_data")) is string noData
+            && HomeFacts.CardHeading(snapshot.Text("sign_in_near_ai")) is string accountSignInWord)
+        {
+            accountSignIn = new HomeAccountSignIn(noData, accountSignInWord, NonEmpty(snapshot.Text("sign_in_near_ai_accessibility")));
+        }
+
         return new HomeOverviewModel(
             home("section_traces"),
             home("section_account"),
@@ -217,7 +239,8 @@ public sealed record HomeOverviewModel(
             insightsLine,
             noCredit,
             catalogue,
-            privateAI);
+            privateAI,
+            accountSignIn);
     }
 
     /// <summary>
@@ -234,6 +257,7 @@ public sealed record HomeOverviewModel(
         && NoCredit == other.NoCredit
         && Catalogue == other.Catalogue
         && Equals(PrivateAI, other.PrivateAI)
+        && AccountSignIn == other.AccountSignIn
         && TraceTiles.SequenceEqual(other.TraceTiles)
         && AccountTiles.SequenceEqual(other.AccountTiles)
         && Heroes.SequenceEqual(other.Heroes)

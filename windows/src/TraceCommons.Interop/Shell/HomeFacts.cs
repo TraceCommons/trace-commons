@@ -127,6 +127,16 @@ public static class HomeFacts
     public static string? CardHeading(string? word) => string.IsNullOrEmpty(word) ? null : word;
 
     /// <summary>
+    /// Whether the NEAR AI balance offers a sign-in
+    /// (<c>NearAiSignInOffer.balanceOffers</c>, NearAiSignInControl.swift:13-16):
+    /// it answered that no sign-in is kept or that NEAR AI did not accept it.
+    /// NEAR AI being unreachable is not a sign-in problem. The Mac also offers
+    /// one after a sign-in that did not finish and when the account session's
+    /// renewal found NEAR AI refusing it; this shell records neither.
+    /// </summary>
+    public static bool BalanceOffersSignIn(string? state) => state is "session_expired" or "no_session";
+
+    /// <summary>
     /// The compiled campaign's fingerprint (HomeViews.swift:138-141): every
     /// field it shows, so a changed campaign is a different one. The image URL
     /// is part of it; this shell draws no image (owner decision W11-D3 (a)).

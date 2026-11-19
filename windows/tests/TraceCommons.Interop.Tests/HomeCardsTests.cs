@@ -124,3 +124,81 @@ public class HomePrivateAITests
         Assert.Null(Build(new DaemonStatus(), null).PrivateAI);
     }
 }
+
+/// <summary>
+/// Beside the Account heading while its figures wait on a sign-in
+/// (<c>accountSignIn</c>, HomeViews.swift:445-470): the core's "No data",
+/// then Sign in. Its NEAR AI half: the balance answered that no sign-in is
+/// kept or that NEAR AI did not accept it (<c>NearAiSignInOffer.balanceOffers</c>).
+/// The account-session half has no sign-in on Windows, so a credit summary
+/// waiting on the account session alone draws nothing.
+/// </summary>
+public class HomeAccountSignInTests
+{
+    private static readonly HomeOverviewModel.Figures Figures = new(
+        n => n.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        c => c.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        (_, _) => string.Empty);
+
+    private static readonly ManagedSnapshot Managed = new(
+        1, Array.Empty<ManagedAccount>(), Array.Empty<ManagedSession>(), new Dictionary<string, ulong>(),
+        new ManagedCapabilities(false, false, null, false),
+        new Dictionary<string, string> { ["sign_in_near_ai"] = "Sign in", ["sign_in_near_ai_accessibility"] = "Sign in to NEAR AI" });
+
+    private static NearAiBalance Balance(string state) => new(state, null, null, null, null, null);
+
+    private static HomeOverviewModel Build(NearAiBalance? balance, ManagedSnapshot? managed = null, CommonsCredit? credit = null) =>
+        HomeOverviewModel.From(
+            new HomeOverviewModel.Reads(new DaemonStatus(), null, credit, balance, null, null, null, false, false, null, null, null, false, managed ?? Managed),
+            MonitorShellCopy.Top, k => MonitorShellCopy.Section("home_history", k), "Balance", Figures);
+
+    [Theory]
+    [InlineData("no_session")]
+    [InlineData("session_expired")]
+    public void WhileTheBalanceWaitsOnASignInTheHeadingSaysNoDataAndSignIn(string state)
+    {
+        HomeAccountSignIn? signIn = Build(Balance(state)).AccountSignIn;
+        Assert.NotNull(signIn);
+        Assert.Equal(MonitorShellCopy.Section("home_history", "account_no_data"), signIn!.NoData);
+        Assert.Equal("No data", signIn.NoData);
+        Assert.Equal("Sign in", signIn.SignIn);
+        Assert.Equal("Sign in to NEAR AI", signIn.SignInName);
+    }
+
+    /// <summary>A known balance, an unreachable NEAR AI or an unread balance is not a sign-in problem.</summary>
+    [Theory]
+    [InlineData("known")]
+    [InlineData("unavailable")]
+    [InlineData("no_organization")]
+    [InlineData("")]
+    public void OtherwiseNothingIsDrawn(string state)
+    {
+        Assert.Null(Build(Balance(state)).AccountSignIn);
+        Assert.Null(Build(null).AccountSignIn);
+    }
+
+    [Fact]
+    public void TheAccountSessionAloneHasNoSignInHere()
+    {
+        var credit = new CommonsCredit(true, null, false, null, AccountSessionRequired: true);
+        Assert.Null(Build(Balance("known"), credit: credit).AccountSignIn);
+        Assert.NotNull(Build(Balance("no_session"), credit: credit).AccountSignIn);
+    }
+
+    [Fact]
+    public void WithoutTheSignInWordsNothingIsDrawn()
+    {
+        var bare = Managed with { Copy = new Dictionary<string, string>() };
+        Assert.Null(Build(Balance("no_session"), bare).AccountSignIn);
+        Assert.Null(HomeOverviewModel.From(
+            new HomeOverviewModel.Reads(new DaemonStatus(), null, null, Balance("no_session"), null, null, null, false, false, null, null, null, false, null),
+            MonitorShellCopy.Top, k => MonitorShellCopy.Section("home_history", k), "Balance", Figures).AccountSignIn);
+    }
+
+    [Fact]
+    public void TheSignInIsADifferentHome()
+    {
+        Assert.False(Build(Balance("known")).Same(Build(Balance("no_session"))));
+        Assert.True(Build(Balance("no_session")).Same(Build(Balance("no_session"))));
+    }
+}

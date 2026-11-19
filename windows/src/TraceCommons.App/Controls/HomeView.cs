@@ -158,7 +158,7 @@ public sealed class HomeView : UserControl
         }
 
         AddSection(model.TracesHeading, model.TraceTiles, HomeLink.Traces, balanceIndex: -1, model.NoCredit is HomeNotice notice ? BuildNotice(notice) : null);
-        AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2);
+        AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2, accessory: model.AccountSignIn is HomeAccountSignIn signIn ? BuildAccountSignIn(signIn) : null);
 
         foreach (HomeHero hero in model.Heroes)
         {
@@ -174,16 +174,30 @@ public sealed class HomeView : UserControl
         UpdateClocks();
     }
 
-    private void AddSection(string heading, IReadOnlyList<HomeTile> tiles, HomeLink link, int balanceIndex, UIElement? underHeading = null)
+    private void AddSection(string heading, IReadOnlyList<HomeTile> tiles, HomeLink link, int balanceIndex, UIElement? underHeading = null, UIElement? accessory = null)
     {
         if (heading.Length > 0)
         {
-            _column.Children.Add(new TextBlock
+            var title = new TextBlock
             {
                 Text = heading,
                 Style = (Style)Application.Current.Resources["TcTitleSectionTextStyle"],
                 Margin = new Thickness(0, HomeTrayInks.Measures.S4, 0, 0),
-            });
+            };
+            if (accessory is null)
+            {
+                _column.Children.Add(title);
+            }
+            else
+            {
+                // Just after the title, on its line (HomeSection's accessory,
+                // HomeViews.swift:725-748).
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S5 };
+                title.VerticalAlignment = VerticalAlignment.Bottom;
+                row.Children.Add(title);
+                row.Children.Add(accessory);
+                _column.Children.Add(row);
+            }
         }
 
         if (underHeading is not null)
@@ -213,6 +227,42 @@ public sealed class HomeView : UserControl
         }
 
         _column.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// Beside the Account heading while its figures wait on a sign-in
+    /// (<c>HomeAccountSignIn</c>, HomeViews.swift:626-649): the core's
+    /// "No data", a dash the screen reader skips, then Sign in as a link,
+    /// which begins the NEAR AI sign-in as the Private AI section's does.
+    /// </summary>
+    private UIElement BuildAccountSignIn(HomeAccountSignIn signIn)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S2, VerticalAlignment = VerticalAlignment.Bottom };
+        row.Children.Add(new TextBlock
+        {
+            Text = signIn.NoData,
+            Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
+            Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        var dash = new TextBlock
+        {
+            Text = "\u2013",
+            Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
+            Foreground = (Brush)Application.Current.Resources["TcInkTertiaryBrush"],
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetAccessibilityView(dash, AccessibilityView.Raw);
+        row.Children.Add(dash);
+        var link = new HyperlinkButton { Content = signIn.SignIn, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+        if (signIn.SignInName is string name)
+        {
+            AutomationProperties.SetName(link, name);
+        }
+
+        link.Click += (_, _) => LinkRequested?.Invoke(HomeLink.PrivateAISignIn);
+        row.Children.Add(link);
+        return row;
     }
 
     /// <summary>
