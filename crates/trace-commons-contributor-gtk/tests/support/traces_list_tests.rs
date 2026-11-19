@@ -518,7 +518,7 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
     for (name, text) in crate::ui::omarchy::fixtures::FIXTURES {
         let palette = crate::ui::omarchy::parse(text, false).expect(name);
         let provider = gtk::CssProvider::new();
-        provider.load_from_string(&crate::ui::style::omarchy_stylesheet(&palette));
+        provider.load_from_data(&crate::ui::style::omarchy_stylesheet(&palette));
         gtk::style_context_add_provider_for_display(
             &display,
             &provider,
