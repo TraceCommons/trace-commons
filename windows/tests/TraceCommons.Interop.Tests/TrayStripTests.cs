@@ -141,10 +141,19 @@ public class TrayStripTests
         (double x, double y, double w, double h) = slot.Badge!.Value;
 
         // The halo's line is centred 2.5 points out from the badge's top
-        // edge, at the badge's horizontal middle.
-        Rgba halo = At(strip, true, x + w / 2, y - TrayStrip.HaloInset);
+        // edge, at the badge's horizontal middle: the Mac's number, written
+        // here, so a change to the constant is seen in the drawn pixels.
+        Rgba halo = At(strip, true, x + w / 2, y - 2.5);
         Assert.Equal(Rgba.FromArgb(HomeTrayInks.Dark.PurpleText).B, halo.B, 2);
         Assert.True(halo.A > 0.9);
+
+        // The line runs from 1.5 to 3.5 points out: drawn at 2 and at 3.25
+        // (4 pixels a point), so an inset of 2 or 3 is seen.
+        foreach (double outward in new[] { 2.0, 3.25 })
+        {
+            Rgba line = At(strip, true, x + w / 2, y - outward, size: 88);
+            Assert.True(line.A > 0.9, $"{outward} points out: alpha {line.A}");
+        }
 
         // Inside the inset, between halo and badge, it is clear: the mark was cut past the halo too.
         Rgba between = At(strip, true, x + w / 2, y - 1);

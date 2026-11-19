@@ -66,6 +66,24 @@ public class HeroArtTests
         Assert.Equal((156.0, 90.0, 210.0), (HeroCard.MinHeight, HeroCard.GraphicReserve, HeroCard.GraphicWidth));
     }
 
+    /// <summary>
+    /// The matrix the glyph is drawn with tilts it 12 degrees anticlockwise
+    /// on screen (y down): its trailing side rises, as on the Mac. The
+    /// numbers are the Mac's angle written out, not read back from
+    /// <see cref="HeroGlyph.Angle"/>.
+    /// </summary>
+    [Fact]
+    public void TheGlyphIsDrawnTiltedWithItsTrailingSideUp()
+    {
+        (double m11, double m12, double m21, double m22) = HeroGlyph.Rotation();
+
+        // (1, 0) maps to (M11, M12): right, and up by sin 12 degrees.
+        Assert.Equal(0.9781476007, m11, Tight);
+        Assert.Equal(-0.2079116908, m12, Tight);
+        Assert.Equal(0.2079116908, m21, Tight);
+        Assert.Equal(0.9781476007, m22, Tight);
+    }
+
     /// <summary>HeroCard.swift:265-267 under the flat theme: dataKept, chartSeries1, firstRunBeamCore, per appearance.</summary>
     [Fact]
     public void TheGlyphsBluesAndTheGroundsAreTheMacs()
@@ -255,10 +273,11 @@ public class HeroArtTests
 
 /// <summary>
 /// Home's glyph clock follows the system's animation setting live, both
-/// ways. On tc-win-az5, 2026-11-19, turning animations back on left the
-/// glyphs still until the window was next activated: the clock had stopped
-/// when they went off, and nothing woke it to read the setting again (the
-/// 19041 projection has no AnimationsEnabledChanged event).
+/// ways, without polling (checklist P1, O3). On tc-win-az5, 2026-11-19,
+/// turning animations back on left the glyphs still until the window was next
+/// activated; the fix there was a 0.5 s probe, which the review rejected:
+/// WM_SETTINGCHANGE reaches the window when the setting changes
+/// (<c>SystemSettingWatch</c>), so with animations off nothing ticks.
 /// </summary>
 public class GlyphClockTests
 {
@@ -269,13 +288,9 @@ public class GlyphClockTests
     }
 
     [Fact]
-    public void OnScreenWithAnimationsOffASlowProbeKeepsReadingTheSetting()
+    public void WithAnimationsOffNothingTicks()
     {
-        TimeSpan? probe = GlyphClock.Interval(onScreen: true, hasGlyphs: true, animations: false);
-
-        Assert.NotNull(probe);
-        Assert.True(probe > GlyphClock.Frame, "the still glyph must not be redrawn at the frame rate");
-        Assert.True(probe <= TimeSpan.FromSeconds(1), "animations coming back on must show within a second");
+        Assert.Null(GlyphClock.Interval(onScreen: true, hasGlyphs: true, animations: false));
     }
 
     [Fact]

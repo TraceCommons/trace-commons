@@ -24,6 +24,7 @@ public static class HomeTrayInks
     public const uint CoinGoldDeep = 0xFFC58A12U;
     public const uint CoinGoldRim = 0xFF8F5E0AU;
     public const uint CoinSpark = 0xFFFFD45CU;
+    public const uint CoinGlint = 0xE6FFFFFFU;
 
     /// <summary>Radii and spacing in points (DIPs), as the flat theme sets them.</summary>
     public static class Measures

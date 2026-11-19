@@ -1643,7 +1643,8 @@ WINDOWS_HOME_TRAY_OUTPUT = (
 # edge rail's handle (EdgeRail.swift `GlassRailHandle`).
 WINDOWS_TRAY_INKS = ["menuItemMark", "purpleText", "menuModeNever", "edgeRailHandle"]
 # The coins' golds are literals in the Mac's Swift, not tokens
-# (CoinBurst.swift:50-54 `goldLight`, `gold`, `goldDeep`, `goldRim`, `spark`).
+# (CoinBurst.swift:50-54 `goldLight`, `gold`, `goldDeep`, `goldRim`, `spark`),
+# and the glint is `.white.opacity(0.9)` (CoinBurst.swift:206).
 # They are carried here so the Windows code holds no colour literal of its
 # own; a change to the Swift is a change to this list.
 WINDOWS_COIN_GOLDS = [
@@ -1652,6 +1653,7 @@ WINDOWS_COIN_GOLDS = [
     ("GoldDeep", "#C58A12"),
     ("GoldRim", "#8F5E0A"),
     ("Spark", "#FFD45C"),
+    ("Glint", "#FFFFFF", 0.9),
 ]
 
 
@@ -1691,8 +1693,9 @@ def render_windows_home_tray(tokens: dict) -> str:
         if colour != flat_color(tokens, name, "light"):
             raise TokenError(f"hero {name}: expected one ink in both appearances")
         out.append(f"    public const uint {pascal(name)} = {argb(colour, name)};")
-    for name, hex_ in WINDOWS_COIN_GOLDS:
-        out.append(f"    public const uint Coin{name} = {argb({'hex': hex_}, name)};")
+    for name, hex_, *alpha in WINDOWS_COIN_GOLDS:
+        entry = {"hex": hex_, "alpha": alpha[0]} if alpha else {"hex": hex_}
+        out.append(f"    public const uint Coin{name} = {argb(entry, name)};")
     # The measures Home's cards and the rail are laid out with, as the flat
     # theme sets them (its radii override the classic ones in both
     # appearances alike).

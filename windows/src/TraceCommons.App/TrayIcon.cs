@@ -55,7 +55,7 @@ public sealed class TrayIcon : IDisposable
     /// item opens its panel). Without a listener, the click opens the window
     /// as it always did.
     /// </summary>
-    public event Action? FlyoutRequested;
+    public event Action<(int X, int Y)>? FlyoutRequested;
 
     /// <summary>The menu's header line, the tray's own sentence of what is owed.</summary>
     public string HeaderLine => _model.MenuHeader;
@@ -265,6 +265,15 @@ public sealed class TrayIcon : IDisposable
     private string Tooltip =>
         Clamp(TrayStrip.MarkAccessibility(_model.Tooltip, _markWords), TrayModel.MaxTooltipLength);
 
+    /// <summary>A system setting changed (<see cref="SystemSettingWatch"/>): the mark is drawn again in the taskbar's ink.</summary>
+    public void RedrawForSettings()
+    {
+        if (_added)
+        {
+            Redraw(withTip: false);
+        }
+    }
+
     private void Redraw(bool withTip)
     {
         IntPtr previous = _hIcon;
@@ -458,9 +467,11 @@ public sealed class TrayIcon : IDisposable
                 case NIN_KEYSELECT:
                     // A click on the icon opens the flyout, which only
                     // re-houses what the tray says and leads into the app.
+                    // The icon's anchor, from wParam: after a keyboard select
+                    // the cursor can be anywhere (checklist M3).
                     if (FlyoutRequested is { } flyout)
                     {
-                        flyout();
+                        flyout(TrayAnchor.From(wParam.ToInt64(), ToolWindows.Cursor()));
                     }
                     else
                     {
@@ -478,9 +489,8 @@ public sealed class TrayIcon : IDisposable
                 case WM_CONTEXTMENU:
                     // Cursor position is in wParam under version 4, in screen
                     // coordinates already.
-                    ShowMenu(
-                        (short)(wParam.ToInt64() & 0xFFFF),
-                        (short)(wParam.ToInt64() >> 16 & 0xFFFF));
+                    (int x, int y) = TrayAnchor.From(wParam.ToInt64(), ToolWindows.Cursor());
+                    ShowMenu(x, y);
                     return IntPtr.Zero;
             }
         }
@@ -721,7 +731,10 @@ public sealed class TrayIcon : IDisposable
     /// follows the system one. Absent or unreadable means the Windows
     /// default, which is a dark taskbar.
     /// </remarks>
-    internal static bool IsTaskbarLight()
+    internal static bool IsTaskbarLight() => SystemSettingWatch.TaskbarLight;
+
+    /// <summary>The registry read behind <see cref="IsTaskbarLight"/>, made once and on each setting change (<see cref="SystemSettingWatch"/>).</summary>
+    internal static bool ReadTaskbarLight()
     {
         try
         {

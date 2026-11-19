@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -15,8 +16,15 @@ namespace TraceCommons.App;
 /// </summary>
 internal static class ToolWindows
 {
-    /// <summary>Makes <paramref name="window"/> a tool window: no frame, always on top, not in the switchers, never activated by showing.</summary>
-    public static IntPtr Prepare(Window window)
+    private static readonly Dictionary<IntPtr, Action<uint, long>> Listeners = new();
+
+    /// <summary>
+    /// Makes <paramref name="window"/> a tool window: no frame, always on top,
+    /// not in the switchers, never activated by showing.
+    /// <paramref name="onMessage"/>, when given, sees every message the
+    /// window procedure gets (the rail re-places itself on display changes).
+    /// </summary>
+    public static IntPtr Prepare(Window window, Action<uint, long>? onMessage = null)
     {
         AppWindow app = window.AppWindow;
         var presenter = OverlappedPresenter.Create();
@@ -29,6 +37,11 @@ internal static class ToolWindows
         app.IsShownInSwitchers = false;
 
         IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+        if (onMessage is not null)
+        {
+            Listeners[hwnd] = onMessage;
+            window.Closed += (_, _) => Listeners.Remove(hwnd);
+        }
 
         // The presenter keeps a dialog frame on the window whatever its style
         // is set to, so the whole window is made client area instead: no
@@ -107,11 +120,127 @@ internal static class ToolWindows
     public static void ReturnFocus(IntPtr hwnd)
     {
         bool exists = hwnd != IntPtr.Zero && IsWindow(hwnd);
-        if (Interop.Shell.FocusReturn.ShouldReturn(exists, exists && IsWindowVisible(hwnd), exists && IsIconic(hwnd), sameDesktop: true))
+        if (Interop.Shell.FocusReturn.ShouldReturn(exists, exists && IsWindowVisible(hwnd), exists && IsIconic(hwnd), exists && OnCurrentDesktop(hwnd)))
         {
             SetForegroundWindow(hwnd);
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="hwnd"/> is on the virtual desktop being shown
+    /// (IVirtualDesktopManager): the keyboard is never handed to a window on
+    /// another desktop, which would switch desktops (checklist M2). An answer
+    /// the system cannot give is "no": focus then stays where it is.
+    /// </summary>
+    private static bool OnCurrentDesktop(IntPtr hwnd)
+    {
+        try
+        {
+            var manager = (IVirtualDesktopManager)new VirtualDesktopManagerClass();
+            return manager.IsWindowOnCurrentVirtualDesktop(hwnd, out bool onCurrent) == 0 && onCurrent;
+        }
+        catch (COMException)
+        {
+            return false;
+        }
+        catch (InvalidCastException)
+        {
+            return false;
+        }
+    }
+
+    [ComImport]
+    [Guid("aa509086-5ca9-4c25-8f95-589d3c07b48a")]
+    private class VirtualDesktopManagerClass
+    {
+    }
+
+    [ComImport]
+    [Guid("a5cd92ff-29be-454c-8d04-d82879fb3f1b")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IVirtualDesktopManager
+    {
+        [PreserveSig]
+        int IsWindowOnCurrentVirtualDesktop(IntPtr topLevelWindow, [MarshalAs(UnmanagedType.Bool)] out bool onCurrentDesktop);
+
+        [PreserveSig]
+        int GetWindowDesktopId(IntPtr topLevelWindow, out Guid desktopId);
+
+        [PreserveSig]
+        int MoveWindowToDesktop(IntPtr topLevelWindow, ref Guid desktopId);
+    }
+
+    /// <summary>Whether the system cursor is on <paramref name="hwnd"/>'s window rectangle.</summary>
+    public static bool CursorInside(IntPtr hwnd)
+    {
+        if (!GetCursorPos(out POINT p) || !GetWindowRect(hwnd, out RECT r))
+        {
+            return false;
+        }
+
+        return p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
+    }
+
+    /// <summary>
+    /// Follows the system's foreground window (EVENT_SYSTEM_FOREGROUND, out of
+    /// context, delivered on this thread's message loop) until disposed.
+    /// </summary>
+    public static IDisposable WatchForeground(Action<IntPtr> changed)
+    {
+        WinEventProc proc = (hook, eventType, hwnd, idObject, idChild, thread, time) => changed(hwnd);
+        IntPtr handle = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero, proc, 0, 0, WINEVENT_OUTOFCONTEXT);
+        return new ForegroundHook(handle, proc);
+    }
+
+    private sealed class ForegroundHook : IDisposable
+    {
+        private IntPtr _handle;
+
+        // Rooted while hooked: native code holds a raw pointer to it.
+        private readonly WinEventProc _proc;
+
+        public ForegroundHook(IntPtr handle, WinEventProc proc)
+        {
+            _handle = handle;
+            _proc = proc;
+        }
+
+        public void Dispose()
+        {
+            if (_handle != IntPtr.Zero)
+            {
+                UnhookWinEvent(_handle);
+                _handle = IntPtr.Zero;
+            }
+
+            GC.KeepAlive(_proc);
+        }
+    }
+
+    private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+
+    private delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventProc proc, uint process, uint thread, uint flags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
 
     /// <summary>Takes the keyboard after a click inside: the window may now be activated.</summary>
     public static void TakeKeyboard(IntPtr hwnd)
@@ -133,9 +262,19 @@ internal static class ToolWindows
 
     /// <summary>Rooted for the life of the process: native code holds a raw pointer to it.</summary>
     private static readonly SubclassProc NoFrameProc = (hwnd, message, wParam, lParam, id, data) =>
-        message == WM_NCCALCSIZE && wParam != IntPtr.Zero
-            ? IntPtr.Zero
-            : DefSubclassProc(hwnd, message, wParam, lParam);
+    {
+        if (message == WM_NCCALCSIZE && wParam != IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        if (Listeners.TryGetValue(hwnd, out Action<uint, long>? listener))
+        {
+            listener(message, wParam.ToInt64());
+        }
+
+        return DefSubclassProc(hwnd, message, wParam, lParam);
+    };
 
     private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, UIntPtr id, IntPtr data);
 

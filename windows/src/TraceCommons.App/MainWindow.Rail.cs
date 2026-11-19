@@ -21,7 +21,7 @@ public sealed partial class MainWindow
         if (!_flyoutWired)
         {
             _flyoutWired = true;
-            _tray.FlyoutRequested += () => DispatcherQueue.TryEnqueue(ShowFlyout);
+            _tray.FlyoutRequested += anchor => DispatcherQueue.TryEnqueue(() => ShowFlyout(anchor));
         }
 
         if (_closed)
@@ -51,7 +51,7 @@ public sealed partial class MainWindow
         }
     }
 
-    private void ShowFlyout()
+    private void ShowFlyout((int X, int Y) anchor)
     {
         if (_closed)
         {
@@ -59,7 +59,7 @@ public sealed partial class MainWindow
         }
 
         _flyout ??= new TrayFlyoutWindow(BringForward, ShowSettingsWindow);
-        _flyout.ShowAt(ToolWindows.Cursor(), _tray.HeaderLine, _tray.WeekLine, _tray.PrivateAILine, _tray.MarkTooltip);
+        _flyout.ShowAt(anchor, _tray.HeaderLine, _tray.WeekLine, _tray.PrivateAILine, _tray.MarkTooltip);
     }
 
     /// <summary>Closes the tool windows with the main window, so none outlives it.</summary>

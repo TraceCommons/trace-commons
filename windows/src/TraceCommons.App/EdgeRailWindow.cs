@@ -35,7 +35,6 @@ internal sealed class EdgeRailWindow : Window
     private readonly IntPtr _hwnd;
     private readonly EdgeRailHover _hover = new();
     private readonly DispatcherQueueTimer _closeTimer;
-    private readonly UISettings _uiSettings = new();
     private readonly Grid _root = new();
     private readonly Grid _closed = new();
     private readonly Grid _open = new();
@@ -48,7 +47,9 @@ internal sealed class EdgeRailWindow : Window
     private readonly Action _openSettings;
     private bool _sliding;
     private bool _slidingOpen;
-    private IntPtr _previousFocus;
+    private readonly EdgeRailFocus _focus;
+    private readonly IDisposable _foreground;
+    private IntPtr _handBack;
     private MonitorTab _peekTab = MonitorTab.Inference;
 
     public EdgeRailWindow(Func<IReadOnlyList<HomeTile>> privateAITiles, Func<IReadOnlyList<HomeTile>> tracesTiles, Action<MonitorTab?> openApp, Action openSettings)
@@ -58,7 +59,15 @@ internal sealed class EdgeRailWindow : Window
         _tracesTiles = tracesTiles;
         _openApp = openApp;
         Title = MonitorShellCopy.Section("edge_rail", "rail_label");
-        _hwnd = ToolWindows.Prepare(this);
+        _hwnd = ToolWindows.Prepare(this, OnWindowMessage);
+
+        // The window the keyboard goes back to is the last one other than
+        // the rail in the foreground, followed as it changes: a press on the
+        // zone activates the rail before any handler here runs (M2).
+        _focus = new EdgeRailFocus(_hwnd);
+        _focus.Foreground(ToolWindows.Foreground());
+        _foreground = ToolWindows.WatchForeground(_focus.Foreground);
+        Closed += (_, _) => _foreground.Dispose();
 
         _closeTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
         _closeTimer.Interval = TimeSpan.FromMilliseconds(50);
@@ -70,7 +79,9 @@ internal sealed class EdgeRailWindow : Window
         _root.Children.Add(_closed);
         _root.Children.Add(_open);
         _open.Visibility = Visibility.Collapsed;
-        _root.PointerEntered += (_, _) => Step(_hover.PointerEntered());
+        // An enter counts only with the system cursor on the window: WinUI
+        // can report one from a stale position as the window resizes.
+        _root.PointerEntered += (_, _) => Step(_hover.PointerEntered(ToolWindows.CursorInside(_hwnd)));
         _root.PointerExited += (_, _) =>
         {
             _hover.PointerExited(DateTimeOffset.UtcNow);
@@ -81,16 +92,10 @@ internal sealed class EdgeRailWindow : Window
             if (_hover.Open && !_hover.HoldsKeyboard)
             {
                 // WinUI focuses its input site on the press, which activates
-                // the rail before this handler runs: the window that had the
-                // keyboard is the one noted as the rail opened, unless
-                // another has it now (tc-win-az5: the rail handed the
-                // keyboard back to itself).
-                IntPtr foreground = ToolWindows.Foreground();
-                if (foreground != _hwnd)
-                {
-                    _previousFocus = foreground;
-                }
-
+                // the rail before this handler runs; the foreground trail
+                // still names the window before it (tc-win-az5: the rail
+                // handed the keyboard to 0x0).
+                _focus.Opening(ToolWindows.Foreground());
                 _hover.Clicked();
                 ToolWindows.TakeKeyboard(_hwnd);
 
@@ -122,6 +127,15 @@ internal sealed class EdgeRailWindow : Window
         Place(open: false);
     }
 
+    /// <summary>A display arriving, leaving or changing, a DPI change, or the work area moving: the rail is placed again (EdgeRailController.swift:67).</summary>
+    private void OnWindowMessage(uint message, long wParam)
+    {
+        if (EdgeRailReplace.After(message, wParam))
+        {
+            DispatcherQueue.TryEnqueue(() => Place(_hover.Open));
+        }
+    }
+
     /// <summary>Puts the window on the primary screen's right edge at the size the state needs (EdgeRailController.swift:102-106).</summary>
     private void Place(bool open)
     {
@@ -134,10 +148,7 @@ internal sealed class EdgeRailWindow : Window
         switch (step)
         {
             case EdgeRailStep.GrowThenOpen:
-                if (ToolWindows.Foreground() is var opener && opener != _hwnd)
-                {
-                    _previousFocus = opener;
-                }
+                _focus.Opening(ToolWindows.Foreground());
 
                 // The window grows before the rail draws open into it
                 // (EdgeRailController.swift:142-147).
@@ -155,7 +166,8 @@ internal sealed class EdgeRailWindow : Window
                 // control collapsing moves XAML focus inside the rail, which
                 // activated it again (tc-win-az5).
                 ToolWindows.ReleaseKeyboard(_hwnd);
-                ToolWindows.ReturnFocus(_previousFocus);
+                _handBack = _focus.HandBack();
+                ToolWindows.ReturnFocus(_handBack);
                 StartSlide(opening: false);
                 break;
         }
@@ -182,7 +194,7 @@ internal sealed class EdgeRailWindow : Window
 
     private void OnSlideFrame(object? sender, object e)
     {
-        bool reduce = !_uiSettings.AnimationsEnabled;
+        bool reduce = !SystemSettingWatch.AnimationsEnabled;
         (double offset, double opacity, bool done) = reduce && !_slidingOpen
             ? (0, 0, true)
             : EdgeRailHover.Slide(_slidingOpen, reduce ? EdgeRailHover.SlideSeconds : _slideClock.Elapsed.TotalSeconds, reduce);
@@ -205,8 +217,16 @@ internal sealed class EdgeRailWindow : Window
             // After the layout pass that moves XAML focus off the collapsed
             // controls: that move activated the rail again when the keyboard
             // went back any sooner.
-            IntPtr returnTo = _previousFocus;
-            _previousFocus = IntPtr.Zero;
+            IntPtr returnTo = _handBack;
+            _handBack = IntPtr.Zero;
+
+            // A cursor already off the shrunk zone ends the wait after Escape,
+            // so the next real hover opens the rail.
+            if (!ToolWindows.CursorInside(_hwnd))
+            {
+                _hover.CursorAway();
+            }
+
             DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
             {
                 if (ToolWindows.Foreground() == _hwnd)

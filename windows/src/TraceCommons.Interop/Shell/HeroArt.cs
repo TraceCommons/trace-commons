@@ -105,6 +105,20 @@ public static class HeroGlyph
     public const double BrightCells = 0.46;
     public const double DimCells = 0.32;
 
+    /// <summary>
+    /// The tilt as the matrix the glyph is drawn with (M11, M12, M21, M22),
+    /// in XAML's convention: y down, a point (x, y) maps to
+    /// (x M11 + y M21, x M12 + y M22), and a positive angle turns clockwise.
+    /// <see cref="Angle"/> is negative, so the glyph's trailing side rises,
+    /// as SwiftUI's <c>rotationEffect(.degrees(-12))</c> draws it.
+    /// </summary>
+    public static (double M11, double M12, double M21, double M22) Rotation()
+    {
+        double radians = Angle * Math.PI / 180;
+        double cos = Math.Cos(radians), sin = Math.Sin(radians);
+        return (cos, sin, -sin, cos);
+    }
+
     /// <summary>PixelGlyph.swift:49: how far the canvas runs past the symbol.</summary>
     public const double Overscan = 0.3;
 
@@ -420,18 +434,15 @@ public static class HeroCard
 }
 
 /// <summary>
-/// When Home's glyph clock wakes. On screen with animations on, at the
-/// field's 10 fps; on screen with animations off, a slow probe that only
-/// reads the setting again, so turning animations back on shows within half
-/// a second (the 19041 projection has no AnimationsEnabledChanged event);
-/// off screen, or with no glyph to draw, not at all.
+/// When Home's glyph clock wakes: on screen with animations on, at the
+/// field's 10 fps; otherwise not at all. Animations coming back on reach
+/// the window as WM_SETTINGCHANGE (<c>SystemSettingWatch</c>), which starts
+/// the clock again, so nothing polls while they are off (checklist P1, O3).
 /// </summary>
 public static class GlyphClock
 {
     public static readonly TimeSpan Frame = TimeSpan.FromSeconds(1 / PixelField.FramesPerSecond);
 
-    public static readonly TimeSpan Probe = TimeSpan.FromMilliseconds(500);
-
     public static TimeSpan? Interval(bool onScreen, bool hasGlyphs, bool animations) =>
-        !onScreen || !hasGlyphs ? null : animations ? Frame : Probe;
+        onScreen && hasGlyphs && animations ? Frame : null;
 }

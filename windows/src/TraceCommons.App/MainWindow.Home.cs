@@ -44,6 +44,11 @@ public sealed partial class MainWindow
         // its switches and the Balance tile's last reading stay in memory.
         _prefs.ReadOnly = Program.IsSampleLaunch;
         HomePane.Children.Insert(0, _home);
+
+        // The animation and taskbar settings, followed through this window's
+        // WM_SETTINGCHANGE: the tray redraws in the taskbar's new ink.
+        SystemSettingWatch.Install(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        SystemSettingWatch.Changed += () => _tray.RedrawForSettings();
         _home.LinkRequested += OnHomeLink;
         _home.CampaignClosed += () =>
         {
@@ -69,7 +74,7 @@ public sealed partial class MainWindow
         Activated += (_, e) =>
         {
             _windowActive = e.WindowActivationState != WindowActivationState.Deactivated;
-            _home.Recheck();
+            SystemSettingWatch.Refresh();
         };
 
         // Home's own reads follow the daemon while Home is on screen, as the
@@ -299,7 +304,7 @@ public sealed partial class MainWindow
     {
         CreditCelebrationPlan plan = CreditCelebration.Plan(
             _prefs.CreditIconAnimation,
-            reduceMotion: !_uiSettings.AnimationsEnabled,
+            reduceMotion: !SystemSettingWatch.AnimationsEnabled,
             windowActive: _windowActive,
             hasTaskbarButton: AppWindow.IsVisible);
         if (!plan.Play)
@@ -329,7 +334,7 @@ public sealed partial class MainWindow
         // (GeneralSection.swift:41-43; MenuBarGlassPanel.swift:692-699).
         double? t = _prefs.CreditIconAnimation ? _creditPlayer.Step() : null;
         _tray.ShowCreditFrame(t);
-        _taskbarCredit?.ShowFrame(AppWindow.IsVisible ? t : null, still: !_uiSettings.AnimationsEnabled);
+        _taskbarCredit?.ShowFrame(AppWindow.IsVisible ? t : null, still: !SystemSettingWatch.AnimationsEnabled);
         if (t is null)
         {
             _creditTimer?.Stop();

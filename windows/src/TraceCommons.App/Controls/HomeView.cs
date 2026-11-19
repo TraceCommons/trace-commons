@@ -34,7 +34,6 @@ public sealed class HomeView : UserControl
     private readonly Grid _root = new();
     private readonly StackPanel _column = new() { Spacing = HomeTrayInks.Measures.CardGap };
     private readonly Canvas _burstLayer = new() { IsHitTestVisible = false };
-    private readonly UISettings _uiSettings = new();
     private readonly DispatcherQueueTimer _glyphTimer;
     private readonly DispatcherQueueTimer _countTimer;
     private readonly DispatcherQueueTimer _burstEnd;
@@ -57,11 +56,7 @@ public sealed class HomeView : UserControl
         _glyphTimer.Interval = GlyphClock.Frame;
         _glyphTimer.Tick += (_, _) =>
         {
-            // Each tick re-reads the system's animation setting (the 19041
-            // projection has no AnimationsEnabledChanged event): turning it
-            // off stops the glyphs within a frame, and while it is off a slow
-            // probe notices it coming back on (GlyphClock).
-            if (MayTick && _glyphTimer.Interval == GlyphClock.Frame)
+            if (MayTick)
             {
                 DrawGlyphs();
             }
@@ -89,27 +84,30 @@ public sealed class HomeView : UserControl
         Content = _root;
         IsTabStop = false;
 
+        // The window's visibility and the system's animation setting are
+        // followed while Home is loaded, and let go when it is unloaded:
+        // both are static events, which would otherwise hold this view.
         Loaded += (_, _) =>
         {
             _loaded = true;
+            WindowClocks.Changed -= OnWindowClocks;
+            WindowClocks.Changed += OnWindowClocks;
+            SystemSettingWatch.Changed -= UpdateClocks;
+            SystemSettingWatch.Changed += UpdateClocks;
             UpdateClocks();
         };
         Unloaded += (_, _) =>
         {
             _loaded = false;
+            WindowClocks.Changed -= OnWindowClocks;
+            SystemSettingWatch.Changed -= UpdateClocks;
             UpdateClocks();
             EndBurst();
         };
         IsEnabledChanged += (_, _) => UpdateClocks();
-        WindowClocks.Changed += _ => DispatcherQueue.TryEnqueue(UpdateClocks);
     }
 
-    /// <summary>
-    /// Re-reads the system's animation setting and starts or stops the
-    /// clocks: the window calls it as it is activated, which is when a
-    /// change made in Settings is first seen.
-    /// </summary>
-    public void Recheck() => UpdateClocks();
+    private void OnWindowClocks(bool running) => DispatcherQueue.TryEnqueue(UpdateClocks);
 
     /// <summary>Where a tile or a hero leads; the window opens it.</summary>
     public event Action<HomeLink>? LinkRequested;
@@ -130,7 +128,7 @@ public sealed class HomeView : UserControl
 
     private bool _showing;
 
-    private bool AnimationsOn => _uiSettings.AnimationsEnabled;
+    private bool AnimationsOn => SystemSettingWatch.AnimationsEnabled;
 
     /// <summary>
     /// Whether a clock may run: loaded, the page shown, the window neither
@@ -658,7 +656,8 @@ public sealed class HomeView : UserControl
             _canvas.Width = side;
             _canvas.Height = side;
             _canvas.RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5);
-            _canvas.RenderTransform = new RotateTransform { Angle = HeroGlyph.Angle };
+            (double m11, double m12, double m21, double m22) = HeroGlyph.Rotation();
+            _canvas.RenderTransform = new MatrixTransform { Matrix = new Matrix(m11, m12, m21, m22, 0, 0) };
             AutomationProperties.SetAccessibilityView(_canvas, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
             double cell = Math.Max(HeroGlyph.Cell - 1, 1);
             foreach (HeroGlyph.Lit lit in HeroGlyph.LitCells(mask, 0, 3))
@@ -732,7 +731,7 @@ public sealed class HomeView : UserControl
             var glow = new RadialGradientBrush();
             glow.GradientStops.Add(new GradientStop { Color = Argb(HomeTrayInks.CoinGoldLight), Offset = 0 });
             glow.GradientStops.Add(new GradientStop { Color = Argb(HomeTrayInks.CoinGold), Offset = 0.5 });
-            glow.GradientStops.Add(new GradientStop { Color = Color.FromArgb(0, 0xF5, 0xB9, 0x21), Offset = 1 });
+            glow.GradientStops.Add(new GradientStop { Color = Argb(HomeTrayInks.CoinGold & 0x00FFFFFFU), Offset = 1 });
             _flash.Fill = glow;
             layer.Children.Add(_flash);
             foreach (Coin coin in CoinBurst.Coins)
@@ -762,7 +761,7 @@ public sealed class HomeView : UserControl
                 {
                     Width = coin.Diameter * 0.32,
                     Height = coin.Diameter * 0.32,
-                    Fill = new SolidColorBrush(Color.FromArgb((byte)Math.Round(255 * 0.9), 255, 255, 255)),
+                    Fill = new SolidColorBrush(Argb(HomeTrayInks.CoinGlint)),
                     IsHitTestVisible = false,
                 };
                 layer.Children.Add(face);

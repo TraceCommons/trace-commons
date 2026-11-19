@@ -98,6 +98,7 @@ public sealed class EdgeRailHover
     public const double SlideSeconds = 0.25;
 
     private DateTimeOffset? _closeAt;
+    private bool _awaitingLeave;
 
     /// <summary>Whether the rail is open, or opening.</summary>
     public bool Open { get; private set; }
@@ -109,8 +110,27 @@ public sealed class EdgeRailHover
     public DateTimeOffset? CloseAt => _closeAt;
 
     /// <summary>The pointer came over the zone or the open rail.</summary>
-    public EdgeRailStep PointerEntered()
+    /// <remarks>
+    /// <paramref name="cursorInside"/> is whether the system cursor is on the
+    /// window: WinUI can report an enter from a stale pointer position as the
+    /// window resizes under it, and that opens nothing. After a close by
+    /// Escape or a control, a pointer still resting on the zone opens nothing
+    /// until it has left (tc-win-az5: the rail reopened 120-190 ms after
+    /// Escape); a cursor seen elsewhere ends that wait.
+    /// </remarks>
+    public EdgeRailStep PointerEntered(bool cursorInside = true)
     {
+        if (!cursorInside)
+        {
+            _awaitingLeave = false;
+            return EdgeRailStep.None;
+        }
+
+        if (_awaitingLeave)
+        {
+            return EdgeRailStep.None;
+        }
+
         _closeAt = null;
         if (Open)
         {
@@ -121,9 +141,13 @@ public sealed class EdgeRailHover
         return EdgeRailStep.GrowThenOpen;
     }
 
+    /// <summary>The system cursor was seen off the window: a wait for the pointer to leave is over.</summary>
+    public void CursorAway() => _awaitingLeave = false;
+
     /// <summary>The pointer left the rail: a close is scheduled <see cref="CloseDelay"/> later.</summary>
     public void PointerExited(DateTimeOffset now)
     {
+        _awaitingLeave = false;
         if (Open)
         {
             _closeAt = now + CloseDelay;
@@ -139,8 +163,19 @@ public sealed class EdgeRailHover
         }
     }
 
-    /// <summary>Escape, or a control that closes the rail: closes now.</summary>
+    /// <summary>Escape, or a control that closes the rail: closes now, and stays closed until the pointer has left.</summary>
     public EdgeRailStep CloseNow()
+    {
+        EdgeRailStep step = Close();
+        _awaitingLeave = step == EdgeRailStep.CloseThenShrink;
+        return step;
+    }
+
+    /// <summary>The window's timer: closes once a scheduled close falls due.</summary>
+    public EdgeRailStep Tick(DateTimeOffset now) =>
+        _closeAt is DateTimeOffset due && now >= due ? Close() : EdgeRailStep.None;
+
+    private EdgeRailStep Close()
     {
         _closeAt = null;
         if (!Open)
@@ -152,10 +187,6 @@ public sealed class EdgeRailHover
         HoldsKeyboard = false;
         return EdgeRailStep.CloseThenShrink;
     }
-
-    /// <summary>The window's timer: closes once a scheduled close falls due.</summary>
-    public EdgeRailStep Tick(DateTimeOffset now) =>
-        _closeAt is DateTimeOffset due && now >= due ? CloseNow() : EdgeRailStep.None;
 
     /// <summary>
     /// The rail's slide at <paramref name="seconds"/> into an open or close:
@@ -171,6 +202,66 @@ public sealed class EdgeRailHover
         double shown = opening ? eased : 1 - eased;
         return (reduceMotion ? 0 : 1 - shown, shown, t >= 1);
     }
+}
+
+/// <summary>
+/// Which window the rail gives the keyboard back to (one-pass checklist M2):
+/// the last window other than the rail that was in the foreground, followed
+/// through the system's foreground events. A press on the closed zone
+/// activates the rail before any handler runs, so the foreground window at
+/// that moment is the rail itself, and on tc-win-az5 the keyboard was handed
+/// to nothing (0x0) and stayed on the 4 px zone.
+/// </summary>
+public sealed class EdgeRailFocus
+{
+    private readonly IntPtr _rail;
+    private IntPtr _lastOther;
+    private IntPtr _noted;
+
+    public EdgeRailFocus(IntPtr rail) => _rail = rail;
+
+    /// <summary>The system's foreground changed to <paramref name="hwnd"/>.</summary>
+    public void Foreground(IntPtr hwnd)
+    {
+        if (hwnd != _rail && hwnd != IntPtr.Zero)
+        {
+            _lastOther = hwnd;
+        }
+    }
+
+    /// <summary>The rail opens, or takes the keyboard; <paramref name="foregroundNow"/> is the foreground window at that moment.</summary>
+    public void Opening(IntPtr foregroundNow)
+    {
+        Foreground(foregroundNow);
+        _noted = _lastOther;
+    }
+
+    /// <summary>The window to give the keyboard back to as the rail closes, once.</summary>
+    public IntPtr HandBack()
+    {
+        IntPtr back = _noted;
+        _noted = IntPtr.Zero;
+        return back;
+    }
+}
+
+/// <summary>
+/// The window messages after which the rail is placed again (one-pass
+/// checklist M3; the Mac re-places on <c>didChangeScreenParameters</c>,
+/// EdgeRailController.swift:67): a display arriving, leaving or changing
+/// resolution, a DPI change, and the work area moving (the taskbar resized
+/// or moved).
+/// </summary>
+public static class EdgeRailReplace
+{
+    private const uint WM_SETTINGCHANGE = 0x001A;
+    private const uint WM_DISPLAYCHANGE = 0x007E;
+    private const uint WM_DPICHANGED = 0x02E0;
+    private const long SPI_SETWORKAREA = 0x002F;
+
+    public static bool After(uint message, long wParam) =>
+        message is WM_DISPLAYCHANGE or WM_DPICHANGED
+        || (message == WM_SETTINGCHANGE && wParam == SPI_SETWORKAREA);
 }
 
 /// <summary>
@@ -275,4 +366,19 @@ public static class ToolWindowStyle
     public static long Frameless(long style) => (style & ~(FrameBits | CaptionExtras)) | Popup;
 
     public static long Extended(long exStyle) => (exStyle & ~EdgeBits) | ToolBits;
+}
+
+/// <summary>
+/// Where a tray click or key press says the icon is (one-pass checklist M3).
+/// Under NOTIFYICON_VERSION_4 a NIN_SELECT, NIN_KEYSELECT or WM_CONTEXTMENU
+/// callback carries the icon's anchor in <c>wParam</c>, in physical screen
+/// pixels, as two signed 16-bit halves: a monitor left of or above the
+/// primary has negative coordinates. The cursor is not the anchor: after a
+/// keyboard select it can be on another monitor.
+/// </summary>
+public static class TrayAnchor
+{
+    /// <summary>The anchor in <paramref name="wParam"/>; the cursor only when the callback carried none.</summary>
+    public static (int X, int Y) From(long wParam, (int X, int Y) cursor) =>
+        wParam == 0 ? cursor : ((short)(wParam & 0xFFFF), (short)((wParam >> 16) & 0xFFFF));
 }
