@@ -1,0 +1,7 @@
+{
+  "id": 1,
+  "error": {
+    "code": "bad_params",
+    "message": "invite-invalid"
+  }
+}
