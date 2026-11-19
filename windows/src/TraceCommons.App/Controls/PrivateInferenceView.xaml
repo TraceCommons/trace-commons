@@ -43,7 +43,7 @@
 
         <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
             <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
-                <ContentControl x:Name="ManagedContent" />
+                <ContentControl x:Name="ManagedContent" IsTabStop="False" />
 
                 <!--
                     The credential this computer answers calls with, and it
@@ -330,7 +330,7 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    Foreground="{ThemeResource TcGoldTextBrush}"
                                    TextWrapping="Wrap" />
-                        <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">
                                     <StackPanel Spacing="12" Margin="0,12,0,0" Padding="20"

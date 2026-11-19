@@ -1342,7 +1342,7 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    Foreground="{ThemeResource TcInkSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ItemsControl ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:QueueEntryViewModel">
                                     <StackPanel Spacing="2" Margin="0,0,0,6">
