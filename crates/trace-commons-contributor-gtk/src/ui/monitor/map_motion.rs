@@ -349,6 +349,19 @@ impl PileMotion {
     }
 }
 
+// --- The transfer cards -----------------------------------------------------------
+
+/// The stack's spring (`GlassPopoverStack`'s `.animation(.spring(response:
+/// 0.36, dampingFraction: 0.86), value: front.id)`).
+pub const STACK: Ease = Ease::Spring(0.36, 0.86);
+
+/// The opacity of the card a new front card covers, or the one a close
+/// takes away, `t` seconds after it left the front: it fades where it is
+/// on the stack's spring (`GlassPopoverStack.arrival`, removal `.opacity`).
+pub fn covered_opacity(t: f64) -> f64 {
+    (1.0 - STACK.progress(t)).clamp(0.0, 1.0)
+}
+
 // --- The graph and the panes ------------------------------------------------------
 
 /// `TracesGraphFooter.slideAnimation`: #1146's 0.45 s on
@@ -865,6 +878,28 @@ mod tests {
         pile.settle();
         assert!(!pile.moving(5.1));
         assert_eq!(pile.coin("c").unwrap().index.value(5.1), 1.0);
+    }
+
+    /// The covered card fades on the stack's spring: SwiftUI's value of
+    /// `spring(0.36, 0.86)` at 0.1 s is 0.567733, so 0.432267 is left;
+    /// past the overshoot it is gone, never below 0.
+    #[test]
+    fn a_covered_card_fades_on_the_stacks_spring() {
+        const POPOVER: &str =
+            include_str!("../../../../../macos/Sources/TCDesign/Components/PopoverNotice.swift");
+        has(
+            POPOVER,
+            ".animation(reduceMotion ? nil : .spring(response: 0.36, dampingFraction: 0.86), value: front.id)",
+        );
+        has(
+            POPOVER,
+            "return .asymmetric(insertion: fresh ? slide : .opacity, removal: .opacity)",
+        );
+        assert_eq!(STACK, Ease::Spring(0.36, 0.86));
+        assert_eq!(covered_opacity(0.0), 1.0);
+        close(covered_opacity(0.1), 1.0 - 0.567_732_99, 1e-6, "at 0.1 s");
+        assert_eq!(covered_opacity(0.3), 0.0, "past the overshoot");
+        assert_eq!(covered_opacity(STACK.length()), 0.0);
     }
 
     /// A tween heads for its target on its ease, from wherever it is when
