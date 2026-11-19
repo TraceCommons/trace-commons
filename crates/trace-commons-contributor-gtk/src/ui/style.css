@@ -280,7 +280,10 @@
   color: @tc_glass_ink_secondary;
 }
 
-button.tc-home-tile {
+/* A third of the 440 pane: no generated 10em floor (the Insights
+   summary tile's), the Mac's 10 by 12 inside. */
+.tc-insights button.tc-insights-summary.tc-home-tile {
+  min-width: 0;
   padding: 10px 12px;
 }
 

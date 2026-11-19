@@ -970,6 +970,8 @@ mod tests {
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn mounted_home_draws_the_macs_tiles() {
         adw::init().unwrap();
+        // The app's own sheet: the tiles' floors and paddings are in it.
+        crate::ui::style::install();
         let words = monitor_screens_copy();
         let view = HomeView::new(false);
         let window = gtk::Window::builder()
