@@ -46,6 +46,7 @@
             <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#E08A6A" />
             <SolidColorBrush x:Key="TcToolCodexBrush" Color="#E6E6EC" />
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#4FD39A" />
+            <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#EB1924" />
             <SolidColorBrush x:Key="TcTileFolderBrush" Color="#2A2A2C" />
         </ResourceDictionary>
 
@@ -78,6 +79,7 @@
             <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#C2603E" />
             <SolidColorBrush x:Key="TcToolCodexBrush" Color="#3A3A3C" />
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#1D9467" />
+            <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#C8141E" />
             <SolidColorBrush x:Key="TcTileFolderBrush" Color="#E6E6EA" />
         </ResourceDictionary>
 
@@ -110,6 +112,7 @@
             <StaticResource x:Key="TcToolClaudeBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcToolCodexBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcToolOpenCodeBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcToolRedTeamBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcTileFolderBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>

@@ -203,7 +203,8 @@ public sealed class LaunchTests
     [InlineData("claude", ToolLogoId.Claude, "TcToolClaudeBrush", "CC")]
     [InlineData("codex", ToolLogoId.Codex, "TcToolCodexBrush", "Cx")]
     [InlineData("opencode", ToolLogoId.OpenCode, "TcToolOpenCodeBrush", "OC")]
-    [InlineData("red_team", null, "TextFillColorPrimaryBrush", "Re")]
+    [InlineData("red_team", ToolLogoId.RedTeam, "TcToolRedTeamBrush", "RT")]
+    [InlineData("future_tool", null, "TextFillColorPrimaryBrush", "Fu")]
     public void EachToolDrawsTheMacsMark(string tool, ToolLogoId? logo, string tint, string initials)
     {
         Assert.Equal(new LaunchToolMark(logo, tint, initials), LaunchToolMark.For(tool));
@@ -366,6 +367,17 @@ public sealed class LaunchTests
         // hiding the logo and dots drawn in the same system colour.
         Assert.Equal((0.06, 0.18), LaunchHandoff.TerminalInks(highContrast: false));
         Assert.Equal((0.0, 1.0), LaunchHandoff.TerminalInks(highContrast: true));
+    }
+
+    [Fact]
+    public void TheRedTeamLogoParses()
+    {
+        // GlassLogoPaths.swift redTeam (#2238); no Swift probe pin yet, so
+        // only that it parses and draws inside its view box.
+        var steps = ToolLogos.Steps(ToolLogoId.RedTeam);
+        Assert.NotEmpty(steps);
+        LayoutRect box = ToolLogos.Artwork(ToolLogoId.RedTeam).ViewBox;
+        Assert.All(steps, s => Assert.InRange(s.X, box.X - 0.01, box.X + box.Width + 0.01));
     }
 
     [Fact]

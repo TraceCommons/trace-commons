@@ -36,6 +36,13 @@ public static partial class ToolLogoPaths
             "M16,6H8v12h8V6zm4,16H4V2h16v20z",
         });
 
+    public static readonly ToolLogoArtwork RedTeam = new(
+        new LayoutRect(0.0, 0.0, 12.0, 12.0),
+        new[]
+        {
+            "M4,0h4v1h-4zM3,1h5v1h-5zM2,2h8v1h-8zM2,3h2v1h-2zM6,3h5v1h-5zM0,4h4v1h-4zM9,4h3v1h-3zM0,5h4v1h-4zM9,5h3v1h-3zM0,6h3v1h-3zM8,6h4v1h-4zM0,7h3v1h-3zM8,7h4v1h-4zM1,8h5v1h-5zM8,8h2v1h-2zM2,9h8v1h-8zM4,10h5v1h-5zM4,11h4v1h-4z",
+        });
+
     public static readonly ToolLogoArtwork Theia = new(
         new LayoutRect(0.0, 0.0, 64.0, 64.0),
         new[]

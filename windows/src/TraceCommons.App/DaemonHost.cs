@@ -37,6 +37,26 @@ public sealed class DaemonHost : IAsyncDisposable
 #endif
 
     /// <summary>
+    /// Where the shell keeps its own small marks (a closed card): the app's
+    /// local data, or the throwaway directory in a sample launch, so a sample
+    /// run writes nothing outside it.
+    /// </summary>
+    public string ShellStateDirectory
+    {
+        get
+        {
+#if DEBUG
+            if (_sample is not null)
+            {
+                return SampleDaemon.ThrowawayConfigDir();
+            }
+#endif
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TraceCommons");
+        }
+    }
+
+    /// <summary>
     /// Raised on the UI thread when the queue may have changed. Carries no
     /// payload deliberately: the event frame's own data is a delta, and the
     /// app refetches rather than patching, so there is nothing worth passing.
@@ -45,6 +65,22 @@ public sealed class DaemonHost : IAsyncDisposable
 
     /// <summary>Raised on the UI thread when daemon status may have changed.</summary>
     public event Action? StatusChanged;
+
+    /// <summary>
+    /// <c>feature_flags_changed</c>: the window reads the snapshot again
+    /// (<see cref="FeatureFlagGate"/>). Declared on the subscription, since
+    /// the daemon sends it only to a subscriber that accepts it.
+    /// </summary>
+    public event Action? FeatureFlagsChanged;
+
+    /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
+    public event Action? Started;
+
+    /// <summary>
+    /// A model call was recorded (<c>inference_call_added</c>). The Private AI
+    /// tab re-reads its ledger on it, as the Mac's InferenceStore does.
+    /// </summary>
+    public event Action? InferenceCallAdded;
 
     /// <summary>
     /// Raised on the UI thread when the daemon says a digest is due, carrying
@@ -222,7 +258,8 @@ public sealed class DaemonHost : IAsyncDisposable
 
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent);
+        _subscription = daemon.Subscribe(OnDaemonEvent, new[] { DaemonProtocol.Events.FeatureFlagsChanged });
+        Started?.Invoke();
     }
 
     /// <summary>
@@ -415,6 +452,14 @@ public sealed class DaemonHost : IAsyncDisposable
                     StatusChanged?.Invoke();
                     break;
 
+                case DaemonProtocol.Events.FeatureFlagsChanged:
+                    FeatureFlagsChanged?.Invoke();
+                    break;
+
+                case "inference_call_added":
+                    InferenceCallAdded?.Invoke();
+                    break;
+
                 case DaemonProtocol.Events.DigestDue:
                     DigestDue?.Invoke(new DigestFacts(
                         evt.PendingCount,
@@ -432,11 +477,13 @@ public sealed class DaemonHost : IAsyncDisposable
                     Lagged?.Invoke(evt.SkippedCount);
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.ResyncRequired:
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.PreviewReady:

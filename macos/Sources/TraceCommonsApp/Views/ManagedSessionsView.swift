@@ -481,6 +481,7 @@ enum ManagedWords {
         case "claude": .claudeCode
         case "codex": .codex
         case "opencode": .openCode
+        case "red_team": .redTeam
         default: .other(initials: String(tool.prefix(2)).capitalized)
         }
     }

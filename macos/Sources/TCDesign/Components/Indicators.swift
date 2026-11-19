@@ -202,6 +202,8 @@ public struct GlassBadge: View {
 /// Display names are not here: the caller shows the core's name for a tool.
 public enum GlassTool: Sendable, Equatable {
     case claudeCode, codex, antigravity, geminiCLI, cline, openCode, theia
+    /// NEAR AI Red SandBox sessions (the managed `red_team` tool).
+    case redTeam
     /// Any other tool, by its two-letter initials.
     case other(initials: String)
 
@@ -213,6 +215,7 @@ public enum GlassTool: Sendable, Equatable {
         case .antigravity, .geminiCLI: GlassTokens.Color.toolAntigravity
         case .openCode: GlassTokens.Color.toolOpenCode
         case .theia: GlassTokens.Color.toolTheia
+        case .redTeam: GlassTokens.Color.toolRedTeam
         case .cline, .other: GlassTokens.Color.textPrimary
         }
     }
@@ -226,6 +229,7 @@ public enum GlassTool: Sendable, Equatable {
         case .antigravity: .antigravity
         case .openCode: .openCode
         case .theia: .theia
+        case .redTeam: .redTeam
         case .geminiCLI, .cline, .other: nil
         }
     }
@@ -240,6 +244,7 @@ public enum GlassTool: Sendable, Equatable {
         case .cline: "Cl"
         case .openCode: "OC"
         case .theia: "Th"
+        case .redTeam: "RT"
         case let .other(initials): String(initials.prefix(2))
         }
     }

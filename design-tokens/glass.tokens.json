@@ -147,6 +147,7 @@
     "toolAntigravity": { "hex": "#6d9cff", "light": { "hex": "#3a68d8" } },
     "toolOpenCode": { "hex": "#4fd39a", "light": { "hex": "#1d9467" } },
     "toolTheia": { "hex": "#9d93ff", "light": { "hex": "#6152e0" } },
+    "toolRedTeam": { "hex": "#eb1924", "light": { "hex": "#c8141e" } },
     "tileFolder": { "hex": "#2a2a2c", "light": { "hex": "#e6e6ea" } },
     "tileFolderInk": { "hex": "#8be28b", "light": { "hex": "#2c8a37" } },
     "ink": { "hex": "#ffffff", "note": "Overlay strokes and fills over a surface: white on dark, black on light. Used at an alpha.", "light": { "hex": "#000000" } }

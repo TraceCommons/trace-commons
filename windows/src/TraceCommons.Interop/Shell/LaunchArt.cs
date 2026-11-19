@@ -12,6 +12,7 @@ public enum ToolLogoId
     Claude,
     Codex,
     OpenCode,
+    RedTeam,
 }
 
 /// <summary>
@@ -33,6 +34,8 @@ public sealed record LaunchToolMark(ToolLogoId? Logo, string TintKey, string Ini
         "claude" => new(ToolLogoId.Claude, "TcToolClaudeBrush", "CC"),
         "codex" => new(ToolLogoId.Codex, "TcToolCodexBrush", "Cx"),
         "opencode" => new(ToolLogoId.OpenCode, "TcToolOpenCodeBrush", "OC"),
+        // NEAR AI Red SandBox (Indicators.swift:205-247, #2238).
+        "red_team" => new(ToolLogoId.RedTeam, "TcToolRedTeamBrush", "RT"),
         // `.other(initials: String(tool.prefix(2)).capitalized)`, drawn in
         // textPrimary (Indicators.swift:187).
         _ => new(null, "TextFillColorPrimaryBrush", Capitalized(tool.Length > 2 ? tool[..2] : tool)),
@@ -55,6 +58,7 @@ public static class ToolLogos
         ToolLogoId.Claude => ToolLogoPaths.Claude,
         ToolLogoId.Codex => ToolLogoPaths.Codex,
         ToolLogoId.OpenCode => ToolLogoPaths.OpenCode,
+        ToolLogoId.RedTeam => ToolLogoPaths.RedTeam,
         _ => throw new ArgumentOutOfRangeException(nameof(id)),
     };
 

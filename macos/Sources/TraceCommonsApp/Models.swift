@@ -256,6 +256,8 @@ struct DaemonStatus: Decodable, Equatable {
     /// CLI setup completion for this daemon's current enrollment. An older
     /// daemon omits it; the existing tenant-keyed GUI marker still applies.
     let setupComplete: Bool?
+    /// Stable enrollment fingerprint for completing setup after settings writes.
+    let setupScope: String?
     var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
@@ -311,6 +313,7 @@ struct DaemonStatus: Decodable, Equatable {
         case loggedIn = "logged_in"
         case tenantID = "tenant_id"
         case setupComplete = "setup_complete"
+        case setupScope = "setup_scope"
         case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
@@ -341,6 +344,7 @@ struct DaemonStatus: Decodable, Equatable {
         loggedIn: Bool,
         tenantID: String?,
         setupComplete: Bool? = nil,
+        setupScope: String? = nil,
         accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
@@ -364,6 +368,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.loggedIn = loggedIn
         self.tenantID = tenantID
         self.setupComplete = setupComplete
+        self.setupScope = setupScope
         self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
@@ -390,6 +395,7 @@ struct DaemonStatus: Decodable, Equatable {
         loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
         tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
         setupComplete = try c.decodeIfPresent(Bool.self, forKey: .setupComplete)
+        setupScope = try c.decodeIfPresent(String.self, forKey: .setupScope)
         accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
