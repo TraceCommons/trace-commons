@@ -79,6 +79,23 @@ class PairTests(unittest.TestCase):
         self.assertIn("stray.png", page)
         self.assertEqual(page.count("<img"), 3)
 
+    def test_the_second_side_is_named_by_parity_side(self):
+        with tempfile.TemporaryDirectory() as mac, tempfile.TemporaryDirectory() as win:
+            touch(mac, "normalDay-traces-main-light.png")
+            touch(win, "normalDay-traces-main-light.png")
+            touch(win, "empty-traces-main-dark.png")
+            result = gallery.collect(mac, win)
+            page = gallery.render(result, side="Windows")
+            default = gallery.render(result)
+        self.assertIn("<title>Mac and Windows captures</title>", page)
+        self.assertIn("<figcaption>Windows</figcaption>", page)
+        self.assertIn("<h2>Windows only</h2>", page)
+        self.assertNotIn("Linux", page)
+        # Unset, the page is the Linux one it always was.
+        self.assertIn("<title>Mac and Linux captures</title>", default)
+        self.assertEqual(gallery.side_name({}), "Linux")
+        self.assertEqual(gallery.side_name({"PARITY_SIDE": "Windows"}), "Windows")
+
 
 if __name__ == "__main__":
     unittest.main()

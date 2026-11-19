@@ -259,6 +259,52 @@
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    The recorded-sample client (SampleDaemonTests).
+
+    TraceCommons.Interop compiles SampleDaemon.cs, and copies the macOS app's
+    recordings beside itself, in Debug only: a Release build cannot be put on
+    sample data. CI runs this suite in Release, so there the test assembly
+    compiles its own copy of the source under TC_SAMPLE_TESTS and copies the
+    recordings itself, and the sample tests still run. In Debug the
+    referenced assembly's copy is used and nothing is duplicated.
+  -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DefineConstants>$(DefineConstants);TC_SAMPLE_TESTS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(Configuration)' == 'Release'">
+    <Compile Include="../../src/TraceCommons.Interop/SampleDaemon.cs" Link="SampleDaemon.cs" />
+    <None Include="$(MSBuildThisFileDirectory)../../../macos/Sources/TCShellCore/DataContract/RecordedSamples/**/*.json"
+          Link="RecordedSamples/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!--
+    The interop project file, for the Debug-only recordings copy, and the two
+    halves of the capture naming: the gallery's grammar and the Windows
+    capture driver that must follow it.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/TraceCommons.Interop.csproj"
+          Link="interop-project/TraceCommons.Interop.csproj.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../../scripts/parity/gallery.py"
+          Link="parity/gallery.py.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../scripts/win-capture-samples.ps1"
+          Link="parity/win-capture-samples.ps1.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!--
+    The C ABI header, for NativeBindingTests: every DllImport of the cdylib
+    must name a function it declares, with the same signature. The FFI
+    crate's copy; the macOS copy is kept byte-identical by that crate's tests.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../../crates/trace-commons-contributor-ffi/include/trace_commons.h"
+          Link="abi/trace_commons.h.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
     <TcFfiLibDir Condition="'$(TcFfiLibDir)' == ''">$(MSBuildThisFileDirectory)../../../target/debug</TcFfiLibDir>

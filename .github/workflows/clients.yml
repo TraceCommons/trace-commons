@@ -26,6 +26,9 @@ on:
       - "design-tokens/**"
       - "scripts/design-tokens/**"
       - "windows/**"
+      # The parity gallery: its NAME grammar is pinned by the Windows sample
+      # tests (SampleDaemonTests.CaptureNamesFollowTheGalleryGrammar).
+      - "scripts/parity/**"
       - "installer/**"
       - "scripts/windows/**"
       - "scripts/install.ps1"
@@ -757,6 +760,22 @@ jobs:
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\debug
         run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
+
+      # The recorded-sample mode (TRACE_COMMONS_SAMPLE) is compiled into Debug
+      # builds only, so the Release build above never compiles it: every
+      # `#if DEBUG` line in the app would otherwise reach main unbuilt. This
+      # compiles the unpackaged Debug app, and runs the sample tests against
+      # the Debug interop assembly, where the client is present (the Release
+      # run above checks that it is absent).
+      - name: Build the Debug app and run the sample tests in Debug
+        working-directory: windows
+        shell: pwsh
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\debug
+        run: |
+          msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Debug -p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Debug --filter "FullyQualifiedName~SampleDaemonTests|FullyQualifiedName~NativeBindingTests" --logger "console;verbosity=normal"
 
       - name: Confirm exactly one package was produced
         working-directory: windows
