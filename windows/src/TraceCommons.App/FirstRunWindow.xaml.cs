@@ -1457,46 +1457,6 @@ public sealed partial class FirstRunWindow : Window
         return group;
     }
 
-    /// <summary>
-    /// A glow under <paramref name="shape"/>: a composition drop shadow in
-    /// firstRunGlow, masked by the element's own alpha, blurred to
-    /// <paramref name="radius"/>, placed in <paramref name="host"/> behind it.
-    /// The returned setter takes its opacity (0 to 1).
-    /// </summary>
-    private static Func<double, bool> Glow(Panel host, FrameworkElement shape, double radius)
-    {
-        var compositor = Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.GetElementVisual(host).Compositor;
-        var shadow = compositor.CreateDropShadow();
-        shadow.BlurRadius = (float)radius;
-        shadow.Color = FirstRunStagePainter.Argb(FirstRunTokens.FirstRunGlow);
-        shadow.Offset = System.Numerics.Vector3.Zero;
-        shadow.Opacity = 0;
-        var sprite = compositor.CreateSpriteVisual();
-        sprite.Shadow = shadow;
-        var layer = new Canvas { IsHitTestVisible = false };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(layer, AccessibilityView.Raw);
-        host.Children.Add(layer);
-        Microsoft.UI.Xaml.Hosting.ElementCompositionPreview.SetElementChildVisual(layer, sprite);
-        void Fit()
-        {
-            sprite.Size = new System.Numerics.Vector2((float)shape.ActualWidth, (float)shape.ActualHeight);
-            shadow.Mask = shape switch
-            {
-                TextBlock t => t.GetAlphaMask(),
-                Shape sh => sh.GetAlphaMask(),
-                _ => null,
-            };
-        }
-
-        shape.SizeChanged += (_, _) => Fit();
-        shape.Loaded += (_, _) => Fit();
-        return opacity =>
-        {
-            shadow.Opacity = (float)Math.Clamp(opacity, 0, 1);
-            return true;
-        };
-    }
-
     private static Windows.UI.Color Lerp(uint a, uint b, double p)
     {
         byte M(int shift) => (byte)Math.Round(((a >> shift) & 0xFF) * (1 - p) + ((b >> shift) & 0xFF) * p);
@@ -1773,13 +1733,7 @@ public sealed partial class FirstRunWindow : Window
                 }
 
                 bool isCurrent = current == i, passed = current is int cur && i < cur;
-                var title = new TextBlock { Text = labels[i], FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
-                // The lit title's glow, firstRunGlow at 0.35, radius 7
-                // (FirstRunStage.swift:210-211), drawn under the words from
-                // their own shape and lit with them.
-                var cell = new Grid { Margin = new Thickness(FirstRunStepThread.TitlePadding, 0, FirstRunStepThread.TitlePadding, 0), VerticalAlignment = VerticalAlignment.Center };
-                Func<double, bool> setGlow = Glow(cell, title, FirstRunStepThread.TitleGlow);
-                cell.Children.Add(title);
+                var title = new TextBlock { Text = labels[i], FontSize = 13, Margin = new Thickness(10, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
                 bool wasCurrent = before == i;
                 int at = i;
                 _motions.Add((t =>
@@ -1788,11 +1742,10 @@ public sealed partial class FirstRunWindow : Window
                     uint rest = passed ? FirstRunTokens.TextSecondary : FirstRunTokens.TextTertiary;
                     title.Foreground = new SolidColorBrush(Lerp(rest, FirstRunTokens.TextPrimary, lit));
                     title.FontWeight = lit >= 0.5 ? FontWeights.SemiBold : FontWeights.Medium;
-                    setGlow(FirstRunStepThread.GlowAlpha * lit);
                 }, t => t - now < FirstRunMotion.TitleGlowDelay + FirstRunMotion.TitleGlow));
                 if (passed)
                 {
-                    var back = new Button { Content = cell, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = !_runner.IsCommitting };
+                    var back = new Button { Content = title, Padding = new Thickness(0), Background = new SolidColorBrush(Colors.Transparent), BorderThickness = new Thickness(0), IsEnabled = !_runner.IsCommitting };
                     AutomationProperties.SetName(back, labels[i]);
                     back.Click += (_, _) =>
                     {
@@ -1804,7 +1757,7 @@ public sealed partial class FirstRunWindow : Window
                 else
                 {
                     AutomationProperties.SetName(title, labels[i]);
-                    Thread.Children.Add(cell);
+                    Thread.Children.Add(title);
                 }
 
             }
