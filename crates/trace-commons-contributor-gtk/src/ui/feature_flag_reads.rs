@@ -46,6 +46,7 @@ mod tests {
         use super::super::*;
         use crate::backend::DaemonEvent;
         use crate::worker::{Job, Outcome, Worker};
+        use gtk::gio::prelude::ApplicationExt;
 
         /// The recorded daemon answer, about this build's profile, with
         /// `insights_skills` as given and the generation given.
