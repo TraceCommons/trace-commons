@@ -1868,10 +1868,8 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             credit_icon_animation_title: "Credit arrivals",
             credit_icon_animation_toggle: "Animate Dock and menu bar icons",
             credit_icon_animation_caption: "Burst gold coins on the Dock and menu bar icons when credits arrive.",
-            // Owner-approved 2026-11-19.
-            credit_icon_animation_toggle_linux: "Animate taskbar and tray icons",
-            // Owner-approved 2026-11-19.
-            credit_icon_animation_caption_linux: "Burst gold coins on the tray icon and flag the taskbar when credits arrive.",
+            credit_icon_animation_toggle_linux: CREDIT_ICON_ANIMATION_TOGGLE_TASKBAR,
+            credit_icon_animation_caption_linux: CREDIT_ICON_ANIMATION_CAPTION_TASKBAR,
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -1951,9 +1949,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
     }
 }
 
-/// The default Private AI promotion, shared by the native app and the
-/// separately published campaign feed. It is compiled into the contributor
-/// so a failed network read never makes the promotion disappear.
+/// The credit-arrival switch's words for a taskbar and tray, shared by the
+/// Linux keys (`credit_icon_animation_toggle_linux`) and the Windows table
+/// (owner-approved 2026-11-19, "Same as Linux"), so the two cannot drift.
+const CREDIT_ICON_ANIMATION_TOGGLE_TASKBAR: &str = "Animate taskbar and tray icons";
+const CREDIT_ICON_ANIMATION_CAPTION_TASKBAR: &str =
+    "Burst gold coins on the tray icon and flag the taskbar when credits arrive.";
+
 /// The Windows app's words where it cannot say what the Mac says: Settings'
 /// credit-arrival switch names the taskbar and tray, where the Mac names the
 /// Dock and menu bar. A table of its own, so the Mac's monitor export keeps
@@ -1968,13 +1970,14 @@ pub struct WindowsWordsCopy {
 /// The Windows app's own words (`WindowsWordsCopy`).
 pub fn windows_words_copy() -> WindowsWordsCopy {
     WindowsWordsCopy {
-        // Owner-approved 2026-11-19 ("Same as Linux").
-        credit_icon_animation_toggle: "Animate taskbar and tray icons",
-        // Owner-approved 2026-11-19 ("Same as Linux").
-        credit_icon_animation_caption: "Burst gold coins on the tray icon and flag the taskbar when credits arrive.",
+        credit_icon_animation_toggle: CREDIT_ICON_ANIMATION_TOGGLE_TASKBAR,
+        credit_icon_animation_caption: CREDIT_ICON_ANIMATION_CAPTION_TASKBAR,
     }
 }
 
+/// The default Private AI promotion, shared by the native app and the
+/// separately published campaign feed. It is compiled into the contributor
+/// so a failed network read never makes the promotion disappear.
 pub fn private_ai_campaign_json() -> &'static str {
     include_str!("private_ai_campaign.json")
 }
@@ -2000,6 +2003,26 @@ mod tests {
         let mut out = Vec::new();
         leaves(&serde_json::to_value(copy).unwrap(), "", &mut out);
         out
+    }
+
+    /// The Windows switch says what the Linux keys say (owner, 2026-11-19:
+    /// "Same as Linux").
+    #[test]
+    fn windows_words_are_the_linux_words() {
+        let linux = monitor_screens_copy().home_history;
+        let windows = windows_words_copy();
+        assert_eq!(
+            windows.credit_icon_animation_toggle,
+            linux.credit_icon_animation_toggle_linux
+        );
+        assert_eq!(
+            windows.credit_icon_animation_caption,
+            linux.credit_icon_animation_caption_linux
+        );
+        assert_eq!(
+            windows.credit_icon_animation_toggle,
+            "Animate taskbar and tray icons"
+        );
     }
 
     /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy
