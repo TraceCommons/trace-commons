@@ -199,6 +199,10 @@ pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
     // A read that answered: Home marks credit that arrived since the
     // figure it last showed.
     app.home.balance_read(balance);
+    // And the tray celebrates a whole credit received while the app runs
+    // (`AppModel.recordBalanceStatus`).
+    app.credit_arrival
+        .observe_received(balance.received_total_nanos);
 }
 
 fn render_section(app: &Rc<App>, view: &BalanceSection, balance: &crate::model::NearAiBalance) {

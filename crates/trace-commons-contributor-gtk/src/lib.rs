@@ -24,6 +24,7 @@ pub mod balance;
 // Recorded sample data in place of a daemon; never in a release build.
 pub mod certificate;
 pub mod copy;
+pub mod credit_arrival;
 mod dbus;
 pub mod disclosure;
 pub mod document_portal;

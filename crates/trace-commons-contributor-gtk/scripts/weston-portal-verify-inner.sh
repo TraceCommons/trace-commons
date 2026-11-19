@@ -200,6 +200,7 @@ else
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
+    ui::settings::tests::mounted_the_credit_arrival_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
