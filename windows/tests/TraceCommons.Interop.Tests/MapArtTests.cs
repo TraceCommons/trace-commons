@@ -190,15 +190,10 @@ public class MapArtTests
     {
         // Each sampled at 0, 0.1 ... 1 of its duration (probe: UnitCurve.value(at:)).
         AssertCurve("curveShimmer", MapMotion.ShimmerPass);
-        AssertCurve("curveGraph", MapMotion.GraphPeriodSlide);
-        AssertCurve("curveEaseInOut", MapMotion.GraphFooterToggle);
         AssertCurve("curveEaseOut", BezierCurve.EaseOut(0.18));
-        AssertCurve("curveToken", MapMotion.GraphFooter);
-        Assert.Equal(0.45, MapMotion.GraphPeriodSlide.Duration);
-        Assert.Equal(0.25, MapMotion.GraphFooter.Duration);
-        Assert.Equal(0.15, MapMotion.GraphZoomFade.Duration);
-        Assert.Equal(0.15, MapMotion.SearchFieldSlide.Duration);
-        Assert.Equal(0.22, MapMotion.MapPane.Duration);
+        // The pointer light's fade runs on the token curve (probe "curveToken" is 0.25 s of it).
+        AssertCurve("curveToken", BezierCurve.Token(0.25));
+        Assert.Equal(0.15, MapMotion.PointerLightFade.Duration);
 
         // Spring(response:dampingRatio:).value(target: 1, time:) at 0.05 ... 0.8 s.
         var springs = new Dictionary<string, SpringCurve>
@@ -210,8 +205,8 @@ public class MapArtTests
             ["0.3/0.86"] = (SpringCurve)MapMotion.PileOpen[1].Curve,
             ["0.28/0.9"] = (SpringCurve)MapMotion.PileClose[1].Curve,
             ["0.34/0.86"] = (SpringCurve)MapMotion.PileClose[2].Curve,
-            ["0.3/0.85"] = MapMotion.FolderDragRelease,
-            ["0.36/0.86"] = MapMotion.TransferCardArrival,
+            // The transfer cards arrive on the notice stack's own spring (PopoverNotice.swift:238).
+            ["0.36/0.86"] = new SpringCurve(NoticeStack.SpringResponse, NoticeStack.SpringDamping),
         };
         double[] times = { 0.05, 0.1, 0.2, 0.3, 0.5, 0.8 };
         foreach ((string key, SpringCurve spring) in springs)

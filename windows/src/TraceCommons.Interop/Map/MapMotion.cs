@@ -232,37 +232,6 @@ public static class MapMotion
         return target;
     }
 
-    // Traces list (TracesViews.swift:503, :764; ToolFolderInspectors.swift:88; NudgeViews.swift:150-161).
-
-    /// <summary>The list scrolling a row into view, and the submit menu into room: fast 0.15 on the token curve.</summary>
-    public static readonly BezierCurve ScrollToRow = BezierCurve.Token(MonitorMotion.Fast);
-
-    /// <summary>A dragged folder settling where it was dropped (:764).</summary>
-    public static readonly SpringCurve FolderDragRelease = new(0.3, 0.85);
-
-    /// <summary>The tree's search field sliding in from the trailing edge with a fade: fast 0.15.</summary>
-    public static readonly BezierCurve SearchFieldSlide = BezierCurve.Token(MonitorMotion.Fast);
-
-    // The W2-deferred map and graph rows (MonitorShell.swift:233-293; MonitorWindowView.swift:418, :943, :1034).
-
-    /// <summary>The graph's bars sliding in from the period's side: timingCurve(0.4, 0, 0.2, 1) over 0.45 s.</summary>
-    public static readonly BezierCurve GraphPeriodSlide = new(0.4, 0, 0.2, 1, 0.45);
-
-    /// <summary>The graph footer's height 0 to 206 with a move from the bottom and a fade: the token curve over Motion.slide 0.25 s.</summary>
-    public static readonly BezierCurve GraphFooter = BezierCurve.Token(0.25);
-
-    /// <summary>The graph footer toggle's own easeInOut 0.25 (MonitorWindowView.swift:943).</summary>
-    public static readonly BezierCurve GraphFooterToggle = BezierCurve.EaseInOut(0.25);
-
-    /// <summary>The graph footer's open height (MonitorWindowView.swift:418).</summary>
-    public const double GraphFooterHeight = 206;
-
-    /// <summary>The graph's zoom swap: bars swap in place with a fade, fast 0.15.</summary>
-    public static readonly BezierCurve GraphZoomFade = BezierCurve.Token(MonitorMotion.Fast);
-
-    /// <summary>The map pane opening or closing: Motion.standard 0.22 on the token curve, panes crossfading.</summary>
-    public static readonly BezierCurve MapPane = BezierCurve.Token(MonitorMotion.Standard);
-
     // Map art (Indicators.swift:660-885).
 
     /// <summary>The pointer light fading in and out: fast 0.15 (:862, :882).</summary>
@@ -270,9 +239,6 @@ public static class MapMotion
 
     /// <summary>The shimmer pass (:672-674).</summary>
     public static readonly BezierCurve ShimmerPass = new(MapField.ShimmerX1, MapField.ShimmerY1, MapField.ShimmerX2, MapField.ShimmerY2, MapField.ShimmerDuration);
-
-    /// <summary>The transfer cards' arrival at the map's foot: spring(0.36, 0.86) (PopoverNotice.swift).</summary>
-    public static readonly SpringCurve TransferCardArrival = new(NoticeStack.SpringResponse, NoticeStack.SpringDamping);
 }
 
 /// <summary>What the map's clock decision reads (<see cref="MapMotion.ClockInterval"/>).</summary>
