@@ -154,7 +154,7 @@ public sealed partial class MainWindow : Window
         // The daemon's feature flags, read as the Mac reads them: at start,
         // on its change event (and after a lag or resync), and after a wake.
         // Insights shows Skills while insights_skills is on.
-        _flags = new FeatureFlagGate(IsSampleWindow() ? null : (method, parameters) => _host.CallAsync(method, parameters));
+        _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
         _flags.Changed += OnFeatureFlagsChanged;
         _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
         _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
@@ -1145,7 +1145,7 @@ public sealed partial class MainWindow : Window
     private readonly FeatureFlagGate _flags;
 
     /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
-    private bool IsSampleWindow()
+    private bool ReadsNoFlags()
     {
 #if DEBUG
         return _host.IsSample;
