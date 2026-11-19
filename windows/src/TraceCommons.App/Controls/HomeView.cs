@@ -211,7 +211,8 @@ public sealed class HomeView : UserControl
 
     /// <summary>
     /// The no-credit reminder (<c>NoCreditNotice</c>, NoCreditNotice.swift):
-    /// one slim line on the ask status at 12%, never red, the ask mark, the
+    /// one slim line on the ask status at 12%, never red, the ask mark (the
+    /// filled circle with its exclamation, as the Mac's), the
     /// core's sentence, and Open Settings at its end. No X: it goes once the
     /// use is on.
     /// </summary>
@@ -229,7 +230,7 @@ public sealed class HomeView : UserControl
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var mark = new FontIcon
         {
-            Glyph = "\uE814",
+            Glyph = "\uEB90",
             FontSize = 14,
             Foreground = (Brush)Application.Current.Resources["TcStatusAskBrush"],
             VerticalAlignment = VerticalAlignment.Center,
