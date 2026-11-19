@@ -271,13 +271,15 @@ impl Navigation {
         // Written when the libadwaita floor was 1.2, which has no
         // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
         // been moved to one. Allocation is checked at frame time and only
-        // visibility changes; fields are never rebuilt.
-        root.add_tick_callback({
+        // visibility changes; fields are never rebuilt. Minimised or
+        // suspended, the check comes off the clock, and goes back on when
+        // the window is shown.
+        let frame: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();
             let scroller = scroller.downgrade();
             let navigate = navigate.clone();
-            move |root, _| {
+            move |root: &gtk::Box| {
                 if let (Some(sidebar), Some(compact)) = (sidebar.upgrade(), compact.upgrade()) {
                     let wide = root.width() >= 760;
                     sidebar.set_visible(wide);
@@ -291,7 +293,44 @@ impl Navigation {
                     pending.set(None);
                     navigate(index);
                 }
-                gtk::glib::ControlFlow::Continue
+            }
+        });
+        let tick: std::rc::Rc<std::cell::RefCell<Option<gtk::TickCallbackId>>> =
+            std::rc::Rc::default();
+        let start: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
+            let tick = tick.clone();
+            move |root: &gtk::Box| {
+                if tick.borrow().is_some() || crate::ui::glass_motion::window_hidden(root) {
+                    return;
+                }
+                let frame = frame.clone();
+                let slot = tick.clone();
+                let id = root.add_tick_callback(move |root, _| {
+                    if crate::ui::glass_motion::window_hidden(root) {
+                        // Ended by returning Break; shown again, it restarts.
+                        drop(slot.borrow_mut().take());
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    frame(root);
+                    gtk::glib::ControlFlow::Continue
+                });
+                *tick.borrow_mut() = Some(id);
+            }
+        });
+        start(&root);
+        crate::ui::glass_motion::on_window_state(&root, {
+            let tick = tick.clone();
+            move |widget| {
+                let Some(root) = widget.downcast_ref::<gtk::Box>() else {
+                    return;
+                };
+                if crate::ui::glass_motion::window_hidden(root) {
+                    if let Some(id) = tick.borrow_mut().take() {
+                        id.remove();
+                    }
+                } else {
+                    start(root);
+                }
             }
         });
         list.select_row(list.row_at_index(0).as_ref());
@@ -467,6 +506,46 @@ mod tests {
         (navigation.select)(Section::PrivateAI);
         settle();
         assert!(navigation.scroller.vadjustment().value() > 0.0);
+        window.close();
+    }
+
+    /// Minimised, the layout check comes off the clock: narrowed
+    /// meanwhile, the window keeps its wide layout. Shown again, the check
+    /// is back on the clock and takes the narrow one.
+    #[test]
+    #[ignore = "requires a GTK display; run separately with --ignored --test-threads=1"]
+    fn mounted_the_layout_check_holds_while_minimised_and_resumes() {
+        use crate::ui::glass_motion::minimise_for_test;
+        adw::init().expect("GTK display unavailable");
+        let sections = Sections::new();
+        for section in Section::ALL {
+            sections.body(section).set_size_request(-1, 240);
+        }
+        let navigation = Navigation::new(sections);
+        let window = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(600)
+            .child(&navigation.root)
+            .build();
+        window.present();
+        wait_for_layout(&navigation, true);
+
+        minimise_for_test(&window, true);
+        settle();
+        window.set_default_size(550, 600);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while navigation.root.width() >= 760 && std::time::Instant::now() < end {
+            settle();
+        }
+        assert!(navigation.root.width() < 760, "the window did not narrow");
+        settle();
+        assert!(
+            navigation.sidebar.is_visible() && !navigation.compact.is_visible(),
+            "the layout check ran while minimised"
+        );
+
+        minimise_for_test(&window, false);
+        wait_for_layout(&navigation, false);
         window.close();
     }
 

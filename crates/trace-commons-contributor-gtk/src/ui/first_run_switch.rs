@@ -113,7 +113,11 @@ fn animate(
         let running = tick.take();
         let ticking = running.is_some();
         tick.set(running);
-        if !area.is_mapped() || !motion::switch_moving(elapsed, !animations()) || ticking {
+        if !area.is_mapped()
+            || super::glass_motion::window_hidden(area)
+            || !motion::switch_moving(elapsed, !animations())
+            || ticking
+        {
             return;
         }
         let (since, tick_slot) = (since.clone(), tick.clone());

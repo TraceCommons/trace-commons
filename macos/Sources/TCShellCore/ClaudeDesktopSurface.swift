@@ -30,6 +30,9 @@ public struct ClaudeDesktopStatus: Decodable, Equatable, Sendable {
         "status_disconnected", "status_ready", "status_observed", "status_unavailable",
         "status_sign_in_required", "status_disabled", "instructions", "error",
     ]
+    /// The Private AI tab's setup notice (`ClaudeDesktopPrompt`). Optional:
+    /// a daemon without them draws no notice, and the row still works.
+    public static let promptCopyKeys = ["prompt_title", "prompt_line", "prompt_dismiss"]
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -81,5 +84,33 @@ public struct ClaudeDesktopStatus: Decodable, Equatable, Sendable {
         self.copy = copy
         self.environment = environment
         self.recognizedState = recognizedState
+    }
+}
+
+/// What the Private AI tab draws for Claude Desktop.
+///
+/// - `offer`: the flag is on, Claude Desktop is installed on this Mac, the
+///   person has not dismissed the offer, the daemon says it is not set up
+///   (`disconnected`), and the daemon sends the offer's words.
+/// - `connected`: the flag is on and it is set up (`ready` or `observed`):
+///   its status with Disconnect, whatever became of the offer or the app,
+///   so a live connection can always be turned off from the tab.
+/// - `hidden`: anything else. Other states either cannot be set up from
+///   here or say why in Settings' row.
+public enum ClaudeDesktopPrompt {
+    public enum Mode: Equatable, Sendable { case hidden, offer, connected }
+
+    /// Claude Desktop's bundle identifier.
+    public static let desktopBundleID = "com.anthropic.claudefordesktop"
+    /// The `UserDefaults` key holding the offer's dismissal.
+    public static let dismissedKey = "claudeDesktopPromptDismissed"
+
+    public static func mode(featureOn: Bool, desktopInstalled: Bool, dismissed: Bool,
+                            status: ClaudeDesktopStatus?) -> Mode {
+        guard featureOn, let status else { return .hidden }
+        if [.ready, .observed].contains(status.state), status.canDisconnect { return .connected }
+        guard status.state == .disconnected, desktopInstalled, !dismissed,
+              ClaudeDesktopStatus.promptCopyKeys.allSatisfy({ !status.text($0).isEmpty }) else { return .hidden }
+        return .offer
     }
 }

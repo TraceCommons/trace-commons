@@ -808,7 +808,7 @@ public sealed partial class MainWindow : Window
     private async void OnShowHistory(object sender, RoutedEventArgs e)
     {
         if (!await StartContributionsAsync()) return;
-        HistoryPane.Content ??= new HistoryView(_host);
+        HistoryPane.Content ??= NewHistoryView();
         ViewModel.ShowHistory();
     }
 

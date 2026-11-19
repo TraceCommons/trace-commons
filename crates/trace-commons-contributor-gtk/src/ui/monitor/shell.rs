@@ -156,7 +156,9 @@ impl EmberGlide {
             tick.remove();
         }
         state.began = None;
-        state.from = state.drawn.filter(|_| glass_motion::animations_enabled());
+        state.from = state
+            .drawn
+            .filter(|_| glass_motion::animations_enabled() && !glass_motion::window_hidden(ember));
         if state.from.is_none() {
             return;
         }
@@ -3779,6 +3781,294 @@ mod tests {
                 drawn[1]
             );
         }
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        sheet.destroy();
+        settings.destroy();
+        mounted.window.close();
+    }
+
+    const MAC_TOKENS: &str =
+        include_str!("../../../../../macos/Sources/TCDesign/Generated/GlassTokens.swift");
+    const MAC_CONTROLS: &str =
+        include_str!("../../../../../macos/Sources/TCDesign/Components/Controls.swift");
+
+    /// The flat theme's value of the Swift colour `name` in one scheme, as
+    /// R, G, B and alpha: `GlassTheme.pick(classic, flat: GlassRGBA(dark,
+    /// alpha:, light: GlassRGBA(light, alpha:)))`. The Mac ships flat
+    /// (`GlassTheme.resolve` defaults to it).
+    fn mac_flat(name: &str, dark: bool) -> ([u8; 3], f64) {
+        let line = MAC_TOKENS
+            .lines()
+            .find(|line| line.contains(&format!("static var {name}: GlassRGBA {{")))
+            .unwrap_or_else(|| panic!("the Swift no longer has {name}"));
+        let flat = &line[line.find("flat: GlassRGBA(").expect("a flat value") + 16..];
+        let parse = |text: &str| -> ([u8; 3], f64) {
+            let hex = &text[2..8];
+            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+            let alpha = &text[text.find("alpha: ").unwrap() + 7..];
+            let alpha: String = alpha
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            ([byte(0), byte(2), byte(4)], alpha.parse().unwrap())
+        };
+        match (dark, flat.find("light: GlassRGBA(")) {
+            (false, Some(at)) => parse(&flat[at + 17..]),
+            _ => parse(flat),
+        }
+    }
+
+    /// A Swift number found after `needle` in `source`.
+    fn swift_number(source: &str, needle: &str) -> i32 {
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("the Swift no longer says {needle}"));
+        source[at + needle.len()..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    }
+
+    fn over(colour: ([u8; 3], f64), ground: [u8; 3]) -> [u8; 3] {
+        let (c, a) = colour;
+        let mix = |i: usize| (f64::from(c[i]) * a + f64::from(ground[i]) * (1.0 - a)).round() as u8;
+        [mix(0), mix(1), mix(2)]
+    }
+
+    /// Every switch is the Mac's flat `GlassToggleStyle`: a Settings
+    /// switch 40 by 24 (`toggleWidth`, `toggleHeight`), the tree's watch
+    /// switch 38 by 22, each with an 18-point round knob `inset` in from
+    /// the track's end (3, and 2 on the watch switch). On, the track is
+    /// `toggleOnSettings` (#0558B6 Light, #7EBCFF Dark) and the knob
+    /// `textOnAccent`; off, the track is `toggleOff` over its ground and
+    /// the knob `toggleKnobOff`. Read from the Swift and measured on the
+    /// drawn pixels, focused and unfocused: the knob clears 3:1 on its
+    /// track and the track 3:1 on its ground in every state. Light's off
+    /// track is the one deviation: the Mac's 24% black is 1.8:1 on its
+    /// ground, so the generator lifts it, as little as the floor allows.
+    /// On the branch before this fix the switches drew libadwaita's purple
+    /// (#6D14F3, #8A3DFF) at 46 by 26 with a white, shadowed knob.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_every_switch_is_the_macs_flat_switch() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        let manager = adw::StyleManager::default();
+        // Two Settings switches on a Settings card, one on and one off.
+        let card = style::card(gtk::Orientation::Horizontal, 12);
+        card.set_halign(gtk::Align::Start);
+        card.set_valign(gtk::Align::Start);
+        card.set_margin_top(24);
+        card.set_margin_start(24);
+        // The app's own switch (`GlassSwitch`), as Settings builds it.
+        let settings_on = crate::ui::glass_switch::GlassSwitch::with_active(true);
+        let settings_off = crate::ui::glass_switch::GlassSwitch::with_active(false);
+        for switch in [&settings_on, &settings_off] {
+            switch.set_valign(gtk::Align::Center);
+            card.append(switch);
+        }
+        mounted.shell.settings_root.append(&card);
+        let settings = mounted.shell.settings_window_for(&mounted.window);
+        // Two watch switches straight on a sheet's pane, as on a tree row.
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        row.set_halign(gtk::Align::Center);
+        row.set_valign(gtk::Align::Center);
+        let watch_on = crate::ui::glass_switch::GlassSwitch::watch(true);
+        let watch_off = crate::ui::glass_switch::GlassSwitch::watch(false);
+        for switch in [&watch_on, &watch_off] {
+            switch.set_valign(gtk::Align::Center);
+            row.append(switch);
+        }
+        let sheet = adw::Window::builder()
+            .default_width(300)
+            .default_height(200)
+            .content(&row)
+            .build();
+        settings.present();
+        sheet.present();
+
+        // The Swift's knob, inset and track sizes.
+        let style_source = &MAC_CONTROLS[MAC_CONTROLS
+            .find("public struct GlassToggleStyle")
+            .expect("the Swift has GlassToggleStyle")..];
+        let knob = swift_number(
+            &style_source[style_source.find("Circle()").expect("a knob")..],
+            ".frame(width:",
+        );
+        let inset_line = style_source
+            .lines()
+            .find(|line| line.contains("let inset: CGFloat = watch ?"))
+            .expect("the Swift states the knob's inset");
+        let watch_inset = swift_number(inset_line, "watch ?");
+        let toggle_inset = swift_number(&inset_line[inset_line.find("watch ?").unwrap()..], " : ");
+        let kinds = [
+            (
+                settings.clone().upcast::<gtk::Window>(),
+                &settings_on,
+                &settings_off,
+                swift_number(MAC_TOKENS, "static let toggleWidth: CGFloat ="),
+                swift_number(MAC_TOKENS, "static let toggleHeight: CGFloat ="),
+                toggle_inset,
+                "settings",
+            ),
+            (
+                sheet.clone().upcast::<gtk::Window>(),
+                &watch_on,
+                &watch_off,
+                swift_number(MAC_TOKENS, "static let watchSwitchWidth: CGFloat ="),
+                swift_number(MAC_TOKENS, "static let watchSwitchHeight: CGFloat ="),
+                watch_inset,
+                "watch",
+            ),
+        ];
+        let off_by =
+            |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).map(|(x, y)| x.abs_diff(y)).max().unwrap();
+        let mut report = Vec::new();
+        for dark in [false, true] {
+            manager.set_color_scheme(if dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            pump_until(|| std::time::Instant::now() >= end);
+            let track_on = mac_flat("toggleOnSettings", dark).0;
+            let knob_on = mac_flat("textOnAccent", dark).0;
+            let knob_off = mac_flat("toggleKnobOff", dark).0;
+            let mac_off = mac_flat("toggleOff", dark);
+            for (window, on, off, width, height, inset, kind) in &kinds {
+                let (width, height, inset) = (*width, *height, *inset);
+                // Alone on screen, so the compositor gives it frames: a
+                // window under another gets none, and keeps the style it
+                // had before the scheme changed (a light knob in dark).
+                for (other, ..) in &kinds {
+                    if other != window {
+                        other.set_visible(false);
+                    }
+                }
+                window.present();
+                for unfocused in [false, true] {
+                    if unfocused {
+                        window.set_state_flags(gtk::StateFlags::BACKDROP, false);
+                    } else {
+                        window.unset_state_flags(gtk::StateFlags::BACKDROP);
+                    }
+                    let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                    pump_until(|| std::time::Instant::now() >= end);
+                    assert_eq!(
+                        on.state_flags().contains(gtk::StateFlags::BACKDROP),
+                        unfocused,
+                        "the window's focus state reached its switch"
+                    );
+                    let state = format!("dark={dark} unfocused={unfocused} {kind}");
+                    // Sizes are border boxes (`compute_bounds`): a
+                    // widget's `width()` is its content box, without the
+                    // padding that stands the knob in from the track's end.
+                    let size = |widget: &gtk::Widget| {
+                        let bounds = widget.compute_bounds(widget).expect("laid out");
+                        (
+                            bounds.width().round() as i32,
+                            bounds.height().round() as i32,
+                        )
+                    };
+                    for (switch, active) in [(*on, true), (*off, false)] {
+                        assert_eq!(
+                            size(switch.upcast_ref()),
+                            (width, height),
+                            "{state}: the switch is the Mac's size"
+                        );
+                        let mut slider = switch.first_child();
+                        while let Some(child) = slider.clone() {
+                            if child.css_name() == "slider" {
+                                break;
+                            }
+                            slider = child.next_sibling();
+                        }
+                        let slider = slider.expect("a slider");
+                        assert_eq!(
+                            size(&slider),
+                            (knob, knob),
+                            "{state}: the knob is the Mac's"
+                        );
+                        let at = switch.compute_bounds(window).expect("laid out");
+                        let (x, y) = (at.x().round() as i32, at.y().round() as i32);
+                        let mid = y + height / 2;
+                        // The knob's centre, the track beside it, the
+                        // ground just outside the track's end, then the
+                        // pixels just inside and outside the knob's edge
+                        // at the Mac's inset.
+                        let points = if active {
+                            [
+                                (x + width - inset - knob / 2, mid),
+                                (x + inset / 2 + 4, mid),
+                                (x - 3, mid),
+                                (x + width - inset - 1, mid),
+                                (x + width - inset, mid),
+                            ]
+                        } else {
+                            [
+                                (x + inset + knob / 2, mid),
+                                (x + width - inset / 2 - 4, mid),
+                                (x + width + 3, mid),
+                                (x + inset, mid),
+                                (x + inset - 1, mid),
+                            ]
+                        };
+                        let drawn = any_window_pixels(window, &points);
+                        let (knob_px, track_px, ground_px) = (drawn[0], drawn[1], drawn[2]);
+                        let (want_knob, want_track) = if active {
+                            (knob_on, track_on)
+                        } else {
+                            (knob_off, over(mac_off, ground_px))
+                        };
+                        assert!(
+                            off_by(knob_px, want_knob) <= 3,
+                            "{state} active={active}: the knob draws {knob_px:?}, not the Mac's {want_knob:?}"
+                        );
+                        if active || dark {
+                            assert!(
+                                off_by(track_px, want_track) <= 3,
+                                "{state} active={active}: the track draws {track_px:?}, not the Mac's {want_track:?}"
+                            );
+                        } else {
+                            // Light's off track: the Mac's black, at
+                            // least as dense as the Mac's alpha.
+                            let alpha = 1.0 - f64::from(track_px[1]) / f64::from(ground_px[1]);
+                            assert!(
+                                track_px[0].abs_diff(track_px[1]) <= 3 && alpha >= mac_off.1 - 0.01,
+                                "{state}: the off track draws {track_px:?} on {ground_px:?}"
+                            );
+                        }
+                        assert!(
+                            off_by(drawn[3], knob_px) <= 24,
+                            "{state} active={active}: the knob does not reach its inset ({:?})",
+                            drawn[3]
+                        );
+                        assert!(
+                            off_by(drawn[4], track_px) <= 24,
+                            "{state} active={active}: the knob runs past its inset ({:?})",
+                            drawn[4]
+                        );
+                        let on_track = drawn_contrast(knob_px, track_px);
+                        let on_ground = drawn_contrast(track_px, ground_px);
+                        report.push(format!(
+                            "{state} active={active}: knob {knob_px:?} track {track_px:?} \
+                             ground {ground_px:?}: knob/track {on_track:.2}, track/ground {on_ground:.2}"
+                        ));
+                        assert!(
+                            on_track >= 3.0 && on_ground >= 3.0,
+                            "{state} active={active}: knob {knob_px:?} on track {track_px:?} is \
+                             {on_track:.2}:1, the track on ground {ground_px:?} {on_ground:.2}:1"
+                        );
+                    }
+                }
+                window.unset_state_flags(gtk::StateFlags::BACKDROP);
+            }
+        }
+        println!("{}", report.join("\n"));
         manager.set_color_scheme(adw::ColorScheme::Default);
         sheet.destroy();
         settings.destroy();

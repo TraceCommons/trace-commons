@@ -146,9 +146,12 @@ final class AppModel: ObservableObject {
 
     /// Only a named tool and setup action cross the RPC boundary. Setup needs
     /// no sign-in, managed account, profile, session, or working directory.
+    /// Red Team only installs: the daemon installs its pinned runtime release
+    /// itself and refuses `update`.
     func setupManagedTool(_ tool: String, action: String) {
-        guard managedSnapshot?.capabilities.toolSetup == true,
-              ManagedSurface.supportedTools.contains(tool), ["install", "update"].contains(action) else { return }
+        let allowed = (ManagedSurface.supportedTools.contains(tool) && ["install", "update"].contains(action))
+            || (tool == "red_team" && action == "install")
+        guard managedSnapshot?.capabilities.toolSetup == true, allowed else { return }
         managedAction("managed_tool_setup", params: ["tool": tool, "action": action])
     }
 
