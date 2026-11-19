@@ -309,10 +309,21 @@ final class RoutingBindingTests: XCTestCase {
         let panel = try XCTUnwrap(
             RoutingCard.declaration("static func choose() -> String? {", in: RoutingCard.panelPath)
         )
-        XCTAssertTrue(panel.contains("panel.canChooseDirectories = true"), panel)
-        XCTAssertTrue(panel.contains("panel.canChooseFiles = false"), panel)
-        XCTAssertTrue(panel.contains("panel.allowsMultipleSelection = false"), panel)
-        XCTAssertTrue(panel.contains("panel.canCreateDirectories = false"), panel)
+        // The panel is built by `makePanel`, which the file picker for Red
+        // Team inputs shares: `choose()` fixes the two arguments that make
+        // it a single-folder chooser, and `makePanel` fixes the two
+        // properties that hold for every caller.
+        XCTAssertTrue(
+            panel.contains("makePanel(canChooseFiles: false, allowsMultipleSelection: false)"), panel)
+        let maker = try XCTUnwrap(
+            RoutingCard.declaration(
+                "private static func makePanel(canChooseFiles: Bool, allowsMultipleSelection: Bool) -> NSOpenPanel {",
+                in: RoutingCard.panelPath)
+        )
+        XCTAssertTrue(maker.contains("panel.canChooseDirectories = true"), maker)
+        XCTAssertTrue(maker.contains("panel.canChooseFiles = canChooseFiles"), maker)
+        XCTAssertTrue(maker.contains("panel.allowsMultipleSelection = allowsMultipleSelection"), maker)
+        XCTAssertTrue(maker.contains("panel.canCreateDirectories = false"), maker)
 
         let applyArgument = try XCTUnwrap(
             RoutingCard.region(of: body, from: "buttonStyle(GlassButtonStyle(.glass))\n", to: "\n")
