@@ -1,8 +1,9 @@
 # Windows app, matching the native Mac app
 
-Status: draft. The owner took the W0 decisions on 2026-11-18 (see
-"Decisions taken 2026-11-18"); the decisions in W16 and later, and the few
-listed under "Still open", are still to ask. Nothing here is implemented.
+Status: draft. The owner took the W0 decisions on 2026-11-18 and the rest on
+2026-11-19 (see "Decisions taken 2026-11-18" and "Decisions taken
+2026-11-19"). Only two items are still open, each gated on a spike (W14-D2,
+W15-D1). Nothing here is implemented.
 Facts about the code are cited at `origin/main` 19b42d0d2. Anything not
 read in source is marked unverified.
 
@@ -39,14 +40,14 @@ offered, for the record.
 | G-1 | (a) | The WinUI app in `windows/` is unfrozen for parity work now and becomes the Windows client. Tauri on Windows is retired once WinUI matches the Mac. CLAUDE.md is updated in a separate change. |
 | G-2 | (a) | The Mac look, as close as Windows allows. |
 | G-3 | (a) | The NEAR AI N everywhere: title bar, tray, first-run stage and the MSIX tiles (tiles redrawn in W10). |
-| G-4 | (a) | Slices W16 and later cover the surfaces no slice covered. Their own decisions are still to ask. |
+| G-4 | (a) | Slices W16 and later cover the surfaces no slice covered. Their decisions were taken 2026-11-19 (see below). |
 | G-5 | (a) | `az`-based equivalents of `provision-dev-vm.sh` and `win-exec.sh`; `win-capture.ps1` stays on the box. |
 | W1-D1 | (a) | Captures are made on the test machines only, never uploaded from CI. |
 | W1-D2 | (a) | A new `net8.0-windows` render-test project, run in the `windows contributor app` CI job. |
 | W2-D1 | (a) | History and Mission drafts become Home sub-pages behind a breadcrumb. |
 | W2-D2 | (a) | Settings gets its own window, 780 x 640. |
 | W2-D3 | (a) | The Mac's edge growth: the window grows at its right edge and slides left at the screen edge (spike S2). |
-| W2-D4 | (a) | The Mac's notice stack, X rules and inspector demand. Each card new to Windows still needs its own yes (listed under "Still open"). |
+| W2-D4 | (a) | The Mac's notice stack, X rules and inspector demand. Cards new to Windows were approved as a class on 2026-11-19 (see below). |
 | W2-D5 | (a) | Ctrl+1 to Ctrl+4 by tab position, Home first; Ctrl+comma for Settings; Ctrl+Shift+M kept for Private AI. Ctrl+5 goes. |
 | W3-D1 | (a) | Tool logos from the Mac's own path data, generated, with the source recorded. |
 | W3-D2 | (a) | The Private AI map view lands in W3 with the Traces view. |
@@ -69,28 +70,38 @@ offered, for the record.
 | W12-D3 | (a) | The news ring and idle halo, with the Mac's conditions. |
 | W12-D4 | (a) | Credit arrival: tray animation (gleam, mark hop, mini coins) plus the taskbar attention flash and a taskbar coin burst, behind one Settings switch (W17). |
 | W13-D1 | (a) | Both the tray flyout and the edge rail (off by default). |
-| W14-D1 | (c) | Windows Terminal, plus other terminals each admitted after an argv check. Which terminals is still open. |
-| W14-D2 | (a) | Spike "Show" on Windows. Whether it ships depends on the spike. |
+| W14-D1 | (c), superseded 2026-11-19 by (b) | Windows Terminal, plus other terminals each admitted after an argv check. Superseded: see "Decisions taken 2026-11-19". |
+| W14-D2 | (a), refined 2026-11-19 | Spike "Show" on Windows. Whether it ships depends on the spike; see "Decisions taken 2026-11-19". |
 | W14-D3 | (a) | Per-tool launch buttons, with the per-tool start flow. |
-| W15-D1 | open | Spike S4 runs first. The recommendation, if two daemons do not collide, is (a): no background-service flow. |
+| W15-D1 | (a), gated on spike S4 (2026-11-19) | No background-service flow on Windows unless spike S4 shows two daemons collide. |
 
 Also decided earlier: the title bar is the Mac's toolbar row with the system
 caption buttons; Win2D is approved; the font is Segoe UI Variable.
 
+## Decisions taken 2026-11-19
+
+The owner said "go with your recommendations" to every decision still open.
+Each slice below marks its decision "Taken 2026-11-19" and keeps the options
+that were offered.
+
+| Decision | Taken | What it means here |
+|---|---|---|
+| W10-D2 | (a) | The invite protocol's display name is the app name alone, from `brand.rs` `APP_NAME`, with no "invite" suffix. No new words. |
+| W14-D1 | (b) | Windows Terminal, plus the Windows console host (PowerShell) as the fallback when Windows Terminal is not installed. Both must pass the argv check. No other terminals. This replaces the 2026-11-18 answer (c). |
+| W14-D2 | (a), gated | "Show" ships only if its spike finds a reliable way to raise the session window that never steals focus unexpectedly. Otherwise it stays Mac-only. |
+| W15-D1 | (a), gated | No background-service flow on Windows unless spike S4 shows two daemons collide. |
+| Windows floor | raise | Support Windows 10 22H2 and Windows 11. `TargetPlatformMinVersion` goes from 10.0.17763.0 to 10.0.19041.0, matching `TargetFramework` `net8.0-windows10.0.19041.0`. 22H2 is the tested minimum. |
+| W16-D1 to W25-D2 | the option that matches the Mac | Every open decision in W16 to W25 takes the option that matches the Mac, with Linux as precedent where one exists. Each is marked "Taken 2026-11-19: (option)" in its slice. |
+| Cards and notices | approved as a class | Cards and notices the Mac shows and Windows does not are ported with the Mac's conditions and core words. Each slice lists the cards it ports in its PR. This closes the per-card "own yes" of W2-D4 and W19-D2. |
+| W2 deferrals | approved | The map half of pane open and close, the graph period slide, the graph footer, the zoom fade and the tree search field slide move from W2 to W3. The arming offer motion and the notice mark move from W2 to W9. The Animation coverage table and the slices' decoration tables match. |
+
 ### Still open
 
-- **W15-D1.** Waits for spike S4. Recommended (a) no background-service flow
+Only items explicitly gated on a spike result:
+
+- **W14-D2.** Whether "Show" ships, after its spike.
+- **W15-D1.** Waits for spike S4. Taken (a), no background-service flow,
   unless two daemons collide.
-- **Each Mac notice new to Windows** (W2-D4). Each card listed under W2
-  needs its own yes, wording included, before it ships.
-- **Which terminals** join Windows Terminal (W14-D1 (c)), each after an argv
-  check.
-- **Whether "Show" ships** (W14-D2), after the spike.
-- **W10-D2.** The invite protocol's display name (`Package.appxmanifest:92`,
-  "Near.ai invite").
-- **Every decision in W16 and later.**
-- **The Windows 10 floor** (see "Test machines"): the code's minimum
-  platform is 10.0.17763; the matrix's minimum is Windows 10 22H2.
 
 Where Linux made the same choice, an option is marked "Linux precedent".
 That marks history, not a default.
@@ -319,13 +330,13 @@ failures on Windows.
 
 | Mac animation | Mac source | Mac numbers (curve, duration, spring, fps) | Windows slice |
 |---|---|---|---|
-| Arming offer: bolt to check, ring pulse, hold, exit | Monitor/ArmingOfferMotion.swift; MonitorNotices.swift:880-884; AppModel.swift:2203-2252; PopoverNotice.swift:154 | symbol replace + bounce; tint spring(0.32,0.7); ring 1->1.9, 0.8->0, easeOut 0.7 s; hold 900 ms; card fades and list below slides up, spring(0.42,0.9) | W2 |
-| Graph bars period slide | Monitor/MonitorShell.swift:233-293 | bars move in from the period's side + fade; timingCurve(0.4,0,0.2,1) 0.45 s | W2 |
-| Graph footer open/close | MonitorWindowView.swift:418,943,1034 | height 0<->206, move from bottom + opacity; effective curve is the token curve over Motion.slide 0.25 s (.animation at MonitorWindowView.swift:1034), with withAnimation easeInOut 0.25 at :943 on the toggle | W2 |
-| Graph zoom swap | MonitorShell.swift zoom | bars swap in place with fade, fast 0.15 s | W2 |
-| Map/inspector pane open-close (window resize) | Components/ThreePane.swift:367-374,540-565 | NSWindow frame animated 0.22 s token curve; panes crossfade; instant in full screen | W2 |
+| Arming offer: bolt to check, ring pulse, hold, exit | Monitor/ArmingOfferMotion.swift; MonitorNotices.swift:880-884; AppModel.swift:2203-2252; PopoverNotice.swift:154 | symbol replace + bounce; tint spring(0.32,0.7); ring 1->1.9, 0.8->0, easeOut 0.7 s; hold 900 ms; card fades and list below slides up, spring(0.42,0.9) | W9 (moved from W2, 2026-11-19) |
+| Graph bars period slide | Monitor/MonitorShell.swift:233-293 | bars move in from the period's side + fade; timingCurve(0.4,0,0.2,1) 0.45 s | W3 (moved from W2, 2026-11-19) |
+| Graph footer open/close | MonitorWindowView.swift:418,943,1034 | height 0<->206, move from bottom + opacity; effective curve is the token curve over Motion.slide 0.25 s (.animation at MonitorWindowView.swift:1034), with withAnimation easeInOut 0.25 at :943 on the toggle | W3 (moved from W2, 2026-11-19) |
+| Graph zoom swap | MonitorShell.swift zoom | bars swap in place with fade, fast 0.15 s | W3 (moved from W2, 2026-11-19) |
+| Map/inspector pane open-close (window resize) | Components/ThreePane.swift:367-374,540-565 | NSWindow frame animated 0.22 s token curve; panes crossfade; instant in full screen | W2 (inspector half), W3 (map half; moved 2026-11-19) |
 | Popover notice stack arrival + peek plates | Components/PopoverNotice.swift:225-260 | new card move(edge)+opacity, revealed card fades, spring(0.36,0.86); plates peek 8, x 0.96/0.92, opacity 0.9/0.7; the whole Monitor notice stack also fades in/out (MonitorNotices.swift:76 .transition(.opacity)) | W2 |
-| Traces tree search field | Monitor/NudgeViews.swift:150-161 | slide in from trailing + fade, fast 0.15 s | W2 |
+| Traces tree search field | Monitor/NudgeViews.swift:150-161 | slide in from trailing + fade, fast 0.15 s | W3 (moved from W2, 2026-11-19) |
 | Map arcs moving dashes | Monitor/FlowMapView.swift:80-84,239-243,294 | dash [4,8] x scale, phase 18 pt/s, 30 fps; still when paused/unknown | W3 |
 | Submit menu scroll into room | Monitor/ToolFolderInspectors.swift:88 | scrollTo fast 0.15 s | W3 |
 | Traces folder drag reorder | TracesViews.swift:699-768 | row follows pointer; release spring(0.3, 0.85) | W3 |
@@ -421,8 +432,11 @@ failures on Windows.
 
 The code's floor is lower than the matrix's: `TargetPlatformMinVersion` is
 10.0.17763.0 (`TraceCommons.App.csproj:6`; Windows 10 1809, from memory), and
-the target framework is `net8.0-windows10.0.19041.0` (`:5`). Whether to
-raise the floor to 22H2 is still open; no code changes for it in this spec.
+the target framework is `net8.0-windows10.0.19041.0` (`:5`). Taken
+2026-11-19: support Windows 10 22H2 and Windows 11, and raise
+`TargetPlatformMinVersion` to 10.0.19041.0 to match the target framework.
+22H2 is the tested minimum. The change itself lands with the first slice that
+touches the project file; no code changes in this spec.
 The project already builds x86, x64 and ARM64 (`:14-15`); the ARM VM would
 be the first run of the arm64 build.
 
@@ -559,7 +573,7 @@ No decoration items.
 
 ### W2. Window shell
 
-The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs. Mac notices with no Windows card found in the survey (unverified card by card; W2-D4 (a) is taken, but each is a new notice on Windows and still needs its own yes, wording included): a daemon that refused to start, onboarding owed, the attached-daemon limits, first run's last word, a failed or finished action, the traces moving now, the undos, arming rewordings, a consent gate hold, the backlog and idle suggestions, the idle notifications offer, the first-contribution note, Resume while uploads are paused, History's verdict news and verdict notifications offer, and the NEAR AI sign-in card (`Views/Monitor/MonitorNotices.swift:6-25`). Windows today has the update InfoBar, the health banner, the switch-on and grant-void notices, the legacy migration card, the private inference offer, the arming offer and the witness capacity banner.
+The toolbar row moves into `AppTitleBar` with the system caption buttons (decided). The rail is replaced by four tabs. Mac notices with no Windows card found in the survey (unverified card by card; W2-D4 (a) is taken, and on 2026-11-19 the owner approved porting these cards as a class, with the Mac's conditions and core words; the slice lists the cards it ports in its PR): a daemon that refused to start, onboarding owed, the attached-daemon limits, first run's last word, a failed or finished action, the traces moving now, the undos, arming rewordings, a consent gate hold, the backlog and idle suggestions, the idle notifications offer, the first-contribution note, Resume while uploads are paused, History's verdict news and verdict notifications offer, and the NEAR AI sign-in card (`Views/Monitor/MonitorNotices.swift:6-25`). Windows today has the update InfoBar, the health banner, the switch-on and grant-void notices, the legacy migration card, the private inference offer, the arming offer and the witness capacity banner.
 
 **Mac sources:**
 
@@ -603,12 +617,8 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
 |---|---|---|---|---|---|---|
 | NEAR AI N mark (app mark). Moved from W12: the title bar draws the mark first. W3, W6, W8 and W12 reuse the path. | TCDesign/Logos/GlassBrandMark.swift:10 (path); drawn by the map marks (Indicators.swift:759, 849), the stage (FirstRunStage.swift:261), the strip (MenuBarPanel.swift:316) | Windows draws the Turn instead: Controls/BrandMark.xaml:32-58 (two bracket paths, "no gradients"), used in the title bar (MainWindow.xaml:92) and the empty queue (MainWindow.xaml:1876); MSIX tiles in windows/packaging/Assets are the green Turn (Square150x150Logo.png inspected) | missing | high, M |  | G-3 |
 | Toolbar row in the title bar | TCDesign/Components/ThreePane.swift (GlassThreePane); MonitorWindowView.swift:979 GlassRuleTabs, :1146 GlassSegmentedTabs | custom title bar exists (MainWindow.xaml.cs:129-130 ExtendsContentIntoTitleBar/SetTitleBar; AppTitleBar MainWindow.xaml:86) but holds only the Turn and the literal "Near.ai", no toolbar row | partial | high, M |  |  |
-| Pane open and close (map, inspector) | TCDesign/Components/ThreePane.swift:358-376 (map and inspector fade), :538-550 (window frame change on the standard curve) | No map control. | missing | medium, S | Motion.standard 0.22 s on the token curve (ThreePane.swift:547, GlassTokens.swift:694); none under reduce motion (:540) |  |
-| Traces graph footer: bars, period slide, open and close. Moved from W5: the footer is part of the shell, as in the Linux spec. | TCDesign/Components/Indicators.swift:358 GlassBarGraph (Canvas :433, hover :460), :414-416 and :537 GlassBarSlide; TraceCommonsApp/Views/Monitor/MonitorShell.swift:233-290 (period steps slide, zoom swaps in place), :292-293; MonitorWindowView.swift:410-418 (footer rises from the bottom), :943, :1034 | no graph footer; Insights draws static Rectangle bars (Controls/InsightsView.xaml:57-58, 119-120, 136, 189, 282-283), a different chart; animation greps 0 (Z1) | missing | medium, M | period slide 0.45 s on (0.4, 0, 0.2, 1) (MonitorShell.swift:293); zoom on GlassMotion.fast (:284); footer opens over 0.25 s (MonitorWindowView.swift:943, :1034) |  |
+| Pane open and close (inspector half; the map half moved to W3, 2026-11-19) | TCDesign/Components/ThreePane.swift:358-376 (map and inspector fade), :538-550 (window frame change on the standard curve) | No map control. | missing | medium, S | Motion.standard 0.22 s on the token curve (ThreePane.swift:547, GlassTokens.swift:694); none under reduce motion (:540) |  |
 | Notice stack: peeking plates and arrival | TCDesign/Components/PopoverNotice.swift:182 GlassPopoverStack, :201-202, :225 arrival, :238 spring, :247 covered card fades out, :258-260; MonitorNotices.swift:76 (the whole stack fades in and out) | no notice overlay; the one InfoBar is the update notice (MainWindow.xaml:397-411); animation greps 0 (Z1) | missing | high, M | peek 8, 3 drawn (PopoverNotice.swift:201-202); plates narrow 4% a level, opacity 0.9/0.7 (:258-260); spring 0.36/0.86 (:238); the card a new one covers fades (:247); stack fade on .opacity (MonitorNotices.swift:76) | W2-D4 |
-| Notice mark and its symbol swap | TCDesign/Components/PopoverNotice.swift:116 GlassNoticeMark (side 30 :143), :154 contentTransition symbolEffect replace; MonitorNotices.swift:844, :882 bounce | animation greps 0 (Z1) | missing | medium, S | mark side 30 (PopoverNotice.swift:143) |  |
-| Arming offer: bolt to check, spreading ring, hold and exit | TraceCommonsApp/Views/Monitor/ArmingOfferMotion.swift:18, 37, 42, 66, 72; AppModel.swift:2197, 2221; MonitorNotices.swift:882-884 | the offer is a text card (MainWindow.xaml:753, ViewModel.HasArmingOffer) with no mark and no motion; animation greps 0 (Z1) | missing | medium, S | hold 900 ms (:18); exit spring 0.42/0.9 (:37); mark spring 0.32/0.7 (:42); ring 1 to 1.9, easeOut 0.7 s (:66, :72) |  |
-| Tree search field reveal | TraceCommonsApp/Views/Monitor/NudgeViews.swift:150 (opacity + move trailing), :153/:161 fast | animation greps 0 (Z1) | missing | low, S |  |  |
 
 **Owner decisions:**
 
@@ -625,10 +635,10 @@ The toolbar row moves into `AppTitleBar` with the system caption buttons (decide
   - (a) The Mac's behaviour, with `AppWindow.Resize` and `Move` (spike S2)
   - (b) The window keeps its size and the panes reallocate inside it (Linux precedent: forced by Wayland, not chosen)
 - **W2-D4. Notices and inspector demand.** Windows stacks inline cards above the pane with no X. The Mac lays a peeking stack over the tab and opens the inspector on demand.
-  - **Taken 2026-11-18: (a). Each card new to Windows still needs its own yes.**
+  - **Taken 2026-11-18: (a).** Taken 2026-11-19: cards new to Windows are approved as a class, with the Mac's conditions and core words; each slice lists the cards it ports in its PR.
   - (a) Both as on the Mac: the overlay stack with its X rules, and the inspector opening itself on the Mac's demand keys (Linux precedent: decision 1, "all three approved")
   - (b) Re-house the existing cards only; the inspector opens on selection only
-  - Note: Either way, a card the Mac shows that Windows lacks today is a new notice on Windows (copy guide rule 9). The spec lists those cards under W2; each needs its own yes.
+  - Note: Either way, a card the Mac shows that Windows lacks today is a new notice on Windows (copy guide rule 9). The spec lists those cards under W2; they were approved as a class on 2026-11-19.
 - **W2-D5. Keyboard map.** Windows binds Ctrl+1 Waiting, Ctrl+2 History, Ctrl+3 Private inference, Ctrl+4 Settings and Ctrl+5 Insights (`MainWindow.xaml:44-48`), which is not rail order, and Mission drafts has no key. Windows already has Ctrl+Shift+M for Private AI (`:49`), matching the Mac's Cmd-Shift-M (`TraceCommonsAppMain.swift:295-296`); it is kept either way. The Mac has Cmd-1 to Cmd-4 by tab position and Cmd-, for Settings.
   - **Taken 2026-11-18: (a), and Ctrl+Shift+M is kept.**
   - (a) Ctrl+1 to Ctrl+4 by tab position, Home first, and Ctrl+, for Settings (Linux precedent: `<Control>comma` at `crates/trace-commons-contributor-gtk/src/ui/shortcuts.rs:44`)
@@ -679,6 +689,9 @@ Drawn with Win2D (decided). Nodes stay focusable elements with names; arcs and m
 | Map nodes: discs, laptop, launch pad, key glyph, rings | TraceCommonsApp/Views/Monitor/FlowMapView.swift:313 drawNode, :435 drawLaptop, :455 drawPad, :488 keyGlyph, :511 ringMetrics, :767 still Canvas | No map control. | missing | high, L |  |  |
 | Map node card | TCDesign/Components/Indicators.swift:887 GlassNodeCard; FlowMapView.swift:680; nodeCardEdge GlassTokens.swift:449 | No map control. | missing | medium, S |  |  |
 | Traces folder drag settle and scroll | TraceCommonsApp/Views/Monitor/TracesViews.swift:503 (scroll on GlassMotion.fast), :764 (drag release spring 0.3/0.85); ToolFolderInspectors.swift:88 (fast) | animation greps 0 (Z1) | missing | low, S |  |  |
+| Pane open and close (map half; the inspector half stays in W2). Moved from W2, 2026-11-19. | TCDesign/Components/ThreePane.swift:358-376 (map and inspector fade), :538-550 (window frame change on the standard curve) | No map control. | missing | medium, S | Motion.standard 0.22 s on the token curve (ThreePane.swift:547, GlassTokens.swift:694); none under reduce motion (:540) |  |
+| Traces graph footer: bars, period slide, open and close. Moved from W2, 2026-11-19 (earlier moved from W5): the footer is part of the shell, as in the Linux spec. | TCDesign/Components/Indicators.swift:358 GlassBarGraph (Canvas :433, hover :460), :414-416 and :537 GlassBarSlide; TraceCommonsApp/Views/Monitor/MonitorShell.swift:233-290 (period steps slide, zoom swaps in place), :292-293; MonitorWindowView.swift:410-418 (footer rises from the bottom), :943, :1034 | no graph footer; Insights draws static Rectangle bars (Controls/InsightsView.xaml:57-58, 119-120, 136, 189, 282-283), a different chart; animation greps 0 (Z1) | missing | medium, M | period slide 0.45 s on (0.4, 0, 0.2, 1) (MonitorShell.swift:293); zoom on GlassMotion.fast (:284); footer opens over 0.25 s (MonitorWindowView.swift:943, :1034) |  |
+| Tree search field reveal | TraceCommonsApp/Views/Monitor/NudgeViews.swift:150 (opacity + move trailing), :153/:161 fast | animation greps 0 (Z1) | missing | low, S |  |  |
 
 **Owner decisions:**
 
@@ -934,6 +947,8 @@ The Mac forces the stage dark (`TraceCommonsAppMain.swift:141`). WinUI can scope
 | Traces step: orbs streaming into a filling ring | TraceCommonsApp/Views/FirstRun/TracesScreen.swift:91-123, :160, :193-208, :285 | Legacy onboarding window; no stage, no drawing. | missing | medium, M | count rises over 1.9 s (doc :91); 60 fps (:160); glow @0.35 r 6 (:196); spatial 0.64 (:285) |  |
 | Uses flow: tools folding in, review gate, pulse | TraceCommonsApp/Views/FirstRun/UsesScreen.swift:419-582, :645-655 | Legacy onboarding window; no stage, no drawing. | missing | medium, M | 60 fps (:431); tile shadow r 10 y 8 (:494); pulse blur 3 (:558); expressive 0.46 (:582) |  |
 | Join graphic: tools circling the N on a turning dashed ring | TraceCommonsApp/Views/FirstRun/JoinScreen.swift:521-545, :688 | Legacy onboarding window; no stage, no drawing. | missing | medium, M | 30 fps; ring turns once per 90 s (:531); pulse scale 0.3 + 1.6 p, blur 4 (:542-543) |  |
+| Notice mark and its symbol swap | TCDesign/Components/PopoverNotice.swift:116 GlassNoticeMark (side 30 :143), :154 contentTransition symbolEffect replace; MonitorNotices.swift:844, :882 bounce | animation greps 0 (Z1) | missing | medium, S | mark side 30 (PopoverNotice.swift:143) |  |
+| Arming offer: bolt to check, spreading ring, hold and exit | TraceCommonsApp/Views/Monitor/ArmingOfferMotion.swift:18, 37, 42, 66, 72; AppModel.swift:2197, 2221; MonitorNotices.swift:882-884 | the offer is a text card (MainWindow.xaml:753, ViewModel.HasArmingOffer) with no mark and no motion; animation greps 0 (Z1) | missing | medium, S | hold 900 ms (:18); exit spring 0.42/0.9 (:37); mark spring 0.32/0.7 (:42); ring 1 to 1.9, easeOut 0.7 s (:66, :72) |  |
 
 **Owner decisions:**
 
@@ -1021,7 +1036,8 @@ No decoration items.
 
 **Owner decisions:**
 
-- **W10-D2. The invite protocol's display name.** `Package.appxmanifest:92` is "Near.ai invite", the name Windows shows for the `tracecommons` protocol. `APP_NAME` is "Near AI Gateway" (`brand.rs:28-35`). Still open.
+- **W10-D2. The invite protocol's display name.** `Package.appxmanifest:92` is "Near.ai invite", the name Windows shows for the `tracecommons` protocol. `APP_NAME` is "Near AI Gateway" (`brand.rs:28-35`).
+  - **Taken 2026-11-19: (a).**
   - (a) `APP_NAME` alone, no new words
   - (b) A core word such as `<APP_NAME> invite` (a new copy item, needing approval)
   - (c) Leave the literal as it is for now, excluded from the test
@@ -1205,13 +1221,13 @@ No decoration items.
 **Owner decisions:**
 
 - **W14-D1. Terminals.** Windows offers Windows Terminal only (`terminal.rs:73`).
-  - **Taken 2026-11-18: (c). Which terminals is still open.**
+  - **Taken 2026-11-18: (c).** **Taken 2026-11-19: (b), replacing (c): Windows Terminal, with the PowerShell console host as the fallback when Windows Terminal is not installed. Both must pass the argv check. No other terminals.**
   - (a) Windows Terminal only
   - (b) Add the PowerShell console host
   - (c) Add others after an argv check
   - Note: Linux precedent: four terminals added (#2170), each from an argv vector.
 - **W14-D2. "Show" (raise a running session).**
-  - **Taken 2026-11-18: (a). Whether it ships depends on the spike.**
+  - **Taken 2026-11-18: (a).** **Taken 2026-11-19: ship "Show" only if its spike finds a reliable way to raise the session window that never steals focus unexpectedly; otherwise it stays Mac-only (b). Gated on the spike.**
   - (a) Spike it on Windows
   - (b) Leave it Mac-only (Linux precedent: Wayland gave no safe way)
 - **W14-D3. Per-tool launch buttons.** The Mac has a launch button per tool, with its logo. That is a new per-tool start flow, not only decoration.
@@ -1247,7 +1263,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W15-D1. Background service.** The Windows app is not sandboxed and hosts the daemon in-process.
-  - **Open.** Spike S4 runs first. Recommended: (a), no background-service flow, unless two daemons collide.
+  - **Taken 2026-11-19: (a), unless spike S4 shows two daemons collide.** Gated on S4.
   - (a) No background-service flow on Windows
   - (b) A CLI-owned daemon the app attaches to, with dialogs approved for Windows
   - Note: Linux precedent: (b), "Flatpak = host daemon" (#2171), forced by the sandbox. Spike S4 runs first.
@@ -1268,8 +1284,9 @@ The Mac does not ship these, so they are not ported. Listed so a later Mac chang
 ## Slices for the surfaces W1-W15 did not cover
 
 G-4 (a) is taken: these Mac surfaces get slices W16 to W25. The W0 survey
-listed them as "Surfaces no slice covers". Their decisions are still to ask:
-each is written as options, with no recommendation, and none is taken.
+listed them as "Surfaces no slice covers". Their decisions were taken
+2026-11-19: each takes option (a), the one that matches the Mac, and the
+other options are kept for the record.
 
 Every slice from W2 on also carries the keyboard and accessibility-name
 acceptance line: every control it adds is reachable by keyboard and named
@@ -1324,14 +1341,17 @@ No decoration items.
 **Owner decisions:**
 
 - **W16-D1. Settings section list.** The Mac lists 19 sections in 6 groups, with a hairline between groups and no group headings.
+  - **Taken 2026-11-19: (a).**
   - (a) The Mac's list, order and groups
   - (b) Windows' current Settings layout, with the missing sections added
   - Note: No Linux precedent recorded here.
 - **W16-D2. Payouts and referrals.** Windows has neither section today.
+  - **Taken 2026-11-19: (a).**
   - (a) Both, as on the Mac
   - (b) Payouts only
   - (c) Neither yet; the existing "payouts need a NEAR AI login" line stays
 - **W16-D3. Device codes.** The Mac mints a code to add another device and lists, renames and revokes devices.
+  - **Taken 2026-11-19: (a).**
   - (a) All of it, as on the Mac
   - (b) List, rename and revoke only; no minting from Windows
 
@@ -1378,15 +1398,19 @@ The Capture, Private AI and App groups of the Mac's Settings, less what W9
 **Owner decisions:**
 
 - **W17-D1. Appearance choice.** The Mac offers Light, Dark or the system's. Its words are not in the core.
+  - **Taken 2026-11-19: (a).**
   - (a) Port it, after core words are added (new words, each needing approval)
   - (b) Follow the system only
 - **W17-D2. Notification kinds.** The Mac switches notifications per kind (`set_notify_kind`). Windows has one interval setting. A kind Windows does not notify today is a new notice on Windows.
+  - **Taken 2026-11-19: (a).**
   - (a) Port the switches; each kind new to Windows is asked separately
   - (b) Keep Windows' interval setting only
 - **W17-D3. Updates section.** Windows has its own updater (`AppUpdater.cs`) and the update InfoBar (`MainWindow.xaml:397-411`).
+  - **Taken 2026-11-19: (a).**
   - (a) The Mac's Updates section and words, driving the Windows updater
   - (b) Keep Windows' update surface as it is
 - **W17-D4. Managed CLI options and `herdr`.** What `set_managed_herdr` controls on Windows is unverified.
+  - **Taken 2026-11-19: (a).**
   - (a) Port the CLI options; `herdr` only after a check that it applies on Windows
   - (b) Leave the managed CLI options Mac-only for now
 
@@ -1424,6 +1448,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W18-D1. Compute on Windows.**
+  - **Taken 2026-11-19: (a).**
   - (a) Port the section as on the Mac
   - (b) Leave it out until a Windows compute use is asked for
   - Note: No Linux precedent recorded here.
@@ -1465,10 +1490,12 @@ No decoration items.
 **Owner decisions:**
 
 - **W19-D1. Tab body.** Windows has a Private inference pane of its own.
+  - **Taken 2026-11-19: (a).**
   - (a) The Mac's tab body and inspector replace it
   - (b) Keep Windows' pane and add the missing reads to it
 - **W19-D2. Spend organisation prompt.** The Mac asks for a spend organisation (`SpendOrganizationPrompt.swift`). On Windows that prompt would be new.
-  - (a) Port the prompt, under the notice rule (its own yes)
+  - **Taken 2026-11-19: (a).**
+  - (a) Port the prompt, under the notice rule (approved as a class, 2026-11-19)
   - (b) The Settings card only
 
 ### W20. Insights
@@ -1515,12 +1542,15 @@ Moved here from the W0 inventory's G-4 rows.
 **Owner decisions:**
 
 - **W20-D1. Week and drill reads.** The Mac asks the daemon; Windows computes them locally.
+  - **Taken 2026-11-19: (a).**
   - (a) Send the daemon methods the Mac sends
   - (b) Keep the local `tc_insights_call` reads
 - **W20-D2. Skill install.** The Mac plans, installs, reviews and rolls back skills in a tool's folder.
+  - **Taken 2026-11-19: (a).**
   - (a) All of it, as on the Mac
   - (b) Browse and follow only; no install from Windows
 - **W20-D3. Sent-traces training consent.** A consent surface new to Windows.
+  - **Taken 2026-11-19: (a).**
   - (a) Port it with the Mac's flow, nothing preselected
   - (b) Leave it Mac-only for now
 
@@ -1559,6 +1589,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W21-D1. Public runs.**
+  - **Taken 2026-11-19: (a).**
   - (a) Publish and unpublish, as on the Mac
   - (b) The detail inspector only; no publishing from Windows
 
@@ -1592,9 +1623,11 @@ No decoration items.
 **Owner decisions:**
 
 - **W22-D1. Find in the preview.** The Mac has Cmd-F (`PreviewSheet.swift:228`).
+  - **Taken 2026-11-19: (a).**
   - (a) Ctrl+F, as on the Mac
   - (b) No find key
 - **W22-D2. Unsure spans.**
+  - **Taken 2026-11-19: (a).**
   - (a) Mark them in the text, as on the Mac
   - (b) A count in the summary only
 
@@ -1625,6 +1658,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W23-D1. Missions and Mission drafts.** Windows has a Mission drafts page; the Mac has a Missions sub-page.
+  - **Taken 2026-11-19: (a).**
   - (a) The Mac's Missions page replaces Mission drafts
   - (b) Both, side by side under Home
 
@@ -1657,6 +1691,7 @@ No decoration items.
 **Owner decisions:**
 
 - **W24-D1. Where About opens.** The Mac opens it from the app menu.
+  - **Taken 2026-11-19: (a).**
   - (a) A tray menu row and a row in Settings
   - (b) Settings only
 
@@ -1692,9 +1727,11 @@ No decoration items.
 **Owner decisions:**
 
 - **W25-D1. UI Automation driver.**
+  - **Taken 2026-11-19: (a).**
   - (a) The UI Automation client from PowerShell, no new dependency
   - (b) A driver library (a new dependency, needing approval)
 - **W25-D2. The credential-store self-check.** `tc_credential_store_self_check` checks the Mac code signature's keychain entitlements (`TCBridge/TCCredentialStore.swift:12-14`, called at `TraceCommonsApp/SelfTest.swift:56`).
+  - **Taken 2026-11-19: (a).**
   - (a) A Windows self-check for its own credential store
   - (b) Not applicable on Windows
 
@@ -1770,31 +1807,11 @@ G-1 to G-5; W1-D1, W1-D2; W2-D1 to W2-D5; W3-D1, W3-D2; W4-D1; W5-D1 to
 W5-D3; W6-D1; W7-D1, W7-D2; W9-D1 to W9-D3; W10-D1; W11-D1 to W11-D3;
 W12-D1 to W12-D4; W13-D1; W14-D1 to W14-D3.
 
-**Still to ask:**
+**Taken 2026-11-19** (see "Decisions taken 2026-11-19"): W10-D2 (a); W14-D1
+(b), replacing (c); W14-D2 (a), gated on its spike; W15-D1 (a), gated on
+spike S4; the Windows 10 22H2 floor; W16-D1 to W25-D2, each the option that
+matches the Mac (a); cards and notices new to Windows, approved as a class;
+the W2 deferrals to W3 and W9.
 
-- W15-D1 (W15): Background service, after spike S4 (recommended (a))
-- W2-D4 follow-ups: each Mac notice new to Windows, card by card
-- W14-D1 follow-up: which terminals join Windows Terminal
-- W14-D2 follow-up: whether "Show" ships, after the spike
-- W10-D2 (W10): The invite protocol's display name
-- The Windows 10 floor: 10.0.17763 in code against 22H2 in the matrix
-- W16-D1 (W16): Settings section list
-- W16-D2 (W16): Payouts and referrals
-- W16-D3 (W16): Device codes
-- W17-D1 (W17): Appearance choice
-- W17-D2 (W17): Notification kinds
-- W17-D3 (W17): Updates section
-- W17-D4 (W17): Managed CLI options and `herdr`
-- W18-D1 (W18): Compute on Windows
-- W19-D1 (W19): Tab body
-- W19-D2 (W19): Spend organisation prompt
-- W20-D1 (W20): Week and drill reads
-- W20-D2 (W20): Skill install
-- W20-D3 (W20): Sent-traces training consent
-- W21-D1 (W21): Public runs
-- W22-D1 (W22): Find in the preview
-- W22-D2 (W22): Unsure spans
-- W23-D1 (W23): Missions and Mission drafts
-- W24-D1 (W24): Where About opens
-- W25-D1 (W25): UI Automation driver
-- W25-D2 (W25): The credential-store self-check
+**Still open:** only the spike-gated W14-D2 (whether "Show" ships) and
+W15-D1 (whether two daemons collide).
