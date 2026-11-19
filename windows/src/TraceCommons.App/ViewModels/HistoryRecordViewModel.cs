@@ -85,6 +85,12 @@ public sealed class HistoryRecordViewModel
     /// <summary>The id <c>withdraw</c> takes, and the key the attempt is filed under.</summary>
     public string SubmissionId => _record.SubmissionId;
 
+    /// <summary>The record's status token, as the daemon sent it (W21's detail reads it).</summary>
+    public string Status => _record.Status;
+
+    /// <summary>Whether a withdrawal this session completed (the Mac's <c>withdrawals[id]</c> withdrawn).</summary>
+    public bool WithdrawnHere => _attempt?.State == WithdrawalState.Done;
+
     /// <summary>
     /// Which history folder this record belongs to.
     /// </summary>

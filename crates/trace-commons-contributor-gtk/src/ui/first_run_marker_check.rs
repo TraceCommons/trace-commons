@@ -152,7 +152,11 @@ impl MarkerCheck {
     /// Draws the stroke's next frames while it moves and is shown.
     fn animate(&self) {
         self.area.queue_draw();
-        if !self.area.is_mapped() || !self.moving() || self.ticking() {
+        if !self.area.is_mapped()
+            || super::glass_motion::window_hidden(&self.area)
+            || !self.moving()
+            || self.ticking()
+        {
             return;
         }
         let (since, check, tick) = (self.since.clone(), self.check.clone(), self.tick.clone());

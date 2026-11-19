@@ -716,7 +716,62 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
         ratio = contrast(palette["selectedInk"], palette[token])
         if ratio < 4.5:
             raise TokenError(f"glass {scheme}: selection text on {token} is {ratio:.2f}:1, under 4.5:1")
+    # Every switch (`GlassToggleStyle`; the app draws .settings and .watch,
+    # both toggleOnSettings): its track when on, and its knob on and off.
+    # The off track stays translucent (`switch_off_track`).
+    palette["toggleOn"] = over(flat_color(tokens, "toggleOnSettings", scheme), ground)
+    palette["toggleKnobOn"] = over(flat_color(tokens, "textOnAccent", scheme), ground)
+    palette["toggleKnobOff"] = over(flat_color(tokens, "toggleKnobOff", scheme), ground)
     return palette
+
+
+# The grounds a GTK switch sits on: the Settings window's ground and card,
+# the other windows' pane and card, and the Monitor's tiers, focused and out
+# of focus. Both the knob on its track and the track on these hold 3:1.
+SWITCH_GROUNDS = ["settingsGround", "settingsCard", "windowPane", "windowCard",
+                  "pane", "card", "popover", "menu",
+                  "paneInactive", "cardInactive", "popoverInactive", "menuInactive"]
+SWITCH_FLOOR = 3.0
+
+
+def switch_failures(palette: dict[str, str], off: dict) -> list[str]:
+    """Every switch state under 3:1 on a switch ground: the knob on its
+    track, and the track on the ground, on and off."""
+    failures = []
+    on, knob_on, knob_off = palette["toggleOn"], palette["toggleKnobOn"], palette["toggleKnobOff"]
+    if contrast(knob_on, on) < SWITCH_FLOOR:
+        failures.append(f"switch knob on its track is {contrast(knob_on, on):.2f}:1")
+    for ground in SWITCH_GROUNDS:
+        under = palette[ground]
+        track = opaque_over(off, under)
+        for what, a, b in (("on track", on, under), ("off track", track, under),
+                           ("off knob on its track", knob_off, track)):
+            ratio = contrast(a, b)
+            if ratio < SWITCH_FLOOR:
+                failures.append(f"switch {what} over {ground} is {ratio:.2f}:1")
+    return failures
+
+
+def switch_off_track(tokens: dict, scheme: str) -> dict:
+    """`toggleOff`, or the smallest lift of its alpha in 0.01 steps at which
+    every switch state clears 3:1 on every switch ground. Dark holds at the
+    Mac's 38% white. Light's 24% black is about 1.8:1 on its grounds and the
+    white knob about 1.9:1 on it, under the floor the owner holds
+    (2026-10-07), so it is lifted: a deviation from the Mac kept as small as
+    the floor allows, as the blur's tint share is. The on track and both
+    knobs are the Mac's exactly; a token that breaks them fails here."""
+    palette = glass_palette(tokens, scheme)
+    base = flat_color(tokens, "toggleOff", scheme)
+    step = round(float(base.get("alpha", 1)) * 100)
+    first = None
+    while step <= 100:
+        entry = {"hex": base["hex"], "alpha": step / 100}
+        failures = switch_failures(palette, entry)
+        first = first or failures
+        if not failures:
+            return entry
+        step += 1
+    raise TokenError(f"glass {scheme}: no switch track clears 3:1: " + "; ".join(first))
 
 
 
@@ -937,6 +992,9 @@ GLASS_COLOURS = [
     ("settingsGround", "settings_ground"),
     ("settingsCard", "settings_card"),
     ("settingsRule", "settings_rule"),
+    ("toggleOn", "toggle_on"),
+    ("toggleKnobOn", "toggle_knob_on"),
+    ("toggleKnobOff", "toggle_knob_off"),
 ]
 
 
@@ -975,6 +1033,9 @@ def render_glass_css(tokens: dict, scheme: str) -> str:
     # on the desktop, with no pane under it to be opaque over.
     for token, name in GLASS_TRANSLUCENT_COLOURS:
         out.append(f"@define-color tc_glass_{name} {css_rgba(flat_color(tokens, token, scheme), token)};")
+    # The switch's off track, over whichever ground the switch sits on.
+    out.append(f"@define-color tc_glass_toggle_off "
+               f"{css_rgba(switch_off_track(tokens, scheme), 'toggleOff')};")
     for tier, css, radius_token, edge, _ in GLASS_TIERS:
         where = f"glass tier {tier}"
         out.append(
@@ -1031,6 +1092,15 @@ def render_glass_rust(tokens: dict) -> list[str]:
             hex_ = flat_color(tokens, token, scheme)["hex"].upper()
             out.append(f"        /// `{token}`, {scheme}.")
             out.append(f'        pub const {name}_{scheme.upper()}: &str = "{hex_}";')
+    out.append("    }")
+    # The secondary ink, opaque over the pane as `tc_glass_ink_secondary`
+    # is, for cairo: History's Waiting glyph strokes in it.
+    out.append("    /// The glass inks cairo draws with, opaque over the pane.")
+    out.append("    pub mod ink {")
+    for scheme in SCHEMES:
+        hex_ = glass_palette(tokens, scheme)["inkSecondary"].upper()
+        out.append(f"        /// `textSecondary` over the pane, {scheme}.")
+        out.append(f'        pub const SECONDARY_{scheme.upper()}: &str = "{hex_}";')
     out.append("    }")
     # The selected tab's ember line and the halo behind its title
     # (`GlassRuleTabs.emberGlow`), drawn in cairo across the strip.

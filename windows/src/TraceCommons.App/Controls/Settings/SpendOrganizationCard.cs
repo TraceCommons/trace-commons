@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -42,6 +44,7 @@ public sealed class SpendOrganizationCard : UserControl
     private readonly TextBlock _noticeText = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, FontWeight = FontWeights.SemiBold };
     private bool _filling;
     private bool _bringIntoView;
+    private bool _renderQueued;
 
     public SpendOrganizationCard(SpendOrganizationModel model)
     {
@@ -132,8 +135,17 @@ public sealed class SpendOrganizationCard : UserControl
 
     private void OnModelChanged(object? sender, PropertyChangedEventArgs e)
     {
-        Render();
-        if (_bringIntoView && IsLoaded) Settle();
+        // Queued, not inline: a pick raises this from inside the picker's own
+        // SelectionChanged, and setting its selection there leaves the
+        // closed picker drawing an empty box.
+        if (_renderQueued) return;
+        _renderQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _renderQueued = false;
+            Render();
+            if (_bringIntoView && IsLoaded) Settle();
+        });
     }
 
     private void Render()
@@ -149,10 +161,18 @@ public sealed class SpendOrganizationCard : UserControl
         {
             _title.Text = _model.PickerTitle;
             AutomationProperties.SetName(_picker, _model.PickerName);
-            _picker.Items.Clear();
-            foreach (string name in _model.OptionNames) _picker.Items.Add(name);
+            AutomationProperties.SetName(this, _model.PickerTitle);
+            // Rows are rebuilt only when the daemon's list changed: clearing
+            // a focused picker drops the keyboard and scrolls Settings away.
+            IReadOnlyList<string> names = _model.OptionNames;
+            if (!_picker.Items.Cast<object>().Select(o => o as string).SequenceEqual(names))
+            {
+                _picker.Items.Clear();
+                foreach (string name in names) _picker.Items.Add(name);
+            }
+
             _picker.SelectedIndex = _model.CurrentIndex;
-            _picker.IsEnabled = _model.CanPick;
+            Hold(!_model.CanPick);
         }
         finally
         {
@@ -178,6 +198,32 @@ public sealed class SpendOrganizationCard : UserControl
         }
 
         Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Holds the picker while a switch or sign-in is in flight
+    /// (<c>.disabled(spendOrganizationSwitching || credentialBusy)</c>). A
+    /// disabled control gives up the keyboard, and WinUI would hand it to
+    /// the next stop and scroll Settings there, so the card keeps it for the
+    /// hold and gives it back to the picker after.
+    /// </summary>
+    private void Hold(bool held)
+    {
+        if (held == !_picker.IsEnabled) return;
+        if (held)
+        {
+            bool focused = _picker.FocusState != FocusState.Unfocused;
+            IsTabStop = true;
+            if (focused) Focus(FocusState.Programmatic);
+            _picker.IsEnabled = false;
+        }
+        else
+        {
+            _picker.IsEnabled = true;
+            bool focused = FocusState != FocusState.Unfocused;
+            if (focused) _picker.Focus(FocusState.Programmatic);
+            IsTabStop = false;
+        }
     }
 
     private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];

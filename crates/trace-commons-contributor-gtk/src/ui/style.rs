@@ -55,34 +55,18 @@
 //! `scripts/design-tokens/generate.py`, which writes [`brand_tokens`]: one
 //! `@define-color` sheet per scheme, loaded ahead of the palette below,
 //! which maps this shell's `tc_*` names onto them. Edit the JSON and
-//! regenerate; `generate.py --check` fails CI on a hand edit. The grounds,
-//! ink, blue and the redaction wash stay this shell's own.
+//! regenerate; `generate.py --check` fails CI on a hand edit.
 //!
-//! ## Dark comes from the design spec, not from an inversion
+//! ## The grounds and inks are the Monitor's
 //!
-//! The site has no `prefers-color-scheme` block anywhere, so there was no
-//! dark palette to copy from it -- and on this platform dark is not
-//! optional, since a large share of GNOME and KDE users run it permanently.
-//! The dark values below are now the approved mockups' native palette
-//! (`design-import/DESIGN-SPEC.md` §2.1) rather than this file's earlier
-//! derivation, and they hold the same relations:
-//!
-//! * The ground (`#23251D`) is not a neutral grey; it keeps the warm green
-//!   cast of the light ground (`#F6F7F4`) at the other end of the scale
-//!   rather than the blue-black a naive inversion produces.
-//! * ground / surface / inset keep the same order and roughly the same
-//!   perceptual spacing as `--bg` / `--surface` / `--surface-2`.
-//! * Every accent keeps its hue and its role and is lifted in lightness
-//!   until it clears text contrast on the dark ground.
-//!
-//! ## Where the tokens come from
-//!
-//! Every `tc_*` ground, ink, blue and redaction colour below is one row of
-//! §2.1's native-palette table, and the mapping is recorded inline; the
-//! accent and status rows are the generated tokens instead (above). Two
-//! rows are deliberately absent:
-//! `bg.sidebar.macos` and `bg.chrome.windows` are other platforms' chrome
-//! and have no surface in this shell.
+//! Every window and sheet draws on the Monitor's pane, card and well
+//! (`tc_glass_window_*`) in the Mac's flat glass inks and rule, and the
+//! Settings window on the Mac's own Settings ground and card, in both
+//! schemes. These come from the same generated sheet. The warm, olive
+//! grounds and inks of the design spec's §2.1 (`#F6F7F4` / `#23251D`,
+//! `#5C635B` / `#A6AC9F`) are gone, from the stylesheet and from the inks
+//! cairo draws with ([`Inks`]). The blue and the redaction wash stay this
+//! shell's own.
 //!
 //! ## Contrast is measured, never eyeballed
 //!
@@ -96,8 +80,8 @@
 //! suggested action in the window at once.
 //!
 //! The dark fill purple (`#8A3DFF`) is a fill, not a line: it clears 3:1 on
-//! the window ground and a card but measures 2.76:1 on the inset well. So
-//! a border or rule drawn straight on a ground (`tc_green`, below) takes
+//! the window ground and a card but not on every inset well. So a border or
+//! rule drawn straight on a ground (`tc_green`, below) takes
 //! `tc_accent_line`, which is the text purple in dark.
 
 use adw::prelude::*;
@@ -110,51 +94,47 @@ pub mod brand_tokens;
 
 /// Light tokens.
 ///
-/// The first block is the design spec's native palette, §2.1's light
-/// column. The accent and status values are the generated
+/// The accent and status values are the generated
 /// [`brand_tokens::LIGHT_CSS`], each in a fill/rule weight and a text-safe
-/// twin that clears 4.5:1 as small type.
+/// twin that clears 4.5:1 as small type. The grounds and inks are the
+/// Monitor's: since 2026-11-18 every window and sheet draws on its pane,
+/// card and well (the generated `tc_glass_window_*`) in the Mac's flat
+/// glass inks, so the warm and olive values of the design spec's §2.1
+/// column are gone. The blue and the redaction wash stay this shell's own.
 ///
-/// The three grounds (`tc_bg`, `tc_surface`, `tc_surface2`) are no longer
-/// the spec's literals measured below: since 2026-11-18 every window and
-/// sheet draws on the Monitor's pane, card and well (the generated
-/// `tc_glass_window_*`), and the contrast tests in this file hold every ink
-/// at its floor on those, in both schemes.
-///
-/// Measured (WCAG 2.1, computed not estimated), on the former grounds:
+/// Measured (WCAG 2.1, computed from the values this file loads; the test
+/// `the_measured_tables_are_the_live_palette` rebuilds this table from the
+/// live palette and fails if a row drifts):
 ///
 /// ```text
-///  14.64:1  ink         #20241F on bg         #F6F7F4
-///  15.75:1  ink         #20241F on surface    #FFFFFF
-///   5.76:1  muted       #5C635B on bg         #F6F7F4
-///   6.19:1  muted       #5C635B on surface    #FFFFFF
-///   5.48:1  muted       #5C635B on surface-2  #EEF2F0
-///   4.58:1  tertiary    #6D7269 on bg         #F6F7F4   (see the note below)
-///   4.93:1  tertiary    #6D7269 on surface    #FFFFFF
-///   8.17:1  accent text #5B10CC on bg         #F6F7F4
-///   7.78:1  accent text #5B10CC on surface-2  #EEF2F0
-///   6.95:1  gold text   #7A4A06 on bg         #F6F7F4
-///   6.62:1  gold text   #7A4A06 on surface-2  #EEF2F0
-///   6.97:1  coral text  #A3221C on bg         #F6F7F4
-///   6.04:1  blue text   #315FBA on surface    #FFFFFF
-///   6.90:1  PRIMARY     #FFFFFF on accent     #6D14F3   <- the consent action
-///   6.11:1  accent rule #6D14F3 on surface-2  #EEF2F0   (non-text, >= 3:1)
-///   3.96:1  gold rule   #A8690F on surface-2  #EEF2F0   (non-text, >= 3:1)
-///  12.34:1  redaction   #202426 on gold wash  #F3E3C0
-///   3.27:1  (rejected)  spec ink.tertiary #8A9086 on surface #FFFFFF
+///   15.17:1  tc_ink                  #1D1D1F on tc_bg                  #F2F3F6
+///   16.13:1  tc_ink                  #1D1D1F on tc_surface             #FAFAFB
+///   12.39:1  tc_ink                  #1D1D1F on tc_surface2            #DBDDE3
+///    9.86:1  tc_muted                #3C3C43 on tc_bg                  #F2F3F6
+///   10.49:1  tc_muted                #3C3C43 on tc_surface             #FAFAFB
+///    8.06:1  tc_muted                #3C3C43 on tc_surface2            #DBDDE3
+///    9.72:1  tc_ink_tertiary         #3D3D43 on tc_bg                  #F2F3F6
+///   10.34:1  tc_ink_tertiary         #3D3D43 on tc_surface             #FAFAFB
+///    7.92:1  tc_green_text           #5B10CC on tc_bg                  #F2F3F6
+///    6.47:1  tc_green_text           #5B10CC on tc_surface2            #DBDDE3
+///    6.74:1  tc_gold_text            #7A4A06 on tc_bg                  #F2F3F6
+///    5.50:1  tc_gold_text            #7A4A06 on tc_surface2            #DBDDE3
+///    6.75:1  tc_coral_text           #A3221C on tc_bg                  #F2F3F6
+///    5.79:1  tc_blue_text            #315FBA on tc_surface             #FAFAFB
+///    5.44:1  tc_blue_icon            #315FBA on tc_bg                  #F2F3F6
+///    6.90:1  tc_primary_label        #FFFFFF on tc_primary_fill        #6D14F3
+///    6.22:1  tc_primary_fill         #6D14F3 on tc_bg                  #F2F3F6
+///    6.61:1  tc_primary_fill         #6D14F3 on tc_surface             #FAFAFB
+///    5.08:1  tc_green                #6D14F3 on tc_surface2            #DBDDE3
+///    3.30:1  tc_gold                 #A8690F on tc_surface2            #DBDDE3
+///   12.34:1  tc_redaction_fg         #202426 on tc_redaction_bg        #F3E3C0
+///    6.82:1  tc_glass_toggle_knob_on #FFFFFF on tc_glass_toggle_on     #0558B6
+///    6.37:1  tc_glass_toggle_on      #0558B6 on tc_glass_settings_card #F6F7F9
 /// ```
 ///
-/// **The one deviation from §2.1.** The spec's `ink.tertiary` is `#8A9086`
-/// light / `#82887C` dark, and the spec assigns it to timestamps, eyebrow
-/// labels and footnotes -- all small text. Measured, it is 3.27:1 on white
-/// and 4.26:1 on the dark ground, so it fails the 4.5:1 body-text floor at
-/// both ends. `tc_ink_tertiary` therefore carries the nearest accessible
-/// twin on the same hue and saturation (`#6D7269` / `#878D81`, 4.58:1 and
-/// 4.55:1 on their grounds; light is `#6A6F66` since the grounds became the
-/// Monitor's, 4.64:1 on its pane `#F2F3F6`), which keeps the three-step ink ramp the spec
-/// asks for without putting sub-threshold type on a screen. It must not be
-/// used on the inset surface, where the dark twin measures 4.05:1; small
-/// type inside a manifest strip stays on `tc_muted`.
+/// The switch's off track is translucent, so it is measured where it is
+/// drawn: `switch_off_track` in the generator holds it at 3:1 on every
+/// ground a switch sits on, and a mounted test measures the drawn pixels.
 const LIGHT_TOKENS: &str = r#"
 /* --- Ground and ink: the Monitor's own. Every window and sheet draws
        on its pane, card and well (the generated `tc_glass_window_*`),
@@ -242,29 +222,37 @@ const LIGHT_TOKENS: &str = r#"
 @define-color borders              @tc_line;
 "#;
 
-/// Dark tokens. §2.1's dark column, with the same corrections.
+/// Dark tokens: the Monitor's navy grounds and the Mac's flat glass inks,
+/// as in light, with the generated accent and status roles.
 ///
-/// Measured (WCAG 2.1, computed not estimated):
+/// Measured (WCAG 2.1, computed from the values this file loads; the test
+/// `the_measured_tables_are_the_live_palette` rebuilds this table from the
+/// live palette and fails if a row drifts):
 ///
 /// ```text
-///  12.79:1  ink         #E8EAE3 on bg         #23251D
-///  12.96:1  ink         #E8EAE3 on surface    #21241E
-///   6.75:1  muted       #A6AC9F on surface    #21241E
-///   6.66:1  muted       #A6AC9F on bg         #23251D
-///   5.94:1  muted       #A6AC9F on surface-2  #2A2E27
-///   4.55:1  tertiary    #878D81 on bg         #23251D   (see the light note)
-///   4.61:1  tertiary    #878D81 on surface    #21241E
-///   7.49:1  accent text #C9B3FF on surface-2  #2A2E27
-///   8.29:1  gold text   #F5C142 on surface-2  #2A2E27
-///   6.53:1  coral text  #FF9494 on surface-2  #2A2E27
-///   7.78:1  blue text   #9DB6F1 on surface    #21241E
-///   7.68:1  blue icon   #9DB6F1 on bg         #23251D
-///   5.01:1  PRIMARY     #FFFFFF on accent     #8A3DFF   <- the consent action
-///   3.10:1  accent fill #8A3DFF on bg         #23251D   (non-text, >= 3:1)
-///   2.76:1  (not drawn) accent fill #8A3DFF on surface-2 #2A2E27
-///   7.49:1  accent rule #C9B3FF on surface-2  #2A2E27
-///   9.04:1  redaction   #F0EBDD on gold wash  #4A3C18
-///   4.26:1  (rejected)  spec ink.tertiary #82887C on bg #23251D
+///   15.39:1  tc_ink                  #F2F3F8 on tc_bg                  #171B2D
+///   15.87:1  tc_ink                  #F2F3F8 on tc_surface             #14182A
+///   16.97:1  tc_ink                  #F2F3F8 on tc_surface2            #0E111D
+///   12.12:1  tc_muted                #D8D9E0 on tc_bg                  #171B2D
+///   12.50:1  tc_muted                #D8D9E0 on tc_surface             #14182A
+///   13.36:1  tc_muted                #D8D9E0 on tc_surface2            #0E111D
+///   11.10:1  tc_ink_tertiary         #CFD0D8 on tc_bg                  #171B2D
+///   11.45:1  tc_ink_tertiary         #CFD0D8 on tc_surface             #14182A
+///    9.24:1  tc_green_text           #C9B3FF on tc_bg                  #171B2D
+///   10.19:1  tc_green_text           #C9B3FF on tc_surface2            #0E111D
+///   10.23:1  tc_gold_text            #F5C142 on tc_bg                  #171B2D
+///   11.27:1  tc_gold_text            #F5C142 on tc_surface2            #0E111D
+///    8.05:1  tc_coral_text           #FF9494 on tc_bg                  #171B2D
+///    8.71:1  tc_blue_text            #9DB6F1 on tc_surface             #14182A
+///    8.44:1  tc_blue_icon            #9DB6F1 on tc_bg                  #171B2D
+///    5.01:1  tc_primary_label        #FFFFFF on tc_primary_fill        #8A3DFF
+///    3.41:1  tc_primary_fill         #8A3DFF on tc_bg                  #171B2D
+///    3.51:1  tc_primary_fill         #8A3DFF on tc_surface             #14182A
+///   10.19:1  tc_green                #C9B3FF on tc_surface2            #0E111D
+///   11.27:1  tc_gold                 #F5C142 on tc_surface2            #0E111D
+///    9.04:1  tc_redaction_fg         #F0EBDD on tc_redaction_bg        #4A3C18
+///    8.80:1  tc_glass_toggle_knob_on #071A2E on tc_glass_toggle_on     #7EBCFF
+///    9.37:1  tc_glass_toggle_on      #7EBCFF on tc_glass_settings_card #0D1124
 /// ```
 ///
 /// Dark keeps the white primary label: the brighter purple carries it at
@@ -712,6 +700,14 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_control_hover" => hex(p.control_hover),
         "tc_glass_row_hover" => hex(p.row_hover),
         "tc_glass_tab_ember" => hex(p.accent_line),
+        // Every switch: on, the skin's accent fill under its label colour,
+        // the pair the primary action carries; off, the secondary ink
+        // under a surface knob. Each clears 3:1 both ways because the
+        // pairs it borrows clear their text floors.
+        "tc_glass_toggle_on" => hex(p.accent),
+        "tc_glass_toggle_knob_on" => hex(p.on_accent),
+        "tc_glass_toggle_off" => hex(p.muted),
+        "tc_glass_toggle_knob_off" => hex(p.surface),
         // The glass tiers out of focus: the skin does not dim, so each is
         // its focused role.
         "tc_glass_pane_inactive" => hex(p.bg),
@@ -916,7 +912,7 @@ impl Inks {
                 status_outside: s(t::STATUS_OUTSIDE),
                 accent_text: s(t::ACCENT_TEXT),
                 held_icon: s("#9DB6F1"),
-                muted: s("#A6AC9F"),
+                muted: s(brand_tokens::glass::ink::SECONDARY_DARK),
                 outside_text: s(t::STATUS_OUTSIDE_TEXT),
                 redaction_bg: s("#4A3C18"),
                 redaction_fg: s("#F0EBDD"),
@@ -939,7 +935,7 @@ impl Inks {
                 status_outside: s(t::STATUS_OUTSIDE),
                 accent_text: s(t::ACCENT_TEXT),
                 held_icon: s("#315FBA"),
-                muted: s("#5C635B"),
+                muted: s(brand_tokens::glass::ink::SECONDARY_LIGHT),
                 outside_text: s(t::STATUS_OUTSIDE_TEXT),
                 redaction_bg: s("#f3e3c0"),
                 redaction_fg: s("#202426"),
@@ -1618,6 +1614,88 @@ mod tests {
         }
     }
 
+    /// The pairs the measured tables on `LIGHT_TOKENS` and `DARK_TOKENS`
+    /// state, in their order: foreground, ground.
+    const TABLE_PAIRS: [(&str, &str); 23] = [
+        ("tc_ink", "tc_bg"),
+        ("tc_ink", "tc_surface"),
+        ("tc_ink", "tc_surface2"),
+        ("tc_muted", "tc_bg"),
+        ("tc_muted", "tc_surface"),
+        ("tc_muted", "tc_surface2"),
+        ("tc_ink_tertiary", "tc_bg"),
+        ("tc_ink_tertiary", "tc_surface"),
+        ("tc_green_text", "tc_bg"),
+        ("tc_green_text", "tc_surface2"),
+        ("tc_gold_text", "tc_bg"),
+        ("tc_gold_text", "tc_surface2"),
+        ("tc_coral_text", "tc_bg"),
+        ("tc_blue_text", "tc_surface"),
+        ("tc_blue_icon", "tc_bg"),
+        ("tc_primary_label", "tc_primary_fill"),
+        ("tc_primary_fill", "tc_bg"),
+        ("tc_primary_fill", "tc_surface"),
+        ("tc_green", "tc_surface2"),
+        ("tc_gold", "tc_surface2"),
+        ("tc_redaction_fg", "tc_redaction_bg"),
+        ("tc_glass_toggle_knob_on", "tc_glass_toggle_on"),
+        ("tc_glass_toggle_on", "tc_glass_settings_card"),
+    ];
+
+    /// One row of a measured table, as the doc comment writes it.
+    fn table_row(colours: &HashMap<String, String>, fg: &str, bg: &str) -> String {
+        let get = |name: &str| {
+            colours
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not an opaque colour"))
+                .clone()
+        };
+        let (a, b) = (get(fg), get(bg));
+        format!("{:>6.2}:1  {fg:<23} {a} on {bg:<22} {b}", contrast(&a, &b))
+    }
+
+    /// The rows of the measured table in the doc comment on `constant`.
+    fn documented_table(constant: &str) -> Vec<String> {
+        let source = include_str!("style.rs");
+        let end = source
+            .find(&format!("\nconst {constant}: &str"))
+            .unwrap_or_else(|| panic!("no {constant}"));
+        let doc = &source[..end];
+        let open = doc.rfind("/// ```text\n").expect("a measured table") + 12;
+        let close = open + doc[open..].find("/// ```").expect("the table ends");
+        doc[open..close]
+            .lines()
+            .map(|line| line.trim_start_matches("///").trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// The measured tables are the live palette's: every row's colours
+    /// are what this file loads and every ratio is recomputed, so the
+    /// table cannot drift from the tokens again. On the branch before
+    /// this fix both tables still measured the olive grounds and inks
+    /// (#23251D, #E8EAE3, #A6AC9F) the shell no longer draws.
+    #[test]
+    fn the_measured_tables_are_the_live_palette() {
+        for (dark, constant) in [(false, "LIGHT_TOKENS"), (true, "DARK_TOKENS")] {
+            let colours = palette(dark);
+            let live: Vec<String> = TABLE_PAIRS
+                .iter()
+                .map(|(fg, bg)| table_row(&colours, fg, bg))
+                .collect();
+            let trimmed: Vec<String> = live.iter().map(|row| row.trim().to_string()).collect();
+            assert_eq!(
+                documented_table(constant),
+                trimmed,
+                "the table on {constant} is stale; it should read:\n{}",
+                live.iter()
+                    .map(|row| format!("///  {row}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+
     #[test]
     fn every_status_and_accent_text_clears_4_5_on_every_ground() {
         let text = on_every_ground(&[
@@ -1821,9 +1899,9 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            // 48, the edge rail's handle, and the Settings window's
-            // ground, card and hairline.
-            assert_eq!(glass, 52, "{name}");
+            // 48, the edge rail's handle, the Settings window's ground,
+            // card and hairline, and the switch's two tracks and knobs.
+            assert_eq!(glass, 56, "{name}");
             let omarchy::Rgb(r, g, b) = palette.ink;
             assert!(
                 css.contains(&format!(
@@ -1966,6 +2044,17 @@ mod tests {
             failures.extend(check_css(&name, &css, &labels, 4.5));
             failures.extend(check_css(&name, &css, &glass_text, 4.5));
             failures.extend(check_css(&name, &css, &glass_label, 4.5));
+            // The skin's switches: its accent pair on, its secondary ink
+            // under a surface knob off; each 3:1 both ways.
+            let switches = [
+                ("tc_glass_toggle_knob_on", "tc_glass_toggle_on"),
+                ("tc_glass_toggle_on", "tc_bg"),
+                ("tc_glass_toggle_on", "tc_surface"),
+                ("tc_glass_toggle_knob_off", "tc_glass_toggle_off"),
+                ("tc_glass_toggle_off", "tc_bg"),
+                ("tc_glass_toggle_off", "tc_surface"),
+            ];
+            failures.extend(check_css(&name, &css, &switches, 3.0));
             assert_eq!(failures, Vec::<String>::new());
         }
     }
@@ -2046,7 +2135,9 @@ mod tests {
         }
         let light = super::Inks::standard(false);
         assert_eq!(light.held_icon, "#315FBA");
-        assert_eq!(light.muted, "#5C635B");
+        // The secondary ink is the Mac's flat textSecondary, opaque over
+        // the pane, as `tc_muted` is; never the old olive #5C635B.
+        assert_eq!(light.muted, brand_tokens::glass::ink::SECONDARY_LIGHT);
         assert_eq!(light.outside_text, brand_tokens::light::STATUS_OUTSIDE_TEXT);
         assert_eq!(light.status_on, brand_tokens::light::STATUS_ON);
         assert_eq!(light.status_ask, brand_tokens::light::STATUS_ASK);
@@ -2061,7 +2152,15 @@ mod tests {
         );
         let dark = super::Inks::standard(true);
         assert_eq!(dark.held_icon, "#9DB6F1");
-        assert_eq!(dark.muted, "#A6AC9F");
+        assert_eq!(dark.muted, brand_tokens::glass::ink::SECONDARY_DARK);
+        // The drawn secondary ink is the sheet's `tc_muted`.
+        for (is_dark, inks) in [(false, &light), (true, &dark)] {
+            assert_eq!(
+                inks.muted.to_ascii_uppercase(),
+                palette(is_dark)["tc_muted"],
+                "dark={is_dark}"
+            );
+        }
         assert_eq!(
             (dark.redaction_bg.as_str(), dark.redaction_fg.as_str()),
             ("#4A3C18", "#F0EBDD")

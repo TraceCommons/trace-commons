@@ -117,6 +117,28 @@ public class MonitorShellTests
         Assert.Equal(NoticePlace.History, MonitorNavigation.Place(history));
     }
 
+    /// <summary>
+    /// The commons catalogue is Home's own page, apart from the drafts
+    /// (HomeViews.swift:87-98), under the core's catalogue word
+    /// (MonitorWindowView.swift:763-765), and hidden with the drafts while
+    /// missions are off (MonitorNavigation.swift:12-20).
+    /// </summary>
+    [Fact]
+    public void TheCatalogueIsHomesOwnPageWithItsOwnCrumb()
+    {
+        MonitorLocation catalogue = MonitorLocation.Default with { Tab = MonitorTab.Home, HomePage = HomePage.Missions };
+        IReadOnlyList<Crumb>? crumbs = MonitorNavigation.Breadcrumb(catalogue, missions: true);
+        Assert.Equal(
+            new[] { new Crumb(CrumbWord.Tab, MonitorTab.Home, true), new Crumb(CrumbWord.MissionCatalogue, MonitorTab.Home, false) },
+            crumbs);
+        Assert.Null(MonitorNavigation.Breadcrumb(catalogue, missions: false));
+        Assert.Equal(HomePage.Overview, HomePage.Missions.Shown(false));
+        Assert.Equal(HomePage.Missions, HomePage.Missions.Shown(true));
+        Assert.Equal(HomePage.Overview, MonitorNavigation.Back(catalogue, crumbs![0]).HomePage);
+        Assert.Equal(NoticePlace.Home, MonitorNavigation.Place(catalogue));
+        Assert.False(MonitorNavigation.InspectorAvailable(MonitorTab.Home, HomePage.Missions));
+    }
+
     [Fact]
     public void MissionDraftsIsHomesPageBehindTheBreadcrumb()
     {

@@ -51,13 +51,16 @@ public sealed class SpendOrganizationShellWiringTests
     public void TheSettingsPickerSitsInPrivateAIBeforeTheTerminalPicker()
     {
         string settings = Code("TraceCommons.App/Controls/SettingsView.SpendOrganization.cs");
-        Assert.Matches(
-            new Regex(@"section\.Children\.Insert\(section\.Children\.IndexOf\(ManagedTerminalHost\), _spendOrganizationCard\)"),
-            settings);
+        Assert.Contains("SpendOrganizationHost.Content = _spendOrganizationCard;", settings, StringComparison.Ordinal);
+        string xaml = ShellSource("TraceCommons.App/Controls/SettingsView.xaml");
+        int host = xaml.IndexOf("x:Name=\"SpendOrganizationHost\"", StringComparison.Ordinal);
+        int terminal = xaml.IndexOf("x:Name=\"ManagedTerminalHost\"", StringComparison.Ordinal);
+        int privateAi = xaml.IndexOf("Settings.PrivateInferenceMoved", StringComparison.Ordinal);
+        Assert.True(privateAi > 0 && host > privateAi && terminal > host, $"{privateAi} < {host} < {terminal}");
         string card = Code("TraceCommons.App/Controls/Settings/SpendOrganizationCard.cs");
         // The picker's echo of the selection the card set is not a pick.
         Assert.Matches(new Regex(@"if \(_filling\) return;\s*await _model\.PickAsync\(_picker\.SelectedIndex\);"), card);
-        Assert.Contains("_picker.IsEnabled = _model.CanPick;", card, StringComparison.Ordinal);
+        Assert.Contains("Hold(!_model.CanPick);", card, StringComparison.Ordinal);
     }
 
     // One credential flag: the tab's sign-in sets the one the picker waits

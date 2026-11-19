@@ -1374,8 +1374,18 @@ mod tests {
             brand_tokens::light::ACCENT_TEXT
         );
         assert_eq!(Glyph::Held.ink(&light), "#315FBA");
-        assert_eq!(Glyph::Waiting.ink(&light), "#5C635B");
+        // Waiting is the secondary ink: the Mac's flat textSecondary,
+        // opaque over the pane (#3C3C43 in Light), never the old olive.
+        assert_eq!(
+            Glyph::Waiting.ink(&light),
+            brand_tokens::glass::ink::SECONDARY_LIGHT
+        );
+        assert_eq!(brand_tokens::glass::ink::SECONDARY_LIGHT, "#3C3C43");
         let dark = Inks::standard(true);
+        assert_eq!(
+            Glyph::Waiting.ink(&dark),
+            brand_tokens::glass::ink::SECONDARY_DARK
+        );
         assert_eq!(Glyph::Held.ink(&dark), "#9DB6F1");
         assert_eq!(
             Glyph::Withdrawn.ink(&dark),
@@ -1387,6 +1397,134 @@ mod tests {
         assert_eq!(Glyph::Held.ink(&skin), p.held_text.hex());
         assert_eq!(Glyph::Waiting.ink(&skin), p.muted.hex());
         assert_eq!(Glyph::Withdrawn.ink(&skin), p.status_outside_text.hex());
+    }
+
+    /// The Waiting glyph draws in the Mac's flat secondary ink
+    /// (`textSecondary`: #3C3C43 in Light, #F2F3F8 at 88% in Dark, read
+    /// from the Swift) over the ground it sits on, at 4.5:1 or more. On
+    /// the branch before this fix it drew the olive #5C635B and #A6AC9F.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_waiting_glyph_is_the_macs_secondary_ink() {
+        use gtk::prelude::*;
+        const MAC_TOKENS: &str =
+            include_str!("../../../../macos/Sources/TCDesign/Generated/GlassTokens.swift");
+        let line = MAC_TOKENS
+            .lines()
+            .find(|line| line.contains("static var textSecondary: GlassRGBA {"))
+            .expect("the Swift has textSecondary");
+        let flat = &line[line.find("flat: GlassRGBA(").expect("a flat value") + 16..];
+        let parse = |text: &str| -> ([f64; 3], f64) {
+            let byte = |i: usize| f64::from(u8::from_str_radix(&text[2 + i..4 + i], 16).unwrap());
+            let alpha = &text[text.find("alpha: ").unwrap() + 7..];
+            let alpha: String = alpha
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            ([byte(0), byte(2), byte(4)], alpha.parse().unwrap())
+        };
+        let mac = |dark: bool| match (dark, flat.find("light: GlassRGBA(")) {
+            (false, Some(at)) => parse(&flat[at + 17..]),
+            _ => parse(flat),
+        };
+        let contrast = |a: [u8; 3], b: [u8; 3]| {
+            let lum = |c: [u8; 3]| {
+                let ch = |v: u8| {
+                    let v = f64::from(v) / 255.0;
+                    if v <= 0.04045 {
+                        v / 12.92
+                    } else {
+                        ((v + 0.055) / 1.055).powf(2.4)
+                    }
+                };
+                0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2])
+            };
+            let (x, y) = (lum(a), lum(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+
+        adw::init().expect("GTK display");
+        crate::ui::style::install();
+        let manager = adw::StyleManager::default();
+        // Large, so the dashes' strokes have pixels they cover wholly.
+        let glyph = super::icon(super::Glyph::Waiting, 64);
+        let window = gtk::Window::builder()
+            .default_width(160)
+            .default_height(120)
+            .child(&glyph)
+            .build();
+        window.present();
+        for dark in [false, true] {
+            manager.set_color_scheme(if dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+            let context = gtk::glib::MainContext::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < end {
+                if !context.iteration(false) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+            let (width, height) = (window.width(), window.height());
+            let paintable = gtk::WidgetPaintable::new(Some(&window));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+            let node = snapshot.to_node().expect("the window drew");
+            let renderer = gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface"))
+                .expect("a renderer");
+            let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+            let texture = renderer.render_texture(&node, Some(&viewport));
+            renderer.unrealize();
+            let stride = texture.width() as usize * 4;
+            let mut pixels = vec![0u8; stride * texture.height() as usize];
+            texture.download(&mut pixels, stride);
+            let at = |x: i32, y: i32| {
+                let i = y as usize * stride + x as usize * 4;
+                [pixels[i + 2], pixels[i + 1], pixels[i]]
+            };
+            // The ground is the glyph box's commonest pixel: the dashes
+            // cover a small share of it. A window corner is no ground: the
+            // window's rounded corner leaves it transparent, read as black.
+            let bounds = glyph.compute_bounds(&window).expect("laid out");
+            let mut counts = std::collections::HashMap::new();
+            for y in bounds.y() as i32..(bounds.y() + bounds.height()) as i32 {
+                for x in bounds.x() as i32..(bounds.x() + bounds.width()) as i32 {
+                    *counts.entry(at(x, y)).or_insert(0usize) += 1;
+                }
+            }
+            let ground = counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(pixel, _)| pixel)
+                .expect("the glyph has pixels");
+            let mut strongest = ground;
+            for y in bounds.y() as i32..(bounds.y() + bounds.height()) as i32 {
+                for x in bounds.x() as i32..(bounds.x() + bounds.width()) as i32 {
+                    let pixel = at(x, y);
+                    if contrast(pixel, ground) > contrast(strongest, ground) {
+                        strongest = pixel;
+                    }
+                }
+            }
+            let (ink, alpha) = mac(dark);
+            let want: Vec<u8> = (0..3)
+                .map(|i| (ink[i] * alpha + f64::from(ground[i]) * (1.0 - alpha)).round() as u8)
+                .collect();
+            let off = (0..3)
+                .map(|i| strongest[i].abs_diff(want[i]))
+                .max()
+                .unwrap();
+            assert!(
+                off <= 3,
+                "dark={dark}: Waiting draws {strongest:?} on {ground:?}, not the Mac's {want:?}"
+            );
+            let ratio = contrast(strongest, ground);
+            assert!(ratio >= 4.5, "dark={dark}: Waiting draws {ratio:.2}:1");
+        }
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        window.destroy();
     }
 
     fn folder_record(id: &str, project: &str, label: &str) -> HistoryRecord {

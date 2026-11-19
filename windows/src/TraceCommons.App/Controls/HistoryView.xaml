@@ -286,6 +286,8 @@
                                     Padding="16,14"
                                     Margin="0,0,0,12"
                                     Tag="{x:Bind}"
+                                    AutomationProperties.AutomationId="HistoryFolderRow"
+                                    AutomationProperties.Name="{x:Bind ProjectLabel}"
                                     Click="OnOpenHistoryFolder">
                                 <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
                                     <StackPanel Grid.Column="0" Spacing="2">
@@ -347,6 +349,22 @@
                               Visibility="{x:Bind ViewModel.IsInHistoryFolder, Mode=OneWay}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:HistoryRecordViewModel">
+                            <!--
+                                W21: a row opens its detail in the inspector, as
+                                the Mac's History row does (HistoryInspector.swift).
+                                A ContentControl, so the row is a tab stop named by
+                                its visible title; Enter or Space opens it too. The
+                                Withdraw button inside handles its own press, so a
+                                press on it never opens the row.
+                            -->
+                            <ContentControl IsTabStop="True"
+                                            AutomationProperties.AutomationId="HistoryRecordRow"
+                                            UseSystemFocusVisuals="True"
+                                            HorizontalContentAlignment="Stretch"
+                                            Tag="{x:Bind}"
+                                            AutomationProperties.Name="{x:Bind ProjectLabel}"
+                                            Tapped="OnRecordTapped"
+                                            KeyDown="OnRecordKeyDown">
                             <Border Margin="0,0,0,12"
                                     Padding="16,14"
                                     Background="{ThemeResource TcSurfaceCardBrush}"
@@ -491,6 +509,7 @@
                                                TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
+                            </ContentControl>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

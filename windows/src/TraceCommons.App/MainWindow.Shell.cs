@@ -130,6 +130,7 @@ public sealed partial class MainWindow
         TracesHistoryButton.Content = MonitorWords.CrumbTitle(new Crumb(CrumbWord.History, MonitorTab.Traces, false));
         HomeOpenTraces.Content = MonitorShellCopy.Top("open_traces");
         HomeOpenMissionDrafts.Content = MonitorWords.CrumbTitle(new Crumb(CrumbWord.Missions, MonitorTab.Home, false));
+        ApplyMissionCatalogueEntry();
 
         BuildTabs();
         ApplyTabDescriptions();
@@ -273,6 +274,11 @@ public sealed partial class MainWindow
             return _at with { Tab = MonitorTab.Home, HomePage = HomePage.MissionDrafts };
         }
 
+        if (ViewModel.ShowingMissions)
+        {
+            return _at with { Tab = MonitorTab.Home, HomePage = HomePage.Missions };
+        }
+
         if (ViewModel.ShowingHome)
         {
             return _at with { Tab = MonitorTab.Home, HomePage = HomePage.Overview };
@@ -381,9 +387,11 @@ public sealed partial class MainWindow
             case nameof(MainViewModel.ShowingPrivateInference):
             case nameof(MainViewModel.ShowingInsights):
             case nameof(MainViewModel.ShowingMissionDrafts):
+            case nameof(MainViewModel.ShowingMissions):
             case nameof(MainViewModel.ShowingHome):
             case nameof(MainViewModel.MissionsShown):
                 RefreshLocation();
+                ApplyMissionCatalogueEntry();
                 break;
             case nameof(MainViewModel.Demand):
             case nameof(MainViewModel.HasPrivateInferenceOffer):
@@ -1112,6 +1120,12 @@ public sealed partial class MainWindow
         // (box, 2026-11-19: every launch died here in RefreshNotices).
         ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
+        // A card that never arrived has no Translation property, and stopping
+        // an animation on a property that does not exist throws ("The
+        // specified property was not found", the app's first notice at
+        // launch). Give it the property first, at rest.
+        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
+        visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
         visual.Opacity = 1;

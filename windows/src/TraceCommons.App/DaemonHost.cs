@@ -381,6 +381,49 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// The turn index over the body an open preview showed
+    /// (<c>tc_preview_turns_json</c>), off the UI thread: the JSON, or null
+    /// when it could not be made (no daemon, a sample launch, or a refusal
+    /// such as <c>preview-body-changed</c>). The sheet says the core's
+    /// request-failed line for null, as the Mac does (PreviewSheet.swift:506-508).
+    /// </summary>
+    public async Task<string?> PreviewTurnsAsync(string entryId, string bodyDigest)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(bodyDigest);
+
+        if (_daemon is not TcDaemon daemon)
+        {
+            return null;
+        }
+
+        (string? json, _) = await Task.Run(() => daemon.PreviewTurns(entryId, bodyDigest)).ConfigureAwait(true);
+        return json;
+    }
+
+    /// <summary>
+    /// How the Missions page's catalogue read ends, and the catalogue when it
+    /// came back. The Mac's live client has no source for the page's shape
+    /// and answers <c>notAvailableYet</c> without asking the daemon
+    /// (LiveDaemonClient.swift:439-440), which counts as not served
+    /// (DaemonDataModels.swift:153-158), so a live launch draws a dash named
+    /// with the core's word for unknown (HomeStore.swift:215-217,
+    /// MissionsViews.swift:58-64), never a failure line. A sample launch gets
+    /// the Mac's hand-written provisional catalogue, or unreachable in
+    /// <c>coreDown</c> (SampleDaemonClient.swift:576-581).
+    /// </summary>
+    public (MissionRead Read, string? Json) MissionCatalogue()
+    {
+#if DEBUG
+        if (_sample is SampleDaemon sample)
+        {
+            return MissionSamples.Read(sample.Set);
+        }
+#endif
+        return (MissionRead.NotServed, null);
+    }
+
+    /// <summary>
     /// The subscription callback. Runs on a RUST BACKGROUND THREAD, so it does
     /// the minimum possible work and hops to the UI thread for everything
     /// else. Nothing here may touch observable state directly.

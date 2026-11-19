@@ -620,6 +620,40 @@ public sealed class NativeRoundTripTests : IDisposable
     }
 
     /// <summary>
+    /// W22: the core's turn index over the body the preview showed, anchored
+    /// to <c>sha256:</c> of that body's UTF-8 bytes as this shell computes it
+    /// (<see cref="PreviewTurns.DigestOf"/>). A digest for any other body is
+    /// refused rather than indexed (trace_commons.h, tc_preview_turns_json).
+    /// </summary>
+    [Fact]
+    public void TheTurnIndexIsReadForTheExactBodyOnScreen()
+    {
+        string entryId = SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+        string body;
+        using (TcPreview preview = daemon.OpenPreview(entryId))
+        {
+            body = preview.Body;
+        }
+
+        string digest = PreviewTurns.DigestOf(body);
+        (string? json, string? error) = daemon.PreviewTurns(entryId, digest);
+        Assert.Null(error);
+        PreviewTurns turns = PreviewTurns.Parse(json)!;
+        Assert.NotNull(turns);
+        Assert.True(turns.Indexes(digest));
+        Assert.Equal(entryId, turns.EntryId);
+        Assert.Equal(turns.TurnCount, turns.Turns.Count);
+        Assert.NotEmpty(turns.Turns);
+        int bodyBytes = System.Text.Encoding.UTF8.GetByteCount(body);
+        Assert.All(turns.Turns, turn => Assert.InRange(turn.ByteOffset + turn.ByteLen, 1, bodyBytes));
+
+        (string? refused, string? label) = daemon.PreviewTurns(entryId, PreviewTurns.DigestOf(body + " "));
+        Assert.Null(refused);
+        Assert.Equal("preview-body-changed", label);
+    }
+
+    /// <summary>
     /// Absent is 0, never the error sentinel. A needle nowhere in the session
     /// has to come back as a count, because -1 would render as "could not
     /// check" and lose the one honest reassurance this tab can give.
