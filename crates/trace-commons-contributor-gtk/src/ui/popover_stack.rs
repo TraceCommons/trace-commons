@@ -382,6 +382,9 @@ impl Slide {
         beneath: Option<(gtk::gsk::RenderNode, f64)>,
     ) {
         let imp = self.imp();
+        // A movement still running ends first: its last frame clears the
+        // card it was fading, and must not clear this one's.
+        imp.driver.finish();
         imp.from_foot.set(from_foot);
         imp.covered_opacity
             .set(if beneath.is_some() { 1.0 } else { 0.0 });
