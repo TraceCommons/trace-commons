@@ -589,10 +589,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get
         {
-            if (!Equals(_armingCopyFor, Arming.Offer))
+            if (!Equals(_armingCopyFor, Arming.DrawnOffer))
             {
-                _armingCopyFor = Arming.Offer;
-                _armingCopy = Arming.Offer is { } offer ? ProjectArmingCopy.For(offer) : null;
+                _armingCopyFor = Arming.DrawnOffer;
+                _armingCopy = Arming.DrawnOffer is { } offer ? ProjectArmingCopy.For(offer) : null;
             }
 
             return _armingCopy;
@@ -615,9 +615,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string ArmingOfferDecline => ArmingCopy?.Decline ?? string.Empty;
 
     /// <summary>Enable is pressed once (ArmingOfferMotion.swift:31-34).</summary>
-    public bool ArmingOfferEnableEnabled => !Arming.EnableLocked;
+    public bool ArmingOfferEnableEnabled => !Arming.EnableLocked && !Arming.Leaving;
 
-    public bool ArmingOfferDeclineEnabled => !Arming.DeclineLocked;
+    public bool ArmingOfferDeclineEnabled => !Arming.DeclineLocked && !Arming.Leaving;
 
     /// <summary>The core's line after a refused Enable; empty otherwise.</summary>
     public string ArmingOfferRefusal => Arming.Refusal;

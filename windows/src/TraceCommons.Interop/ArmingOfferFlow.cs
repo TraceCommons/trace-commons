@@ -156,6 +156,16 @@ public sealed class ArmingOfferFlow
     /// </summary>
     public bool LeftArmed { get; private set; }
 
+    /// <summary>
+    /// The offer whose words the card draws: the one on screen, or, while an
+    /// armed card leaves, the one it last showed. A SwiftUI removal draws the
+    /// view's last state, so the card fades with its words, not empty.
+    /// </summary>
+    public ArmingOffer? DrawnOffer => Offer ?? (Leaving ? _leftOffer : null);
+
+    /// <summary>An armed card has gone and nothing has replaced it: its buttons stay locked while it fades.</summary>
+    public bool Leaving => Offer is null && LeftArmed && _leftOffer is not null;
+
     /// <summary>Not now is locked while its own call is out, and while Enable's is.</summary>
     public bool DeclineLocked => _declining || Step is not null;
 
@@ -253,6 +263,7 @@ public sealed class ArmingOfferFlow
             if (IsCurrent(press) && Step == ArmingOfferStep.Armed)
             {
                 LeftArmed = true;
+                _leftOffer = Offer;
                 Offer = null;
                 Step = null;
                 Changed?.Invoke();
@@ -339,6 +350,8 @@ public sealed class ArmingOfferFlow
             return new DaemonError { Code = "transport", Message = "transport-failed" };
         }
     }
+
+    private ArmingOffer? _leftOffer;
 
     private sealed record Press(ArmingOffer Offer, DateTimeOffset At, long Generation);
 }

@@ -152,6 +152,45 @@ public class ArmingOfferFlowTests
         Assert.Null(rig.Flow.Offer);
     }
 
+    // A SwiftUI removal draws the view's last state: the armed card fades
+    // with its words and its locked buttons, not as an empty frame (box
+    // frames, 2026-11-19). A new offer, or an account boundary, ends that.
+    [Fact]
+    public async Task TheArmedCardLeavesDrawingWhatItLastShowed()
+    {
+        var rig = new Rig();
+        rig.Flow.OnRefreshed(Api);
+        Task pressed = rig.Flow.AcceptAsync();
+        rig.Answer(Armed);
+        rig.Hold.SetResult();
+        await pressed;
+
+        Assert.Null(rig.Flow.Offer);
+        Assert.Equal(Api, rig.Flow.DrawnOffer);
+        Assert.True(rig.Flow.Leaving);
+
+        rig.Flow.OnRefreshed(Web);
+        Assert.Equal(Web, rig.Flow.DrawnOffer);
+        Assert.False(rig.Flow.Leaving);
+
+        rig.Flow.AccountBoundary();
+        Assert.Null(rig.Flow.DrawnOffer);
+        Assert.False(rig.Flow.Leaving);
+    }
+
+    [Fact]
+    public async Task ADeclinedCardDrawsNothingOnceItHasGone()
+    {
+        var rig = new Rig();
+        rig.Flow.OnRefreshed(Api);
+        Task declined = rig.Flow.DeclineAsync();
+        rig.Answer(Declined);
+        await declined;
+
+        Assert.Null(rig.Flow.DrawnOffer);
+        Assert.False(rig.Flow.Leaving);
+    }
+
     [Fact]
     public async Task AFailedReReadNeverStrandsTheCheckedCard()
     {
