@@ -63,6 +63,20 @@ public class TransferCardTests
     }
 
     [Fact]
+    public void ATwoTraceBatchCountsItsTracesInTheEyebrow()
+    {
+        // TraceTransferCard.swift:45: `transfer.count > 1` reads the count,
+        // so the smallest batch, two traces from one tool in one folder,
+        // already says how many (review X4 of #2215).
+        var two = One("codex", TransferAction.Contribute) with { Count = 2 };
+        TransferCardFace face = TransferCardFace.For(two, Words, null, null, System.Globalization.CultureInfo.GetCultureInfo("en-US"));
+        Assert.Equal(Words.TransferTraces(2).ToUpper(System.Globalization.CultureInfo.GetCultureInfo("en-US")), face.Eyebrow);
+        Assert.NotEqual(Words.TransferTrace.ToUpperInvariant(), face.Eyebrow);
+        // One tool: the tool is still the title.
+        Assert.Equal("Codex", face.Title);
+    }
+
+    [Fact]
     public void OneToolsTraceNamesItsToolFolderTimeAndMemory()
     {
         var at = new DateTimeOffset(2026, 11, 19, 15, 4, 0, TimeSpan.Zero);
