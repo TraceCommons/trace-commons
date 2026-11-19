@@ -2818,7 +2818,7 @@ mod tests {
         card(Notice::Undo).set_visible(true);
         pump_until(|| slide(shell, Notice::Undo).offset() == 0.0 && undo.covered_opacity() == 0.0);
         card(Notice::Undo).set_visible(false);
-        pump();
+        // The stack follows at once; the fade then runs on the clock.
         assert!(
             health.covered_opacity() > 0.0,
             "the closed card went at once"
