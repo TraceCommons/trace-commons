@@ -4844,7 +4844,34 @@ extension AppModel: FirstRunDaemon {
         return false
     }
 
+    /// Read the enrollment's sign-in route and session from the same daemon.
+    func firstRunAccountSession() async -> NativeAccountSession? {
+        guard let client else { return nil }
+        let enrollment = completionAccountScope
+        for _ in 0..<2 {
+            guard self.client === client,
+                  enrollment == nil || completionAccountScope == enrollment else { return nil }
+            let generation = accountReadGeneration
+            let scope = status.accountScope
+            let result = await firstRunCall { try $0.accountSessionStatus() }
+            guard accountReadIsCurrent(client, scope: scope, generation: generation) else { continue }
+            guard case .success(let session) = result else { return nil }
+            return session
+        }
+        return nil
+    }
+
     func signInNearAI() async -> Bool {
+        guard let account = await firstRunAccountSession() else { return false }
+        if account.signsInWithNearAI {
+            if account.signedIn == true { return true }
+            let enrollment = completionAccountScope
+            await signInAgain()
+            guard accountSignInFailure == nil,
+                  let renewed = await firstRunAccountSession(),
+                  completionAccountScope == enrollment else { return false }
+            return renewed.signsInWithNearAI && renewed.signedIn == true
+        }
         guard case .success(let session) = await firstRunCall({ try $0.accountSignIn() }) else { return false }
         return session.signedIn == true
     }
@@ -5084,12 +5111,39 @@ extension AppModel: FirstRunDaemon {
         }
     }
 
+    var completionAccountScope: String? { status.setupScope ?? status.tenantID }
+
+    func prepareCompletionAccount() async -> Bool {
+        guard let client else { return false }
+        let scope = completionAccountScope
+        var read = await readStatusForCurrentAccount()
+        if read == .stale, self.client === client, scope == nil || scope == completionAccountScope {
+            read = await readStatusForCurrentAccount()
+        }
+        return read == .published && self.client === client && status.loggedIn
+            && completionAccountScope != nil && (scope == nil || scope == completionAccountScope)
+    }
+
     /// Reads status first: right after enrolling, the tenant the marker is
     /// keyed by may not have reached `status` yet. Without a tenant nothing
     /// is marked, and that is reported rather than passed off as done.
     func markComplete() async -> Bool {
-        guard await readStatusForCurrentAccount() != .stale else { return false }
-        guard status.tenantID != nil else { return false }
+        guard let client else { return false }
+        let originalTenant = status.tenantID
+        if status.setupScope == nil {
+            // Older daemons report the tenant but lack a daemon-owned
+            // completion scope. Require a current status for their marker.
+            guard await readStatusForCurrentAccount() == .published else { return false }
+        }
+        guard self.client === client, status.loggedIn, let tenant = status.tenantID, !tenant.isEmpty,
+              originalTenant == nil || originalTenant == tenant else { return false }
+        if let scope = status.setupScope {
+            guard case .success(true) = await firstRunCall({ try $0.completeSetup(expectedScope: scope) }),
+                  self.client === client, status.setupScope == scope else { return false }
+            finishedFirstRunThisLaunch = true
+            refreshStatus()
+            return true
+        }
         markOnboardingComplete()
         return isOnboardingComplete
     }

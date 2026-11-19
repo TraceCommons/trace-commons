@@ -137,6 +137,13 @@ private struct FirstRunSteps: View {
             if completed { onComplete() }
         }
         .onChange(of: model.status.loggedIn, initial: true) { _, _ in recordEnrolment() }
+        .task(id: model.status.loggedIn ? [model.status.tenantID, model.status.accountScope] : []) {
+            recordEnrolment()
+            guard model.status.loggedIn, !runner.isCommitting, runner.state.enrolledInvite == "",
+                  let session = await model.firstRunAccountSession(),
+                  !Task.isCancelled, !runner.isCommitting else { return }
+            runner.restoreConnectedNearAI(session)
+        }
         // Not `onOpenURL`: a link can arrive before any window exists,
         // so `AppDelegate` parks it and the first run collects it when
         // it next appears, or at once while it is up.

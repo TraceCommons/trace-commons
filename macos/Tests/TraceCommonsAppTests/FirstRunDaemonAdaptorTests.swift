@@ -29,6 +29,26 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         return model
     }
 
+    func test_signInReusesTheConnectedNearAIAccount() async {
+        let enrolled = model([
+            "hello": #"{"result":{"methods":["account_session_status","account_sign_in"]}}"#,
+            "account_session_status": #"{"result":{"signed_in":true,"sign_in":"near_ai"}}"#,
+            "account_sign_in": #"{"error":{"code":"unavailable","message":"account-sign-in-refused"}}"#,
+        ])
+        let signedIn = await enrolled.signInNearAI()
+        XCTAssertTrue(signedIn)
+    }
+
+    func test_enrolledSetupFinishesThroughTheDaemon() async {
+        let enrolled = model([
+            "status": #"{"result":{"logged_in":true,"tenant_id":"test-daemon-setup","setup_scope":"scope"}}"#,
+            "complete_setup": #"{"result":{"complete":true}}"#,
+        ])
+        let done = await enrolled.markComplete()
+        XCTAssertTrue(done)
+        XCTAssertTrue(enrolled.finishedFirstRunThisLaunch)
+    }
+
     func test_completeWithNoTenantIsNotReportedAsDone() async {
         let noClient = AppModel()
         let done = await noClient.markComplete()

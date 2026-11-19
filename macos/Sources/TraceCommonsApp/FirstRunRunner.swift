@@ -58,6 +58,9 @@ protocol FirstRunDaemon: AnyObject {
     func includePastSessions(projectID: String, sessionIDs: [String]) async -> Bool
     func setPrivateAI(_ on: Bool) async -> Bool
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer
+    /// The account whose setup choices a completion retry would use.
+    var completionAccountScope: String? { get }
+    func prepareCompletionAccount() async -> Bool
     /// True only once the completion marker is actually written. The marker
     /// is keyed by tenant, so with no tenant known this answers false.
     func markComplete() async -> Bool
@@ -81,6 +84,8 @@ protocol FirstRunDaemon: AnyObject {
 }
 
 extension FirstRunDaemon {
+    var completionAccountScope: String? { nil }
+    func prepareCompletionAccount() async -> Bool { true }
     /// A daemon that cannot say: Traces shows the core's line.
     func firstRunCopy(traceCount: UInt64, totalBytes: UInt64) async -> DaemonData.FirstRunCopyLines? { nil }
     /// A daemon that cannot take the terms: the hold flow asks again.
@@ -162,6 +167,13 @@ final class FirstRunRunner: ObservableObject {
     /// Start ran `markComplete`: the first run is finished.
     @Published private(set) var completed = false
 
+    private var verifiedCompletionScope: String?
+    private var pendingCompletion: (state: FirstRunState, scope: String?, call: FirstRunCall)?
+    var canRetryCompletion: Bool {
+        guard let pendingCompletion else { return false }
+        return pendingCompletion.state == state && pendingCompletion.scope == daemon.completionAccountScope
+    }
+
     /// The daemon refused the grant during the last commit. `failure` says
     /// so too, unless `completeFailed` outranked it; this keeps the refusal
     /// for the retry that finishes on Ask.
@@ -182,6 +194,13 @@ final class FirstRunRunner: ObservableObject {
         self.state = state
         self.daemon = daemon
         self.finishedNotice = finishedNotice
+    }
+
+    func restoreConnectedNearAI(_ session: NativeAccountSession) {
+        let restored = OnboardingNavigation.recordConnectedNearAI(state, session: session)
+        guard restored != state else { return }
+        verifiedCompletionScope = daemon.completionAccountScope
+        state = restored
     }
 
     /// The Terms step is left only with this: the terms copy is present,
@@ -227,8 +246,28 @@ final class FirstRunRunner: ObservableObject {
             isCommitting = false
             committing = nil
         }
+        if point == .start, state.holdsEnrolment {
+            let ready = await daemon.prepareCompletionAccount()
+            let scope = daemon.completionAccountScope
+            if let verifiedCompletionScope, verifiedCompletionScope != scope {
+                stopAfterEnrollmentChanged()
+                return
+            }
+            if let pendingCompletion, pendingCompletion.scope != scope {
+                stopAfterEnrollmentChanged()
+                return
+            }
+            guard ready else {
+                failure = .completeFailed
+                return
+            }
+        }
+        let scope = daemon.completionAccountScope
+        let retry = point == .start && canRetryCompletion ? pendingCompletion?.call : nil
+        let earlierRefusal = retry == nil ? nil : refusedGrant
+        pendingCompletion = nil
         failure = nil
-        refusedGrant = nil
+        refusedGrant = earlierRefusal
         carriedRefusal = refusal
         defer { carriedRefusal = nil }
 
@@ -242,7 +281,11 @@ final class FirstRunRunner: ObservableObject {
         // run may begin with it running: hand the terms over at the first
         // commit after they were accepted (Join's sign-in or Start sharing).
         if state.daemonStarted { await handOverTerms() }
-        for call in FirstRunPlan.calls(for: state, at: point) {
+        for call in retry.map({ [$0] }) ?? FirstRunPlan.calls(for: state, at: point) {
+            if point == .start, daemon.completionAccountScope != scope {
+                stopAfterEnrollmentChanged()
+                return
+            }
             guard await run(call) else { return }
         }
         if point == .leaveTools {
@@ -315,6 +358,7 @@ final class FirstRunRunner: ObservableObject {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.signInFailed)
             }
+            verifiedCompletionScope = daemon.completionAccountScope
             state.signedIn = true
         case .nearAILogin:
             let daemon = self.daemon
@@ -349,6 +393,7 @@ final class FirstRunRunner: ObservableObject {
         case .enrollNearAI:
             switch await daemon.enrollNearAI(referralCode: Self.sentReferralCode(referralCode)) {
             case .enrolled:
+                verifiedCompletionScope = daemon.completionAccountScope
                 state.nearAIEnrolled = true
                 state.signedIn = true
                 state.signedOutOfEnrolment = false
@@ -377,11 +422,9 @@ final class FirstRunRunner: ObservableObject {
                 refusedGrant = failure
             }
         case .markComplete:
-            guard await daemon.markComplete() else { return fail(.completeFailed) }
-            finish()
+            return await complete(call, write: daemon.markComplete)
         case .markWatchOnlyComplete:
-            guard await daemon.markWatchOnlyComplete() else { return fail(.completeFailed) }
-            finish()
+            return await complete(call, write: daemon.markWatchOnlyComplete)
         }
         return true
     }
@@ -411,6 +454,30 @@ final class FirstRunRunner: ObservableObject {
         await cancelSignIn()
         while isCommitting { await Task.yield() }
         state = FirstRunNavigation.back(state)
+    }
+
+    private func stopAfterEnrollmentChanged() {
+        pendingCompletion = nil
+        verifiedCompletionScope = nil
+        state.account = .none
+        state.enrolledInvite = nil
+        state.nearAIEnrolled = false
+        state.signedIn = false
+        state.sharingChosen = false
+        state.grantReady = false
+        state.step = .uses
+        failure = .signInFailed
+    }
+
+    private func complete(_ call: FirstRunCall, write: () async -> Bool) async -> Bool {
+        let savedState = state
+        let scope = daemon.completionAccountScope
+        guard await write() else {
+            pendingCompletion = (savedState, scope, call)
+            return fail(.completeFailed)
+        }
+        finish()
+        return true
     }
 
     /// The marker is written. No suspension point separates this from the
