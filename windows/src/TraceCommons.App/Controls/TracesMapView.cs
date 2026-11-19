@@ -819,7 +819,7 @@ public sealed partial class TracesMapView : UserControl
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
             // The pile moves between the layers as it starts and stops.
             bool pileMoving = PileMoves(now);
-            if (fieldMoves || _fieldMoved || pileMoving == _pileInStill)
+            if (MapMotion.StillRedraws(fieldMoves, _fieldMoved, _scene.DrawsMap && _scene.Stack is not null, pileMoving, _pileInStill))
             {
                 _still.Invalidate();
             }
@@ -991,6 +991,7 @@ public sealed partial class TracesMapView : UserControl
         DrawField(ds, sender, size, Now, Motion && WindowClocks.Running);
         if (!_scene.DrawsMap)
         {
+            _pileInStill = false;
             return;
         }
 

@@ -157,6 +157,15 @@ public static class MapMotion
     public static bool ClockRuns(bool wanted, bool loaded, bool windowVisible) => wanted && loaded && windowVisible;
 
     /// <summary>
+    /// Whether the still layer (field, nodes, a resting pile) is drawn again
+    /// on this tick: while the field's shimmer or pointer light moves, the
+    /// frame after it stops, and when a pile crosses between the layers. A
+    /// scene with no pile (the Private AI view) never crosses.
+    /// </summary>
+    public static bool StillRedraws(bool fieldMoves, bool fieldMoved, bool hasPile, bool pileMoving, bool pileInStill) =>
+        fieldMoves || fieldMoved || (hasPile && pileMoving == pileInStill);
+
+    /// <summary>
     /// Whether the running clock must be started again to take a new
     /// interval. A DispatcherQueueTimer keeps the wait it was started with
     /// when its interval changes, so a clock waiting ~30 s for the next
