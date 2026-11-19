@@ -60,7 +60,7 @@ public sealed class SpendOrganizationShellWiringTests
         string card = Code("TraceCommons.App/Controls/Settings/SpendOrganizationCard.cs");
         // The picker's echo of the selection the card set is not a pick.
         Assert.Matches(new Regex(@"if \(_filling\) return;\s*await _model\.PickAsync\(_picker\.SelectedIndex\);"), card);
-        Assert.Contains("_picker.IsEnabled = _model.CanPick;", card, StringComparison.Ordinal);
+        Assert.Contains("Hold(!_model.CanPick);", card, StringComparison.Ordinal);
     }
 
     // One credential flag: the tab's sign-in sets the one the picker waits
