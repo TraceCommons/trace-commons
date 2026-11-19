@@ -962,7 +962,8 @@
 
                 <!-- Header, queue, recovery bar, decision notice, caveat, week
                      band, progress. -->
-                <Grid Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                <Grid x:Name="TracesContent"
+                      Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
                       RowDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto,Auto">
 
                     <!--

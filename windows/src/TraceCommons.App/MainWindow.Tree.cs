@@ -39,9 +39,9 @@ public sealed partial class MainWindow : ITracesTreeHost
         // tab's room as on the Mac (round 2, box: at 615 px they left it none).
         foreach (FrameworkElement section in new FrameworkElement[] { CertificateSection, ScrubCaveatLine, WeekBandSection })
         {
-            if (section.Parent is Panel parent)
+            if (!TracesContent.Children.Remove(section))
             {
-                parent.Children.Remove(section);
+                continue;
             }
 
             _tree.AddFooter(section);
