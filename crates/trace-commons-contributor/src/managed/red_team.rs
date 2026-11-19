@@ -15,6 +15,142 @@ pub const RED_TEAM_SESSIONS_DIR: &str = "red-team/sessions";
 /// (`mvmctl`, guest image helpers, plugin shim) are installed.
 pub const RED_TEAM_RUNTIME_DIR: &str = "red-team/runtime";
 
+/// The runtime prefix under our config directory (`<config>/red-team/runtime`).
+pub fn runtime_prefix(store: &ConfigStore) -> PathBuf {
+    store.dir().join(RED_TEAM_RUNTIME_DIR)
+}
+
+/// Check whether Red Team prerequisites are installed inside `<config>/red-team/runtime`.
+pub fn setup_state(store: &ConfigStore) -> super::tool_setup::ToolSetupState {
+    setup_state_with(store, run_setup_check)
+}
+
+pub(crate) fn setup_state_with<F>(
+    store: &ConfigStore,
+    check: F,
+) -> super::tool_setup::ToolSetupState
+where
+    F: FnOnce(&Path, &Path) -> bool,
+{
+    let prefix = runtime_prefix(store);
+    let sessions_dir = store.dir().join(RED_TEAM_SESSIONS_DIR);
+    if check(&prefix, &sessions_dir) {
+        super::tool_setup::ToolSetupState::Ready
+    } else {
+        super::tool_setup::ToolSetupState::NeedsSetup
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> bool {
+    let Ok(fetch) = rts::setup::HttpsFetch::new() else {
+        return false;
+    };
+    let defaults = rts::config::Defaults::for_prefix(prefix, sessions_dir);
+    let supervisor = rts::install::prefix_supervisor(prefix);
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("near-ai"));
+    let host = rts::session::RealHost;
+    let Ok((_tmp, empty_git)) = rts::launch::private_git_config("rts-check-") else {
+        return false;
+    };
+    let mvm_plain = rts::mvm::SpawnRunner {
+        mvmctl: defaults.mvmctl.clone(),
+        empty_git_config: empty_git.clone(),
+        extra_env: std::collections::HashMap::new(),
+        remove_env: Vec::new(),
+    };
+    let mvm = rts::mvm::SpawnRunner {
+        mvmctl: defaults.mvmctl.clone(),
+        empty_git_config: empty_git,
+        extra_env: std::collections::HashMap::new(),
+        remove_env: Vec::new(),
+    };
+    let ctx = rts::setup::SetupContext {
+        home: prefix,
+        defaults: &defaults,
+        explicit_mvmctl: false,
+        supervisor: &supervisor,
+        rts: &exe,
+        fetch: &fetch,
+        host: &host,
+        mvm_plain: &mvm_plain,
+        mvm: &mvm,
+    };
+    let opts = rts::setup::SetupOptions {
+        check: true,
+        offline: true,
+    };
+    let release = super::red_team_release::RTS_RELEASE.to_archive();
+    rts::setup::run_in_prefix(&opts, &ctx, prefix, &release).is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_setup_check(_prefix: &Path, _sessions_dir: &Path) -> bool {
+    false
+}
+
+/// Install Red Team prerequisites from the pinned signed release archive into
+/// `<config>/red-team/runtime`.
+#[cfg(target_os = "macos")]
+pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
+    let prefix = runtime_prefix(store);
+    if let Some(parent) = prefix.parent() {
+        super::profiles::private_directory(parent)?;
+    }
+    super::profiles::private_directory(&prefix)?;
+    let sessions_dir = store.dir().join(RED_TEAM_SESSIONS_DIR);
+    let defaults = rts::config::Defaults::for_prefix(&prefix, &sessions_dir);
+    let supervisor = rts::install::prefix_supervisor(&prefix);
+    let exe = std::env::current_exe().map_err(|_| ManagedError::ToolUnavailable)?;
+    let fetch = rts::setup::HttpsFetch::new().map_err(|_| ManagedError::ToolUnavailable)?;
+    let host = rts::session::RealHost;
+    let (_tmp, empty_git) =
+        rts::launch::private_git_config("rts-setup-").map_err(|_| ManagedError::StorageUnavailable)?;
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let mvm_plain = rts::mvm::SpawnRunner {
+        mvmctl: defaults.mvmctl.clone(),
+        empty_git_config: empty_git.clone(),
+        extra_env: std::collections::HashMap::from([
+            ("HOME".into(), prefix.to_string_lossy().into_owned()),
+            (
+                "MVM_HOME".into(),
+                prefix.join("mvm").to_string_lossy().into_owned(),
+            ),
+        ]),
+        remove_env: Vec::new(),
+    };
+    let mvm = rts::mvm::SpawnRunner {
+        mvmctl: defaults.mvmctl.clone(),
+        empty_git_config: empty_git,
+        extra_env: rts::session::mvm_environment(&env, &supervisor),
+        remove_env: Vec::new(),
+    };
+    let ctx = rts::setup::SetupContext {
+        home: &prefix,
+        defaults: &defaults,
+        explicit_mvmctl: false,
+        supervisor: &supervisor,
+        rts: &exe,
+        fetch: &fetch,
+        host: &host,
+        mvm_plain: &mvm_plain,
+        mvm: &mvm,
+    };
+    let opts = rts::setup::SetupOptions {
+        check: false,
+        offline: false,
+    };
+    let release = super::red_team_release::RTS_RELEASE.to_archive();
+    rts::setup::run_in_prefix(&opts, &ctx, &prefix, &release)
+        .map(|_| ())
+        .map_err(|_| ManagedError::ToolUnavailable)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
+    Err(ManagedError::RedTeamUnavailable)
+}
+
 /// Copy each validated input file or directory into
 /// `<config>/red-team/<session_id>/in/`. Never symlinks; editing a staged copy
 /// never mutates the original.

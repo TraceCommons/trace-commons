@@ -10,6 +10,13 @@ pub enum ToolSetupAction {
     Update,
 }
 
+/// Whether a tool's local runtime prerequisites are ready or need setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolSetupState {
+    Ready,
+    NeedsSetup,
+}
+
 fn name(tool: ToolId) -> &'static str {
     match tool {
         ToolId::Claude => "claude",

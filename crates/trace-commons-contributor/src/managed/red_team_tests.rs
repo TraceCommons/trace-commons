@@ -309,3 +309,32 @@ fn route_config_is_unchanged_for_other_sessions() {
     let expected = "[capture]\nenabled = true\nbodies = false\nreceipts = true\n[privacy]\nmode = \"full\"\ntrusted_backends = [\"nearai\"]\n[[backends]]\nid = \"nearai\"\nkind = \"nearai\"\nbase_url = \"https://cloud-api.near.ai/v1\"\n";
     assert_eq!(crate::managed::route::ironwire_config(false, url), expected);
 }
+
+#[test]
+fn red_team_setup_checks_inside_our_config_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let mut seen_prefix = None;
+    let state = setup_state_with(&store, |prefix, _sessions| {
+        seen_prefix = Some(prefix.to_path_buf());
+        true
+    });
+    assert_eq!(state, crate::managed::tool_setup::ToolSetupState::Ready);
+    assert_eq!(seen_prefix, Some(store.dir().join("red-team/runtime")));
+}
+
+#[test]
+fn the_release_pin_is_well_formed() {
+    let pin = crate::managed::red_team_release::RTS_RELEASE;
+    assert!(
+        pin.url
+            .starts_with("https://github.com/nearai/nearai-red-sandbox/releases/download/"),
+        "release URL must point to nearai-red-sandbox GitHub releases: {}",
+        pin.url
+    );
+    assert_eq!(pin.sha256.len(), 32);
+    assert!(
+        pin.sha256.iter().any(|&b| b != 0),
+        "release sha256 digest must be non-zero"
+    );
+}

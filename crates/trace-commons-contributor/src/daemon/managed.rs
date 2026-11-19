@@ -658,8 +658,13 @@ impl ManagedService {
                 // herdr while sessions are grouped there (owner, 2026-11-03).
                 let destination = terminal::destination(choice);
                 let opens_in = launch_destination(terminal.herdr, destination);
+                let store = ConfigStore::open(self.config_dir.clone())
+                    .map_err(|_| ManagedError::StorageUnavailable)?;
+                let red_team_installed = red_team
+                    && crate::managed::red_team::setup_state(&store)
+                        == crate::managed::tool_setup::ToolSetupState::Ready;
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, false),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, red_team_installed),"cli_options":crate::managed::options::snapshot(&store)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
                 )
             }
             "managed_tool_setup" => {
@@ -670,6 +675,18 @@ impl ManagedService {
                     action: ToolSetupAction,
                 }
                 let params: Params = parse(request)?;
+                if params.tool == ToolId::RedTeam {
+                    if !red_team {
+                        return Err(ManagedError::RedTeamUnavailable);
+                    }
+                    if params.action != ToolSetupAction::Install {
+                        return Err(ManagedError::InvalidRequest);
+                    }
+                    let store = ConfigStore::open(self.config_dir.clone())
+                        .map_err(|_| ManagedError::StorageUnavailable)?;
+                    crate::managed::red_team::setup_install(&store)?;
+                    return Ok(json!({"opened": true, "installed": true}));
+                }
                 let native = find_native(params.tool).ok();
                 let command = tool_setup::command(params.tool, params.action, native.as_deref())?;
                 let (choice, installed) = self.terminal_for(terminal);

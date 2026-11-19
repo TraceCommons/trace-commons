@@ -13,6 +13,7 @@ pub mod opencode;
 pub mod options;
 pub mod profiles;
 pub mod red_team;
+pub mod red_team_release;
 pub mod sandbox;
 pub mod secrets;
 pub mod session_binding;
