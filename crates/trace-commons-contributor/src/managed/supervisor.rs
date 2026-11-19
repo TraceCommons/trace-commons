@@ -149,6 +149,40 @@ async fn run_native(
     login: bool,
 ) -> anyhow::Result<i32> {
     let row = &context.session;
+    if row.tool == super::ToolId::RedTeam {
+        if login {
+            return Err(ManagedError::InvalidRequest.into());
+        }
+        let running = LifecycleReport {
+            model: row.model.clone(),
+            collection: None,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: SessionState::Running,
+            process_id: Some(std::process::id()),
+            process_identity: None,
+            exit_code: None,
+        };
+        let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(running));
+        let exit_code = super::red_team::run(store, context).await?;
+        *spawned = true;
+        let report = LifecycleReport {
+            model: row.model.clone(),
+            collection: None,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: SessionState::Exited,
+            process_id: None,
+            process_identity: None,
+            exit_code: Some(exit_code),
+        };
+        let _ = super::sessions::persist_exit(store, &report);
+        let response: anyhow::Result<Value> = call(store, "managed_session_report", json!(report));
+        if response.is_ok() {
+            super::sessions::clear_exit(store, row.id);
+        }
+        return Ok(exit_code);
+    }
     let account = AccountView {
         id: row.account_id,
         tool: row.tool,

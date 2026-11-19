@@ -532,7 +532,15 @@ impl ManagedService {
             terminal::remove_launch_files(session_id);
             return Err(ManagedError::NearAiSignInRequired);
         }
-        let redeemed = self.sessions.redeem(session_id, ticket)?;
+        let mut redeemed = self.sessions.redeem(session_id, ticket)?;
+        if redeemed.session.tool == ToolId::RedTeam
+            && redeemed.session.connection == ConnectionKind::NearAi
+        {
+            let key = self.secrets.get(redeemed.session.account_id)?;
+            redeemed.red_team_key = Some(crate::managed::secrets::RedactedSecret::new(
+                key.expose().to_owned(),
+            ));
+        }
         // The launch has used its ticket; a Tab Config that still holds it
         // has nothing left to do (the backstop would remove it later).
         terminal::remove_launch_files(session_id);
@@ -1564,6 +1572,33 @@ async fn redeem_async(shared: &DaemonShared, request: &Request) -> Response {
         Ok(redeemed) => redeemed,
         Err(refusal) => return respond(request, Err(refusal)),
     };
+    if context.session.tool == ToolId::RedTeam {
+        if on_sign_in {
+            match key.map(ApiKey::new) {
+                Some(Ok(api_key)) => {
+                    context.red_team_key = Some(crate::managed::secrets::RedactedSecret::new(
+                        api_key.expose().to_owned(),
+                    ));
+                }
+                _ => {
+                    let _ = with_service(shared, |service| {
+                        service.sessions.report(LifecycleReport {
+                            model: None,
+                            collection: None,
+                            session_id: p.session_id,
+                            proof: context.proof.clone(),
+                            state: SessionState::Failed,
+                            process_id: None,
+                            process_identity: None,
+                            exit_code: None,
+                        })
+                    });
+                    return respond(request, Err(ManagedError::NearAiSignInRequired.into()));
+                }
+            }
+        }
+        return respond(request, Ok(json!(context)));
+    }
     if !on_sign_in {
         return respond(request, Ok(json!(context)));
     }

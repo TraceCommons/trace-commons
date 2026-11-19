@@ -236,6 +236,11 @@ pub struct LaunchContext {
     /// Validated sandbox settings for a Red Team launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<super::sandbox::SandboxSettings>,
+    /// NEAR AI key handed to the terminal helper only for Red Team launches
+    /// (`ToolId::RedTeam`). Never placed in argv, environment, or disk, and
+    /// never passed into OpenCode or the guest VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub red_team_key: Option<super::secrets::RedactedSecret>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1263,6 +1268,7 @@ impl SessionRegistry {
             route_native_responses: None,
             resume_of,
             sandbox,
+            red_team_key: None,
         })
     }
 

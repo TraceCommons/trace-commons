@@ -3,7 +3,12 @@
 //! These entries are derived, never saved: one per tool, present exactly
 //! while the daemon holds a NEAR AI sign-in. Nothing here is written to the
 //! managed accounts store, and nothing here sees the credential itself; the
-//! daemon reads it at launch time and hands it only to the session's proxy.
+//! daemon reads it at launch time and hands it only to the session's proxy
+//! — with one explicit exception for Red Team (`ToolId::RedTeam`), where the
+//! daemon hands the key in the `managed_launch_redeem` response (`red_team_key`)
+//! to our own terminal helper so `rts::launch::run` can host the session's
+//! embedded IronWire proxy and attested forwarder in-process without ever
+//! exposing the key to OpenCode or the guest VM.
 
 use super::{AccountId, AccountView, AuthState, ConnectionKind, Generation, Selection, ToolId};
 use uuid::Uuid;

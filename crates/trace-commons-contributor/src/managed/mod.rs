@@ -12,6 +12,7 @@ pub mod native_collection;
 pub mod opencode;
 pub mod options;
 pub mod profiles;
+pub mod red_team;
 pub mod sandbox;
 pub mod secrets;
 pub mod session_binding;

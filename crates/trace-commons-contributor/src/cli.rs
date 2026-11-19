@@ -49,6 +49,12 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum RedTeamCommand {
+    /// Execute one sandboxed tool call on behalf of OpenCode's plugin shim.
+    Tool { name: String },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Inspect feature flags and change per-machine overrides.
     FeatureFlags(feature_flags_cli::FlagArgs),
@@ -76,6 +82,12 @@ enum Command {
         /// The proxy's home: `<config dir>/managed-routes/<session id>`
         #[arg(long)]
         home: Option<PathBuf>,
+    },
+    /// Internal Red Team sandbox tool bridge (`red-team tool <name>`).
+    #[command(hide = true, name = "red-team")]
+    RedTeam {
+        #[command(subcommand)]
+        action: RedTeamCommand,
     },
     #[command(hide = true)]
     ManagedSessionBind {
@@ -628,6 +640,16 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         crate::managed::statusline::run(home.as_deref()).await;
         return Ok(());
     }
+    if let Command::RedTeam {
+        action: RedTeamCommand::Tool { name },
+    } = &cli.command
+    {
+        let code = crate::managed::red_team::run_tool(name);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     if let Command::MissionDraft { file } = &cli.command {
         let review = crate::mission_draft::review_file(file)?;
         if cli.json {
@@ -791,7 +813,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         | Command::Insights(_)
         | Command::MissionDraft { .. }
         | Command::MissionDrafts(_)
-        | Command::Statusline { .. } => {
+        | Command::Statusline { .. }
+        | Command::RedTeam { .. } => {
             anyhow::bail!("import-preview-dispatch-invalid")
         }
         Command::ImportAntigravity { project, all } => {
