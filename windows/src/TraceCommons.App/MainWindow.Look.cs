@@ -57,6 +57,11 @@ public sealed partial class MainWindow
         };
         WindowRoot.ActualThemeChanged += (_, _) => PaintGround();
         WindowRoot.Loaded += (_, _) => PaintGround();
+        // The system's animation switch, followed while the window keeps
+        // the foreground (SystemMotionWatch), and logged for the test box.
+        SystemMotionWatch.Install(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        GlassMotionSettings.Changed += () =>
+            LookLog($"motion: animations={GlassMotionSettings.AnimationsEnabled} mayMove={GlassMotionSettings.MayMove}");
         // A strip laid out again (a tab's count, a scale change) puts the
         // ember under its tab at once (TabEmberGlide.Decide); only a change
         // of tab glides.
