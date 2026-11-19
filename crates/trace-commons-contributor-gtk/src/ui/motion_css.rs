@@ -72,7 +72,7 @@ pub fn css(dark: bool) -> String {
             .collect::<Vec<_>>()
             .join(",\n")
     };
-    let mut out = String::from("/* Motion (`ui::motion_css`): the Mac's control timings. */\n");
+    let mut out = String::new();
     out.push_str(&format!(
         "button {{\n  transition-duration: {fast};\n  transition-timing-function: {ease};\n}}\n"
     ));

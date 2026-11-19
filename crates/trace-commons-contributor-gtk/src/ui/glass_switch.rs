@@ -35,7 +35,9 @@ pub fn slide_duration(watch: bool) -> f64 {
 }
 
 /// The knob's place, 0 at the start and 1 at the end, `t` seconds into a
-/// slide from `from` to `to`.
+/// slide from `from` to `to`: what `GlassSwitch`'s tween draws, as a
+/// function for the tests.
+#[cfg(test)]
 pub fn knob_at(from: f64, to: f64, t: f64, watch: bool) -> f64 {
     let duration = slide_duration(watch);
     glass_motion::tween_value(from, to, glass_motion::ease_out(t / duration))
