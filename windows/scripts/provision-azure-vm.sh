@@ -318,7 +318,12 @@ shutdown_utc() {
 ensure_autoshutdown() {
   local utc
   utc="$(shutdown_utc)"
-  az_q vm auto-shutdown -g "$RG" -n "$NAME" --time "$utc" -o none
+  # The schedule must sit in the VM's region, and az defaults it to the
+  # group's. Read the VM's region from the API rather than TC_AZ_LOCATION, so
+  # a re-run that leaves the variable unset still gets it right.
+  local vm_loc
+  vm_loc="$(az_q vm show -g "$RG" -n "$NAME" --query location -o tsv)"
+  az_q vm auto-shutdown -g "$RG" -n "$NAME" -l "$vm_loc" --time "$utc" -o none
   local sched_id
   sched_id="$(az_q resource list -g "$RG" --resource-type Microsoft.DevTestLab/schedules \
     --query "[?name=='${SCHEDULE}'].id | [0]" -o tsv)"
