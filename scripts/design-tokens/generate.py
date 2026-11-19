@@ -691,6 +691,20 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     # the Monitor has blur behind it.
     for tier in ("pane", "card", "well"):
         palette["window" + tier.title()] = fills[tier]
+    # The Settings window's ground (`SettingsModal`'s settingsGround), a
+    # card on it and the hairline round that card, which in Dark is all
+    # that tells the card from the ground: the card's fill is the ground's
+    # own navy. Every ink clears 4.5:1 on the ground and the card.
+    palette["settingsGround"] = flat_color(tokens, "settingsGround", scheme)["hex"]
+    palette["settingsCard"] = over(flat_fill(tokens, "cardFill", scheme), palette["settingsGround"])
+    palette["settingsRule"] = over(flat_color(tokens, "rule", scheme), palette["settingsGround"])
+    for ink in ("ink", "inkSecondary", "textTertiary"):
+        for where in ("settingsGround", "settingsCard"):
+            ratio = contrast(palette[ink], palette[where])
+            if ratio < 4.5:
+                raise TokenError(f"glass {scheme}: {ink} on {where} is {ratio:.2f}:1, under 4.5:1")
+    if contrast(palette["settingsRule"], palette["settingsGround"]) < 1.2:
+        raise TokenError(f"glass {scheme}: the Settings card's hairline is invisible on its ground")
     # A control on a selected row (`GlassGround.selection`): its own fill
     # and hover over the selection, labelled in the selection's ink
     # (`controlInk`), as the Mac's Submit pill on a selected Traces row.
@@ -917,6 +931,9 @@ GLASS_COLOURS = [
     ("windowWell", "window_well"),
     ("controlOnSelection", "control_on_selection"),
     ("controlOnSelectionHover", "control_on_selection_hover"),
+    ("settingsGround", "settings_ground"),
+    ("settingsCard", "settings_card"),
+    ("settingsRule", "settings_rule"),
 ]
 
 

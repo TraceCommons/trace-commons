@@ -164,11 +164,12 @@ pub fn frost(dark: bool) -> Frost {
 /// The largest `contrast`, in steps of 0.05, at which every text colour
 /// reads on the frosted dark panes: the most desktop that can show through
 /// (`style.rs`, `the_frost_shows_as_much_desktop_as_the_text_allows`). The
-/// worst text there is 4.63:1; at 0.40 `tc_muted` falls to 4.49:1 over a
-/// white desktop.
-pub const FROST_CONTRAST_DARK: f64 = 0.35;
-/// None in light: no contrast makes its text read (at 0, a mid-grey
-/// desktop, `tc_muted` is 3.93:1), and the intensity that would lift it is
+/// worst text there is `tc_coral_text` at 4.58:1 over a white desktop; at
+/// 0.60 it falls under 4.5:1. (0.35 while `tc_muted` was the olive
+/// #A6AC9F; the Mac's secondary ink is lighter.)
+pub const FROST_CONTRAST_DARK: f64 = 0.55;
+/// None in light: no contrast makes its text read (at 0, a black desktop,
+/// `tc_blue_text` is 3.53:1 on the unfocused pane), and the intensity that would lift it is
 /// ignored by KWin 6.5 and 6.6. Light asks for no change and stays painted.
 pub const FROST_CONTRAST_LIGHT: f64 = 1.0;
 

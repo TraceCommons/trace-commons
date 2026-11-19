@@ -156,20 +156,21 @@ pub mod brand_tokens;
 /// used on the inset surface, where the dark twin measures 4.05:1; small
 /// type inside a manifest strip stays on `tc_muted`.
 const LIGHT_TOKENS: &str = r#"
-/* --- Ground and ink, from DESIGN-SPEC §2.1 (light column) --------- */
-/* The grounds are the Monitor's: every window and sheet draws on its
-   pane, card and well (the generated `tc_glass_window_*`). */
+/* --- Ground and ink: the Monitor's own. Every window and sheet draws
+       on its pane, card and well (the generated `tc_glass_window_*`),
+       in the Mac's glass inks and rule; the Settings window takes its
+       own ground and card (`window.tc-settings-window`). -------------- */
 @define-color tc_bg        @tc_glass_window_pane;   /* bg.window */
 @define-color tc_surface   @tc_glass_window_card;   /* surface.card */
 @define-color tc_surface2  @tc_glass_window_well;   /* surface.inset */
 @define-color tc_surface_inset @tc_surface2;   /* the spec's name for it */
 @define-color tc_scrim     rgba(0, 0, 0, 0.06);   /* surface.scrim */
 @define-color tc_selected  rgba(0, 0, 0, 0.07);   /* surface.selected */
-@define-color tc_ink       #20241F;   /* ink.primary */
-@define-color tc_muted     #5C635B;   /* ink.secondary */
-@define-color tc_ink_tertiary #6A6F66;   /* ink.tertiary, contrast-corrected */
-@define-color tc_line      #D9DFDC;   /* hairline */
-@define-color tc_line_divider #DDDFD8;   /* hairline.divider */
+@define-color tc_ink       @tc_glass_ink;   /* textPrimary */
+@define-color tc_muted     @tc_glass_ink_secondary;   /* textSecondary */
+@define-color tc_ink_tertiary @tc_glass_ink_tertiary;   /* textTertiary */
+@define-color tc_line      @tc_glass_settings_rule;   /* rule, opaque */
+@define-color tc_line_divider @tc_glass_settings_rule;
 
 /* --- Accent and status. Fills, rules and glyph strokes only. The
        accent and status values are the generated brand_tokens sheet,
@@ -269,20 +270,19 @@ const LIGHT_TOKENS: &str = r#"
 /// Dark keeps the white primary label: the brighter purple carries it at
 /// 5:1, where the old dark mint had to flip its label to near-black.
 const DARK_TOKENS: &str = r#"
-/* --- Ground and ink, from DESIGN-SPEC §2.1 (dark column). Warm
-       near-black carrying the light ground's green cast, not the
-       blue-black a naive inversion produces. ------------------------ */
+/* --- Ground and ink: the Monitor's navy and the Mac's glass inks
+       and rule, as in light; Settings takes its own ground and card. -- */
 @define-color tc_bg        @tc_glass_window_pane;
 @define-color tc_surface   @tc_glass_window_card;
 @define-color tc_surface2  @tc_glass_window_well;
 @define-color tc_surface_inset @tc_surface2;
 @define-color tc_scrim     rgba(255, 255, 255, 0.08);
 @define-color tc_selected  rgba(255, 255, 255, 0.1);
-@define-color tc_ink       #E8EAE3;
-@define-color tc_muted     #A6AC9F;
-@define-color tc_ink_tertiary #878D81;   /* contrast-corrected, see LIGHT */
-@define-color tc_line      #3B4038;
-@define-color tc_line_divider #373A33;
+@define-color tc_ink       @tc_glass_ink;
+@define-color tc_muted     @tc_glass_ink_secondary;
+@define-color tc_ink_tertiary @tc_glass_ink_tertiary;
+@define-color tc_line      @tc_glass_settings_rule;
+@define-color tc_line_divider @tc_glass_settings_rule;
 
 /* --- Same hue, same role, lifted until it clears the dark ground -- */
 @define-color tc_green     @tc_accent_line;   /* purple, see LIGHT */
@@ -678,6 +678,9 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_window_pane" => hex(p.bg),
         "tc_glass_window_card" => hex(p.surface),
         "tc_glass_window_well" => hex(p.inset),
+        "tc_glass_settings_ground" => hex(p.bg),
+        "tc_glass_settings_card" => hex(p.surface),
+        "tc_glass_settings_rule" => hex(p.line),
         "tc_glass_control_on_selection" => hex(p.control_on_selection),
         "tc_glass_control_on_selection_hover" => hex(p.control_on_selection_hover),
         "tc_glass_toolbar_glyph_hidden" => hex(p.tertiary),
@@ -1506,7 +1509,7 @@ mod tests {
 
     /// The frost's contrast is the largest, in steps of 0.05, at which the
     /// text reads: the most desktop that can show through. In light no step
-    /// reads (a mid-grey desktop at contrast 0 still leaves `tc_muted`
+    /// reads (a black desktop at contrast 0 still leaves `tc_blue_text`
     /// under 4.5:1), so light asks for none and stays painted.
     #[test]
     fn the_frost_shows_as_much_desktop_as_the_text_allows() {
@@ -1539,6 +1542,42 @@ mod tests {
             ("tc_ink_tertiary", "tc_surface"),
         ]);
         for dark in [false, true] {
+            assert_eq!(check(dark, &text, 4.5), Vec::<String>::new());
+        }
+    }
+
+    /// The shell's inks and hairline are the Mac's glass inks and rule,
+    /// the Monitor's own, so Settings, the sheets and the dialogs draw
+    /// no ink of their own (on main dark Settings drew the olive
+    /// #E8EAE3, #A6AC9F and #3B4038 on the navy). Each ink clears 4.5:1
+    /// on the Settings window's ground and card too.
+    #[test]
+    fn the_shells_inks_are_the_macs_and_clear_4_5_on_settings() {
+        for dark in [false, true] {
+            let colours = palette(dark);
+            let get = |name: &str| colours.get(name).cloned().unwrap_or_default();
+            let mut wrong = Vec::new();
+            for (shell, mac) in [
+                ("tc_ink", "tc_glass_ink"),
+                ("tc_muted", "tc_glass_ink_secondary"),
+                ("tc_ink_tertiary", "tc_glass_ink_tertiary"),
+                ("tc_line", "tc_glass_settings_rule"),
+                ("tc_line_divider", "tc_glass_settings_rule"),
+            ] {
+                if !get(shell).eq_ignore_ascii_case(&get(mac)) {
+                    wrong.push(format!(
+                        "dark={dark}: {shell} is {}, the Mac's {}",
+                        get(shell),
+                        get(mac)
+                    ));
+                }
+            }
+            assert_eq!(wrong, Vec::<String>::new());
+            let mut text = Vec::new();
+            for ink in ["tc_ink", "tc_muted", "tc_ink_tertiary"] {
+                text.push((ink, "tc_glass_settings_ground"));
+                text.push((ink, "tc_glass_settings_card"));
+            }
             assert_eq!(check(dark, &text, 4.5), Vec::<String>::new());
         }
     }
@@ -1746,8 +1785,9 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            // 48, and the edge rail's handle.
-            assert_eq!(glass, 49, "{name}");
+            // 48, the edge rail's handle, and the Settings window's
+            // ground, card and hairline.
+            assert_eq!(glass, 52, "{name}");
             let omarchy::Rgb(r, g, b) = palette.ink;
             assert!(
                 css.contains(&format!(
