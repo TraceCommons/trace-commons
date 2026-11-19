@@ -54,7 +54,7 @@ public sealed partial class MainWindow
         MapToggle.Visibility = Visibility.Visible;
         MapToggle.Click += (_, _) =>
         {
-            _wantsMap = !_presented.Map;
+            _wantsMap = PaneToggles.Wanted(PaneToggle.Map, _presented, _transition?.To);
             ApplyPaneAvailability();
         };
     }

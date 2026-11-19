@@ -196,4 +196,31 @@ public class MonitorPaneLayoutTests
         Assert.Equal(0, MonitorPaneLayout.ClientWidth(500, double.NaN));
         Assert.Equal(0, MonitorPaneLayout.ClientWidth(-32000, 1.0));
     }
+
+    [Fact]
+    public void APaneToggleFlipsWhereThePanesAreGoingNotWhereTheyWere()
+    {
+        // Review finding 10 (#2215): "hide inspector, hide map, show
+        // inspector, hide inspector" left the inspector open, because each
+        // toggle read the panes as presented, and those change only when
+        // the window's move ends. A click mid-move answers the move's end.
+        var shown = new PaneVisibility(Map: true, Inspector: true);
+        var closingInspector = new PaneVisibility(Map: true, Inspector: false);
+        Assert.False(PaneToggles.Wanted(PaneToggle.Inspector, shown, movingTo: null));
+        Assert.True(PaneToggles.Wanted(PaneToggle.Inspector, shown, movingTo: closingInspector));
+        Assert.False(PaneToggles.Wanted(PaneToggle.Map, shown, movingTo: closingInspector));
+        Assert.True(PaneToggles.Wanted(PaneToggle.Map, closingInspector with { Map = false }, movingTo: null));
+
+        string shell = ShellSourceText("TraceCommons.App/MainWindow.Shell.cs");
+        string map = ShellSourceText("TraceCommons.App/MainWindow.Map.cs");
+        Assert.Contains("PaneToggles.Wanted(PaneToggle.Inspector, _presented, _transition?.To)", shell, System.StringComparison.Ordinal);
+        Assert.Contains("PaneToggles.Wanted(PaneToggle.Map, _presented, _transition?.To)", map, System.StringComparison.Ordinal);
+    }
+
+    private static string ShellSourceText(string relativePath)
+    {
+        string path = System.IO.Path.Combine(System.AppContext.BaseDirectory, "shell-source", relativePath + ".txt");
+        Assert.True(System.IO.File.Exists(path), path);
+        return System.IO.File.ReadAllText(path);
+    }
 }

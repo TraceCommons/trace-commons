@@ -462,7 +462,7 @@ public sealed partial class MainWindow
 
     private void OnInspectorToggleClick(object sender, RoutedEventArgs e)
     {
-        _wantsInspector = !_presented.Inspector;
+        _wantsInspector = PaneToggles.Wanted(PaneToggle.Inspector, _presented, _transition?.To);
         ApplyPaneAvailability();
     }
 
