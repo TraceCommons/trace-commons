@@ -99,7 +99,12 @@ impl StepFade {
         settle: f64,
     ) {
         let widget = widget.upcast_ref::<gtk::Widget>();
-        if !animations() || !widget.is_mapped() || widget.width() == 0 || widget.height() == 0 {
+        if !animations()
+            || super::glass_motion::window_hidden(widget)
+            || !widget.is_mapped()
+            || widget.width() == 0
+            || widget.height() == 0
+        {
             return;
         }
         let Some(at) = widget.compute_point(&self.root, &gtk::graphene::Point::new(0.0, 0.0))
@@ -148,7 +153,13 @@ impl StepFade {
         self.finish();
         // A still of the step going away, taken while it is still shown.
         let still = before
-            .filter(|b| animations() && b.is_mapped() && b.width() > 0 && b.height() > 0)
+            .filter(|b| {
+                animations()
+                    && !super::glass_motion::window_hidden(b)
+                    && b.is_mapped()
+                    && b.width() > 0
+                    && b.height() > 0
+            })
             .map(|b| {
                 let still = gtk::WidgetPaintable::new(Some(&b)).current_image();
                 (still, b.width(), b.height())
@@ -215,7 +226,7 @@ pub(super) fn restyle_after_drawn(
     widget: &impl IsA<gtk::Widget>,
     restyle: impl FnOnce() + 'static,
 ) {
-    if !animations() {
+    if !animations() || super::glass_motion::window_hidden(widget) {
         restyle();
         return;
     }

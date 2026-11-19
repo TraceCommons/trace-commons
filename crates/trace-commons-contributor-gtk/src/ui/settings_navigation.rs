@@ -271,13 +271,15 @@ impl Navigation {
         // Written when the libadwaita floor was 1.2, which has no
         // Breakpoint; the floor is 1.4 since 2026-11-16 and this has not
         // been moved to one. Allocation is checked at frame time and only
-        // visibility changes; fields are never rebuilt.
-        root.add_tick_callback({
+        // visibility changes; fields are never rebuilt. Minimised or
+        // suspended, the check comes off the clock, and goes back on when
+        // the window is shown.
+        let frame: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
             let sidebar = sidebar.downgrade();
             let compact = compact.downgrade();
             let scroller = scroller.downgrade();
             let navigate = navigate.clone();
-            move |root, _| {
+            move |root: &gtk::Box| {
                 if let (Some(sidebar), Some(compact)) = (sidebar.upgrade(), compact.upgrade()) {
                     let wide = root.width() >= 760;
                     sidebar.set_visible(wide);
@@ -291,7 +293,44 @@ impl Navigation {
                     pending.set(None);
                     navigate(index);
                 }
-                gtk::glib::ControlFlow::Continue
+            }
+        });
+        let tick: std::rc::Rc<std::cell::RefCell<Option<gtk::TickCallbackId>>> =
+            std::rc::Rc::default();
+        let start: std::rc::Rc<dyn Fn(&gtk::Box)> = std::rc::Rc::new({
+            let tick = tick.clone();
+            move |root: &gtk::Box| {
+                if tick.borrow().is_some() || crate::ui::glass_motion::window_hidden(root) {
+                    return;
+                }
+                let frame = frame.clone();
+                let slot = tick.clone();
+                let id = root.add_tick_callback(move |root, _| {
+                    if crate::ui::glass_motion::window_hidden(root) {
+                        // Ended by returning Break; shown again, it restarts.
+                        drop(slot.borrow_mut().take());
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    frame(root);
+                    gtk::glib::ControlFlow::Continue
+                });
+                *tick.borrow_mut() = Some(id);
+            }
+        });
+        start(&root);
+        crate::ui::glass_motion::on_window_state(&root, {
+            let tick = tick.clone();
+            move |widget| {
+                let Some(root) = widget.downcast_ref::<gtk::Box>() else {
+                    return;
+                };
+                if crate::ui::glass_motion::window_hidden(root) {
+                    if let Some(id) = tick.borrow_mut().take() {
+                        id.remove();
+                    }
+                } else {
+                    start(root);
+                }
             }
         });
         list.select_row(list.row_at_index(0).as_ref());
