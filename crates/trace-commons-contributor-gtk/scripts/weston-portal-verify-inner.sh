@@ -232,6 +232,7 @@ else
     ui::armed_mark::tests::mounted_the_mark_turns_to_a_check_with_a_pulse \
     ui::armed_mark::tests::mounted_the_armed_card_goes_once \
     ui::glass_feedback::tests::mounted_a_pressed_refresh_turns_once \
+    ui::glass_feedback::tests::mounted_a_refresh_turns_until_its_read_ends \
     ui::glass_motion::tests::mounted_a_running_driver_follows_reduce_motion_live \
     ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
     ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
