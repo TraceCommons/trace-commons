@@ -699,3 +699,40 @@ public static class FirstRunPlan
         return calls;
     }
 }
+
+/// <summary>
+/// The Sharing choices on Uses and their lines (UsesScreen.swift:193-210,
+/// <c>sharingOptions</c>): Ask titled by the copy's Ask each time, Automatic
+/// by the core's name for <c>auto_upload</c>, with the copy's scope under it
+/// and, while no enrollment is held, that it turns on once the person signs in.
+/// </summary>
+public static class UsesSharing
+{
+    public sealed record Option(SharingPath Path, string Title, IReadOnlyList<string> Lines);
+
+    /// <param name="automaticTitle">The core's mode name for <c>auto_upload</c> (WatchCopy.Armed).</param>
+    public static IReadOnlyList<Option> Options(FirstRunState state, UsesWords uses, string automaticTitle)
+    {
+        var options = new List<Option>();
+        foreach (SharingPath path in FirstRunNavigation.SharingPaths(state))
+        {
+            if (path == SharingPath.AskMe)
+            {
+                options.Add(new Option(path, uses.AskEachTime, Array.Empty<string>()));
+                continue;
+            }
+
+            if (automaticTitle.Length == 0)
+            {
+                continue;
+            }
+
+            var lines = new List<string>();
+            if (uses.AutomaticScope.Length > 0) lines.Add(uses.AutomaticScope);
+            if (!FirstRunNavigation.CanChooseAutomatic(state) && uses.AutomaticAfterSignIn.Length > 0) lines.Add(uses.AutomaticAfterSignIn);
+            options.Add(new Option(path, automaticTitle, lines));
+        }
+
+        return options;
+    }
+}

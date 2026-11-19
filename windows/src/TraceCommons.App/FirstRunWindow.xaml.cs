@@ -951,7 +951,21 @@ public sealed partial class FirstRunWindow : Window
         }
 
         panel.Children.Add(Text(Copy.Uses.Sharing, 12, FirstRunTokens.TextSecondary, FontWeights.SemiBold));
-        panel.Children.Add(Segmented(Copy.Uses.Sharing, new[] { (Copy.Uses.AskEachTime, SharingPath.AskMe), (Copy.Uses.AutomaticScope, SharingPath.Automatic) }));
+        // The Mac's titles and lines (UsesSharing): Automatic by the core's
+        // mode name, its scope and sign-in lines under the choices.
+        IReadOnlyList<UsesSharing.Option> sharing = UsesSharing.Options(_runner.State, Copy.Uses, WatchCopy.Armed);
+        panel.Children.Add(Segmented(Copy.Uses.Sharing, sharing.Select(o => (o.Title, o.Path)).ToArray()));
+        foreach (UsesSharing.Option option in sharing)
+        {
+            foreach (string line in option.Lines)
+            {
+                TextBlock sub = Text(line, 12, FirstRunTokens.TextTertiary);
+                sub.HorizontalAlignment = HorizontalAlignment.Left;
+                sub.TextAlignment = TextAlignment.Left;
+                panel.Children.Add(sub);
+            }
+        }
+
         return Card(panel, 24, 12);
     }
 
