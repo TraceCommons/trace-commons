@@ -262,6 +262,13 @@ public static class TracesTreeRows
     public static TreeSelection? Toggled(TreeSelection clicked, TreeSelection? current) =>
         clicked == current ? null : clicked;
 
+    /// <summary>
+    /// Whether a selection opens the inspector (<c>MonitorWindowView.select</c>,
+    /// MonitorWindowView.swift:828-831): a trace does, every time it is
+    /// selected; a folder, or clearing the selection, never does.
+    /// </summary>
+    public static bool OpensInspector(TreeSelection? selected) => selected is TreeSelection.Session;
+
     /// <summary>The menu open after a row's control for <paramref name="menu"/> is pressed (:120-122).</summary>
     public static TreeRowMenu? Toggled(TreeRowMenu menu, TreeRowMenu? current) => menu == current ? null : menu;
 
@@ -451,6 +458,32 @@ public static class TracesTreeRows
         return parts.Count == 0 ? null : string.Join(" · ", parts);
     }
 
+    /// <summary>
+    /// The daemon's reasons a pending trace waits for a person
+    /// (<c>ReasonLabel.needingAPerson</c>, DaemonDataModels.swift:428-441,
+    /// <c>queue.rs</c> <c>REASONS_NEEDING_A_PERSON</c>).
+    /// </summary>
+    public static readonly IReadOnlySet<string> ReasonsNeedingAPerson = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "token-distribution-review-required", "witness-risk-review-required", "privacy-filter-transient-exhausted",
+        "second-look-review-required", "witness_timeout", "witness_unreachable", "witness_classifier_unavailable",
+        "witness_redaction_failed", "witness_attestation_unavailable", "witness_collateral_unavailable",
+        "witness-not-trusted", "witness-measurement-not-accepted",
+    };
+
+    /// <summary>Held for review: pending, for a reason that needs a person (DaemonDataModels.swift:333-335).</summary>
+    public static bool HeldForReview(string? state, string? reasonLabel) =>
+        state == "pending" && reasonLabel is not null && ReasonsNeedingAPerson.Contains(reasonLabel);
+
+    /// <summary>
+    /// Whether a trace row's Submit may send (<c>maySubmitSession</c>,
+    /// TracesStore.swift:801-806): a core that answered and is signed in, a
+    /// folder that is not ignored, a trace not held for review, and the
+    /// shared eligibility table offering Contribute. Asked again at the press.
+    /// </summary>
+    public static bool MaySubmitTrace(bool offersContribute, bool? loggedIn, bool ready, bool folderIgnored, string? state, string? reasonLabel) =>
+        ready && loggedIn == true && !folderIgnored && !HeldForReview(state, reasonLabel) && offersContribute;
+
     /// <summary>A trace's flag (:1016-1024): amber held or ineligible or a refused mark, green for a clear one.</summary>
     public static TreeFlag? Flag(bool held, bool ineligible, TreeAttestationTone? attestation)
     {
@@ -545,6 +578,12 @@ public sealed class TracesTreeState
     public TracesTree Shown => (Arranged ? _tree.Arranged(_folderOrder) : _tree).Matching(Search);
 
     public IReadOnlySet<string> Expanded => _expanded;
+
+    /// <summary>Whether the core answered the tree's reads (the Mac's phase not failed).</summary>
+    public bool Ready => _read?.Ready == true;
+
+    /// <summary><c>status.logged_in</c> from the same read; null when unread.</summary>
+    public bool? LoggedIn => _read?.Status?.LoggedIn;
 
     public TreeSelection? Selection { get; private set; }
 

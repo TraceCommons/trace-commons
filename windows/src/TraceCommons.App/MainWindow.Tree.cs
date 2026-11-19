@@ -69,8 +69,8 @@ public sealed partial class MainWindow : ITracesTreeHost
         ViewModel.Pending.FirstOrDefault(e => e.EntryId == entryId);
 
     /// <summary>
-    /// A row selected: the inspector shows its folder, open on it; nothing
-    /// selected goes back to the folders (TracesInspectorHost.swift).
+    /// A row selected: the inspector's pane follows it to its folder;
+    /// nothing selected goes back to the folders (TracesInspectorHost.swift).
     /// </summary>
     void ITracesTreeHost.Selected(TreeSelection? selection)
     {
@@ -80,7 +80,6 @@ public sealed partial class MainWindow : ITracesTreeHost
         {
             case TreeSelection.Folder folder:
                 ViewModel.OpenFolder(folder.ProjectId);
-                OpenInspectorForFolder();
                 break;
             case TreeSelection.Session session when TracesTreeRows.FolderOf(session.EntryId, tree) is { } projectId:
                 ViewModel.OpenFolder(projectId);
@@ -94,6 +93,13 @@ public sealed partial class MainWindow : ITracesTreeHost
         // (TracesInspectorHost.swift:182-185). A folder is not.
         _treeReview = (selection as TreeSelection.Session)?.EntryId;
         ApplyDemand();
+
+        // A trace opens the inspector, every time; a folder never does
+        // (MonitorWindowView.swift:828-831): its traces open in the tree.
+        if (TracesTreeRows.OpensInspector(selection))
+        {
+            OpenInspectorForFolder();
+        }
     }
 
     /// <summary>The trace selected in the tree, the inspector demand's <c>review</c> key.</summary>
@@ -108,7 +114,19 @@ public sealed partial class MainWindow : ITracesTreeHost
 
     async void ITracesTreeHost.IgnoreFolder(QueueGroupViewModel group) => await ConfirmIgnoreAsync(group);
 
-    async void ITracesTreeHost.SubmitTrace(QueueEntryViewModel entry) => await ViewModel.SubmitEntryAsync(entry);
+    /// <summary>A trace's Submit, asked again at the press against the live row (TracesStore.swift:810-815).</summary>
+    async void ITracesTreeHost.SubmitTrace(QueueEntryViewModel entry)
+    {
+        QueueEntryViewModel live = ViewModel.Pending.FirstOrDefault(e => e.EntryId == entry.EntryId) ?? entry;
+        TracesTreeState? state = _tree?.State;
+        bool ignored = state?.Tree.Folders.FirstOrDefault(f => f.Sessions.Any(s => s.EntryId == entry.EntryId))?.Mode == MapModes.Ignore;
+        if (state is null || !TracesTreeRows.MaySubmitTrace(live.CanContribute, state.LoggedIn, state.Ready, ignored, live.StateCode, live.ReasonCode))
+        {
+            return;
+        }
+
+        await ViewModel.SubmitEntryAsync(live);
+    }
 
     /// <summary>
     /// Ron's Dismiss confirmation (TracesViews.swift:890-922): the trace by

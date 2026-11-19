@@ -612,7 +612,8 @@ internal sealed class TracesTreeView : UserControl
             Content = _words["submit"],
             Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
             VerticalAlignment = VerticalAlignment.Center,
-            IsEnabled = live is { CanContribute: true } && !off,
+            IsEnabled = live is not null && TracesTreeRows.MaySubmitTrace(
+                live.CanContribute, _state.LoggedIn, _state.Ready, off, live.StateCode, live.ReasonCode),
             IsTabStop = selected,
         };
         ToolTipService.SetToolTip(submit, _words["submit_trace_tip"]);

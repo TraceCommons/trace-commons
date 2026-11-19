@@ -386,6 +386,9 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// <summary>The daemon's reason label as sent, for the Traces tree's holds (TracesTreeRows.IsHeld).</summary>
     public string? ReasonCode => _entry.ReasonLabel;
 
+    /// <summary>The daemon's queue state as sent, for the Traces tree's Submit gate.</summary>
+    public string? StateCode => _entry.State;
+
     /// <summary>
     /// What this one card actually covers, and -- the half the contract makes
     /// mandatory -- whether any of it was left out to fit. See

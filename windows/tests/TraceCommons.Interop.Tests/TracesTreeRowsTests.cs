@@ -89,6 +89,11 @@ public class TracesTreeRowsTests
         Assert.Equal(folder, TracesTreeRows.Toggled(folder, session));
         Assert.Equal(session, TracesTreeRows.Toggled(session, null));
         Assert.Null(TracesTreeRows.Toggled(session, session));
+        // TracesTreeTests.swift:183-200: a trace opens the inspector, also
+        // when clicked again to clear; a folder or nothing never does.
+        Assert.True(TracesTreeRows.OpensInspector(session));
+        Assert.False(TracesTreeRows.OpensInspector(folder));
+        Assert.False(TracesTreeRows.OpensInspector(null));
         // A folder and a trace with the same id are different rows.
         Assert.Equal(new TreeSelection.Session("p1"), TracesTreeRows.Toggled(new TreeSelection.Session("p1"), folder));
     }
@@ -251,6 +256,32 @@ public class TracesTreeRowsTests
         Assert.Equal(TreeFlag.On, TracesTreeRows.Flag(false, false, TreeAttestationTone.Clear));
         Assert.Null(TracesTreeRows.Flag(false, false, TreeAttestationTone.Plain));
         Assert.Null(TracesTreeRows.Flag(false, false, null));
+    }
+
+    [Fact]
+    public void ATracesSubmitIsOfferedOnlyAsTheMacOffersIt()
+    {
+        // TracesStore.swift:801-806 with DaemonDataModels.swift:333-335, :428-441.
+        Assert.True(TracesTreeRows.MaySubmitTrace(true, true, true, false, "pending", null));
+        Assert.False(TracesTreeRows.MaySubmitTrace(false, true, true, false, "pending", null));
+        Assert.False(TracesTreeRows.MaySubmitTrace(true, false, true, false, "pending", null));
+        Assert.False(TracesTreeRows.MaySubmitTrace(true, null, true, false, "pending", null));
+        Assert.False(TracesTreeRows.MaySubmitTrace(true, true, false, false, "pending", null));
+        Assert.False(TracesTreeRows.MaySubmitTrace(true, true, true, true, "pending", null));
+        foreach (string reason in new[] { "token-distribution-review-required", "witness-risk-review-required",
+            "privacy-filter-transient-exhausted", "second-look-review-required", "witness_timeout", "witness_unreachable",
+            "witness_classifier_unavailable", "witness_redaction_failed", "witness_attestation_unavailable",
+            "witness_collateral_unavailable", "witness-not-trusted", "witness-measurement-not-accepted" })
+        {
+            Assert.False(TracesTreeRows.MaySubmitTrace(true, true, true, false, "pending", reason), reason);
+            // Only a pending trace is held: one approved and retrying is not.
+            Assert.False(TracesTreeRows.HeldForReview("approved", reason));
+        }
+
+        Assert.Equal(12, TracesTreeRows.ReasonsNeedingAPerson.Count);
+        // Manual Scrub check and back-from-Keep are holds for the flag, not for review.
+        Assert.True(TracesTreeRows.MaySubmitTrace(true, true, true, false, "pending", "scrub-check-manual"));
+        Assert.True(TracesTreeRows.MaySubmitTrace(true, true, true, false, "pending", "returned-from-keep"));
     }
 
     // ---- The state the window drives ----------------------------------

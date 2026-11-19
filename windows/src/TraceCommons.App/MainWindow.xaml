@@ -1238,9 +1238,10 @@
                          thing, and this app's own wording ("Sessions appear here
                          after they settle") was the only one of the three that
                          did not also say nothing is sent unless you say so. -->
+                    <!-- Shown by MainWindow.Tree.cs when the tree's read has no folder. -->
                     <StackPanel x:Name="QueueEmptyState"
                                 Grid.Row="2"
-                                Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
+                                Visibility="Collapsed"
                                 VerticalAlignment="Center"
                                 HorizontalAlignment="Center"
                                 Spacing="8"
