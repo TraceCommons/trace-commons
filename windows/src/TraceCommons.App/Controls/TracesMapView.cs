@@ -1763,7 +1763,7 @@ public sealed partial class TracesMapView : UserControl
         ds.FillRoundedRectangle(new Rect(left.X, left.Y - height / 2, width, height), (float)(26 * s), (float)(26 * s), fill);
         if (Words?.ToolsHeading is { Length: > 0 } heading)
         {
-            DrawText(ds, heading.ToUpperInvariant(), new MapPoint(left.X + 30 * s, left.Y - height / 2 - 12 * s), Math.Max(9, 10 * s), Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: true);
+            DrawText(ds, heading.ToUpperInvariant(), new MapPoint(left.X + 30 * s, left.Y - height / 2 - 12 * s), Math.Max(9, 10 * s), Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: true, tracking: MapFonts.ToolsHeadingTracking);
         }
 
         // Back of the pile first, so the front coin is drawn last; a grown coin over all.
@@ -1866,7 +1866,13 @@ public sealed partial class TracesMapView : UserControl
     /// <summary>Text formats by size and weight, made once (checklist O3).</summary>
     private static readonly Dictionary<string, CanvasTextFormat> Formats = new(StringComparer.Ordinal);
 
-    private static void DrawText(CanvasDrawingSession ds, string text, MapPoint at, double size, Color colour, CanvasHorizontalAlignment align, bool bold, bool mono = false, bool icons = false)
+    /// <summary>
+    /// The installed families, read once. DirectWrite takes one family name,
+    /// never a list (<see cref="MapFonts"/>).
+    /// </summary>
+    private static readonly string[] InstalledFamilies = CanvasTextFormat.GetSystemFontFamilies();
+
+    private static void DrawText(CanvasDrawingSession ds, string text, MapPoint at, double size, Color colour, CanvasHorizontalAlignment align, bool bold, bool mono = false, bool icons = false, double tracking = 0)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -1889,7 +1895,7 @@ public sealed partial class TracesMapView : UserControl
 
             format = new CanvasTextFormat
             {
-                FontFamily = icons ? "Segoe Fluent Icons, Segoe MDL2 Assets" : mono ? "Cascadia Mono, Consolas" : "Segoe UI Variable Text, Segoe UI",
+                FontFamily = MapFonts.Family(icons ? MapFontRole.Icons : mono ? MapFontRole.Mono : MapFontRole.Text, InstalledFamilies),
                 FontSize = (float)size,
                 FontWeight = bold ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
                 WordWrapping = CanvasWordWrapping.NoWrap,
@@ -1900,6 +1906,12 @@ public sealed partial class TracesMapView : UserControl
         }
 
         using var layout = new CanvasTextLayout(ds, text, format, 0, 0);
+        if (tracking > 0)
+        {
+            // SwiftUI's tracking: space after every character.
+            layout.SetCharacterSpacing(0, text.Length, 0, (float)tracking, 0);
+        }
+
         double width = layout.LayoutBounds.Width;
         double x = align switch
         {
