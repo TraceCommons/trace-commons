@@ -296,10 +296,15 @@ public class PrivateInferenceDestinationTests
     [Fact]
     public void TheRailItemBindsItsLabelRatherThanSpellingIt()
     {
+        // The rail is the Monitor window's tab strip now (W2): the Private AI
+        // tab's title is the core's tab word, as on the Mac
+        // (MonitorWindowView.swift:39-47), set from code, and the markup
+        // spells no label for it.
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
-        Assert.Contains(
-            "ViewModel.PrivateInferenceDestination", markup, StringComparison.Ordinal);
-        Assert.Contains("OnShowPrivateInference", markup, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"TabInferenceLabel\" Grid.Column=\"0\" VerticalAlignment=\"Center\" />", markup, StringComparison.Ordinal);
+        string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
+        Assert.Contains("string title = MonitorWords.TabTitle(tab);", shell, StringComparison.Ordinal);
+        Assert.Contains("OnShowPrivateInference(this, new RoutedEventArgs());", shell, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -368,10 +373,16 @@ public class PrivateInferenceDestinationTests
         Assert.DoesNotContain("_privateInferenceOn", badge, StringComparison.Ordinal);
         Assert.DoesNotContain("PrivateInferenceOn", badge, StringComparison.Ordinal);
 
-        // And the markup: the rail badge's Visibility is the tone-derived
-        // property, never the switch.
+        // The tab's dot (W2): the reported state through the core's menu
+        // table, never the switch; the window shows it from that property.
+        string dot = Property(viewModel, "public DotStatus PrivateInferenceDot");
+        Assert.Contains("_privateInferenceState", dot, StringComparison.Ordinal);
+        Assert.DoesNotContain("PrivateInferenceOn", dot, StringComparison.Ordinal);
+        Assert.Contains(
+            "ViewModel.PrivateInferenceDot", ShellSource("TraceCommons.App/MainWindow.Shell.cs"), StringComparison.Ordinal);
+
+        // And the markup never binds the switch.
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
-        Assert.Contains("ViewModel.PrivateInferenceIsWorking", markup, StringComparison.Ordinal);
         Assert.DoesNotContain(
             "x:Bind ViewModel.PrivateInferenceOn", markup, StringComparison.Ordinal);
     }
@@ -458,14 +469,16 @@ public class PrivateInferenceDestinationTests
     [Fact]
     public void TheShortcutsAreInAppAndThereIsNoGlobalHotkey()
     {
-        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
+        // The keyboard map is registered from code on the window's own tree
+        // (W2-D5 (a)): Ctrl+1..4 by position, Ctrl+comma, Ctrl+Shift+M.
+        string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
         foreach (string key in new[] { "Number1", "Number2", "Number3", "Number4" })
         {
-            Assert.Contains($"Key=\"{key}\"", markup, StringComparison.Ordinal);
+            Assert.Contains($"VirtualKey.{key}", shell, StringComparison.Ordinal);
         }
 
-        Assert.Contains("KeyboardAccelerator", markup, StringComparison.Ordinal);
-        Assert.Contains("OnTogglePrivateInferenceAccelerator", markup, StringComparison.Ordinal);
+        Assert.Contains("WindowRoot.KeyboardAccelerators.Add(", shell, StringComparison.Ordinal);
+        Assert.Contains("privateAI.Invoked += OnTogglePrivateInferenceAccelerator;", shell, StringComparison.Ordinal);
 
         // Comments are stripped first: the prose beside the accelerators
         // names the API it is deliberately not using.
@@ -534,7 +547,8 @@ public class PrivateInferenceDestinationTests
         // control stays ignorant of the rail it sits in.
         string codeBehind = ShellSource("TraceCommons.App/Controls/SettingsView.xaml.cs");
         Assert.Contains("OpenPrivateInferenceRequested", codeBehind, StringComparison.Ordinal);
-        string window = ShellSource("TraceCommons.App/MainWindow.xaml.cs");
+        // The Settings window is built by the main window's shell (W2-D2 (a)).
+        string window = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
         Assert.Contains(
             "OpenPrivateInferenceRequested +=", window, StringComparison.Ordinal);
     }

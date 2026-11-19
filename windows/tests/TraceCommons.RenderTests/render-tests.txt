@@ -1,0 +1,3 @@
+# Every render test the harness must find, one per line. The harness
+# refuses to run when this list and its [RenderTest] methods differ.
+NearMarkMatchesTheMacsRender

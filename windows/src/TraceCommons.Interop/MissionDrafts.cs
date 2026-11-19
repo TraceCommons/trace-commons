@@ -147,7 +147,12 @@ public sealed class MissionListResponse : MissionResponse { public required List
 public sealed class MissionImportResponse : MissionResponse { public required MissionDraftImport Draft { get; init; } }
 public sealed class MissionShowResponse : MissionResponse { public required StoredMissionDraft Draft { get; init; } }
 public sealed class MissionDeleteResponse : MissionResponse { public required MissionDraftDelete Draft { get; init; } }
-public sealed class MissionDraftSummary { public required string Id { get; init; } public required ulong SourceCount { get; init; } public required string Status { get; init; } }
+/// <summary>
+/// One stored draft. A list item without a name of its own is named by its
+/// ToString in UI Automation, which was this type's full name; the draft's
+/// id, the row's first line, names it instead.
+/// </summary>
+public sealed class MissionDraftSummary { public required string Id { get; init; } public required ulong SourceCount { get; init; } public required string Status { get; init; } public override string ToString() => Id; }
 public sealed class MissionDraftImport { public required string Id { get; init; } public required MissionDraftReview Review { get; init; } public required bool Inserted { get; init; } }
 public sealed class MissionDraftDelete { public required string Id { get; init; } public required bool Deleted { get; init; } }
 public sealed class StoredMissionDraft { public required string Id { get; init; } public required MissionProposal Proposal { get; init; } public required MissionDraftReview Review { get; init; } }

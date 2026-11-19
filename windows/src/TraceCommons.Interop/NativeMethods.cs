@@ -468,6 +468,24 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
 
     /// <summary>
+    /// The menu's one word for a <c>private_inference_state</c> label
+    /// (<c>private_inference_copy::menu_state</c>); the Mac's Private AI dot
+    /// is drawn only where it is not empty. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern IntPtr tc_private_inference_menu_word(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
+    /// The tone of the dot beside that word, a <c>TC_PRIVATE_INFERENCE_TONE_*</c>
+    /// value; the Mac draws every Private AI dot in this tone
+    /// (<c>PrivateInferenceIndicator.dot</c>). Never fails: neutral otherwise.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    internal static extern int tc_private_inference_menu_tone(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? state);
+
+    /// <summary>
     /// Where the listener is answering, already assembled. A port outside
     /// 1..65535 -- including the 0 this shell passes for a JSON null -- gives
     /// the EMPTY STRING rather than a sentence naming a number nobody bound.
@@ -1228,12 +1246,52 @@ internal static class NativeMethods
 
     /// <summary>
     /// The monitor's other screens' words
-    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object.
-    /// This shell reads only <c>shell</c> from it today
+    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object:
+    /// its top-level words and its <c>shell</c> table
     /// (<see cref="MonitorShellCopy"/>). NULL only on a caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_monitor_screens_copy_json();
+
+    /// <summary>
+    /// The app's name (<c>brand::APP_NAME</c>), for the titles of the windows
+    /// Alt-Tab and the taskbar name. Owned; NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_app_name();
+
+    /// <summary>
+    /// The label marking a staging build in the window's toolbar row
+    /// (<c>health_copy::window_label</c>): the core's word on staging, empty
+    /// on production. Owned; NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_channel_window_label();
+
+    /// <summary>
+    /// The shared Insights words (<c>insights::service::ui_copy</c>) as an
+    /// owned JSON object, without opening a store. The Insights tab's title is
+    /// its <c>title</c>, as on the Mac. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_insights_copy_json();
+
+    /// <summary>
+    /// The words the macOS shell used to write in Swift
+    /// (<c>shell_words_copy::shell_words_copy</c>) as an owned JSON object; the
+    /// window reads its <c>queue</c> table's close words for the undo card's
+    /// X. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_shell_words_copy_json();
+
+    /// <summary>
+    /// The glass monitor's Traces words (<c>preview_copy::monitor_traces_copy</c>)
+    /// as an owned JSON object; the window reads its <c>dismiss_action</c>,
+    /// the Mac's <c>coreDismissWord</c>. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_monitor_traces_copy_json();
 
     /// <summary>
     /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)

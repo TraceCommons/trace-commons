@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Settings in a window of its own beside the Monitor window, as on the Mac
+    (TraceCommonsAppMain.swift:156-168, spec W2-D2 (a)): 780 by 640, titled
+    with the core's settings_title. It hosts the same SettingsView the pane
+    did, created once by the main window and kept while the window is open.
+-->
+<Window
+    x:Class="TraceCommons.App.SettingsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Grid x:Name="SettingsRoot" Background="{ThemeResource TcWindowBackgroundBrush}">
+        <ContentPresenter x:Name="SettingsHost" />
+    </Grid>
+</Window>

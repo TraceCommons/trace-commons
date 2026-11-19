@@ -12,6 +12,7 @@ using TraceCommons.App;
 
 using Microsoft.UI.Dispatching;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.ViewModels;
 
@@ -66,6 +67,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// time and a batch approval has no batch recall.
     /// </summary>
     private IReadOnlyList<string> _undoEntryIds = Array.Empty<string>();
+
+    /// <summary>When the approval the undo covers was made: a demand key, so a
+    /// second approval of the same session opens the inspector again.</summary>
+    private DateTimeOffset? _undoApprovedAt;
+
+    /// <summary>The folder whose Submit all is in flight, for inspector demand.</summary>
+    private string? _submittingFolder;
+
+    /// <summary>Whether this window's clocks may run: false while it is hidden
+    /// to the tray or minimised (<see cref="SetClocksRunning"/>).</summary>
+    private bool _clocksRunning = true;
 
     /// <summary>
     /// The toast line behind the current undo bar, from
@@ -409,6 +421,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ? TrayModel.DecisionCountUnavailable
         : string.Empty;
 
+    /// <summary>
+    /// The Traces tab's text equivalent for its badge: the core's
+    /// decisions-owed sentence (MonitorWindowView.swift:604-606).
+    /// </summary>
+    public string TracesTabDescription => MonitorWords.TracesDescription(_decisionsOwed);
+
     /// <summary>Whether there is a badge to draw at all.</summary>
     public bool HasQueueCount => QueueCountText.Length > 0;
 
@@ -425,6 +443,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShieldIsAttention));
         Raise(nameof(QueueCountText));
         Raise(nameof(QueueCountToolTip));
+        Raise(nameof(TracesTabDescription));
         Raise(nameof(HasQueueCount));
     }
 
@@ -447,7 +466,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         PrivateInference,
         Insights,
         MissionDrafts,
-        Settings,
+        Home,
     }
 
     public bool ShowingQueue => _pane == MainPane.Queue;
@@ -480,7 +499,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SetPane(MainPane.MissionDrafts);
     }
 
-    public bool ShowingSettings => _pane == MainPane.Settings;
+    /// <summary>
+    /// Home's overview: the Monitor window's first tab. Settings is its own
+    /// window now, not a pane (spec W2-D2 (a)).
+    /// </summary>
+    public bool ShowingHome => _pane == MainPane.Home;
+
+    public void ShowHome() => SetPane(MainPane.Home);
 
     public void ShowQueue() => SetPane(MainPane.Queue);
 
@@ -488,7 +513,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void ShowPrivateInference() => SetPane(MainPane.PrivateInference);
 
-    public void ShowSettings() => SetPane(MainPane.Settings);
 
     private void SetPane(MainPane pane)
     {
@@ -506,7 +530,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(ShowingQueue));
         Raise(nameof(ShowingHistory));
         Raise(nameof(ShowingPrivateInference));
-        Raise(nameof(ShowingSettings));
+        Raise(nameof(ShowingHome));
         Raise(nameof(ShowingInsights));
         Raise(nameof(ShowingMissionDrafts));
     }
@@ -663,6 +687,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// working badge and from nothing at all, because those are three
     /// different facts.
     /// </summary>
+    /// <summary>
+    /// The Private AI tab's dot: the Mac's four states through the core's
+    /// menu table (<see cref="PrivateAIDot"/>), no dot without a state label.
+    /// </summary>
+    public DotStatus PrivateInferenceDot => PrivateAIDot.Of(_privateInferenceState);
+
+    /// <summary>
+    /// The dot's text equivalent: the core's sentence for the same state
+    /// (MonitorWindowView.swift:859-862); empty where there is no dot.
+    /// </summary>
+    public string PrivateInferenceDotDescription =>
+        string.IsNullOrEmpty(_privateInferenceState.Label) || _privateInferenceCopy is null
+            ? string.Empty
+            : PrivateInferenceSurface.StateLine(_privateInferenceState, _privateInferenceCopy);
+
     public bool PrivateInferenceNeedsAttention =>
         PrivateInferenceSurface.Tone(_privateInferenceState)
             is PrivateInferenceTone.Attention or PrivateInferenceTone.Refused;
@@ -721,7 +760,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 Raise(nameof(ShowingMissionDrafts));
                 if (!missionsShown && _pane == MainPane.MissionDrafts)
                 {
-                    SetPane(MainPane.Queue);
+                    // A mission page falls back to Home's overview
+                    // (MonitorNavigation.swift:17-20).
+                    SetPane(MainPane.Home);
                 }
             }
 
@@ -731,6 +772,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Raise(nameof(PrivateInferenceQuitStops));
             Raise(nameof(PrivateInferenceIsWorking));
             Raise(nameof(PrivateInferenceNeedsAttention));
+            Raise(nameof(PrivateInferenceDot));
+            Raise(nameof(PrivateInferenceDotDescription));
             PrivateInferenceSettingsChanged?.Invoke(settings);
         }
 
@@ -930,6 +973,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </summary>
     internal void ShowNotice(string line) => Notice = line;
 
+    /// <summary>The notice's X: the line goes, nothing else changes.</summary>
+    internal void ClearNotice() => Notice = string.Empty;
+
     /// <summary>
     /// Whether an approval can still be recalled.
     ///
@@ -940,6 +986,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// retiring early would take away a recall that still would.
     /// </summary>
     public bool HasUndo => _undoHold is not null;
+
+    /// <summary>The entries the undo card would recall; its stack id holds them (MonitorNotices.swift:655).</summary>
+    public IReadOnlyList<string> UndoEntryIds => _undoEntryIds;
 
     /// <summary>
     /// The submit toast: what was sent, what scrubbing did, what was flagged,
@@ -983,11 +1032,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
             case PreviewOutcome.Approved when decision.Hold is { } hold
                                               && hold.IsLive(DateTimeOffset.UtcNow):
                 _undoHold = hold;
+                _undoApprovedAt = DateTimeOffset.UtcNow;
                 _undoEntryIds = new[] { entry.EntryId };
                 _undoNoticeLine = hold.Toast.Line;
                 Notice = string.Empty;
                 RaiseUndo();
-                _undoTick.Start();
+                if (_clocksRunning) _undoTick.Start();
                 break;
 
             case PreviewOutcome.Approved:
@@ -1128,11 +1178,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
             .Select(entry => entry.EntryId)
             .ToList();
 
-        DaemonResponse response = await _host
-            .CallAsync(
-                DaemonProtocol.Methods.Approve,
-                SubmitParams.ForProject(projectId, outcome))
-            .ConfigureAwait(true);
+        _submittingFolder = projectId;
+        Raise(nameof(Demand));
+        DaemonResponse response;
+        try
+        {
+            response = await _host
+                .CallAsync(
+                    DaemonProtocol.Methods.Approve,
+                    SubmitParams.ForProject(projectId, outcome))
+                .ConfigureAwait(true);
+        }
+        finally
+        {
+            _submittingFolder = null;
+            Raise(nameof(Demand));
+        }
 
         ApplySubmitOutcome(response, candidateEntryIds);
 
@@ -1238,10 +1299,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
         {
             _undoHold = hold;
+            _undoApprovedAt = DateTimeOffset.UtcNow;
             _undoEntryIds = hold.ApprovedEntryIds(candidateEntryIds);
             _undoNoticeLine = hold.Toast.Line;
             RaiseUndo();
-            _undoTick.Start();
+            if (_clocksRunning) _undoTick.Start();
         }
     }
 
@@ -1382,13 +1444,57 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         _undoTick.Stop();
         _undoHold = null;
+        _undoApprovedAt = null;
         _undoEntryIds = Array.Empty<string>();
         _undoNoticeLine = string.Empty;
         RaiseUndo();
     }
 
+    /// <summary>
+    /// What in this window asks for the inspector now
+    /// (<see cref="TraceCommons.Interop.Shell.InspectorDemand"/>): the
+    /// approval held open for undoing and when it was made, and the folder
+    /// whose Submit all is in flight. Contributed, kept and folder-undo have
+    /// no source in this shell until the Traces tree (W3).
+    /// </summary>
+    public TraceCommons.Interop.Shell.DemandSources Demand => new(
+        ApprovalUndo: _undoHold is null ? null : _undoEntryIds,
+        ApprovedAt: _undoHold is null ? null : _undoApprovedAt,
+        SubmittingFolder: _submittingFolder);
+
+    /// <summary>
+    /// Stops or restarts this window's own clock, the undo countdown, while
+    /// the window is hidden to the tray or minimised. The hold is the
+    /// daemon's deadline, so restarting re-reads it at once rather than
+    /// resuming a count.
+    /// </summary>
+    public void SetClocksRunning(bool running)
+    {
+        if (_clocksRunning == running)
+        {
+            return;
+        }
+
+        _clocksRunning = running;
+        if (!running)
+        {
+            _undoTick.Stop();
+            return;
+        }
+
+        if (_undoHold is not null)
+        {
+            OnUndoTick();
+            if (_undoHold is not null)
+            {
+                _undoTick.Start();
+            }
+        }
+    }
+
     private void RaiseUndo()
     {
+        Raise(nameof(Demand));
         Raise(nameof(HasUndo));
         Raise(nameof(UndoHeadline));
         Raise(nameof(UndoButtonText));
