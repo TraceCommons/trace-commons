@@ -485,6 +485,16 @@ internal static class NativeMethods
     internal static extern IntPtr tc_certificate_detail_copy();
 
     /// <summary>
+    /// The arming offer's words for one project
+    /// (<c>project_copy::arming_offer_copy</c>), as an owned JSON object.
+    /// NULL for a NULL label, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_offer_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string projectLabel,
+        uint count);
+
+    /// <summary>
     /// The notice for one element of <c>status.arming_rewordings</c> (K5),
     /// passed through as the daemon sent it, as an owned JSON object. NULL
     /// for an argument that is not a JSON object, and on a caught panic.

@@ -741,25 +741,80 @@
                                 BorderBrush="{ThemeResource TcHairlineBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource TcCardCornerRadius}">
-                            <StackPanel Spacing="8">
-                                <!-- Evidence first, question second: someone who reads
-                                     only the first line still learns why they are being
-                                     asked. -->
-                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
-                                           Style="{StaticResource TcTitleCardTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <StackPanel Orientation="Horizontal" Spacing="12">
-                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind ViewModel.ArmingOfferDecline}"
-                                            Click="OnDeclineArming" />
-                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind ViewModel.ArmingOfferConfirm}"
-                                            Click="OnAcceptArming" />
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                                <!-- The notice coin (GlassNoticeMark, PopoverNotice.swift:116-159):
+                                     a bolt in the accent, turning to a check in the "on" colour once
+                                     the daemon has armed the project, with a ring spreading from it
+                                     (ArmingOfferMotion.swift). Decorative: hidden from automation,
+                                     as the Mac's is (.accessibilityHidden). Driven from
+                                     MainWindow.Arming.cs, which also sizes it from ArmingOfferMotion. -->
+                                <Grid x:Name="ArmingMark"
+                                      Grid.Column="0"
+                                      VerticalAlignment="Top"
+                                      IsHitTestVisible="False"
+                                      AutomationProperties.AccessibilityView="Raw">
+                                    <Ellipse Fill="{ThemeResource TcSurfaceCardBrush}" />
+                                    <!-- Two inks, crossfaded: the accent bolt, and the "on" check
+                                         (ArmingOfferMotion.tint), so each keeps its theme's brush. -->
+                                    <Ellipse x:Name="ArmingMarkRing"
+                                             Stroke="{ThemeResource TcAccentTextBrush}" />
+                                    <Ellipse x:Name="ArmingMarkRingOn"
+                                             Stroke="{ThemeResource TcStatusOnBrush}"
+                                             Opacity="0" />
+                                    <FontIcon x:Name="ArmingMarkBolt"
+                                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                              Glyph="&#xE945;"
+                                              FontWeight="SemiBold"
+                                              Foreground="{ThemeResource TcAccentTextBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                                    <FontIcon x:Name="ArmingMarkCheck"
+                                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                              Glyph="&#xE73E;"
+                                              FontWeight="SemiBold"
+                                              Foreground="{ThemeResource TcStatusOnBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Opacity="0" />
+                                    <!-- Hidden on its visual by InitArmingMotion, not by an
+                                         Opacity here: with XAML Opacity 0 the pulse never
+                                         showed (box frames, 2026-11-19), while the check and
+                                         ring, whose visuals SetMarkAtRest writes first, did. -->
+                                    <Ellipse x:Name="ArmingPulse"
+                                             Stroke="{ThemeResource TcStatusOnBrush}" />
+                                </Grid>
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <!-- Evidence first, question second: someone who reads
+                                         only the first line still learns why they are being
+                                         asked. Every word is the core's (tc_arming_offer_copy_json). -->
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferBody, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <StackPanel Orientation="Horizontal" Spacing="12">
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind ViewModel.ArmingOfferDecline, Mode=OneWay}"
+                                                IsEnabled="{x:Bind ViewModel.ArmingOfferDeclineEnabled, Mode=OneWay}"
+                                                Click="OnDeclineArming" />
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind ViewModel.ArmingOfferConfirm, Mode=OneWay}"
+                                                IsEnabled="{x:Bind ViewModel.ArmingOfferEnableEnabled, Mode=OneWay}"
+                                                Click="OnAcceptArming" />
+                                    </StackPanel>
+                                    <!-- A refused Enable: the core's project_mode_failed
+                                         (AppModel.swift:4752-4756). Leaves with the offer it was
+                                         about, or on the next confirmed Enable. -->
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferRefusal, Mode=OneWay}"
+                                               Visibility="{x:Bind ViewModel.HasArmingOfferRefusal, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
                                 </StackPanel>
-                            </StackPanel>
+                            </Grid>
                         </Border>
                         <!--
                             Approved sessions held because the privacy witness is busy,

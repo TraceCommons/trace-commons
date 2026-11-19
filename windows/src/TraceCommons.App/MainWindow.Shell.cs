@@ -142,6 +142,7 @@ public sealed partial class MainWindow
         ToolbarCapsule.SizeChanged += (_, _) => UpdateTitleBarRegions();
         AppWindow.Changed += OnAppWindowChanged;
         _clockGate.Changed += OnClocksChanged;
+        InitArmingMotion();
 
         ViewModel.PropertyChanged += OnShellViewModelChanged;
         ViewModel.LegacyOffer.PropertyChanged += (_, _) => RefreshNotices();
@@ -938,6 +939,7 @@ public sealed partial class MainWindow
         string[] ids = shown.Select(card => card.Id).ToArray();
         NoticeKind? front = shown.Count == 0 ? null : shown[^1];
         FrameworkElement? previousCard = _frontCard;
+        string? previousFront = _frontNotice?.Id;
         FrameworkElement? frontCard = front is null ? null : elements[front.Id];
         bool frontChanged = front?.Id != _frontNotice?.Id;
         NoticeChange change = NoticeMotion.Plan(
@@ -961,10 +963,16 @@ public sealed partial class MainWindow
         _frontCard = frontCard;
         if (front is null || frontCard is null)
         {
-            NoticeStackHost.Visibility = Visibility.Collapsed;
+            // W9: an armed offer leaving last fades the stack (MainWindow.Arming.cs).
+            if (!BeginArmingStackExit(previousFront, previousCard))
+            {
+                NoticeStackHost.Visibility = Visibility.Collapsed;
+            }
+
             return;
         }
 
+        EndArmingStackExit();
         frontCard.Visibility = Visibility.Visible;
         Canvas.SetZIndex(frontCard, 1);
         if (frontChanged)
@@ -1072,13 +1080,16 @@ public sealed partial class MainWindow
         card.Visibility = Visibility.Visible;
         card.IsHitTestVisible = false;
         Canvas.SetZIndex(card, 0);
-        Animate(card, "Opacity", NoticeMotion.FadeOut, () =>
+        // An armed offer leaves on its own spring (ArmingOfferMotion.exit,
+        // ArmingOfferMotion.swift:35-38); every other card on the stack's.
+        bool armedExit = card == ArmingOfferCard && ArmingExitPending();
+        Animate(card, "Opacity", armedExit ? ArmingOfferMotion.ExitOpacity : NoticeMotion.FadeOut, () =>
         {
             if (_outgoingCard == card)
             {
                 FinishOutgoing();
             }
-        });
+        }, armedExit ? ArmingOfferMotion.ExitSettling : NoticeMotion.SpringSettling);
     }
 
     /// <summary>Ends the outgoing card's fade: collapsed, whole again for its next turn in front.</summary>
@@ -1138,18 +1149,20 @@ public sealed partial class MainWindow
     /// from it 60 times a second; the compositor draws it at the display's
     /// rate. <paramref name="completed"/> runs when it ends or is stopped.
     /// </summary>
-    private static void Animate(FrameworkElement card, string property, Func<double, double> curve, Action? completed)
+    private static void Animate(
+        FrameworkElement card, string property, Func<double, double> curve, Action? completed,
+        double settling = NoticeMotion.SpringSettling)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
         Compositor compositor = visual.Compositor;
         ScalarKeyFrameAnimation animation = compositor.CreateScalarKeyFrameAnimation();
         CompositionEasingFunction linear = compositor.CreateLinearEasingFunction();
-        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(curve, NoticeMotion.SpringSettling))
+        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(curve, settling))
         {
             animation.InsertKeyFrame((float)fraction, (float)value, linear);
         }
 
-        animation.Duration = TimeSpan.FromSeconds(NoticeMotion.SpringSettling);
+        animation.Duration = TimeSpan.FromSeconds(settling);
         CompositionScopedBatch batch = compositor.CreateScopedBatch(CompositionBatchTypes.Animation);
         visual.StartAnimation(property, animation);
         batch.End();

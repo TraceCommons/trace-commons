@@ -104,7 +104,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 "",
                 null),
             "queue-full" => new HealthCopy(
-                "Near.ai has stopped queuing new traces",
+                Shell.MonitorWords.AppName + " has stopped queuing new traces",
                 "-- 500 are already waiting. Review or clear some to start again.",
                 "Review"),
             // An unrecognised label is still a real condition, and the daemon

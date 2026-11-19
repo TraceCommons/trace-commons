@@ -108,7 +108,7 @@ public sealed class TrayModel
         if (decisionsOwed is null)
         {
             return new TrayModel(TrayIconState.Unhealthy, null,
-                $"Near.ai — {DecisionCountUnavailable}", DecisionCountUnavailable);
+                $"{Shell.MonitorWords.AppName} — {DecisionCountUnavailable}", DecisionCountUnavailable);
         }
         int owed = Math.Max(0, decisionsOwed.Value);
 
@@ -136,7 +136,7 @@ public sealed class TrayModel
             _ => "Watching. Nothing waiting.",
         };
 
-        return new TrayModel(state, owed, Truncate($"Near.ai — {detail}"), detail);
+        return new TrayModel(state, owed, Truncate($"{Shell.MonitorWords.AppName} — {detail}"), detail);
     }
 
     /// <summary>The rail badge: unknown stays distinct from an exact zero.</summary>
@@ -318,7 +318,7 @@ public sealed class TrayProjectLine
 public static class DigestText
 {
     /// <summary>The notification title on every shell.</summary>
-    public const string Title = "Near.ai";
+    public static string Title => Shell.MonitorWords.AppName;
 
     /// <summary>
     /// The second line, which is the whole reassurance: an unread digest
