@@ -97,8 +97,8 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
-    private OnboardingWindow? _onboarding;
-    private OnboardingWindow? _automaticOnboarding;
+    private FirstRunWindow? _onboarding;
+    private FirstRunWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
     private bool _activationReady;
@@ -639,14 +639,14 @@ public sealed partial class MainWindow : Window
         onboarding.Activate();
     }
 
-    private OnboardingWindow OpenOnboarding(OnboardingState state, bool automatic = false)
+    private FirstRunWindow OpenOnboarding(OnboardingState state, bool automatic = false)
     {
         if (_onboarding is not null)
         {
             if (!automatic) _automaticOnboarding = null;
             return _onboarding;
         }
-        var onboarding = new OnboardingWindow(_host, state);
+        var onboarding = new FirstRunWindow(_host, state);
         _onboarding = onboarding;
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
@@ -1065,7 +1065,7 @@ public sealed partial class MainWindow : Window
         var onboarding = OpenOnboarding(OnboardingState.Default());
         if (!alreadyOpen && target == HealthNavigationTarget.Connect)
         {
-            onboarding.ViewModel.GetStarted();
+            onboarding.GetStarted();
         }
 
         onboarding.Activate();
