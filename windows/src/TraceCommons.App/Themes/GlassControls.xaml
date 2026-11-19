@@ -41,6 +41,10 @@
         <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
         <Setter Property="FontSize" Value="{StaticResource TcGlassTypeBodyFontSize}" />
         <Setter Property="ManipulationMode" Value="System,TranslateX" />
+        <!-- The Mac's switch carries no On or Off word beside it; its state
+             is the knob and the track (and the toggle state for UI Automation). -->
+        <Setter Property="OnContent" Value="" />
+        <Setter Property="OffContent" Value="" />
         <Setter Property="UseSystemFocusVisuals" Value="True" />
         <Setter Property="FocusVisualMargin" Value="-4" />
         <Setter Property="Template">
