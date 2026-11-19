@@ -38,7 +38,7 @@ impl Rgb {
         Self(channel(0), channel(2), channel(4))
     }
 
-    fn source(self, cr: &cairo::Context, alpha: f64) {
+    pub(crate) fn source(self, cr: &cairo::Context, alpha: f64) {
         cr.set_source_rgba(self.0, self.1, self.2, alpha);
     }
 }
@@ -1022,7 +1022,7 @@ pub mod coins {
     }
 
     /// One coin turning end over end.
-    fn draw_coin(cr: &cairo::Context, coin: &Coin, at: (f64, f64), turn: f64) {
+    pub(crate) fn draw_coin(cr: &cairo::Context, coin: &Coin, at: (f64, f64), turn: f64) {
         let facing = (turn * 2.0 * std::f64::consts::PI).cos();
         let width = coin.diameter * facing.abs().max(0.2);
         let d = coin.diameter;

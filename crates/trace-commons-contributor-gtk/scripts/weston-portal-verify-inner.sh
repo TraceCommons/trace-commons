@@ -206,6 +206,7 @@ else
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
     ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
+    ui::settings::tests::mounted_the_credit_arrival_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
@@ -224,6 +225,8 @@ else
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_the_ember_glides_to_the_chosen_tab \
+    ui::monitor::shell::tests::mounted_a_tab_lifts_drags_into_place_and_drops \
     ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \

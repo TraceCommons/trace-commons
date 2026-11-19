@@ -127,6 +127,8 @@ pub struct SettingsView {
     /// Home's "Show promotions" (the Mac's General section): off, Home's
     /// campaign card never shows.
     pub promotions_switch: GlassSwitch,
+    /// The credit-arrival switch (`GeneralSection.creditIconAnimationCard`).
+    pub credit_icon_switch: gtk::Switch,
     /// The edge rail's switch (`ui::edge_surfaces`).
     pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
     /// Scrolls Settings to a section, for the edge rail's and the
@@ -725,6 +727,12 @@ impl SettingsView {
         // The Mac's last General card, the credit-arrival animation's
         // switch, goes here.
 
+        // The credit-arrival switch, after promotions as the Mac's General
+        // section has it (`creditIconAnimationCard`): the core's heading,
+        // switch label and caption, verbatim.
+        let (credit_icon_card, credit_icon_switch) = credit_icon_card();
+        sections.body(Section::Startup).append(&credit_icon_card);
+
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all
         // -- and, once opted in, because it is drawn in a different visual
@@ -763,6 +771,7 @@ impl SettingsView {
             autostart_switch,
             map_style_switch,
             promotions_switch,
+            credit_icon_switch,
             edge_rail,
             select_section,
             background_state: RefCell::new(None),
@@ -823,6 +832,41 @@ impl SettingsView {
             token_supported: std::cell::Cell::new(false),
         }
     }
+}
+
+/// Settings' credit-arrival card: the core's heading, the switch and the
+/// line under it (`GeneralSection.creditIconAnimationCard`), on unless the
+/// person turned it off.
+pub(crate) fn credit_icon_card() -> (gtk::Box, gtk::Switch) {
+    let words = &monitor_screens_copy().home_history;
+    let card = style::card(gtk::Orientation::Vertical, space::S);
+    let heading = gtk::Label::builder()
+        .label(words.credit_icon_animation_title)
+        .xalign(0.0)
+        .build();
+    heading.add_css_class("heading");
+    card.append(&heading);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let label = gtk::Label::builder()
+        .label(words.credit_icon_animation_toggle)
+        .xalign(0.0)
+        .hexpand(true)
+        .wrap(true)
+        .build();
+    label.add_css_class("tc-body");
+    let switch = gtk::Switch::builder()
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Center)
+        .active(crate::home_cards::HomePrefs::load().animates_credit_icon)
+        .build();
+    switch.update_property(&[gtk::accessible::Property::Label(
+        words.credit_icon_animation_toggle,
+    )]);
+    row.append(&label);
+    row.append(&switch);
+    card.append(&row);
+    style::append_meta(&card, words.credit_icon_animation_caption);
+    (card, switch)
 }
 
 /// The Traces map's style card, as the Mac's General section draws it
@@ -973,6 +1017,14 @@ pub fn wire(app: &Rc<App>) {
 
     render_autostart(app);
     render_public(app);
+    let arrival = Rc::clone(app);
+    app.settings
+        .credit_icon_switch
+        .connect_state_set(move |_, wanted| {
+            arrival.home.set_animates_credit_icon(wanted);
+            arrival.credit_arrival.set_enabled(wanted);
+            gtk::glib::Propagation::Proceed
+        });
     let home = Rc::clone(app);
     app.settings
         .promotions_switch
@@ -4681,6 +4733,57 @@ mod tests {
                 "{words:?} not in {texts:?}"
             );
         }
+    }
+
+    /// The credit-arrival card is the Mac's `creditIconAnimationCard` in the
+    /// core's words, verbatim (title, switch and its accessible name,
+    /// caption), on before the person turns it off.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_credit_arrival_card_has_the_shared_words() {
+        gtk::init().expect("GTK display");
+        let home = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
+        let (card, switch) = credit_icon_card();
+        assert!(switch.is_active());
+        let mut texts = Vec::new();
+        let mut stack = vec![card.upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                texts.push(label.label().to_string());
+            }
+            let mut child = widget.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                stack.push(c);
+            }
+        }
+        for words in [
+            home.credit_icon_animation_title,
+            home.credit_icon_animation_toggle,
+            home.credit_icon_animation_caption,
+        ] {
+            assert!(
+                texts.iter().any(|t| t == words),
+                "{words:?} not in {texts:?}"
+            );
+        }
+    }
+
+    /// The card's words are the Mac's, ported key for key from the core at
+    /// origin/main (#2197), never new English.
+    #[test]
+    fn the_credit_arrival_words_are_the_macs_keys() {
+        let home = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
+        assert_eq!(home.credit_icon_animation_title, "Credit arrivals");
+        assert_eq!(
+            home.credit_icon_animation_toggle,
+            "Animate Dock and menu bar icons"
+        );
+        assert_eq!(
+            home.credit_icon_animation_caption,
+            "Burst gold coins on the Dock and menu bar icons when credits arrive."
+        );
+        assert!(include_str!("settings.rs").contains("words.credit_icon_animation_toggle"));
     }
 
     /// The Mac has no control over the approval hold, so this window has
