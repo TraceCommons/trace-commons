@@ -527,7 +527,7 @@ public class InsightsSkillsTests
     [Fact]
     public void ASmallOrRelativelyWeakChangeIsNotRanked()
     {
-        // Ranking keeps a usage change of at least 2 uses and 25% (InsightsSkillsHomeRanking.swift:46-48).
+        // Ranking keeps a usage change of at least 2 uses and 25% (InsightsSkillsHomeRanking.swift:50).
         var feed = Feed(Array.Empty<InsightsSkillsHome.Update>(), new[]
         {
             Trend("one-more", 3, 4) with { PeriodEnd = DateTimeOffset.Parse("2026-11-15T00:00:00Z") },
