@@ -502,6 +502,7 @@ fn managed_session_projection(row: &crate::managed::sessions::SessionView) -> se
         (ConnectionKind::NearAi | ConnectionKind::NearAiSignIn, _) => "near_ai",
         (_, ToolId::Claude) => "anthropic",
         (_, ToolId::Codex | ToolId::Opencode) => "openai",
+        (_, ToolId::RedTeam) => "near_ai",
     };
     serde_json::json!({
         "id": row.id, "tool": row.tool, "connection": row.connection,
@@ -1930,6 +1931,8 @@ mod tests {
             keep_saved_model: false,
             resume_of: None,
             background_model: None,
+            sandbox: None,
+            initial_prompt: None,
         };
         let run = |sessions: &mut crate::managed::sessions::SessionRegistry,
                    request: LaunchRequest| {

@@ -323,6 +323,7 @@ fn validate(tool: ToolId, args: &[String]) -> Result<(), ManagedError> {
                     return Err(invalid());
                 }
             }
+            ToolId::RedTeam => return Err(invalid()),
         }
     }
     Ok(())

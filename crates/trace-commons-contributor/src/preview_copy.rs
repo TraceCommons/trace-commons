@@ -347,6 +347,9 @@ pub struct MonitorTreeCopy {
     /// show: the folders, their Submit, and their Automatic switch (owner,
     /// 2026-10-30, Proposal A). DRAFT, NEEDS APPROVAL.
     pub column_folders: &'static str,
+    /// `column_folders` on every computer but a Mac. Approved by the owner
+    /// 2026-11-18.
+    pub column_folders_computer: &'static str,
     pub column_submit: &'static str,
     pub column_automatic: &'static str,
     /// The session row menu's one item, and its confirmation.
@@ -648,6 +651,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             automatic_count: "Every folder sends on its own, except folders set to Ask or Never. \
                 {count} of {total} folders automatic.",
             column_folders: "Folders on this Mac",
+            // Approved by the owner 2026-11-18.
+            column_folders_computer: "Folders on this computer",
             column_submit: "Submit",
             column_automatic: "Auto",
             dismiss_session: "Dismiss trace",
@@ -1495,6 +1500,11 @@ pub struct MonitorHomeHistoryCopy {
     pub promotions_title: &'static str,
     pub promotions_toggle: &'static str,
     pub promotions_caption: &'static str,
+    /// Settings' switch for the Dock and menu-bar icon credit-arrival
+    /// animation (on by default; off disables both icon animations).
+    pub credit_icon_animation_title: &'static str,
+    pub credit_icon_animation_toggle: &'static str,
+    pub credit_icon_animation_caption: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1843,6 +1853,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             promotions_toggle: "Show promotions",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P232).
             promotions_caption: "News from NEAR AI, such as a new model.",
+            credit_icon_animation_title: "Credit arrivals",
+            credit_icon_animation_toggle: "Animate Dock and menu bar icons",
+            credit_icon_animation_caption: "Burst gold coins on the Dock and menu bar icons when credits arrive.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",
@@ -2363,6 +2376,22 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// The Traces tree's folder column title names the Mac; every other
+    /// computer has its own words, approved by the owner 2026-11-18. The
+    /// Mac's own title is unchanged, and the export carries both.
+    #[test]
+    fn the_folder_column_has_a_computer_variant() {
+        let tree = monitor_traces_copy().tree;
+        assert_eq!(tree.column_folders, "Folders on this Mac");
+        assert_eq!(tree.column_folders_computer, "Folders on this computer");
+        assert!(!tree.column_folders_computer.contains("Mac"));
+        let json = serde_json::to_value(monitor_traces_copy()).expect("the words serialize");
+        assert_eq!(
+            json["tree"]["column_folders_computer"],
+            "Folders on this computer"
+        );
     }
 
     /// The map's words that name the Mac have a variant for every other

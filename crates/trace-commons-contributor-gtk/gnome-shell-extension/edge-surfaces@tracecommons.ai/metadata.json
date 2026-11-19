@@ -1,0 +1,6 @@
+{
+  "uuid": "edge-surfaces@tracecommons.ai",
+  "name": "Near AI Gateway",
+  "description": "Point at the screen's right edge to glance at Home, Private AI and traces.",
+  "shell-version": ["46", "47", "48", "49", "50", "51"]
+}

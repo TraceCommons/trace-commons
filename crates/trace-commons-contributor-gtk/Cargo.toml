@@ -95,5 +95,41 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # here, so this adds zero new packages -- only a direct edge.
 zbus = "5"
 
+# KWin's blur behind the glass panes (`ui::glass_backdrop`), Linux only, so
+# macOS test builds are unaffected. Owner-approved 2026-11-18: the set the
+# blur spike (#2162) measured; the dependency write-up is in its plan,
+# docs/superpowers/plans/2026-11-16-linux-blur-spike.md. Each turns FFI into
+# safe calls, so the crate keeps `unsafe_code = "forbid"`:
+# - gdk4-wayland (`wayland_crate`): GTK's wl_display and wl_surface as
+#   wayland-client proxies.
+# - wayland-client: our own registry and event queue on that connection.
+# - wayland-protocols-plasma (`client`): the org_kde_kwin_blur bindings.
+# - gdk4-x11: the X11 display check and the window's XID.
+# - x11rb (no default features: pure Rust, no Xlib): the root window's atom
+#   and _KDE_NET_WM_BLUR_BEHIND_REGION.
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk4-wayland = { version = "0.9", features = ["wayland_crate"] }
+gdk4-x11 = "0.9"
+wayland-client = "0.31"
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", default-features = false }
+# The edge rail and the menu-bar panel as wlr-layer-shell surfaces (KDE
+# Plasma, Hyprland, Sway and other wlroots compositors): `src/edge/layer.rs`.
+# Owner-approved 2026-11-18 ("approve both"). 0.5.0 is the newest release on
+# this crate's gtk4 0.9 / glib 0.20 generation (0.6 and later need gtk4
+# 0.10). MIT, as is the C library it binds (wmww/gtk4-layer-shell), which
+# the Flatpak builds as its own module and a distribution package links at
+# >= 1.0. Linux only: macOS, where this crate's unit tests also run, has no
+# Wayland and no such library. Adds two packages, this and its -sys crate;
+# everything else it needs is already in the lockfile.
+gtk4-layer-shell = { version = "=0.5.0", optional = true }
+
+[features]
+# On for every Linux build. Off only to build on a system without the C
+# library, where the rail then needs the GNOME Shell extension and the
+# panel is a plain window (`edge::capability`).
+default = ["layer-shell"]
+layer-shell = ["dep:gtk4-layer-shell"]
+
 [lints.rust]
 unsafe_code = "forbid"
