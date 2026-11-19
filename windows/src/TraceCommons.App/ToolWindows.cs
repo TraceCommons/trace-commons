@@ -28,9 +28,14 @@ internal static class ToolWindows
         app.SetPresenter(presenter);
         app.IsShownInSwitchers = false;
 
+        // The presenter leaves a 3 px classic frame; with it the rail's 4 px
+        // zone had no client area at all (ToolWindowStyle).
         IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-        long style = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST));
+        long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_STYLE, new IntPtr(Interop.Shell.ToolWindowStyle.Frameless(style)));
+        long exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(Interop.Shell.ToolWindowStyle.Extended(exStyle)));
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         return hwnd;
     }
 
@@ -99,10 +104,14 @@ internal static class ToolWindows
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style | WS_EX_NOACTIVATE));
     }
 
+    private const int GWL_STYLE = -16;
     private const int GWL_EXSTYLE = -20;
-    private const long WS_EX_TOOLWINDOW = 0x00000080;
-    private const long WS_EX_TOPMOST = 0x00000008;
     private const long WS_EX_NOACTIVATE = 0x08000000;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_FRAMECHANGED = 0x0020;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -117,6 +126,10 @@ internal static class ToolWindows
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(POINT point, uint flags);

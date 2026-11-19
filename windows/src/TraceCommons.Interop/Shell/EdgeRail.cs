@@ -246,3 +246,32 @@ public static class TrayFlyoutPlacement
         return (x, y);
     }
 }
+
+/// <summary>
+/// The window styles the flyout and the rail end with (one-pass checklist
+/// M1): a popup with no frame of any kind, a tool window (out of Alt-Tab and
+/// the taskbar), topmost, and never activated by being shown. The presenter
+/// alone leaves a 3 px classic frame, which on the rail's 4 px zone left no
+/// client area to draw in or to hover.
+/// </summary>
+public static class ToolWindowStyle
+{
+    /// <summary>WS_POPUP.</summary>
+    public const long Popup = 0x80000000L;
+
+    /// <summary>WS_CAPTION (WS_BORDER | WS_DLGFRAME) and WS_THICKFRAME.</summary>
+    public const long FrameBits = 0x00C00000L | 0x00040000L;
+
+    /// <summary>WS_SYSMENU, WS_MINIMIZEBOX, WS_MAXIMIZEBOX: they come with a caption and go with it.</summary>
+    private const long CaptionExtras = 0x00080000L | 0x00020000L | 0x00010000L;
+
+    /// <summary>WS_EX_DLGMODALFRAME, WS_EX_WINDOWEDGE, WS_EX_CLIENTEDGE, WS_EX_STATICEDGE.</summary>
+    private const long EdgeBits = 0x00000001L | 0x00000100L | 0x00000200L | 0x00020000L;
+
+    /// <summary>WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST.</summary>
+    private const long ToolBits = 0x08000000L | 0x00000080L | 0x00000008L;
+
+    public static long Frameless(long style) => (style & ~(FrameBits | CaptionExtras)) | Popup;
+
+    public static long Extended(long exStyle) => (exStyle & ~EdgeBits) | ToolBits;
+}

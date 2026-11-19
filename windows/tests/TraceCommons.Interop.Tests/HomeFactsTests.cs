@@ -187,3 +187,46 @@ public class HomeFactsTests
                 FocusReturn.ShouldReturn(true, true, false, false),
             });
 }
+
+/// <summary>
+/// The flyout's and the rail's window styles (W13). On tc-win-az5,
+/// 2026-11-19, the presenter left both with a 3 px classic frame: the rail's
+/// 4 px zone became a 6 px window with no client area, so its XAML never
+/// drew and the pointer never reached it, and the rail could not be opened.
+/// </summary>
+public class ToolWindowStyleTests
+{
+    // An overlapped window as the presenter leaves it: caption, thick frame,
+    // system menu and the minimise and maximise boxes.
+    private const long Overlapped = 0x00CF0000;
+
+    [Fact]
+    public void AToolWindowHasNoFrameAtAll()
+    {
+        long style = ToolWindowStyle.Frameless(Overlapped | 0x10000000 /* WS_VISIBLE */);
+
+        Assert.Equal(0, style & ToolWindowStyle.FrameBits);
+        Assert.Equal(ToolWindowStyle.Popup, style & ToolWindowStyle.Popup);
+
+        // Visibility is the window's own business, not the style's.
+        Assert.Equal(0x10000000, style & 0x10000000);
+    }
+
+    [Fact]
+    public void TheFrameBitsAreCaptionBorderDialogFrameAndThickFrame()
+    {
+        // WS_CAPTION is WS_BORDER | WS_DLGFRAME; WS_THICKFRAME is the sizing frame.
+        Assert.Equal(0x00C00000 | 0x00800000 | 0x00400000 | 0x00040000, ToolWindowStyle.FrameBits);
+    }
+
+    [Fact]
+    public void TheExtendedStyleKeepsItOutOfTheSwitchersAndOnTopWithoutActivating()
+    {
+        long ex = ToolWindowStyle.Extended(0x00000100 /* WS_EX_WINDOWEDGE */ | 0x00000200 /* WS_EX_CLIENTEDGE */ | 0x00000001 /* WS_EX_DLGMODALFRAME */);
+
+        Assert.Equal(0x08000000 | 0x00000080 | 0x00000008, ex & (0x08000000 | 0x00000080 | 0x00000008));
+
+        // No edge of any kind: those draw a frame too.
+        Assert.Equal(0, ex & (0x00000100 | 0x00000200 | 0x00000001 | 0x00020000));
+    }
+}
