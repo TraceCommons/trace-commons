@@ -180,7 +180,8 @@ public static partial class RenderChecks
             }
 
             double period = (double)(rises[^1] - rises[0]) / (rises.Count - 1);
-            int column = rises[1] + 2, thick = 0;
+            // Inside the dash, past a round cap's taper.
+            int column = rises[1] + 8, thick = 0;
             for (int y = 0; y < h; y++)
             {
                 thick += On(column, y) ? 1 : 0;
