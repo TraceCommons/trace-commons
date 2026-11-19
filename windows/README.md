@@ -56,13 +56,29 @@ unknown name is `normalDay` plus one log line, and `coreDown` fails every call.
 Every method without a recording is refused as `sample-unrecorded`. In sample
 mode the app never creates the state directory, starts or attaches a daemon or
 takes the lock, and opens the contribution queue rather than local Insights or
-first run. Release builds compile the client out.
+first run. It also changes nothing else on the machine: it stays out of
+single-instancing (so it never hands itself to a running app), never points
+the `tracecommons` URL scheme at itself, offers no run-at-login switch, and
+never writes witness files (`Program.IsSampleLaunch`). Release builds compile
+the client out.
 
-`scripts/win-capture-samples.ps1` runs on the Windows test box and captures each
-set in light and dark through `win-capture.ps1`, named
+`scripts/win-capture-samples.ps1` runs on the Windows test box. It refuses a
+Release build and refuses to start while any copy of the app is running. It
+captures each set in light and dark through `win-capture.ps1`, which captures
+the app's own window by its handle (never the screen) and logs the box's UTC
+time, the pid and whether the window was in the foreground. Captures are named
 `<set>-<tab>-<panes>-<appearance>.png` so `scripts/parity/gallery.sh` pairs them
 with the Mac's. Until the window has the Mac's tabs, each launch yields
-`<set>-traces-main-<appearance>.png`.
+`<set>-traces-main-<appearance>.png`. Around every launch it reads the URL
+scheme, the Run values, the state directory and the sample temp directories,
+and fails the run if any changed; it also launches one set twice and requires
+two windows.
+
+`tests/TraceCommons.Interop.Tests/NativeBindingTests.cs` checks every
+`DllImport` of the cdylib against `trace_commons.h` (name, return and
+parameter kinds, calling convention) and that the loaded library exports every
+function the header declares. It pins the number of bindings (108); a change
+that binds a new export updates it.
 
 ## Things the ABI requires that are easy to get wrong
 
