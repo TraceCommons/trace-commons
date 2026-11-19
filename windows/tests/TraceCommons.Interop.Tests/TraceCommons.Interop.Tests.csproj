@@ -294,6 +294,16 @@
           Link="parity/win-capture-samples.ps1.txt"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <!--
+    The C ABI header, for NativeBindingTests: every DllImport of the cdylib
+    must name a function it declares, with the same signature. The FFI
+    crate's copy; the macOS copy is kept byte-identical by that crate's tests.
+  -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../../../crates/trace-commons-contributor-ffi/include/trace_commons.h"
+          Link="abi/trace_commons.h.txt"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
   <PropertyGroup>
     <TcFfiLibDir Condition="'$(TC_FFI_LIB_DIR)' != ''">$(TC_FFI_LIB_DIR)</TcFfiLibDir>
