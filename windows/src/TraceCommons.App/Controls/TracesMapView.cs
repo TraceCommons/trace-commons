@@ -65,6 +65,9 @@ public sealed partial class TracesMapView : UserControl
 {
     private readonly Grid _root = new();
     private readonly CanvasControl _canvas = new();
+
+    /// <summary>The still layer under the moving one: the field and the nodes, drawn on change (FlowMapView.swift:91-96).</summary>
+    private readonly CanvasControl _still = new();
     private readonly Canvas _targets = new();
     private readonly Border _card = new();
     private readonly TextBlock _cardTitle = new();
@@ -121,6 +124,10 @@ public sealed partial class TracesMapView : UserControl
         _canvas.CreateResources += (_, _) => DropResources();
         _canvas.IsHitTestVisible = false;
         AutomationProperties.SetAccessibilityView(_canvas, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        _still.Draw += OnDrawStill;
+        _still.CreateResources += (_, _) => DropResources();
+        _still.IsHitTestVisible = false;
+        AutomationProperties.SetAccessibilityView(_still, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
 
         _cardTitle.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
         _cardDetail.TextWrapping = TextWrapping.Wrap;
@@ -165,6 +172,7 @@ public sealed partial class TracesMapView : UserControl
         _spinner.HorizontalAlignment = HorizontalAlignment.Center;
         _spinner.VerticalAlignment = VerticalAlignment.Center;
 
+        _root.Children.Add(_still);
         _root.Children.Add(_canvas);
         _root.Children.Add(_targets);
         _root.Children.Add(_card);
@@ -795,8 +803,17 @@ public sealed partial class TracesMapView : UserControl
         timer.IsRepeating = true;
         timer.Tick += (_, _) =>
         {
-            _player.Tick(Now);
-            Redraw();
+            double now = Now;
+            _player.Tick(now);
+            _canvas.Invalidate();
+            bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
+                || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
+            if (fieldMoves || _fieldMoved)
+            {
+                _still.Invalidate();
+            }
+
+            _fieldMoved = fieldMoves;
             Kick();
         };
         return timer;
@@ -804,7 +821,13 @@ public sealed partial class TracesMapView : UserControl
 
     private void StopTimer() => _timer?.Stop();
 
-    private void Redraw() => _canvas.Invalidate();
+    private bool _fieldMoved;
+
+    private void Redraw()
+    {
+        _still.Invalidate();
+        _canvas.Invalidate();
+    }
 
     // ---- The pointer --------------------------------------------------
 
@@ -879,6 +902,13 @@ public sealed partial class TracesMapView : UserControl
         _markUnit = null;
         _tile = null;
         _logos.Clear();
+        _libraryKey = string.Empty;
+        foreach (CanvasRenderTarget frame in _libraryFrames.Values)
+        {
+            frame.Dispose();
+        }
+
+        _libraryFrames.Clear();
     }
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
@@ -892,7 +922,6 @@ public sealed partial class TracesMapView : UserControl
             return;
         }
 
-        DrawField(ds, sender, size, now, motion);
         if (!_scene.DrawsMap)
         {
             return;
@@ -900,16 +929,6 @@ public sealed partial class TracesMapView : UserControl
 
         MapGeometry fit = Fit;
         DrawArcs(ds, sender, fit, motion ? now : 0, motion);
-        foreach (MapNode node in _scene.Nodes)
-        {
-            DrawNode(ds, sender, node, fit);
-        }
-
-        foreach (MapOverflow overflow in _scene.Overflows)
-        {
-            DrawText(ds, "+" + overflow.Count, fit.Point(overflow.At), 11, Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: false);
-        }
-
         if (_scene.Stack is { } stack)
         {
             if (_scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
@@ -931,6 +950,34 @@ public sealed partial class TracesMapView : UserControl
             }
 
             DrawPile(ds, sender, stack, fit, run, t, now, motion);
+        }
+    }
+
+    /// <summary>The field, the nodes and the overflow counts: redrawn on a change, a pointer move or a shimmer pass.</summary>
+    private void OnDrawStill(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        CanvasDrawingSession ds = args.DrawingSession;
+        var size = new Size(sender.ActualWidth, sender.ActualHeight);
+        if (size.Width <= 0 || size.Height <= 0)
+        {
+            return;
+        }
+
+        DrawField(ds, sender, size, Now, Motion && WindowClocks.Running);
+        if (!_scene.DrawsMap)
+        {
+            return;
+        }
+
+        MapGeometry fit = Fit;
+        foreach (MapNode node in _scene.Nodes)
+        {
+            DrawNode(ds, sender, node, fit);
+        }
+
+        foreach (MapOverflow overflow in _scene.Overflows)
+        {
+            DrawText(ds, "+" + overflow.Count, fit.Point(overflow.At), 11, Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: false);
         }
     }
 
@@ -1304,40 +1351,72 @@ public sealed partial class TracesMapView : UserControl
     }
 
     /// <summary>The station or the orb at the library's place (FlowMapView.swift:236-249).</summary>
+    private readonly Dictionary<int, CanvasRenderTarget> _libraryFrames = new();
+    private string _libraryKey = string.Empty;
+
+    /// <summary>
+    /// The station or the orb at the library's place (FlowMapView.swift:236-249),
+    /// with its glow. Each of its 20-a-second frames is drawn once per size,
+    /// style, theme and lit state and then reused: the turn repeats, and the
+    /// mesh and the glow's blur are the costliest things the map draws.
+    /// </summary>
     private void DrawLibrary(CanvasDrawingSession ds, ICanvasResourceCreator device, MapNode library, MapGeometry fit, double seconds, bool still)
     {
         MapPoint at = fit.Point(library.At);
-        Color brand = Ink("heroCampaignBright");
-        if (_style == TracesMapStyle.Launch)
+        bool launch = _style == TracesMapStyle.Launch;
+        double turn = launch ? LibraryStation.TurnSeconds : LibraryOrb.TurnSeconds;
+        int frames = (int)Math.Round(turn / LibraryStation.FrameInterval);
+        int index = still ? -1 : (int)Math.Floor(((seconds % turn) + turn) % turn / LibraryStation.FrameInterval) % frames;
+        string key = $"{_style}|{library.Active}|{Math.Round(fit.Scale, 3)}|{Dark}|{HighContrast}";
+        if (key != _libraryKey)
         {
-            double w = LibraryStation.FrameWidth * fit.Scale, h = LibraryStation.FrameHeight * fit.Scale;
-            double angle = LibraryStation.Angle(seconds, still);
-            using var station = new CanvasCommandList(device);
-            using (CanvasDrawingSession layer = station.CreateDrawingSession())
+            foreach (CanvasRenderTarget old in _libraryFrames.Values)
             {
-                MapPainter.Station(layer, device, new Vector2((float)(at.X - w / 2), (float)(at.Y - h / 2)), w, h, angle);
+                old.Dispose();
             }
 
-            DrawGlow(ds, station, With(brand, LibraryStation.Glow(library.Active)), LibraryStation.GlowRadius);
-            ds.DrawImage(station);
+            _libraryFrames.Clear();
+            _libraryKey = key;
         }
-        else
+
+        double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
+        double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
+        double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
+        if (!_libraryFrames.TryGetValue(index, out CanvasRenderTarget? frame))
         {
-            double frame = TransferDrawing.OrbFrame * fit.Scale;
-            double r = LibraryOrb.Radius(frame, frame);
-            double angle = LibraryOrb.Angle(seconds, still);
-            using var orb = new CanvasCommandList(device);
-            using (CanvasDrawingSession layer = orb.CreateDrawingSession())
+            double angle = launch
+                ? (still ? LibraryStation.RestAngle : LibraryStation.RestAngle + (index + 0.0) / frames * 2 * Math.PI)
+                : (still ? LibraryOrb.RestAngle : LibraryOrb.RestAngle + (index + 0.0) / frames * 2 * Math.PI);
+            frame = new CanvasRenderTarget(device, (float)(w + 2 * pad), (float)(h + 2 * pad), _canvas.Dpi);
+            using (CanvasDrawingSession f = frame.CreateDrawingSession())
             {
-                MapPainter.Orb(layer, device, new Vector2((float)at.X, (float)at.Y), r, angle, Ink("heroCampaignBright"), Ink("heroCampaignDeep"));
+                f.Clear(Color.FromArgb(0, 0, 0, 0));
+                Color brand = Ink("heroCampaignBright");
+                using var art = new CanvasCommandList(device);
+                using (CanvasDrawingSession layer = art.CreateDrawingSession())
+                {
+                    if (launch)
+                    {
+                        MapPainter.Station(layer, device, new Vector2((float)pad, (float)pad), w, h, angle);
+                    }
+                    else
+                    {
+                        MapPainter.Orb(layer, device, new Vector2((float)(pad + w / 2), (float)(pad + h / 2)), LibraryOrb.Radius(w, h), angle, brand, Ink("heroCampaignDeep"));
+                    }
+                }
+
+                DrawGlow(f, art, With(brand, launch ? LibraryStation.Glow(library.Active) : LibraryOrb.Glow(library.Active)),
+                    launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius);
+                using (f.CreateLayer(launch ? 1 : (float)LibraryOrb.Opacity(library.Active)))
+                {
+                    f.DrawImage(art);
+                }
             }
 
-            DrawGlow(ds, orb, With(brand, LibraryOrb.Glow(library.Active)), LibraryOrb.GlowRadius);
-            using (ds.CreateLayer((float)LibraryOrb.Opacity(library.Active)))
-            {
-                ds.DrawImage(orb);
-            }
+            _libraryFrames[index] = frame;
         }
+
+        ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
     }
 
     /// <summary>A shadow-style glow of <paramref name="radius"/> round an image (SwiftUI's <c>.shadow</c>).</summary>
