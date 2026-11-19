@@ -5720,6 +5720,16 @@ fn the_referral_copy_crosses_the_abi() {
 }
 
 #[test]
+fn the_settings_general_copy_crosses_the_abi() {
+    use trace_commons_contributor::settings_general_copy::settings_general_copy;
+    use trace_commons_contributor_ffi::tc_settings_general_copy_json;
+    let copy = json_owned(tc_settings_general_copy_json());
+    assert_eq!(copy, serde_json::to_value(settings_general_copy()).unwrap());
+    assert_eq!(copy.as_object().unwrap().len(), 5);
+    assert!(copy.as_object().unwrap().values().all(|v| v.is_string()));
+}
+
+#[test]
 fn a_typed_referral_code_is_shown_as_the_daemon_reads_it() {
     use trace_commons_contributor_ffi::tc_referral_code_display;
     for (typed, shown) in [

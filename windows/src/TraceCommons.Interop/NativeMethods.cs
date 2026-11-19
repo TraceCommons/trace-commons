@@ -37,7 +37,7 @@ namespace TraceCommons.Interop;
 ///    and is absolute: owned means returned <c>char*</c>, borrowed means
 ///    <c>const char*</c> and lives until its owning handle is freed.
 /// </summary>
-internal static class NativeMethods
+internal static partial class NativeMethods
 {
     // Windows activation argument parsing; these are OS imports, not C ABI exports.
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

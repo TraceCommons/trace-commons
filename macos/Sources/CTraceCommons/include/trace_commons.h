@@ -2789,6 +2789,13 @@ char*       tc_payout_link_copy_json(void);
  */
 char*       tc_referral_copy_json(void);
 
+/* The Settings window's General words the Mac spells in Swift
+ * (settings_general_copy::settings_general_copy): general, appearance,
+ * light, dark and system, every one but appearance a draft for owner review.
+ * NULL only on a caught panic.
+ */
+char*       tc_settings_general_copy_json(void);
+
 /* A typed referral code as it is shown, TC-XXXXX-XXXXX, read the way the
  * daemon reads it before sending one. NULL for text that is not a code, a
  * NULL or non-UTF-8 typed, and on a caught panic.
