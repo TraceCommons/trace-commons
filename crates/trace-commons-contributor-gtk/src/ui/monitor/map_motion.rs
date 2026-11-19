@@ -355,12 +355,9 @@ impl PileMotion {
 /// 0.36, dampingFraction: 0.86), value: front.id)`).
 pub const STACK: Ease = Ease::Spring(0.36, 0.86);
 
-/// The opacity of the card a new front card covers, or the one a close
-/// takes away, `t` seconds after it left the front: it fades where it is
-/// on the stack's spring (`GlassPopoverStack.arrival`, removal `.opacity`).
-pub fn covered_opacity(t: f64) -> f64 {
-    (1.0 - STACK.progress(t)).clamp(0.0, 1.0)
-}
+// The card a new front card covers fades where it is on this spring
+// (`GlassPopoverStack.arrival`, removal `.opacity`): the notice stack's
+// own fade, `popover_stack::covered`, which the map's cards share.
 
 // --- The graph and the panes ------------------------------------------------------
 
@@ -919,6 +916,9 @@ mod tests {
             "return .asymmetric(insertion: fresh ? slide : .opacity, removal: .opacity)",
         );
         assert_eq!(STACK, Ease::Spring(0.36, 0.86));
+        // The map's cards fade by the notice stack's fade, on this spring.
+        assert_eq!(crate::ui::popover_stack::SPRING, (0.36, 0.86));
+        let covered_opacity = crate::ui::popover_stack::covered;
         assert_eq!(covered_opacity(0.0), 1.0);
         close(covered_opacity(0.1), 1.0 - 0.567_732_99, 1e-6, "at 0.1 s");
         assert_eq!(covered_opacity(0.3), 0.0, "past the overshoot");

@@ -3004,14 +3004,24 @@ pub struct Transfers {
     drawn: RefCell<Vec<String>>,
     /// The front card's id and its holder, kept while it stays in front.
     front: RefCell<Option<(String, crate::ui::popover_stack::Slide)>>,
-    /// The fade of the card the front one covered or replaced.
-    covering: crate::ui::glass_motion::Driver,
+    /// The plates peeking out above the front card: one for the stack's
+    /// life, so a change in the count moves them on the stack's spring.
+    plates: crate::ui::popover_stack::Plates,
+    /// Where the front card sits, under the plates.
+    place: gtk::Box,
 }
 
 impl Transfers {
     fn new(canvas: &MapCanvas) -> Rc<Self> {
         let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
         cards.set_visible(false);
+        // The plates sit flush on the card, whatever the column's gap.
+        let plates = crate::ui::popover_stack::Plates::hung_from_foot("tc-map-transfer-plate");
+        let place = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stack.append(&plates);
+        stack.append(&place);
+        cards.append(&stack);
         Rc::new(Self {
             player: RefCell::new(Player::default()),
             feed: RefCell::new(Feed::default()),
@@ -3021,7 +3031,8 @@ impl Transfers {
             shown: Cell::new(false),
             drawn: RefCell::new(Vec::new()),
             front: RefCell::new(None),
-            covering: crate::ui::glass_motion::Driver::default(),
+            plates,
+            place,
         })
     }
 
@@ -3105,19 +3116,23 @@ impl Transfers {
         // close revealed it, and was not when it has just arrived.
         let before = self.drawn.replace(ids);
         // The card in front until now: kept as it is while it stays in
-        // front, fading where it is once covered or closed.
-        self.covering.finish();
+        // front, fading where it is beneath the new one once covered.
         let old = self.front.take();
-        while let Some(child) = self.cards.first_child() {
-            self.cards.remove(&child);
+        let kept: Option<gtk::Widget> = old
+            .as_ref()
+            .filter(|(id, _)| visible.first().is_some_and(|card| card.id == *id))
+            .map(|(_, slide)| slide.clone().upcast());
+        let mut child = self.place.first_child();
+        while let Some(card) = child {
+            child = card.next_sibling();
+            if Some(&card) != kept.as_ref() {
+                self.place.remove(&card);
+            }
         }
         let scene = self.canvas.scene();
         if let Some(transfer) = visible.first() {
-            let (slide, covered) = match old {
-                Some((id, slide)) if id == transfer.id => {
-                    slide.unparent();
-                    (slide, None)
-                }
+            let slide = match old {
+                Some((id, slide)) if id == transfer.id => slide,
                 old => {
                     let from_map = scene
                         .nodes
@@ -3134,59 +3149,44 @@ impl Transfers {
                     });
                     let slide = crate::ui::popover_stack::Slide::new(&card);
                     if crate::ui::glass_motion::animations_enabled() {
-                        slide.arrive(!before.contains(&transfer.id), true);
+                        // The card it covers fades where it is beneath it,
+                        // on the stack's spring, as drawn last; it takes no
+                        // pointer or focus, being only a picture.
+                        let beneath = old.and_then(|(_, slide)| slide.last_drawn());
+                        slide.arrive_over(!before.contains(&transfer.id), true, beneath);
                     }
-                    (slide, old.map(|(_, slide)| slide))
+                    slide
                 }
             };
-            let plates = crate::ui::popover_stack::Plates::hung_from_foot("tc-map-transfer-plate");
-            plates.set_behind(visible.len().saturating_sub(1).min(2));
-            // The front card over the one it covers, both at the stack's
-            // foot (`GlassPopoverStack`'s ZStack, anchor bottom).
-            let front = gtk::Grid::new();
-            if let Some(covered) = covered
-                && crate::ui::glass_motion::animations_enabled()
-            {
-                covered.settle();
-                covered.unparent();
-                covered.set_can_target(false);
-                covered.set_can_focus(false);
-                covered.set_valign(gtk::Align::End);
-                front.attach(&covered, 0, 0, 1, 1);
-                let fading = covered.clone();
-                let gone = covered.clone();
-                self.covering.start(
-                    &front,
-                    map_motion::STACK.length(),
-                    0.0,
-                    move |t| fading.set_opacity(map_motion::covered_opacity(t)),
-                    move || gone.unparent(),
-                );
-            }
+            // At the stack's foot (`GlassPopoverStack`'s ZStack, anchor
+            // bottom).
             slide.set_valign(gtk::Align::End);
-            front.attach(&slide, 0, 0, 1, 1);
-            // The plates sit flush on the card, whatever the column's gap.
-            let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            stack.append(&plates);
-            stack.append(&front);
-            self.cards.append(&stack);
+            if slide.parent().is_none() {
+                self.place.append(&slide);
+            }
             self.front.replace(Some((transfer.id.clone(), slide)));
         }
         // The stack itself comes and goes at once, as on the Mac, where
         // the cards change in no animation (`MapTransferPlayer`) and its
         // `.transition(.opacity)` has none to run in.
-        self.cards.set_visible(!visible.is_empty());
+        // The plates move only while the stack stays shown: set while it
+        // is hidden, they are in place at once.
+        if visible.is_empty() {
+            self.cards.set_visible(false);
+            self.plates.set_behind(0);
+        } else {
+            self.plates
+                .set_behind(visible.len().saturating_sub(1).min(2));
+            self.cards.set_visible(true);
+        }
     }
 
-    /// The cards in the stack's front place now: the front card last, and
-    /// under it the one it covered while that fades.
+    /// The cards in the stack's front place now: only the front card, the
+    /// one it covered fading as a picture inside it
+    /// (`popover_stack::Slide::covered_opacity`).
     pub fn front_cards(&self) -> Vec<gtk::Widget> {
         let mut cards = Vec::new();
-        let front = self
-            .cards
-            .first_child()
-            .and_then(|stack| stack.last_child());
-        let mut child = front.and_then(|grid| grid.first_child());
+        let mut child = self.place.first_child();
         while let Some(card) = child {
             child = card.next_sibling();
             cards.push(card);
@@ -5407,13 +5407,16 @@ mod tests {
         window.close();
     }
 
-    /// A new card covers the front one, which fades where it is on the
-    /// stack's spring and then goes, never taking the pointer or focus; a
-    /// card staying in front is not drawn anew; under reduced motion the
-    /// covered card is gone at once (`GlassPopoverStack`).
+    /// A new card covers the front one, which fades where it is beneath
+    /// it on the stack's spring, as a picture that takes no pointer or
+    /// focus; the plates above are one widget for the stack's life and
+    /// move on the same spring when the count changes; a card staying in
+    /// front is not drawn anew; under reduced motion the covered card is
+    /// gone at once (`GlassPopoverStack`).
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_a_covered_transfer_card_fades_under_the_new_one() {
+        use crate::ui::popover_stack::Slide;
         gtk::init().expect("GTK display");
         let settings = gtk::Settings::default().expect("settings");
         let previous = settings.is_gtk_enable_animations();
@@ -5443,19 +5446,30 @@ mod tests {
         assert_eq!(map.card_ids(), ["a"]);
         let first = map.transfers.front_cards();
         assert_eq!(first.len(), 1);
+        let plates = map.transfers.plates.clone();
+        assert_eq!(plates.behind(), 0);
         map.observe_transfers(&listed[2..], None, None, Some("b"));
         assert_eq!(map.card_ids(), ["b", "a"]);
         let cards = map.transfers.front_cards();
-        assert_eq!(cards.len(), 2, "the covered card stays while it fades");
-        assert_eq!(cards[0], first[0], "under the new one");
-        assert!(!cards[0].can_target() && !cards[0].can_focus());
-        let covered = cards[0].clone();
+        assert_eq!(cards.len(), 1, "the covered card is drawn by the new one");
+        assert_ne!(cards[0], first[0]);
+        assert!(
+            first[0].parent().is_none(),
+            "the covered card's widget is gone"
+        );
+        assert_eq!(map.transfers.plates, plates, "the plates were made anew");
+        assert_eq!(plates.behind(), 1);
+        assert!(
+            plates.moving(),
+            "the plates did not move to their new count"
+        );
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
         let seen = Rc::new(Cell::new(false));
         {
             let seen = seen.clone();
-            let covered = covered.clone();
+            let front = front.clone();
             settle_within(400, move || {
-                let o = covered.opacity();
+                let o = front.covered_opacity();
                 if o > 0.05 && o < 0.95 {
                     seen.set(true);
                 }
@@ -5464,19 +5478,25 @@ mod tests {
         }
         assert!(seen.get(), "the covered card never faded part-way");
         {
-            let transfers = map.transfers.clone();
-            settle_within(1500, move || transfers.front_cards().len() == 1);
+            let front = front.clone();
+            settle_within(1500, move || front.covered_opacity() == 0.0);
         }
-        assert_eq!(map.transfers.front_cards().len(), 1, "then it goes");
+        assert_eq!(front.covered_opacity(), 0.0, "then it goes");
         // The front card stays itself while a card behind changes.
-        let front = map.transfers.front_cards()[0].clone();
         map.set_cards_shown(true);
-        assert_eq!(map.transfers.front_cards()[0], front);
+        assert_eq!(
+            map.transfers.front_cards()[0],
+            front.clone().upcast::<gtk::Widget>()
+        );
         // Reduced motion: a covered card is gone at once.
         settings.set_gtk_enable_animations(false);
         map.observe_transfers(&[], None, None, Some("c"));
         assert_eq!(map.card_ids()[0], "c");
-        assert_eq!(map.transfers.front_cards().len(), 1);
+        let cards = map.transfers.front_cards();
+        assert_eq!(cards.len(), 1);
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
+        assert_eq!(front.covered_opacity(), 0.0);
+        assert!(!map.transfers.plates.moving());
         settings.set_gtk_enable_animations(previous);
         window.close();
     }
