@@ -391,6 +391,13 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// why only this screen prints it.
     /// </remarks>
     public string ProbabilitySummary => _summary?.ProbabilitySummary ?? string.Empty;
+
+    /// <summary>
+    /// Whether the header has a probability line to draw. An empty line took
+    /// a row of its own and pushed "Would send"'s figure below its
+    /// neighbours' (box, 2026-11-19).
+    /// </summary>
+    public bool HasProbabilitySummary => ProbabilitySummary.Length > 0;
     public string WouldSendText =>
         _summary is null ? "—" : QueueEntryViewModel.FormatBytes(_summary.WouldSendBytes);
 
@@ -1075,6 +1082,87 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         Decided?.Invoke(PreviewDecision.Approved(hold));
     }
 
+    // ---- W22: the turn index (PreviewSheet.swift:495-536, :603-615) ----
+
+    /// <summary>The index's rows, once loaded for the body on screen.</summary>
+    public ObservableCollection<PreviewTurnRow> TurnRows { get; } = new();
+
+    private bool _loadingTurns;
+    private bool _turnsLoaded;
+    private bool _turnsFailed;
+
+    /// <summary>
+    /// Load turns is offered until the index is loaded, and is disabled
+    /// while it loads. Every byte of the body is reachable in this sheet's
+    /// transcript, so the Mac's read-it-fully condition always holds here.
+    /// </summary>
+    public bool OffersLoadTurns => !_turnsLoaded && _preview is not null;
+
+    /// <summary>Whether Load turns can be pressed now.</summary>
+    public bool CanLoadTurns => OffersLoadTurns && !_loadingTurns;
+
+    /// <summary>The core's request-failed line after a failed load; empty otherwise.</summary>
+    public string TurnsFailedLine => _turnsFailed ? PreviewTurnFormat.TracesWord("request_failed") : string.Empty;
+
+    /// <summary>Whether a failed load's line is shown.</summary>
+    public bool HasTurnsFailed => _turnsFailed;
+
+    /// <summary>Whether the index has rows to draw under its eyebrow.</summary>
+    public bool HasTurnRows => TurnRows.Count > 0;
+
+    /// <summary>The core's Load turns word (<c>look_inside.load_turn_index</c>).</summary>
+    public string LoadTurnsWord => PreviewTurnFormat.Word("load_turn_index");
+
+    /// <summary>The core's eyebrow over the index (<c>look_inside.turn_index_eyebrow</c>).</summary>
+    public string TurnIndexEyebrow => PreviewTurnFormat.Word("turn_index_eyebrow");
+
+    /// <summary>
+    /// Reads the core's turn index for the body on screen, anchored to that
+    /// body's digest: an index for any other body is not drawn.
+    /// </summary>
+    public async Task LoadTurnsAsync()
+    {
+        if (!CanLoadTurns)
+        {
+            return;
+        }
+
+        string body = Transcript;
+        string digest = PreviewTurns.DigestOf(body);
+        _loadingTurns = true;
+        _turnsFailed = false;
+        RaiseTurns();
+        string? json = await _host.PreviewTurnsAsync(Entry.EntryId, digest).ConfigureAwait(true);
+        _loadingTurns = false;
+        PreviewTurns? turns = PreviewTurns.Parse(json);
+        if (turns is not null && turns.Indexes(digest) && body == Transcript)
+        {
+            _turnsLoaded = true;
+            TurnRows.Clear();
+            foreach (PreviewTurn turn in turns.Turns)
+            {
+                TurnRows.Add(new PreviewTurnRow(
+                    PreviewTurnFormat.Title(turn),
+                    PreviewTurnFormat.Detail(turn, PreviewTurnFormat.Word)));
+            }
+        }
+        else
+        {
+            _turnsFailed = true;
+        }
+
+        RaiseTurns();
+    }
+
+    private void RaiseTurns()
+    {
+        Raise(nameof(OffersLoadTurns));
+        Raise(nameof(CanLoadTurns));
+        Raise(nameof(TurnsFailedLine));
+        Raise(nameof(HasTurnsFailed));
+        Raise(nameof(HasTurnRows));
+    }
+
     /// <summary>
     /// Frees the preview.
     ///
@@ -1139,17 +1227,20 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     {
         RemovedCategories.Clear();
         StillPresentCategories.Clear();
-        (IReadOnlyList<RedactionSummaryRow> removed,
-         IReadOnlyList<RedactionSummaryRow> stillPresent) =
-            RedactionSummary.Rows(summary.Redactions, summary.RedactionsDistinct);
-        foreach (RedactionSummaryRow row in removed)
+        // The core's two lists (tc_redaction_summary_json). An unreadable
+        // answer leaves both empty: the panel then says nothing, rather than
+        // claim that nothing matched (RedactionSummary.swift:72-80).
+        if (RedactionSummary.Rows(summary.Redactions, summary.RedactionsDistinct) is var (removed, stillPresent))
         {
-            RemovedCategories.Add(row);
-        }
+            foreach (RedactionSummaryRow row in removed)
+            {
+                RemovedCategories.Add(row);
+            }
 
-        foreach (RedactionSummaryRow row in stillPresent)
-        {
-            StillPresentCategories.Add(row);
+            foreach (RedactionSummaryRow row in stillPresent)
+            {
+                StillPresentCategories.Add(row);
+            }
         }
 
         // The core's title for each scope (the disclosure bundle's
@@ -1162,6 +1253,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
         Raise(nameof(WouldSendText));
         Raise(nameof(ProbabilitySummary));
+        Raise(nameof(HasProbabilitySummary));
         Raise(nameof(RawSessionText));
         Raise(nameof(ScrubbingFoundText));
         Raise(nameof(NothingMatched));
@@ -1254,4 +1346,21 @@ public sealed class PermissionRow
     }
 
     public string Title { get; }
+}
+
+/// <summary>
+/// One row of the turn index: the turn's heading and its detail line
+/// (<c>LookInside.turnTitle</c>, <c>turnDetail</c>), read as one element.
+/// </summary>
+public sealed class PreviewTurnRow
+{
+    public PreviewTurnRow(string title, string detail)
+    {
+        Title = title;
+        Detail = detail;
+    }
+
+    public string Title { get; }
+
+    public string Detail { get; }
 }

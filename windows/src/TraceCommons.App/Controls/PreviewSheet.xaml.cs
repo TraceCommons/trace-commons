@@ -45,8 +45,28 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         ViewModel = new PreviewSheetViewModel(host, entry, liveEntry);
         ViewModel.Decided += OnDecided;
 
+        // W22-D1 (a): Ctrl+F finds, as Cmd-F does on the Mac
+        // (PreviewSheet.swift:228): the Search tab, with the caret in its box.
+        var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
+        find.Invoked += OnFindInvoked;
+        KeyboardAccelerators.Add(find);
+        KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
+
         Loaded += OnFirstLoaded;
     }
+
+    /// <summary>Ctrl+F: the Search tab, focused, wherever the sheet was.</summary>
+    private void OnFindInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        ViewModel.SelectTab(PreviewTab.Search);
+        SearchBox.Focus(FocusState.Keyboard);
+        SearchBox.SelectAll();
+    }
+
+    /// <summary>Load turns (W22): the core's index over the body on screen.</summary>
+    private async void OnLoadTurns(object sender, RoutedEventArgs e) =>
+        await ViewModel.LoadTurnsAsync();
 
     /// <summary>
     /// Effective pixels of horizontal padding inside the transcript card,
