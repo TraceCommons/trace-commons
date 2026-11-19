@@ -92,6 +92,57 @@ public sealed partial class HistoryView : UserControl
         }
     }
 
+    /// <summary>
+    /// A record was opened: the shell shows its detail in the inspector
+    /// (W21; the Mac's History row opens <c>HistoryDetailInspector</c>).
+    /// </summary>
+    public event Action<HistoryRecordViewModel>? RecordOpened;
+
+    /// <summary>A press on a row, but never one that began on a button inside it.</summary>
+    private void OnRecordTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject source && InsideButton(source, sender as DependencyObject))
+        {
+            return;
+        }
+
+        if (RecordOf(sender) is HistoryRecordViewModel record)
+        {
+            e.Handled = true;
+            RecordOpened?.Invoke(record);
+        }
+    }
+
+    /// <summary>Enter or Space on a focused row opens it, as a press does.</summary>
+    private void OnRecordKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key is not (Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
+            || !ReferenceEquals(e.OriginalSource, sender))
+        {
+            return;
+        }
+
+        if (RecordOf(sender) is HistoryRecordViewModel record)
+        {
+            e.Handled = true;
+            RecordOpened?.Invoke(record);
+        }
+    }
+
+    private static bool InsideButton(DependencyObject source, DependencyObject? row)
+    {
+        for (DependencyObject? node = source; node is not null && !ReferenceEquals(node, row);
+             node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node))
+        {
+            if (node is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Back to the folder list.</summary>
     private void OnCloseHistoryFolder(object sender, RoutedEventArgs e) =>
         ViewModel.CloseFolder();

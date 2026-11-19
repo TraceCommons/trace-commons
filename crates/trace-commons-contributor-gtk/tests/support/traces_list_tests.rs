@@ -308,7 +308,7 @@ fn mounted_the_folder_list_is_the_macs() {
     seen.clear();
     let switch = with_class(&with_class(&page, "tc-tree-row")[0], "tc-tree-switch").remove(0);
     switch
-        .downcast_ref::<gtk::Switch>()
+        .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
         .unwrap()
         .set_active(true);
     settle(&context);
@@ -323,7 +323,10 @@ fn mounted_the_folder_list_is_the_macs() {
     );
     let switch = with_class(&with_class(&page, "tc-tree-row")[0], "tc-tree-switch").remove(0);
     assert!(
-        !switch.downcast_ref::<gtk::Switch>().unwrap().is_active(),
+        !switch
+            .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+            .unwrap()
+            .is_active(),
         "the switch shows the daemon's mode"
     );
 
@@ -545,8 +548,8 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             let switch = with_class(&row, "tc-tree-switch").remove(0);
             let on = switch
                 .clone()
-                .downcast::<gtk::Switch>()
-                .expect("a switch")
+                .downcast::<crate::ui::glass_switch::GlassSwitch>()
+                .expect("a glass switch")
                 .is_active();
             assert_eq!(on, mode == "auto_upload", "{name}: the switch's state");
             let knob = slider(&switch);

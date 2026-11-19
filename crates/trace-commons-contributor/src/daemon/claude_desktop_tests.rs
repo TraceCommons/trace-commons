@@ -1384,3 +1384,18 @@ async fn late_capability_probe_has_a_live_gateway_positive_control() {
     stop(&shared, true).await;
     server.abort();
 }
+
+/// The Private AI tab's setup notice reads these from the status copy; the
+/// shell draws no notice without them.
+#[test]
+fn the_status_copy_carries_the_setup_prompt_words() {
+    let copy = copy();
+    for key in ["prompt_title", "prompt_line", "prompt_dismiss"] {
+        assert!(
+            copy[key]
+                .as_str()
+                .is_some_and(|word| !word.trim().is_empty()),
+            "{key}"
+        );
+    }
+}

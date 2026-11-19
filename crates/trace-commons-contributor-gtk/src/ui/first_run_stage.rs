@@ -1151,6 +1151,248 @@ pub fn tween(from: Frame, to: Frame, t: f64) -> Frame {
     }
 }
 
+// ---- Motion the stage's widgets and paint share -----------------------
+
+/// The first run's motion that is not a step graphic's own drawing: how
+/// often the stage draws, the beam's fade, the ring tightening, the Uses
+/// satellites popping, the Tools rows rising, the Private AI count, the
+/// Traces estimate rising, the thread coming in, the steps crossfading and
+/// Customize's title and graphic giving way. Each is the Mac's own curve,
+/// duration and delay, as a function of the seconds since its change.
+pub mod motion {
+    use super::{Sharing, Step};
+
+    /// How often the stage draws, in seconds between frames (0 is every
+    /// frame the display gives): the Mac's `GlassAnimationTimeline` for
+    /// each step. Welcome has no interval (display rate); Tools draws at
+    /// display rate while it scans and at 30 a second after; Uses and
+    /// Traces at 60; the backdrop, the N, Private AI and Join at 30.
+    /// `in_flight` is a SwiftUI animation under way (an actor moving
+    /// between steps, the thread filling, a beam fading, the ring
+    /// tightening, a satellite popping), which SwiftUI runs at display
+    /// rate whatever the timeline's interval.
+    pub fn frame_interval(step: Step, scanning: bool, in_flight: bool) -> f64 {
+        match step {
+            _ if in_flight => 0.0,
+            Step::Welcome => 0.0,
+            Step::Tools if scanning => 0.0,
+            Step::Uses | Step::Traces => 1.0 / 60.0,
+            _ => 1.0 / 30.0,
+        }
+    }
+
+    /// Whether a frame `since` seconds after the last one drawn is due at
+    /// `interval`: within a tenth of the interval, so a display whose
+    /// frames land a little early does not drop every other one.
+    pub fn frame_due(since: f64, interval: f64) -> bool {
+        since >= interval * 0.9
+    }
+
+    /// The beam's fade as its tile is watched or not (`GlassMotion.timed(
+    /// duration: 0.5)` keyed on `isWatched`): from `from` to `to` along the
+    /// token curve, `since` seconds after the change.
+    pub const BEAM_FADE: f64 = 0.5;
+    pub fn beam_opacity(from: f64, to: f64, since: f64, reduce_motion: bool) -> f64 {
+        if reduce_motion {
+            return to;
+        }
+        from + (to - from) * super::super::glass_motion::curve(since / BEAM_FADE)
+    }
+
+    /// The dashed ring's radius as a share of its loose 130: 118/130 once
+    /// the scan is over, reached along the spatial spring (`scaleEffect`
+    /// keyed on `tight`), `since` seconds after the scan ended (negative
+    /// while it runs).
+    pub fn ring_scale(since: f64, reduce_motion: bool) -> f64 {
+        let tight = super::ring::TIGHT_RADIUS / super::ring::LOOSE_RADIUS;
+        if since < 0.0 {
+            return 1.0;
+        }
+        if reduce_motion {
+            return tight;
+        }
+        1.0 + (tight - 1.0) * super::spatial(since)
+    }
+
+    /// The expressive spring a satellite pops in and out on
+    /// (`GlassMotion.expressive(duration: 0.46)`).
+    pub const SATELLITE_DURATION: f64 = 0.46;
+    pub const EXPRESSIVE_BOUNCE: f64 = 0.32;
+    /// How long the expressive spring is drawn before it is settled.
+    pub const EXPRESSIVE_SETTLE: f64 = 1.0;
+
+    /// Satellite `place` (0 to 4) on the Uses ring, `elapsed` seconds into
+    /// the `path` flow: its scale, which is also its opacity up to 1. It
+    /// springs in when its orb arrives and out when the ring clears.
+    pub fn satellite(path: Sharing, elapsed: f64, place: usize, reduce_motion: bool) -> f64 {
+        use super::uses::{period, satellites};
+        let shown = place < satellites(path, elapsed);
+        if reduce_motion {
+            return if shown { 1.0 } else { 0.0 };
+        }
+        let pop = |since: f64| super::spring(since, SATELLITE_DURATION, EXPRESSIVE_BOUNCE);
+        let Some((cycle, first)) = cycle(path, elapsed) else {
+            return 0.0;
+        };
+        // This cycle's arrival for the place, and its clear.
+        let filled_at = first + period(path) * (5 * cycle + place) as f64;
+        let cleared_at = |cycle: usize| first + period(path) * (5 * cycle + 4) as f64 + 1.3;
+        if shown {
+            pop(elapsed - filled_at)
+        } else if elapsed >= cleared_at(cycle) {
+            1.0 - pop(elapsed - cleared_at(cycle))
+        } else if cycle > 0 {
+            1.0 - pop(elapsed - cleared_at(cycle - 1))
+        } else {
+            0.0
+        }
+    }
+
+    /// Which round of five the flow is in `elapsed` seconds in, and when
+    /// the first orb arrived; None before it.
+    fn cycle(path: Sharing, elapsed: f64) -> Option<(usize, f64)> {
+        use super::uses::{arrival, delay, period};
+        let first = delay(path) + period(path) * arrival(path);
+        (elapsed >= first).then(|| (((elapsed - first) / period(path)) as usize / 5, first))
+    }
+
+    /// Whether a satellite is springing `elapsed` seconds into the flow.
+    pub fn satellites_moving(path: Sharing, elapsed: f64) -> bool {
+        use super::uses::period;
+        let Some((_, first)) = cycle(path, elapsed) else {
+            return false;
+        };
+        let since = elapsed - first;
+        let into = since.rem_euclid(period(path));
+        let index = (since / period(path)) as usize;
+        into < EXPRESSIVE_SETTLE
+            || (index % 5 == 4 && (1.3..1.3 + EXPRESSIVE_SETTLE).contains(&into))
+    }
+
+    /// The Tools list's rows rising once the scan is over (`RowRise`): row
+    /// `index` (the add row is `rows.count`) `since` seconds after: its
+    /// drawn offset and opacity.
+    pub const ROW_RISE: f64 = 0.6;
+    pub const ROW_STAGGER: f64 = 0.08;
+    pub const ROW_LIFT: f64 = 18.0;
+    pub fn row_rise(index: usize, since: f64, reduce_motion: bool) -> (f64, f64) {
+        if reduce_motion {
+            return (0.0, 1.0);
+        }
+        let t = since - ROW_STAGGER * (index + 1) as f64;
+        let p = super::spring(t, ROW_RISE, super::SPATIAL_BOUNCE);
+        (ROW_LIFT * (1.0 - p), p.clamp(0.0, 1.0))
+    }
+    /// The whole card's fade in (`GlassMotion.timed(duration: 0.3)` on
+    /// `shown`).
+    pub const CARD_FADE: f64 = 0.3;
+    pub fn card_fade(since: f64, reduce_motion: bool) -> f64 {
+        if reduce_motion {
+            return 1.0;
+        }
+        super::super::glass_motion::curve(since / CARD_FADE)
+    }
+    /// When every one of `rows` rows (and the add row) has risen.
+    pub fn rows_risen_by(rows: usize) -> f64 {
+        ROW_STAGGER * (rows + 1) as f64 + super::spring_settle(ROW_RISE)
+    }
+
+    /// Private AI's figure counting up to `count`, one tool at a time from
+    /// 0.9 s, 0.24 s apart (`PrivateAIScreenLayout.counted`).
+    pub fn private_counted(count: usize, elapsed: f64, reduce_motion: bool) -> usize {
+        if reduce_motion {
+            return count;
+        }
+        if elapsed < 0.9 {
+            return 0;
+        }
+        count.min(1 + ((elapsed - 0.9) / 0.24) as usize)
+    }
+
+    /// Traces' estimate rising once the count is done (spatial spring at
+    /// 0.64 s from 8 points low): its offset and opacity, `since` seconds
+    /// after the count finished.
+    pub const ESTIMATE_RISE: f64 = 0.64;
+    pub const ESTIMATE_LIFT: f64 = 8.0;
+    pub fn estimate_rise(since: f64, reduce_motion: bool) -> (f64, f64) {
+        if reduce_motion {
+            return (0.0, 1.0);
+        }
+        let p = super::spring(since, ESTIMATE_RISE, super::SPATIAL_BOUNCE);
+        (ESTIMATE_LIFT * (1.0 - p), p.clamp(0.0, 1.0))
+    }
+
+    /// The step thread coming in, or going, with Welcome (`.transition(
+    /// .opacity.combined(with: .offset(y: -10)))` on the spatial spring):
+    /// `shown` its target, `since` seconds after the change: its drawn
+    /// offset and opacity.
+    pub const THREAD_LIFT: f64 = -10.0;
+    pub fn thread_shown(shown: bool, since: f64, reduce_motion: bool) -> (f64, f64) {
+        let p = if reduce_motion {
+            1.0
+        } else {
+            super::spatial(since)
+        };
+        let p = if shown { p } else { 1.0 - p };
+        (THREAD_LIFT * (1.0 - p), p.clamp(0.0, 1.0))
+    }
+
+    /// The thread's current title lighting (`GlassMotion.timed(duration:
+    /// 0.3)?.delay(0.42)`).
+    /// `style.css` carries them; the test reads both.
+    #[cfg(test)]
+    pub const TITLE_GLOW: f64 = 0.3;
+    #[cfg(test)]
+    pub const TITLE_GLOW_DELAY: f64 = 0.42;
+
+    /// Two steps crossfading (`.transition(.opacity)` under the spatial
+    /// spring): the incoming step's opacity `since` seconds after the
+    /// change; the outgoing one is drawn at one minus it.
+    pub fn crossfade(since: f64, reduce_motion: bool) -> f64 {
+        if reduce_motion {
+            return 1.0;
+        }
+        super::spatial(since).clamp(0.0, 1.0)
+    }
+
+    /// The small switch (`FirstRunSwitch`, 30 by 18, a 14-point knob inset
+    /// 2): toggled with `GlassMotion.timed(duration: 0.2)`, the knob
+    /// sliding and the colours crossing on the token curve. How far on it
+    /// reads (0 off, 1 on), `since` seconds after it last changed (None:
+    /// never, at rest).
+    pub const SWITCH: f64 = 0.2;
+    pub const SWITCH_SIZE: (f64, f64) = (30.0, 18.0);
+    pub const SWITCH_KNOB: f64 = 14.0;
+    pub const SWITCH_DISABLED: f64 = 0.45;
+    pub fn switch_on(on: bool, since: Option<f64>, reduce_motion: bool) -> f64 {
+        let p = match since {
+            Some(since) if !reduce_motion => super::super::glass_motion::curve(since / SWITCH),
+            _ => 1.0,
+        };
+        if on { p } else { 1.0 - p }
+    }
+    /// Whether the switch is still sliding.
+    pub fn switch_moving(since: Option<f64>, reduce_motion: bool) -> bool {
+        !reduce_motion && since.is_some_and(|s| s < SWITCH)
+    }
+
+    /// Customize opening: the title and the graphic fading out on the open
+    /// spring (`.transition(.opacity)` under `spatial(duration: 0.76)`).
+    pub fn customize_fade_out(since: f64, reduce_motion: bool) -> f64 {
+        if reduce_motion || since >= super::spring_settle(super::customize::DURATION) {
+            return 0.0;
+        }
+        1.0 - super::spring(since, super::customize::DURATION, super::SPATIAL_BOUNCE)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// How long a spatial-bounce (0.04) spring of `duration` is drawn before it
+/// is settled: SwiftUI's `settlingDuration` for it, rounded up.
+pub fn spring_settle(duration: f64) -> f64 {
+    duration * SPATIAL_SETTLE / SPATIAL_DURATION
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1165,6 +1407,407 @@ mod tests {
             let (a, b) = ($a, $b);
             assert!(close(a, b), "{a} != {b}");
         }};
+    }
+
+    /// The small switch slides over 0.2 s on the token curve, 30 by 18 with
+    /// a 14-point knob, as the Mac's `FirstRunSwitch`.
+    #[test]
+    fn the_small_switch_slides_as_the_macs() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/FirstRunStage.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains("withAnimation(GlassMotion.timed(reduceMotion, duration: 0.2)) { configuration.isOn.toggle() }"));
+        assert!(
+            swift.contains(".frame(width: 14, height: 14)\n                        .padding(2)")
+        );
+        assert!(swift.contains(".frame(width: 30, height: 18)"));
+        assert_eq!(motion::SWITCH_SIZE, (30.0, 18.0));
+        assert_eq!(motion::SWITCH_KNOB, 14.0);
+        for (t, c) in [(0.02, 0.396692276), (0.1, 0.946079254), (0.16, 0.994687080)] {
+            assert!((motion::switch_on(true, Some(t), false) - c).abs() < 1e-5);
+            assert!((motion::switch_on(false, Some(t), false) - (1.0 - c)).abs() < 1e-5);
+        }
+        assert_eq!(motion::switch_on(true, None, false), 1.0);
+        assert_eq!(motion::switch_on(true, Some(0.0), true), 1.0);
+        assert!(motion::switch_moving(Some(0.1), false));
+        assert!(!motion::switch_moving(Some(0.25), false));
+        assert!(!motion::switch_moving(Some(0.1), true));
+    }
+
+    /// The first run's CSS transitions carry the Mac's own numbers: the
+    /// thread title's 0.3 s after 0.42 s, the segmented pill's 0.15 s
+    /// (`fast`), Join's card border and the repo chevron's 0.22 s
+    /// (`standard`), each on the token curve; read from the Swift and the
+    /// generated tokens, so a wrong port fails here.
+    #[test]
+    fn the_first_runs_css_motion_is_the_macs() {
+        let css = include_str!("style.css");
+        let read = |f: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../macos/Sources/{f}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        let stage_swift = read("TraceCommonsApp/Views/FirstRun/FirstRunStage.swift");
+        let tools_swift = read("TraceCommonsApp/Views/FirstRun/ToolsScreen.swift");
+        let join_swift = read("TraceCommonsApp/Views/FirstRun/JoinScreen.swift");
+        let tokens = read("TCDesign/Generated/GlassTokens.swift");
+        assert!(stage_swift.contains(".animation(GlassMotion.timed(reduceMotion, duration: 0.3)?.delay(0.42), value: current)"));
+        assert!(stage_swift.contains(
+            ".animation(GlassMotion.timed(reduceMotion, duration: 0.15), value: chosen)"
+        ));
+        assert!(tools_swift.contains(".rotationEffect(.degrees(isOpen ? 90 : 0))\n                        .animation(GlassMotion.standard(reduceMotion), value: isOpen)"));
+        assert!(
+            join_swift.contains(".animation(GlassMotion.standard(reduceMotion), value: chosen)")
+        );
+        assert!(
+            tokens.contains("public static let fast: Double = 0.15"),
+            "fast"
+        );
+        assert!(
+            tokens.contains("public static let standard: Double = 0.22"),
+            "standard"
+        );
+        let ms = |s: f64| format!("{}ms", (s * 1000.0).round() as i64);
+        let curve = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+        let title = format!(
+            "{} {curve} {}",
+            ms(motion::TITLE_GLOW),
+            ms(motion::TITLE_GLOW_DELAY)
+        );
+        assert_eq!(title, format!("300ms {curve} 420ms"));
+        // The rule a selector's block holds.
+        let rule = |selector: &str| {
+            // The first-run motion block comes last.
+            let at = css
+                .rfind(&format!("{selector} {{"))
+                .unwrap_or_else(|| panic!("{selector}"));
+            let end = css[at..].find('}').unwrap() + at;
+            css[at..end].to_owned()
+        };
+        let thread = rule(".tc-thread-title");
+        for property in ["color", "text-shadow"] {
+            assert!(
+                thread.contains(&format!("{property} {title}")),
+                "{property}: {thread}"
+            );
+        }
+        let pill = rule("checkbutton.tc-first-run-segment");
+        assert!(
+            pill.contains(&format!("background-color 150ms {curve}")),
+            "{pill}"
+        );
+        let join = rule(".tc-card.tc-join-card");
+        assert!(
+            join.contains(&format!("box-shadow 220ms {curve}")),
+            "{join}"
+        );
+        // The repo chevron's 0.22 s turn is the shared disclosure's
+        // (`glass_motion::disclosure`, pinned in `motion_css`), not a rule
+        // of the first run's own.
+        assert!(!css.contains("tc-first-run-disclosure"));
+        assert!(include_str!("first_run.rs").contains("super::glass_motion::disclosure(&more);"));
+        // The token curve the CSS names is the generated one.
+        assert_eq!(
+            super::super::style::brand_tokens::first_run::EASE,
+            [0.2, 0.8, 0.2, 1.0]
+        );
+    }
+
+    /// Every interval the Mac's first-run timelines draw at, read from the
+    /// Swift, and the stage's interval for each step.
+    #[test]
+    fn the_stage_draws_each_step_at_the_macs_rate() {
+        let dir = "../../macos/Sources/TraceCommonsApp/Views/FirstRun/";
+        let read = |f: &str| {
+            std::fs::read_to_string(format!("{}/{dir}{f}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+        };
+        assert!(
+            read("WelcomeScreen.swift").contains("GlassAnimationTimeline(paused: reduceMotion)")
+        );
+        assert!(read("ToolsScreen.swift").contains(
+            "GlassAnimationTimeline(minimumInterval: scanStart == nil ? 1.0 / 30 : nil, paused: reduceMotion)"
+        ));
+        for f in ["UsesScreen.swift", "TracesScreen.swift"] {
+            assert!(
+                read(f).contains(
+                    "GlassAnimationTimeline(minimumInterval: 1.0 / 60, paused: reduceMotion)"
+                ),
+                "{f}"
+            );
+        }
+        for f in [
+            "PrivateAIScreen.swift",
+            "JoinScreen.swift",
+            "FirstRunStage.swift",
+        ] {
+            assert!(
+                read(f).contains(
+                    "GlassAnimationTimeline(minimumInterval: 1.0 / 30, paused: reduceMotion)"
+                ),
+                "{f}"
+            );
+        }
+        use motion::frame_interval as at;
+        assert_eq!(at(Step::Welcome, false, false), 0.0);
+        assert_eq!(at(Step::Tools, true, false), 0.0);
+        assert_eq!(at(Step::Tools, false, false), 1.0 / 30.0);
+        assert_eq!(at(Step::Uses, false, false), 1.0 / 60.0);
+        assert_eq!(at(Step::Traces, false, false), 1.0 / 60.0);
+        for step in [Step::PrivateAi, Step::Join, Step::Terms] {
+            assert_eq!(at(step, false, false), 1.0 / 30.0, "{step:?}");
+        }
+        for step in [Step::Tools, Step::Uses, Step::PrivateAi, Step::Join] {
+            assert_eq!(at(step, false, true), 0.0, "{step:?} in flight");
+        }
+        // 60 Hz frames land every 16.7 ms: at a 30 a second cap every
+        // other one draws, at 60 every one, a little early or not.
+        assert!(!motion::frame_due(0.0167, 1.0 / 30.0));
+        assert!(motion::frame_due(0.0333, 1.0 / 30.0));
+        assert!(motion::frame_due(0.0160, 1.0 / 60.0));
+        assert!(!motion::frame_due(0.0083, 1.0 / 60.0));
+    }
+
+    /// The beam fades over 0.5 s on the token curve (the Swift probe's
+    /// `UnitCurve` values), from wherever it was.
+    #[test]
+    fn the_beam_fades_on_the_token_curve() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains(".animation(GlassMotion.timed(reduceMotion, duration: 0.5), value: ToolsScreenLayout.isWatched(row, in: state))"));
+        assert_eq!(motion::BEAM_FADE, 0.5);
+        for (t, curve) in [
+            (0.05, 0.396692276),
+            (0.15, 0.827630997),
+            (0.25, 0.946079254),
+            (0.4, 0.994687080),
+        ] {
+            // SwiftUI's `UnitCurve` solves the Bezier to about 1e-6, as
+            // `glass_motion`'s own test allows.
+            let near5 = |a: f64, b: f64| assert!((a - b).abs() < 1e-5, "{a} != {b}");
+            near5(motion::beam_opacity(0.0, 1.0, t, false), curve);
+            near5(motion::beam_opacity(1.0, 0.0, t, false), 1.0 - curve);
+            near5(motion::beam_opacity(0.4, 1.0, t, false), 0.4 + 0.6 * curve);
+        }
+        assert!(motion::beam_opacity(0.0, 1.0, 0.0, false).abs() < 1e-9);
+        assert_eq!(motion::beam_opacity(0.0, 1.0, 0.0, true), 1.0);
+        assert!((motion::beam_opacity(0.0, 1.0, 0.6, false) - 1.0).abs() < 1e-9);
+    }
+
+    /// The dashed ring tightens from 130 to 118 on the spatial spring
+    /// (0.9 s, bounce 0.04; Swift probe values) once the scan is over.
+    #[test]
+    fn the_dashed_ring_tightens_on_the_spatial_spring() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains(".scaleEffect(tight ? ToolsRingLayout.tightRadius / ToolsRingLayout.looseRadius : 1)\n            .animation(GlassMotion.spatial(reduceMotion), value: tight)"));
+        let tight = 118.0 / 130.0;
+        assert_eq!(motion::ring_scale(-0.5, false), 1.0);
+        for (t, p) in [
+            (0.1, 0.157440324),
+            (0.2, 0.416044334),
+            (0.5, 0.880779918),
+            (0.8, 0.983876831),
+        ] {
+            near!(motion::ring_scale(t, false), 1.0 + (tight - 1.0) * p);
+        }
+        near!(motion::ring_scale(0.1, true), tight);
+        near!(motion::ring_scale(2.0, false), tight);
+    }
+
+    /// Each satellite springs in on the expressive spring (0.46 s, bounce
+    /// 0.32; Swift probe values) as its orb arrives, and out together 1.3 s
+    /// after the fifth.
+    #[test]
+    fn satellites_pop_on_the_expressive_spring() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/UsesScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains(".scaleEffect(shown ? 1 : 0)\n            .opacity(shown ? 1 : 0)\n            .animation(GlassMotion.expressive(reduceMotion, duration: 0.46), value: filled)"));
+        let probe = [
+            (0.05, 0.168822492),
+            (0.1, 0.478497745),
+            (0.2, 0.933952998),
+            (0.3, 1.053248768),
+            (0.5, 1.005737063),
+        ];
+        for path in [Sharing::Ask, Sharing::Automatic] {
+            let first = uses::delay(path) + uses::period(path) * uses::arrival(path);
+            for place in 0..5 {
+                let arrives = first + uses::period(path) * place as f64;
+                assert_eq!(motion::satellite(path, arrives - 0.01, place, false), 0.0);
+                for (t, want) in probe {
+                    near!(motion::satellite(path, arrives + t, place, false), want);
+                }
+                // The second time round, after the clear, the same.
+                let again = arrives + 5.0 * uses::period(path);
+                near!(
+                    motion::satellite(path, again + 0.1, place, false),
+                    0.478497745
+                );
+                assert_eq!(motion::satellite(path, arrives + 0.01, place, true), 1.0);
+            }
+            let clears = first + 4.0 * uses::period(path) + 1.3;
+            for place in 0..5 {
+                for (t, want) in probe {
+                    near!(
+                        motion::satellite(path, clears + t, place, false),
+                        1.0 - want
+                    );
+                }
+            }
+            assert!(motion::satellites_moving(path, first + 0.2));
+            assert!(motion::satellites_moving(path, clears + 0.2));
+            assert!(!motion::satellites_moving(path, first + 1.5));
+        }
+    }
+
+    /// The Tools rows rise one after another on the spatial spring at 0.6 s
+    /// (Swift probe values), 0.08 s apart from the first, 18 points low,
+    /// and the card fades in over 0.3 s on the token curve.
+    #[test]
+    fn the_tools_rows_rise_as_the_macs() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains(".offset(y: shown ? 0 : 18)\n            .animation(GlassMotion.spatial(reduceMotion, duration: 0.6)?.delay(0.08 * Double(index + 1)), value: shown)"));
+        assert!(
+            swift.contains(
+                ".animation(GlassMotion.timed(reduceMotion, duration: 0.3), value: shown)"
+            )
+        );
+        for index in [0usize, 1, 4] {
+            let delay = 0.08 * (index + 1) as f64;
+            assert_eq!(motion::row_rise(index, delay - 0.01, false), (18.0, 0.0));
+            for (t, p) in [
+                (0.05, 0.098587691),
+                (0.1, 0.287061283),
+                (0.2, 0.634402070),
+                (0.3, 0.839319030),
+                (0.5, 0.976941085),
+            ] {
+                let (offset, opacity) = motion::row_rise(index, delay + t, false);
+                near!(offset, 18.0 * (1.0 - p));
+                near!(opacity, p);
+            }
+            assert_eq!(motion::row_rise(index, 0.0, true), (0.0, 1.0));
+        }
+        for (t, c) in [
+            (0.03, 0.396692276),
+            (0.09, 0.827630997),
+            (0.15, 0.946079254),
+        ] {
+            let got = motion::card_fade(t, false);
+            assert!((got - c).abs() < 1e-5, "{got} != {c}");
+        }
+        assert_eq!(motion::card_fade(0.0, true), 1.0);
+    }
+
+    /// Private AI's figure: none before 0.9 s, then one more every 0.24 s.
+    #[test]
+    fn private_ai_counts_up_as_the_macs() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/PrivateAIScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains("guard elapsed >= 0.9 else { return 0 }\n        return min(count, 1 + Int((elapsed - 0.9) / 0.24))"));
+        assert_eq!(motion::private_counted(3, 0.89, false), 0);
+        assert_eq!(motion::private_counted(3, 0.9, false), 1);
+        assert_eq!(motion::private_counted(3, 1.13, false), 1);
+        assert_eq!(motion::private_counted(3, 1.15, false), 2);
+        assert_eq!(motion::private_counted(3, 1.39, false), 3);
+        assert_eq!(motion::private_counted(3, 9.0, false), 3);
+        assert_eq!(motion::private_counted(3, 0.0, true), 3);
+    }
+
+    /// Traces' estimate rises 8 points on the spatial spring at 0.64 s
+    /// (Swift probe values) once the count is done.
+    #[test]
+    fn the_traces_estimate_rises_as_the_macs() {
+        let swift = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/TracesScreen.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(swift.contains(".offset(y: done ? 0 : 8)\n            .animation(GlassMotion.spatial(reduceMotion, duration: 0.64), value: done)"));
+        assert_eq!(motion::estimate_rise(-0.1, false), (8.0, 0.0));
+        for (t, p) in [
+            (0.05, 0.088423026),
+            (0.1, 0.262329303),
+            (0.2, 0.598536450),
+            (0.5, 0.968039403),
+        ] {
+            let (offset, opacity) = motion::estimate_rise(t, false);
+            near!(offset, 8.0 * (1.0 - p));
+            near!(opacity, p);
+        }
+        assert_eq!(motion::estimate_rise(-1.0, true), (0.0, 1.0));
+    }
+
+    /// The thread comes in from 10 points above, faded, on the spatial
+    /// spring (Swift probe values), and goes the same way; the steps
+    /// crossfade on it; Customize's title and graphic fade out on the open
+    /// spring (0.76 s).
+    #[test]
+    fn the_thread_steps_and_customize_fade_on_the_macs_springs() {
+        let coordinator = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/OnboardingCoordinatorView.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(coordinator.contains(".transition(.opacity.combined(with: .offset(y: -10)))"));
+        assert!(
+            coordinator.contains(
+                ".animation(GlassMotion.spatial(reduceMotion), value: runner.state.step)"
+            )
+        );
+        let spatial = [
+            (0.1, 0.157440324),
+            (0.2, 0.416044334),
+            (0.5, 0.880779918),
+            (0.8, 0.983876831),
+        ];
+        for (t, p) in spatial {
+            let (offset, opacity) = motion::thread_shown(true, t, false);
+            near!(offset, -10.0 * (1.0 - p));
+            near!(opacity, p);
+            let (offset, opacity) = motion::thread_shown(false, t, false);
+            near!(offset, -10.0 * p);
+            near!(opacity, 1.0 - p);
+            near!(motion::crossfade(t, false), p);
+        }
+        assert_eq!(motion::thread_shown(true, 0.0, true), (0.0, 1.0));
+        assert_eq!(motion::thread_shown(false, 0.0, true), (-10.0, 0.0));
+        assert_eq!(motion::crossfade(0.0, true), 1.0);
+        // Overshoot never draws past opaque.
+        assert!((0..300).all(|i| motion::crossfade(f64::from(i) / 100.0, false) <= 1.0));
+        let frame = std::fs::read_to_string(format!(
+            "{}/../../macos/Sources/TraceCommonsApp/Views/FirstRun/FirstRunFrame.swift",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        assert!(frame.contains(
+            ".animation(GlassMotion.spatial(reduceMotion, duration: 0.76), value: open)"
+        ));
+        for (t, p) in [(0.1, 0.204190556), (0.3, 0.726084709), (0.8, 0.994727183)] {
+            near!(motion::customize_fade_out(t, false), 1.0 - p);
+        }
+        assert_eq!(motion::customize_fade_out(0.0, true), 0.0);
+        assert_eq!(motion::customize_fade_out(0.0, false), 1.0);
     }
 
     #[test]

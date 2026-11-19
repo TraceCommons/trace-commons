@@ -17,6 +17,11 @@
 //!   `guide_step_start_title` and `guide_step_use_title` are new, and
 //!   `guide_step_use` lost its "Work as usual." to its title. Those four
 //!   are DRAFT, NEEDS APPROVAL.
+//! - `red_team_setup_title`, `red_team_setup_line`, `red_team_setup_action`,
+//!   `red_team_setup_dismiss`, `red_team_settings_line`,
+//!   `red_team_installed` and `red_team_not_installed` -- the Private AI
+//!   tab's dismissable Red Team setup card and Settings' Red Team row
+//!   (owner request 2026-11-19). DRAFT, NEEDS APPROVAL.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
@@ -368,6 +373,13 @@ pub fn copy() -> serde_json::Value {
             "red_team_packages": "Package registries",
             "red_team_unavailable": "Red Team sessions aren't available in this build.",
             "red_team_needs_near_ai": "Red Team sessions require a NEAR AI account.",
+            "red_team_setup_title": "Set up Red Team sessions",
+            "red_team_setup_line": "Run OpenCode in a NEAR AI sandbox that sees only the files and hosts you allow.",
+            "red_team_setup_action": "Set up",
+            "red_team_setup_dismiss": "Not now",
+            "red_team_settings_line": "Sandboxed OpenCode sessions on NEAR AI.",
+            "red_team_installed": "Installed",
+            "red_team_not_installed": "Not installed",
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
             "guide_body": "Pay for the AI you already use with credit from your traces.",
@@ -739,6 +751,30 @@ mod tests {
         assert_eq!(copy["refresh"], "Refresh");
         for removed in ["opencode_export_scope", "not_installed", "check_again"] {
             assert!(copy.get(removed).is_none(), "{removed} should be gone");
+        }
+    }
+}
+
+#[cfg(test)]
+mod red_team_setup_copy_tests {
+    /// The Private AI tab's Red Team setup card and Settings' Red Team row
+    /// read these (owner request 2026-11-19; DRAFT, NEEDS APPROVAL).
+    #[test]
+    fn the_red_team_setup_words_are_present() {
+        let copy = super::copy();
+        for key in [
+            "red_team_setup_title",
+            "red_team_setup_line",
+            "red_team_setup_action",
+            "red_team_setup_dismiss",
+            "red_team_settings_line",
+            "red_team_installed",
+            "red_team_not_installed",
+        ] {
+            assert!(
+                copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),
+                "{key}"
+            );
         }
     }
 }

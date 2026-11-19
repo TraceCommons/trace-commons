@@ -11,10 +11,20 @@
 //! a tile the new step does not show fades out, and one it newly shows
 //! fades in.
 //!
-//! It animates at most 30 times a second, as the Mac's timelines do, and
-//! only while mapped: the tick is added on map and removed on unmap. With
-//! GTK's animations off (`gtk-enable-animations`), as under the Mac's Reduce
-//! Motion, it draws each step's final frame and moves nothing.
+//! It draws at each step's own rate, as the Mac's timelines do
+//! ([`stage::motion::frame_interval`]: Welcome and the Tools scan at the
+//! display's rate, Uses and Traces at 60 a second, the rest at 30, and at
+//! the display's rate while an actor, the thread, a beam, the ring or a
+//! satellite is springing), and only while mapped: the tick is added on
+//! map and removed on unmap. With GTK's animations off
+//! (`gtk-enable-animations`), as under the Mac's Reduce Motion, it draws
+//! each step's final frame and moves nothing, and it follows that setting
+//! as it changes.
+//!
+//! The same tick moves the few widgets whose motion hangs on the stage's
+//! clock: the Tools rows rising after the scan, the Private AI figure
+//! counting up, the Traces estimate rising after the count, and the thread
+//! coming in.
 //!
 //! It draws no words. The thread's titles are real labels (the core's
 //! `frame.step_*`), and a step already passed is a button back to it.
@@ -35,8 +45,6 @@ use crate::first_run::{Sharing, Step, tools::Tools};
 const FADE: f64 = 0.35;
 /// The thread's stretch grows over this long (`timed(duration: 0.52)`).
 const THREAD_GROW: f64 = 0.52;
-/// At most 30 frames a second, as the Mac's timelines.
-const FRAME_MICROS: i64 = 33_000;
 
 fn now() -> f64 {
     glib::monotonic_time() as f64 / 1e6
@@ -84,6 +92,20 @@ struct Inner {
     last_frame: i64,
     /// How many times the stage has been drawn.
     draws: u64,
+    /// Each found tool's beam: the opacity it fades from, to, and when.
+    beams: BTreeMap<String, (f64, f64, f64)>,
+    /// When the scan ends and the dashed ring tightens (and the Tools rows
+    /// rise); None when no scan ran.
+    ring_tight_at: Option<f64>,
+    /// When the thread last came in.
+    thread_at: f64,
+    /// Private AI's figure has counted once: going back does not replay it
+    /// (`FirstRunStageMemory.privateCounted`).
+    private_counted: bool,
+    /// When Customize opened or closed on Uses, and whether it is open.
+    open_at: f64,
+    /// Where Uses' graphic was last drawn, for its fade as Customize opens.
+    uses_bounds: Option<gtk::graphene::Rect>,
 }
 
 pub(super) struct Stage {
@@ -100,6 +122,15 @@ pub(super) struct Stage {
     backs: RefCell<Vec<gtk::Button>>,
     /// Uses' captions laid out again at the stage's scale.
     captions: RefCell<Option<Rc<dyn Fn()>>>,
+    /// The thread, drawn moved and faded as it comes in.
+    thread_lift: Lift,
+    /// Private AI's figure and the count it reaches.
+    private_count: RefCell<Option<(gtk::Label, usize)>>,
+    /// Traces' estimate, risen once the count is done.
+    estimate: RefCell<Option<Lift>>,
+    /// Tools' rows: told None while the scan holds them back, then the
+    /// seconds since they began to rise.
+    tools_rows: RefCell<Option<Rc<dyn Fn(Option<f64>)>>>,
 }
 
 fn animations() -> bool {
@@ -118,7 +149,8 @@ impl Stage {
         thread.set_halign(gtk::Align::Center);
         thread.set_margin_top(stage::THREAD_TOP as i32);
         thread.set_height_request(stage::THREAD_HEIGHT as i32);
-        thread.set_visible(false);
+        let thread_lift = Lift::new(&thread);
+        thread_lift.set_visible(false);
         let at = now();
         let stage = Rc::new(Self {
             area,
@@ -146,12 +178,22 @@ impl Stage {
                 tick: None,
                 last_frame: 0,
                 draws: 0,
+                beams: BTreeMap::new(),
+                ring_tight_at: None,
+                thread_at: at,
+                private_counted: false,
+                open_at: at - 3600.0,
+                uses_bounds: None,
             }),
             started: Cell::new(false),
             palette: Palette::scheme(true),
             rises: RefCell::new(Vec::new()),
             backs: RefCell::new(Vec::new()),
             captions: RefCell::new(None),
+            thread_lift,
+            private_count: RefCell::new(None),
+            estimate: RefCell::new(None),
+            tools_rows: RefCell::new(None),
         });
         let weak = Rc::downgrade(&stage);
         stage.area.set_draw_func(move |_, cr, w, h| {
@@ -182,6 +224,17 @@ impl Stage {
                 stage.stop_ticking();
             }
         });
+        // Minimised or suspended, the stage holds; shown again, it goes on
+        // from where its clock now is.
+        let weak = Rc::downgrade(&stage);
+        super::glass_motion::on_window_state(&stage.area, move |area| {
+            if let Some(stage) = weak.upgrade() {
+                stage.stop_ticking();
+                if area.is_mapped() {
+                    stage.start_ticking();
+                }
+            }
+        });
         if let Some(settings) = gtk::Settings::default() {
             let weak = Rc::downgrade(&stage);
             settings.connect_gtk_enable_animations_notify(move |_| {
@@ -191,6 +244,7 @@ impl Stage {
                         stage.start_ticking();
                     }
                     stage.raise_lines();
+                    stage.drive(now());
                     stage.area.queue_draw();
                 }
             });
@@ -208,8 +262,8 @@ impl Stage {
     }
 
     /// The thread row, drawn over every step but Welcome.
-    pub(super) fn thread(&self) -> &gtk::Box {
-        &self.thread
+    pub(super) fn thread(&self) -> &Lift {
+        &self.thread_lift
     }
 
     /// An empty slot where `step` draws its graphic, to put at the top of
@@ -259,7 +313,133 @@ impl Stage {
     /// watched a tool): draw again. With animations off nothing else
     /// would, as no tick runs.
     pub(super) fn refresh(&self) {
+        let at = now();
+        self.advance(at, !animations());
+        self.drive(at);
         self.area.queue_draw();
+    }
+
+    /// Private AI's figure, `label`, counts up to `count` on the first
+    /// visit (`PrivateAIScreenLayout.counted`).
+    pub(super) fn set_private_count(&self, label: &gtk::Label, count: usize) {
+        *self.private_count.borrow_mut() = Some((label.clone(), count));
+        self.drive(now());
+    }
+
+    /// Traces' estimate, `lift`, rises once the count is done.
+    pub(super) fn set_estimate(&self, lift: &Lift) {
+        *self.estimate.borrow_mut() = Some(lift.clone());
+        self.drive(now());
+    }
+
+    /// Tools' rows, moved by `rise` (None: held back while the scan runs;
+    /// otherwise the seconds since they began to rise).
+    pub(super) fn set_tools_rows(&self, rise: Rc<dyn Fn(Option<f64>)>) {
+        *self.tools_rows.borrow_mut() = Some(rise);
+        self.drive(now());
+    }
+
+    /// Whether a SwiftUI animation would be under way at `at`, which the
+    /// Mac draws at the display's rate whatever its timeline's interval.
+    fn in_flight(&self, at: f64) -> bool {
+        let inner = self.inner.borrow();
+        let since = |t: f64| at - t;
+        let spring = since(inner.moves.moved_at) < stage::SPATIAL_SETTLE;
+        let beams = inner
+            .beams
+            .values()
+            .any(|(_, _, t)| since(*t) < stage::motion::BEAM_FADE);
+        let rows = self.tools_seen_count();
+        let tight = inner.ring_tight_at.is_some_and(|t| {
+            (0.0..stage::SPATIAL_SETTLE.max(stage::motion::rows_risen_by(rows))).contains(&since(t))
+        });
+        let satellites = inner.step == Step::Uses
+            && stage::motion::satellites_moving(inner.sharing, since(inner.sharing_at));
+        let estimate = inner.step == Step::Traces && {
+            let done =
+                since(inner.opened_at) - stage::traces::COUNT_DELAY - stage::traces::COUNT_DURATION;
+            (0.0..stage::spring_settle(stage::motion::ESTIMATE_RISE)).contains(&done)
+        };
+        let open = since(inner.open_at) < stage::spring_settle(stage::customize::DURATION);
+        spring || beams || tight || satellites || estimate || open
+    }
+
+    /// How many rows the Tools ring shows.
+    fn tools_seen_count(&self) -> usize {
+        self.tools
+            .borrow()
+            .discovered
+            .as_deref()
+            .map_or(0, |found| found.len())
+    }
+
+    /// The scan starts once Tools first has rows, and ends.
+    fn advance(&self, at: f64, reduce: bool) {
+        let (tools, discovered) = self.tools_seen();
+        let mut inner = self.inner.borrow_mut();
+        if inner.step == Step::Tools && discovered && !inner.scanned && inner.scan_started.is_none()
+        {
+            if reduce || tools.rows.is_empty() {
+                inner.scanned = true;
+            } else {
+                inner.scan_started = Some(at);
+                inner.ring_tight_at = Some(at + stage::SCAN_LEAD + stage::SCAN_TURN + 0.25);
+            }
+        }
+        if let Some(started) = inner.scan_started {
+            if at - started >= stage::SCAN_TOTAL || reduce {
+                inner.scan_started = None;
+                inner.scanned = true;
+            }
+        }
+    }
+
+    /// Moves the widgets that ride the stage's clock to where they are at
+    /// `at`: the final frame with animations off.
+    fn drive(&self, at: f64) {
+        let reduce = !animations();
+        let (step, opened, thread_at, tight_at, scanning) = {
+            let inner = self.inner.borrow();
+            (
+                inner.step,
+                inner.opened_at,
+                inner.thread_at,
+                inner.ring_tight_at,
+                inner.scan_started.is_some(),
+            )
+        };
+        if self.thread_lift.is_visible() {
+            let (offset, opacity) = stage::motion::thread_shown(true, at - thread_at, reduce);
+            self.thread_lift.set_offset(offset);
+            self.thread_lift.set_opacity(opacity);
+        }
+        if step == Step::Tools {
+            let rise = self.tools_rows.borrow().clone();
+            if let Some(rise) = rise {
+                rise(match tight_at {
+                    _ if reduce => Some(f64::INFINITY),
+                    Some(t) if scanning && at < t => None,
+                    Some(t) => Some(at - t),
+                    None => Some(f64::INFINITY),
+                });
+            }
+        }
+        if step == Step::PrivateAi {
+            if let Some((label, count)) = self.private_count.borrow().as_ref() {
+                let shown = stage::motion::private_counted(*count, at - opened, reduce).to_string();
+                if label.text() != shown {
+                    label.set_text(&shown);
+                }
+            }
+        }
+        if step == Step::Traces {
+            if let Some(lift) = self.estimate.borrow().as_ref() {
+                let done = opened + stage::traces::COUNT_DELAY + stage::traces::COUNT_DURATION;
+                let (offset, opacity) = stage::motion::estimate_rise(at - done, reduce);
+                lift.set_offset(offset);
+                lift.set_opacity(opacity);
+            }
+        }
     }
 
     /// Welcome's lines, each with the delay it rises after: hidden and
@@ -299,7 +479,10 @@ impl Stage {
     }
 
     fn start_ticking(self: &Rc<Self>) {
-        if !animations() || self.inner.borrow().tick.is_some() {
+        if !animations()
+            || super::glass_motion::window_hidden(&self.area)
+            || self.inner.borrow().tick.is_some()
+        {
             return;
         }
         let weak = Rc::downgrade(self);
@@ -307,16 +490,31 @@ impl Stage {
             let Some(stage) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if super::glass_motion::window_hidden(area) {
+                // Ended here; the window's state change starts it again.
+                stage.inner.borrow_mut().tick.take();
+                return glib::ControlFlow::Break;
+            }
             let frame = clock.frame_time();
+            let at = now();
+            let interval = {
+                let inner = stage.inner.borrow();
+                let (step, scanning) = (inner.step, inner.scan_started.is_some());
+                drop(inner);
+                stage::motion::frame_interval(step, scanning, stage.in_flight(at))
+            };
             let due = {
                 let mut inner = stage.inner.borrow_mut();
-                let due = frame - inner.last_frame >= FRAME_MICROS;
+                let since = (frame - inner.last_frame) as f64 / 1e6;
+                let due = stage::motion::frame_due(since, interval);
                 if due {
                     inner.last_frame = frame;
                 }
                 due
             };
             if due {
+                stage.advance(at, false);
+                stage.drive(at);
                 if stage.lines_rising() {
                     stage.raise_lines();
                     let mut inner = stage.inner.borrow_mut();
@@ -342,6 +540,7 @@ impl Stage {
     /// the thread offers back; `enabled` is false while a commit runs.
     pub(super) fn set_step(self: &Rc<Self>, step: Step, enabled: bool, on_pick: Rc<dyn Fn(Step)>) {
         let at = now();
+        let was = self.inner.borrow().step;
         {
             let mut inner = self.inner.borrow_mut();
             let first = !self.started.replace(true);
@@ -359,11 +558,16 @@ impl Stage {
                 moves.hub_from = if first { None } else { moves.hub_drawn };
                 moves.tiles_from = moves.tiles_drawn.clone();
                 moves.moved_at = at;
-                inner.opened_at = if step == Step::Traces && inner.traces_counted {
+                inner.opened_at = if (step == Step::Traces && inner.traces_counted)
+                    || (step == Step::PrivateAi && inner.private_counted)
+                {
                     at - 3600.0
                 } else {
                     at
                 };
+                if step == Step::PrivateAi {
+                    inner.private_counted = true;
+                }
                 inner.join_known = None;
                 if step == Step::Welcome {
                     inner.welcome_at = at;
@@ -371,10 +575,12 @@ impl Stage {
                 inner.step = step;
             }
         }
-        self.rebuild_thread(step, enabled, on_pick);
+        self.rebuild_thread(step, was, enabled, on_pick);
         if step == Step::Welcome {
             self.raise_lines();
         }
+        self.advance(at, !animations());
+        self.drive(at);
         self.area.queue_draw();
     }
 
@@ -405,7 +611,12 @@ impl Stage {
             }
         }
         drop(inner);
-        self.inner.borrow_mut().open = open;
+        let mut inner = self.inner.borrow_mut();
+        if inner.open != open {
+            inner.open_at = now();
+        }
+        inner.open = open;
+        drop(inner);
         self.area.queue_draw();
     }
 
@@ -445,22 +656,46 @@ impl Stage {
         self.inner.borrow_mut().scroller = Some(scroller.clone().upcast());
     }
 
-    fn rebuild_thread(self: &Rc<Self>, step: Step, enabled: bool, on_pick: Rc<dyn Fn(Step)>) {
+    fn rebuild_thread(
+        self: &Rc<Self>,
+        step: Step,
+        was: Step,
+        enabled: bool,
+        on_pick: Rc<dyn Fn(Step)>,
+    ) {
         while let Some(child) = self.thread.first_child() {
             self.thread.remove(&child);
         }
         self.backs.borrow_mut().clear();
         let Some(current) = stage::thread_index(step) else {
-            self.thread.set_visible(false);
+            self.thread_lift.set_visible(false);
             self.inner.borrow_mut().segments.clear();
             return;
         };
-        self.thread.set_visible(true);
+        if !self.thread_lift.is_visible() {
+            // Coming in from Welcome: from 10 points above, faded.
+            self.inner.borrow_mut().thread_at = now();
+            self.thread_lift.set_visible(true);
+        }
         let words = trace_commons_contributor::first_run_copy::first_run_copy().frame;
         let scale = stage::fit_scale(
             f64::from(self.area.width().max(1)),
             f64::from(self.area.height().max(1)),
         );
+        // The titles are built as they read on the step before, and take
+        // this step's look once drawn, so the current one lights after the
+        // Mac's delay (`tc-thread-title`'s transition) rather than at once.
+        let before = stage::thread_index(was).filter(|w| *w != current);
+        let look = |index: usize, at: usize| {
+            if index == at {
+                Some("tc-thread-current")
+            } else if index < at {
+                Some("tc-thread-passed")
+            } else {
+                None
+            }
+        };
+        let mut relook = Vec::new();
         let mut segments = Vec::new();
         for (index, thread_step) in stage::THREAD_STEPS.iter().enumerate() {
             if index > 0 {
@@ -481,13 +716,18 @@ impl Stage {
             };
             let label = gtk::Label::new(Some(title));
             label.add_css_class("tc-thread-title");
+            let (from, to) = (look(index, before.unwrap_or(current)), look(index, current));
+            if let Some(class) = from {
+                label.add_css_class(class);
+            }
+            if from != to {
+                relook.push((label.clone(), from, to));
+            }
             if index == current {
-                label.add_css_class("tc-thread-current");
                 // The Mac's `.isSelected` on the current step's title.
                 label.update_state(&[gtk::accessible::State::Selected(Some(true))]);
                 self.thread.append(&label);
             } else if index < current {
-                label.add_css_class("tc-thread-passed");
                 let button = gtk::Button::builder().child(&label).build();
                 button.add_css_class("flat");
                 button.add_css_class("tc-thread-back");
@@ -500,6 +740,18 @@ impl Stage {
             } else {
                 self.thread.append(&label);
             }
+        }
+        if !relook.is_empty() {
+            super::first_run_fade::restyle_after_drawn(&self.thread, move || {
+                for (label, from, to) in relook {
+                    if let Some(class) = from {
+                        label.remove_css_class(class);
+                    }
+                    if let Some(class) = to {
+                        label.add_css_class(class);
+                    }
+                }
+            });
         }
         let mut inner = self.inner.borrow_mut();
         let count = segments.len();
@@ -544,24 +796,43 @@ impl Stage {
         let reduce = !animations();
         let at = now();
         let p = &self.palette;
-        let (tools, discovered) = self.tools_seen();
+        // The scan runs once per first run, when Tools first has rows.
+        self.advance(at, reduce);
+        let (tools, _) = self.tools_seen();
         let mut inner = self.inner.borrow_mut();
         inner.draws += 1;
-        // The scan runs once per first run, when Tools first has rows.
-        if inner.step == Step::Tools && discovered && !inner.scanned && inner.scan_started.is_none()
-        {
-            if reduce || tools.rows.is_empty() {
-                inner.scanned = true;
-            } else {
-                inner.scan_started = Some(at);
+        // Each found tool's beam fades as it is watched or not.
+        if inner.step == Step::Tools {
+            for (kind, found) in &tools.rows {
+                if !found {
+                    continue;
+                }
+                let to = if tools.watched.iter().any(|w| w == kind) {
+                    1.0
+                } else {
+                    0.0
+                };
+                let entry = inner
+                    .beams
+                    .entry(kind.clone())
+                    .or_insert((to, to, at - 60.0));
+                if entry.1 != to {
+                    let current =
+                        stage::motion::beam_opacity(entry.0, entry.1, at - entry.2, reduce);
+                    *entry = (current, to, at);
+                }
             }
         }
-        if let Some(started) = inner.scan_started {
-            if at - started >= stage::SCAN_TOTAL || reduce {
-                inner.scan_started = None;
-                inner.scanned = true;
-            }
-        }
+        let beams: BTreeMap<String, f64> = inner
+            .beams
+            .iter()
+            .map(|(k, (from, to, t))| {
+                (
+                    k.clone(),
+                    stage::motion::beam_opacity(*from, *to, at - t, reduce),
+                )
+            })
+            .collect();
         let time = at;
         paint::backdrop(cr, w, h, p, stage::backdrop_phase(time, reduce));
         let scale = stage::fit_scale(w, h);
@@ -575,6 +846,10 @@ impl Stage {
                 &inner,
                 inner.moves.moved_at,
             );
+            // Drawn where the thread's lift draws its titles, as faded.
+            let (lift_y, lift_alpha) = (self.thread_lift.offset(), self.thread_lift.opacity());
+            cr.push_group();
+            cr.translate(0.0, lift_y);
             for (i, place) in inner.segments.iter().enumerate() {
                 let Some(b) = place.compute_bounds(&self.area) else {
                     continue;
@@ -593,6 +868,9 @@ impl Stage {
                 };
                 paint::thread_segment(cr, (f64::from(b.x()), y), width, segment, share, p);
             }
+            if cr.pop_group_to_source().is_ok() {
+                let _ = cr.paint_with_alpha(lift_alpha);
+            }
         }
 
         let step = inner.step;
@@ -605,7 +883,22 @@ impl Stage {
                     .then(|| slot.compute_bounds(&self.area))
                     .flatten()
             });
-        let shown = !inner.agent && !(inner.open && step == Step::Uses);
+        // Customize opening: Uses' graphic fades out where it was.
+        let opening = inner.open && step == Step::Uses;
+        let alpha = if opening {
+            stage::motion::customize_fade_out(at - inner.open_at, reduce)
+        } else {
+            1.0
+        };
+        let slot = if opening {
+            inner.uses_bounds.filter(|_| alpha > 0.0)
+        } else {
+            if step == Step::Uses && slot.is_some() {
+                inner.uses_bounds = slot;
+            }
+            slot
+        };
+        let shown = !inner.agent;
         let Some(bounds) = slot.filter(|_| shown) else {
             inner.moves.hub_drawn = None;
             inner.moves.tiles_drawn.clear();
@@ -626,6 +919,9 @@ impl Stage {
             );
             cr.clip();
         }
+        if alpha < 1.0 {
+            cr.push_group();
+        }
         let origin = (
             f64::from(bounds.x()) + f64::from(bounds.width()) / 2.0 - stage::CANVAS.0 / 2.0 * scale,
             f64::from(bounds.y()),
@@ -643,6 +939,8 @@ impl Stage {
             signed_in: inner.signed_in_at.map(|s| at - s),
             time,
             reduce_motion: reduce,
+            beams,
+            ring_since: inner.ring_tight_at.map(|t| at - t),
         };
         // A step's art behind its actors, in its canvas.
         let _ = cr.save();
@@ -708,6 +1006,9 @@ impl Stage {
         inner.moves.lit_drawn = lit_drawn;
         if step == Step::Traces && stage::traces::counted(scene.opened, reduce) >= 1.0 {
             inner.traces_counted = true;
+        }
+        if alpha < 1.0 && cr.pop_group_to_source().is_ok() {
+            let _ = cr.paint_with_alpha(alpha);
         }
         let _ = cr.restore();
     }
@@ -868,6 +1169,69 @@ mod mounted_tests {
         window.close();
     }
 
+    /// Minimised, the stage's clock holds: no tick and no frame drawn,
+    /// while the window stays mapped and its frame clock runs. Shown
+    /// again, the clock runs on.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_stage_holds_while_its_window_is_minimised() {
+        use super::super::glass_motion::minimise_for_test;
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let stage = Stage::new(Rc::new(RefCell::new(Tools::default())));
+        let window = adw::Window::builder()
+            .default_width(680)
+            .default_height(720)
+            .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.add_css_class("tc-first-run-stage");
+        content.append(stage.thread());
+        let tools = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        tools.append(&stage.slot(Step::Tools));
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .child(&tools)
+            .build();
+        stage.follow(&scroll);
+        content.append(&scroll);
+        window.set_content(Some(&stage.wrap(&content)));
+        let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
+        stage.set_step(Step::Tools, true, pick);
+        window.present();
+        settle(&context, 300);
+        assert!(stage.inner.borrow().tick.is_some(), "ticks while shown");
+
+        minimise_for_test(&window, true);
+        settle(&context, 100);
+        assert!(window.is_mapped(), "a minimised window stays mapped");
+        assert!(
+            stage.inner.borrow().tick.is_none(),
+            "the clock runs while minimised"
+        );
+        let draws = stage.inner.borrow().draws;
+        settle(&context, 300);
+        assert_eq!(
+            stage.inner.borrow().draws,
+            draws,
+            "frames drawn while minimised"
+        );
+
+        minimise_for_test(&window, false);
+        settle(&context, 100);
+        assert!(
+            stage.inner.borrow().tick.is_some(),
+            "the clock does not run once shown again"
+        );
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
     /// With animations off nothing ticks, so a change on Tools must ask
     /// for its own draw: ticking a tool on the real Tools screen lights its
     /// tile without the test drawing anything itself.
@@ -991,6 +1355,133 @@ mod mounted_tests {
         stage.set_agent(true);
         stage.set_agent(false);
         assert_eq!(lifts[0].opacity(), 1.0, "no replay with animations off");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// The widgets on the stage's clock: the thread comes in from 10
+    /// points above, faded, and its new title lights only after it is
+    /// drawn; Tools' rows are held while the scan runs and rise after it;
+    /// Private AI's figure counts up once; Traces' estimate rises once the
+    /// count is done.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_stage_moves_its_widgets_on_the_macs_clock() {
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let mut found = Tools::default();
+        found.record_discovery(
+            ["codex", "claude-code"]
+                .iter()
+                .map(|source| crate::first_run::tools::Found {
+                    source: (*source).into(),
+                    path: format!("/home/x/{source}"),
+                    exists: true,
+                    session_count: 1,
+                    total_bytes: None,
+                })
+                .collect(),
+        );
+        let stage = Stage::new(Rc::new(RefCell::new(found)));
+        let window = adw::Window::builder()
+            .default_width(680)
+            .default_height(720)
+            .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(stage.thread());
+        for step in [Step::Welcome, Step::Tools, Step::PrivateAi, Step::Traces] {
+            content.append(&stage.slot(step));
+        }
+        let estimate = Lift::new(&gtk::Label::new(Some("estimate")));
+        content.append(&estimate);
+        let figure = gtk::Label::new(None);
+        content.append(&figure);
+        window.set_content(Some(&stage.wrap(&content)));
+        let rows: Rc<RefCell<Vec<Option<f64>>>> = Rc::default();
+        stage.set_tools_rows({
+            let rows = rows.clone();
+            Rc::new(move |since| rows.borrow_mut().push(since))
+        });
+        let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
+        stage.set_step(Step::Welcome, true, pick.clone());
+        window.present();
+        settle(&context, 200);
+
+        stage.set_step(Step::Tools, true, pick.clone());
+        let lift = stage.thread();
+        assert!(lift.is_visible());
+        assert!(lift.opacity() < 0.2, "{}", lift.opacity());
+        assert!(lift.offset() < -8.0, "{}", lift.offset());
+        assert_eq!(
+            rows.borrow().last(),
+            Some(&None),
+            "held while the scan runs"
+        );
+        assert!(stage.in_flight(now()), "the step move runs at display rate");
+        settle(&context, 1500);
+        assert_eq!(lift.opacity(), 1.0);
+        assert!(lift.offset().abs() < 0.05, "{}", lift.offset());
+        settle(&context, 2300);
+        let since = rows.borrow().last().copied().flatten();
+        assert!(
+            since.is_some_and(|s| s > 0.0),
+            "rising after the scan: {since:?}"
+        );
+
+        let title = |stage: &Stage, index: usize| {
+            let mut titles = Vec::new();
+            let mut pending = vec![stage.thread.clone().upcast::<gtk::Widget>()];
+            while let Some(widget) = pending.pop() {
+                if let Ok(label) = widget.clone().downcast::<gtk::Label>() {
+                    titles.push(label);
+                }
+                let mut child = widget.last_child();
+                while let Some(c) = child {
+                    child = c.prev_sibling();
+                    pending.push(c);
+                }
+            }
+            titles[index].clone()
+        };
+        stage.set_step(Step::PrivateAi, true, pick.clone());
+        stage.set_private_count(&figure, 3);
+        assert!(
+            !title(&stage, 1).has_css_class("tc-thread-current"),
+            "not lit at once"
+        );
+        assert!(
+            title(&stage, 0).has_css_class("tc-thread-current"),
+            "as it read before"
+        );
+        assert_eq!(figure.text(), "0");
+        settle(&context, 300);
+        assert!(title(&stage, 1).has_css_class("tc-thread-current"));
+        assert!(!title(&stage, 0).has_css_class("tc-thread-current"));
+        settle(&context, 1400);
+        assert_eq!(figure.text(), "3");
+
+        stage.set_estimate(&estimate);
+        stage.set_step(Step::Traces, true, pick.clone());
+        assert_eq!(estimate.offset(), 8.0);
+        assert_eq!(estimate.opacity(), 0.0);
+        settle(&context, 4000);
+        assert!(estimate.offset().abs() < 0.05, "{}", estimate.offset());
+        assert_eq!(estimate.opacity(), 1.0);
+
+        // Back to Private AI: counted already, it does not count again.
+        stage.set_step(Step::PrivateAi, true, pick.clone());
+        assert_eq!(figure.text(), "3");
+
+        // Animations off: everything at its last frame at once.
+        settings.set_gtk_enable_animations(false);
+        stage.set_step(Step::Traces, true, pick);
+        assert_eq!(estimate.opacity(), 1.0);
         settings.set_gtk_enable_animations(previous);
         window.close();
     }

@@ -1684,3 +1684,43 @@ fn the_pile_opens_and_closes_in_the_macs_stages() {
     assert_eq!(closing.last(), Some(&PileStage::default()));
     assert!(closing.iter().all(|stage| !stage.names));
 }
+
+/// The pile's card and coins part-way open: the closed and open shapes at
+/// 0 and 1, and in proportion between, as a SwiftUI spring moves a frame
+/// and a position (`MapToolPile`).
+#[test]
+fn the_pile_moves_in_proportion_between_closed_and_open() {
+    let stack = ToolStack {
+        center: Point::new(100.0, 200.0),
+        tools: vec!["tool:a".into(), "tool:b".into(), "tool:c".into()],
+    };
+    assert_eq!(stack.height_at(0.0), stack.height(false));
+    assert_eq!(stack.height_at(1.0), stack.height(true));
+    let between = stack.height(false) + (stack.height(true) - stack.height(false)) * 0.6;
+    assert!((stack.height_at(0.6) - between).abs() < 1e-9);
+    for index in 0..3 {
+        assert_eq!(
+            stack.coin_center_at(index as f64, 0.0),
+            stack.coin_center(index, false)
+        );
+        assert_eq!(
+            stack.coin_center_at(index as f64, 1.0),
+            stack.coin_center(index, true)
+        );
+    }
+    // Halfway between the first and second places, half open.
+    let at = stack.coin_center_at(0.5, 0.5);
+    let step = (ToolStack::STEP + ToolStack::OPEN_STEP) / 2.0;
+    assert!((at.y - (200.0 - 0.5 * step)).abs() < 1e-9, "{at:?}");
+    let fit = MapGeometry::new(
+        Size::new(580.0, 760.0),
+        1.0,
+        None,
+        Scene::space_for(Size::new(580.0, 760.0)),
+    );
+    assert_eq!(stack.card_at(&fit, 1.0, 0.0), stack.card(&fit, true, false));
+    assert_eq!(stack.card_at(&fit, 0.0, 1.0), stack.card(&fit, false, true));
+    let (_, _, w, _) = stack.card_at(&fit, 1.0, 0.5);
+    let wide = (ToolStack::WIDTH + ToolStack::OPEN_WIDTH) / 2.0 * fit.scale;
+    assert!((w - wide).abs() < 1e-9, "{w}");
+}
