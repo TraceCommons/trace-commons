@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
-    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <RootNamespace>TraceCommons.App</RootNamespace>
     <AssemblyName>TraceCommons</AssemblyName>
     <Nullable>enable</Nullable>
@@ -113,6 +113,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <!-- The first-run stage (W8). Approved 2026-11-18; the only stable version
+         whose floor equals the Windows App SDK pin (spike S1). Microsoft's
+         signed package, under its binary licence (owner, 2026-11-18). -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -147,4 +151,18 @@
            Text="trace_commons_contributor_ffi.dll was not found in $(TcFfiLibDir). Build it first with: cargo build -p trace-commons-contributor-ffi --release  (or set TC_FFI_LIB_DIR to a directory containing it)." />
   </Target>
 
+  <!--
+    The About window's lines (spec W24). The version is the contributor
+    crate's, which this app ships with, read from its Cargo.toml so the two
+    cannot drift; a release that passes -p:Version still wins. The copyright
+    is the Mac bundle's NSHumanReadableCopyright (macos/scripts/info-plist.sh).
+    No source revision is appended: the window shows the version alone, as
+    the Mac does when it has no separate build.
+  -->
+  <PropertyGroup>
+    <TcContributorCargoToml>$(MSBuildThisFileDirectory)../../../crates/trace-commons-contributor/Cargo.toml</TcContributorCargoToml>
+    <Version Condition="'$(Version)' == '' And Exists('$(TcContributorCargoToml)')">$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(TcContributorCargoToml)')), '(?m)^version = "([^"]+)"').Groups[1].Value)</Version>
+    <Copyright>K&amp;Z Partners LLC</Copyright>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
 </Project>

@@ -90,7 +90,6 @@ public class ShellWordingTests
             { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 14 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
-            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
             // The approval failure sentence is shared with the tested decision factory.
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 9 },
             { "TraceCommons.App/ViewModels/PreviewDecision.cs", 2 },
@@ -118,7 +117,6 @@ public class ShellWordingTests
             // button's hand-written accessible name, which also spelled the
             // former app name, is gone; the button is named by its label.
             { "TraceCommons.App/MainWindow.xaml", 16 },
-            { "TraceCommons.App/OnboardingWindow.xaml", 11 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };
 

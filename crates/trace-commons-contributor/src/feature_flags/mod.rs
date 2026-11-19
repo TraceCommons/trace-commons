@@ -464,6 +464,11 @@ pub(crate) mod test_signing {
     pub(crate) fn key() -> Ed25519KeyPair {
         Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("fixed test seed")
     }
+    /// The testing build's capabilities with the fixture signing key.
+    pub(crate) fn testing_profile() -> Profile {
+        pin(profile_for_environment(Environment::Testing).expect("testing profile validates"))
+    }
+
     /// The profile, also trusting the test key.
     pub(crate) fn pin(mut profile: Profile) -> Profile {
         profile

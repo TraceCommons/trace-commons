@@ -1,0 +1,39 @@
+{
+  "state": "listed",
+  "organizations": [
+    {
+      "id": "org-sample-a",
+      "name": "Sample organization A",
+      "role": "owner",
+      "current": true
+    },
+    {
+      "id": "org-sample-b",
+      "name": "Sample organization B",
+      "role": "member",
+      "current": false
+    }
+  ],
+  "current_organization_id": "org-sample-a",
+  "explicit": false,
+  "chosen": false,
+  "multiple": true,
+  "prompt": true,
+  "revoke_pending": false,
+  "view": {
+    "title": "Spending organization",
+    "what": "",
+    "picker": "Organization to spend from",
+    "switching": "Switching.",
+    "failed": "Couldn't switch. Nothing changed.",
+    "session_expired": "Sign in to NEAR AI again.",
+    "refused": "NEAR AI refused that organization. Nothing changed.",
+    "revoke_pending": "Still removing access from the previous organization.",
+    "prompt_title": "Choose an organization",
+    "prompt_line": "Your NEAR AI account has several organizations. Private AI is spending from Sample organization A. Choose one in Settings.",
+    "prompt_action": "Review settings",
+    "prompt_action_accessibility": "Review settings to choose an organization",
+    "prompt_dismiss": "Not now",
+    "prompt_dismiss_accessibility": "Keep spending from Sample organization A"
+  }
+}

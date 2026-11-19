@@ -44,6 +44,8 @@ final class GlassToolLogoTests: XCTestCase {
         XCTAssertEqual(GlassTool.antigravity.logo, .antigravity)
         XCTAssertEqual(GlassTool.openCode.logo, .openCode)
         XCTAssertEqual(GlassTool.theia.logo, .theia)
+        XCTAssertEqual(GlassTool.redTeam.logo, .redTeam)
+        XCTAssertEqual(GlassTool.redTeam.tint, GlassTokens.Color.toolRedTeam)
         XCTAssertNil(GlassTool.geminiCLI.logo)
         XCTAssertNil(GlassTool.cline.logo)
         XCTAssertNil(GlassTool.other(initials: "Zz").logo)

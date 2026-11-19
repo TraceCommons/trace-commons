@@ -97,3 +97,13 @@ private final class RedTeamSetupDaemon: DaemonCalling, @unchecked Sendable {
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
 }
+
+/// Red Team's button and session rows draw the NEAR AI Red SandBox mark,
+/// traced from rts's README splash, not the "Re" initials.
+final class RedTeamLogoTests: XCTestCase {
+    func testRedTeamDrawsTheSandBoxMark() {
+        XCTAssertEqual(ManagedWords.glassTool("red_team"), .redTeam)
+        XCTAssertEqual(ManagedWords.glassTool("red_team").logo, .redTeam)
+        XCTAssertEqual(ManagedWords.glassTool("opencode"), .openCode)
+    }
+}

@@ -18,11 +18,18 @@ namespace TraceCommons.App.Controls;
 /// </summary>
 public sealed partial class PrivateInferenceView : UserControl
 {
-    public PrivateInferenceView(DaemonHost host)
+    /// <param name="spendOrganizations">
+    /// The window's one spending state, shared with the Settings picker; its
+    /// credential flag is this page's sign-in's.
+    /// </param>
+    public PrivateInferenceView(DaemonHost host, SpendOrganizationModel spendOrganizations)
     {
+        _spendPrompt = spendOrganizations ?? throw new ArgumentNullException(nameof(spendOrganizations));
         InitializeComponent();
 
-        ViewModel = new PrivateInferenceViewModel(host);
+        ViewModel = new PrivateInferenceViewModel(host, credential: _spendPrompt.Credential);
+        // A switch moved the key the balance is read with (AppModel.swift:1093).
+        _spendPrompt.SwitchSettled += OnSpendSwitchSettled;
         // The managed card's sign-in is this page's ceremony, on NEAR AI,
         // with the login chosen on this page (owner, 2026-11-01: GitHub,
         // Google or the NEAR wallet), never one fixed here.
@@ -31,7 +38,11 @@ public sealed partial class PrivateInferenceView : UserControl
                 await ViewModel.StartCredentialAsync()));
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
-        Unloaded += (_, _) => ViewModel.Funding.Deactivate();
+        Unloaded += (_, _) =>
+        {
+            ViewModel.Funding.Deactivate();
+            DetachReads();
+        };
 
         // F10: the mismatch line follows status, as the account section's
         // block does. Never unsubscribed: this page lives as long as the
