@@ -181,6 +181,13 @@ pub fn on_window_state(widget: &impl IsA<gtk::Widget>, changed: impl Fn(&gtk::Wi
     });
 }
 
+/// Whether the window's hidden state changed, given the last one `seen`
+/// (kept up to date): `Some(hidden)` on a change, `None` for any other
+/// state change, such as focus, which [`on_window_state`] also reports.
+pub fn hidden_changed(seen: &std::cell::Cell<bool>, hidden: bool) -> Option<bool> {
+    (seen.replace(hidden) != hidden).then_some(hidden)
+}
+
 /// A tween's value `progress` (eased, 0 to 1) of the way from `from` to `to`.
 pub fn tween_value(from: f64, to: f64, progress: f64) -> f64 {
     from + (to - from) * progress
@@ -737,6 +744,18 @@ mod tests {
         pump_until(&|| frames.borrow().len() > count + 1);
         assert!(frames.borrow().len() > count + 1, "it did not start again");
         window.destroy();
+    }
+
+    /// A window's focus change is not a change in hidden; only going
+    /// hidden or shown again is reported.
+    #[test]
+    fn only_a_hidden_change_is_reported() {
+        let seen = std::cell::Cell::new(false);
+        assert_eq!(hidden_changed(&seen, false), None, "a focus change");
+        assert_eq!(hidden_changed(&seen, true), Some(true));
+        assert_eq!(hidden_changed(&seen, true), None);
+        assert_eq!(hidden_changed(&seen, false), Some(false));
+        assert_eq!(hidden_changed(&seen, false), None);
     }
 
     /// A clock that runs on its own (not through `keep_ticking` or a

@@ -490,13 +490,17 @@ mod imp {
             });
             // Minimised or suspended, the clock and the shimmer hold, as
             // while unmapped; shown again, the shimmer starts over.
+            // Only a change in hidden counts: the window's other state
+            // changes (focus) leave the shimmer's pass where it is.
             let weak = obj.downgrade();
+            let hidden = Cell::new(false);
             crate::ui::glass_motion::on_window_state(&*obj, move |_| {
                 let Some(obj) = weak.upgrade() else { return };
-                if crate::ui::glass_motion::window_hidden(&obj) {
-                    obj.stop_shimmer();
-                } else {
-                    obj.schedule_shimmer(map_motion::SHIMMER_FIRST);
+                let now = crate::ui::glass_motion::window_hidden(&obj);
+                match crate::ui::glass_motion::hidden_changed(&hidden, now) {
+                    Some(true) => obj.stop_shimmer(),
+                    Some(false) => obj.schedule_shimmer(map_motion::SHIMMER_FIRST),
+                    None => {}
                 }
                 obj.update_clock();
             });
