@@ -276,19 +276,6 @@
                                    SpinButtonPlacementMode="Inline"
                                    IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                                    ValueChanged="OnBehaviorChanged" />
-                        <NumberBox x:Name="ApprovalHoldSeconds"
-                                   Header="How long you can take something back (seconds after approval)"
-                                   Value="{x:Bind Settings.ApprovalHoldSeconds, Mode=OneWay}"
-                                   Minimum="0"
-                                   Maximum="300"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="No undo window. Approving sends on the next pass."
-                                   Visibility="{x:Bind Settings.HasNoUndoWindow, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
                         <NumberBox x:Name="DigestHours"
                                    Header="How often you can be interrupted (hours between notifications, at most)"
                                    Value="{x:Bind Settings.DigestHours, Mode=OneWay}"

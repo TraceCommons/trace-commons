@@ -387,7 +387,6 @@ public sealed partial class SettingsView : UserControl
         BehaviorSetting setting = sender.Name switch
         {
             "QuiescenceMinutes" => BehaviorSetting.QuiescenceMinutes,
-            "ApprovalHoldSeconds" => BehaviorSetting.ApprovalHoldSeconds,
             "DigestHours" => BehaviorSetting.DigestHours,
             _ => throw new InvalidOperationException("unknown behavior setting"),
         };

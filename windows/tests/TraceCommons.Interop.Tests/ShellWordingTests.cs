@@ -112,7 +112,7 @@ public class ShellWordingTests
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            { "TraceCommons.App/Controls/SettingsView.xaml", 15 },
+            { "TraceCommons.App/Controls/SettingsView.xaml", 13 },
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
             // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
             // button's hand-written accessible name, which also spelled the
