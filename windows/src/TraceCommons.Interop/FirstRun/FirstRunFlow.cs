@@ -735,4 +735,45 @@ public static class UsesSharing
 
         return options;
     }
+
+    /// <summary>
+    /// A path's words split into its line and the rest
+    /// (UsesScreen.swift:170-185, <c>split</c>), or null when the copy is
+    /// missing either half.
+    /// </summary>
+    public static (string Line, string Detail)? Split(SharingPath path, AutomaticGrantCopy grant)
+    {
+        if (path == SharingPath.AskMe)
+        {
+            // An empty title is present, not missing: Ask's first line was cut.
+            return grant.PathAskFirstTitle is { } line && grant.PathAskFirstDetail is { Length: > 0 } detail ? (line, detail) : null;
+        }
+
+        return grant.PathAutomaticTitle is { Length: > 0 } title && grant.PathAutomaticDetail is { Length: > 0 } rest && grant.Chosen is { } scrub
+            ? (title, string.Join(" ", rest, scrub.Scope, scrub.Limit))
+            : null;
+    }
+
+    /// <summary>Whether the path's words were read whole; Start is off otherwise (UsesScreen.swift:100-108).</summary>
+    public static bool Available(SharingPath path, AutomaticGrantCopy? grant) => grant is not null && Split(path, grant) is not null;
+
+    /// <summary>
+    /// The info button's words (UsesScreen.swift:159-168, <c>sharingDetail</c>):
+    /// Ask's detail; for Automatic the copy's scope, then the scrub's scope
+    /// and limit. Null whenever the path's words are not whole.
+    /// </summary>
+    public static string? Detail(SharingPath path, AutomaticGrantCopy? grant, UsesWords uses)
+    {
+        if (grant is null || Split(path, grant) is not { } split)
+        {
+            return null;
+        }
+
+        if (path == SharingPath.Automatic && uses.AutomaticScope.Length > 0 && grant.Chosen is { } scrub)
+        {
+            return string.Join(" ", uses.AutomaticScope, scrub.Scope, scrub.Limit);
+        }
+
+        return split.Detail;
+    }
 }
