@@ -10077,6 +10077,9 @@ scope choice are required. Completion is bound to the tenant, ingest authority,
 device identity and local state directory. It survives a daemon restart but
 cannot finish another enrollment. Marker persistence precedes `status_changed`.
 Missing or invalid state does not produce a positive completion proof.
+The additive `status.setup_scope` field carries the same opaque fingerprint as
+`get_setup_status.scope`. It stays stable when data-use choices change, and
+`complete_setup` checks it before recording completion.
 
 Native shells accept this positive proof alongside their existing local
 completion marker. An absent field from an older daemon keeps the existing

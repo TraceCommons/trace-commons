@@ -38,10 +38,10 @@ async fn fixture() -> (String, Calls, tokio::task::JoinHandle<()>) {
 }
 pub(in crate::daemon) fn shared(store: ConfigStore, base: &str) -> DaemonShared {
     let mut shared = DaemonShared::load(store).unwrap();
-    // The shipped profile, also trusting the test key that signs `set_rollout`.
+    // The testing profile also trusts the key that signs `set_rollout`.
     shared.feature_flags = crate::feature_flags::Runtime::open(
         crate::feature_flags::registry().unwrap(),
-        crate::feature_flags::test_signing::pin(crate::feature_flags::embedded_profile().unwrap()),
+        crate::feature_flags::test_signing::testing_profile(),
         shared.store.dir(),
         chrono::Utc::now(),
     )
