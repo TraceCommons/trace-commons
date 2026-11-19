@@ -39,6 +39,11 @@ public sealed partial class MainWindow
         ViewModel.Host.QueueChanged += () => _ = _map.ReadAsync();
         ViewModel.Host.StatusChanged += () => _ = _map.ReadAsync();
 
+        // Reduce Motion and the window's state are read again on every
+        // activation, so a change made in Settings applies when the window
+        // comes back (the map reads the setting on every tick while it runs).
+        Activated += (_, _) => _map?.Recheck();
+
         MapToggle.Visibility = Visibility.Visible;
         MapToggle.Click += (_, _) =>
         {

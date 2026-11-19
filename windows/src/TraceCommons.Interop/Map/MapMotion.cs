@@ -36,23 +36,24 @@ public sealed record SpringCurve(double Response, double Damping) : MotionCurve
 {
     public override double At(double seconds) => MonitorMotion.Spring(Response, Damping, seconds);
 
-    /// <summary>Until it stays within 0.1% of its target, sampled at 60 per second.</summary>
-    public override double Duration
-    {
-        get
-        {
-            double last = 0;
-            for (int frame = 0; frame < 600; frame++)
-            {
-                double t = frame / 60.0;
-                if (Math.Abs(At(t) - 1) > 0.001)
-                {
-                    last = t;
-                }
-            }
+    private double? _duration;
 
-            return last + 1.0 / 60;
+    /// <summary>Until it stays within 0.1% of its target, sampled at 60 per second; worked out once.</summary>
+    public override double Duration => _duration ??= Settle();
+
+    private double Settle()
+    {
+        double last = 0;
+        for (int frame = 0; frame < 600; frame++)
+        {
+            double t = frame / 60.0;
+            if (Math.Abs(At(t) - 1) > 0.001)
+            {
+                last = t;
+            }
         }
+
+        return last + 1.0 / 60;
     }
 }
 
@@ -113,6 +114,41 @@ public static class MapMotion
 
     /// <summary>The transfer layer and the pile tick at 60 a second while a run moves (:107, :140).</summary>
     public const double TransferFrameInterval = 1.0 / 60;
+
+    /// <summary>
+    /// The map's one clock: the interval its fastest moving part needs now,
+    /// or null when it must not tick at all (hidden, minimised, unloaded,
+    /// its pane closed, or motion off), in which case only a model change
+    /// redraws it. With nothing moving, it waits for the next shimmer pass
+    /// or the next card's expiry.
+    /// </summary>
+    public static double? ClockInterval(MapClockInputs i)
+    {
+        if (!ClockRuns(i.AnimationsEnabled, i.Loaded, i.WindowVisible) || !i.PaneShown)
+        {
+            return null;
+        }
+
+        bool shimmer = MapField.UntilNextPass(i.SecondsShown) == 0;
+        if (i.TransferPlaying || i.PileMoving || i.LightFading || shimmer)
+        {
+            return TransferFrameInterval;
+        }
+
+        (double interval, bool paused) = Resting(false, i.Flows, i.Healthy, i.HasLibrary);
+        if (!paused)
+        {
+            return interval;
+        }
+
+        double wait = MapField.UntilNextPass(i.SecondsShown);
+        if (i.NextDeadlineIn is { } deadline)
+        {
+            wait = Math.Min(wait, Math.Max(0, deadline));
+        }
+
+        return Math.Max(wait, TransferFrameInterval);
+    }
 
     /// <summary>
     /// Whether any map clock may tick: only while the map is loaded and its
@@ -219,3 +255,18 @@ public static class MapMotion
     /// <summary>The transfer cards' arrival at the map's foot: spring(0.36, 0.86) (PopoverNotice.swift).</summary>
     public static readonly SpringCurve TransferCardArrival = new(NoticeStack.SpringResponse, NoticeStack.SpringDamping);
 }
+
+/// <summary>What the map's clock decision reads (<see cref="MapMotion.ClockInterval"/>).</summary>
+public readonly record struct MapClockInputs(
+    bool AnimationsEnabled,
+    bool Loaded,
+    bool WindowVisible,
+    bool PaneShown,
+    bool HasLibrary,
+    bool Flows,
+    bool Healthy,
+    bool TransferPlaying,
+    bool PileMoving,
+    bool LightFading,
+    double SecondsShown,
+    double? NextDeadlineIn);

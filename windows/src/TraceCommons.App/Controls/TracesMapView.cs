@@ -179,6 +179,8 @@ public sealed partial class TracesMapView : UserControl
         Content = _root;
 
         _player.Changed += () => { Rebuild(); Kick(); };
+        // Reduce motion followed live where the system reports changes.
+        _uiSettings.AnimationsEnabledChanged += (_, _) => DispatcherQueue.TryEnqueue(Recheck);
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         ActualThemeChanged += (_, _) => { DropResources(); Redraw(); };
@@ -381,6 +383,10 @@ public sealed partial class TracesMapView : UserControl
     /// </summary>
     private void Rebuild()
     {
+        // The player's runs end on its own clock even while nothing moves on
+        // screen (MapTransfers.swift:243-246: under Reduce Motion the runs
+        // still play).
+        _player.Tick(Now);
         MapSize space = FlowMapScene.SpaceFor(PaneSize);
         if (_view == MapView.Traces)
         {
@@ -482,17 +488,17 @@ public sealed partial class TracesMapView : UserControl
         PlaceReveals(fit);
     }
 
-    private readonly List<Button> _reveals = new();
+    private readonly Dictionary<string, (Button Pill, TextBlock Text)> _reveals = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MapFolderReveal> _revealNow = new(StringComparer.Ordinal);
 
-    /// <summary>The folder pill (FlowMapView.swift:630-669): "+N", or the core's fold-back word.</summary>
+    /// <summary>
+    /// The folder pill (FlowMapView.swift:630-669): "+N", or the core's
+    /// fold-back word. Each pill is kept across rebuilds, so pressing it
+    /// keeps the keyboard on it.
+    /// </summary>
     private void PlaceReveals(MapGeometry fit)
     {
-        foreach (Button b in _reveals)
-        {
-            _targets.Children.Remove(b);
-        }
-
-        _reveals.Clear();
+        var keep = new HashSet<string>(StringComparer.Ordinal);
         foreach (MapFolderReveal reveal in _scene.Reveals)
         {
             bool folds = reveal.Hidden == 0;
@@ -502,37 +508,63 @@ public sealed partial class TracesMapView : UserControl
                 continue;
             }
 
+            keep.Add(reveal.Tool);
+            _revealNow[reveal.Tool] = reveal;
+            if (!_reveals.TryGetValue(reveal.Tool, out var made))
+            {
+                var label = new TextBlock { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+                var button = new Button { Content = label };
+                string key = reveal.Tool;
+                button.Click += (_, _) =>
+                {
+                    if (_revealNow.TryGetValue(key, out MapFolderReveal? current))
+                    {
+                        _revealed = new Dictionary<string, int>(FlowMapScene.Revealing(current, _revealed), StringComparer.Ordinal);
+                        Rebuild();
+                    }
+                };
+                button.SizeChanged += (_, _) => PositionReveal(key);
+                made = (button, label);
+                _reveals[key] = made;
+                _targets.Children.Add(button);
+            }
+
             string name = (folds ? Words?.FoldFoldersLabel : Words?.RevealFolders(reveal.Next)) ?? text;
             double unit = Math.Max(fit.Scale, MapGeometry.LabelFloor);
             double size = MapGeometry.LabelType(fit.Scale).LabelSize;
-            MapPoint column = fit.Point(reveal.At);
-            double end = column.X - FlowMapScene.FolderRadius * fit.Scale - 6 * unit;
-            var pill = new Button
-            {
-                Content = new TextBlock { Text = text, FontSize = size, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold },
-                Padding = new Thickness(8 * unit, 0, 8 * unit, 0),
-                Height = size + 8 * unit,
-                CornerRadius = new CornerRadius((size + 8 * unit) / 2),
-                Opacity = reveal.Dim,
-            };
-            AutomationProperties.SetName(pill, name);
-            ToolTipService.SetToolTip(pill, name);
-            MapFolderReveal captured = reveal;
-            pill.Click += (_, _) =>
-            {
-                _revealed = new Dictionary<string, int>(FlowMapScene.Revealing(captured, _revealed), StringComparer.Ordinal);
-                Rebuild();
-            };
-            pill.Loaded += (_, _) =>
-            {
-                Canvas.SetLeft(pill, end - pill.ActualWidth);
-                Canvas.SetTop(pill, column.Y - pill.ActualHeight / 2);
-            };
-            Canvas.SetLeft(pill, end - 40);
-            Canvas.SetTop(pill, column.Y - pill.Height / 2);
-            _reveals.Add(pill);
-            _targets.Children.Add(pill);
+            made.Text.Text = text;
+            made.Text.FontSize = size;
+            made.Pill.Padding = new Thickness(8 * unit, 0, 8 * unit, 0);
+            made.Pill.Height = size + 8 * unit;
+            made.Pill.CornerRadius = new CornerRadius((size + 8 * unit) / 2);
+            made.Pill.Opacity = reveal.Dim;
+            AutomationProperties.SetName(made.Pill, name);
+            ToolTipService.SetToolTip(made.Pill, name);
+            PositionReveal(reveal.Tool);
         }
+
+        foreach (string gone in _reveals.Keys.Where(k => !keep.Contains(k)).ToList())
+        {
+            _targets.Children.Remove(_reveals[gone].Pill);
+            _reveals.Remove(gone);
+            _revealNow.Remove(gone);
+        }
+    }
+
+    /// <summary>The pill's trailing edge where the folder names end, on its line.</summary>
+    private void PositionReveal(string key)
+    {
+        if (!_reveals.TryGetValue(key, out var made) || !_revealNow.TryGetValue(key, out MapFolderReveal? reveal))
+        {
+            return;
+        }
+
+        MapGeometry fit = Fit;
+        double unit = Math.Max(fit.Scale, MapGeometry.LabelFloor);
+        MapPoint column = fit.Point(reveal.At);
+        double end = column.X - FlowMapScene.FolderRadius * fit.Scale - 6 * unit;
+        Canvas.SetLeft(made.Pill, end - made.Pill.ActualWidth);
+        Canvas.SetTop(made.Pill, column.Y - made.Pill.Height / 2);
     }
 
     private void OnNodeClick(string id)
@@ -583,12 +615,87 @@ public sealed partial class TracesMapView : UserControl
         _loaded = true;
         _shownAt = Now;
         WindowClocks.Changed += OnWindowClocksChanged;
+#if DEBUG
+        StartDemoIfAsked();
+#endif
         Rebuild();
     }
+
+#if DEBUG
+    private DispatcherQueueTimer? _demo;
+    private int _demoRound;
+
+    /// <summary>
+    /// The Mac's dry-run review aid (MapTransferFeed.swift:47-77), Debug
+    /// builds only: with <c>TRACE_COMMONS_MAP_DEMO=1</c> a run plays every
+    /// 12 seconds from the folders the map draws -- two contributions, a
+    /// keep, then a dismissal -- so the motion can be looked at without
+    /// anything leaving this computer. Nothing is sent, kept or dismissed.
+    /// </summary>
+    private void StartDemoIfAsked()
+    {
+        if (_demo is not null || Environment.GetEnvironmentVariable("TRACE_COMMONS_MAP_DEMO") != "1")
+        {
+            return;
+        }
+
+        _demo = DispatcherQueue.CreateTimer();
+        _demo.Interval = TimeSpan.FromSeconds(12);
+        _demo.Tick += (_, _) => DemoRound();
+        _demo.Start();
+        DispatcherQueue.TryEnqueue(DemoRound);
+    }
+
+    private void DemoRound()
+    {
+        if (!_loaded || _snapshot is not { } snapshot)
+        {
+            return;
+        }
+
+        TracesTree tree = snapshot.Tree(MapFeed.CoreScansWhenUnset);
+        var pairs = FlowMapScene.Directories(tree).Take(FlowMapScene.FoldersShown)
+            .Select(f => (Folder: f, Tool: FlowMapScene.Carriers(f, tree).FirstOrDefault()))
+            .Where(p => p.Tool is not null).ToList();
+        if (pairs.Count == 0)
+        {
+            return;
+        }
+
+        TransferAction action = (_demoRound % 4) switch
+        {
+            2 => TransferAction.Keep,
+            3 => TransferAction.Dismiss,
+            _ => TransferAction.Contribute,
+        };
+        var picked = action == TransferAction.Contribute
+            ? pairs.Skip(_demoRound % pairs.Count).Concat(pairs).Take(Math.Min(3, pairs.Count)).ToList()
+            : new() { pairs[_demoRound % pairs.Count] };
+        var transfers = picked.Select(p => new MapTransfer($"demo-{_demoRound}-{p.Folder.Id}", p.Folder.Id, p.Tool!.Id, action)
+        {
+            At = DateTimeOffset.Now,
+            FolderLabel = p.Folder.Label,
+        }).ToList();
+        if (action == TransferAction.Dismiss)
+        {
+            _player.Announce(transfers[0], Now);
+        }
+        else
+        {
+            _player.Enqueue(transfers, Now);
+        }
+
+        _demoRound++;
+    }
+#endif
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _loaded = false;
+#if DEBUG
+        _demo?.Stop();
+        _demo = null;
+#endif
         WindowClocks.Changed -= OnWindowClocksChanged;
         StopTimer();
     }
@@ -610,38 +717,56 @@ public sealed partial class TracesMapView : UserControl
     /// What the map needs next: the interval of its fastest moving part, or
     /// null when nothing moves and only a model change redraws it.
     /// </summary>
+    /// <summary>Whether the map's pane is open: the window collapses the pane, not this control.</summary>
+    public bool PaneShown
+    {
+        get => _paneShown;
+        set
+        {
+            if (_paneShown == value)
+            {
+                return;
+            }
+
+            _paneShown = value;
+            if (value)
+            {
+                _shownAt = Now;
+                Rebuild();
+            }
+            else
+            {
+                StopTimer();
+            }
+        }
+    }
+
+    private bool _paneShown = true;
+
+    /// <summary>The system's motion setting or the window's state may have changed: decide again.</summary>
+    public void Recheck()
+    {
+        _player.Tick(Now);
+        Redraw();
+        Kick();
+    }
+
     private double? WantedInterval()
     {
-        if (!MapMotion.ClockRuns(Motion, _loaded, WindowClocks.Running) || Visibility != Visibility.Visible)
-        {
-            return null;
-        }
-
         double now = Now;
-        bool library = _scene.Stack is not null && _scene.Nodes.Any(n => n.Kind == MapNodeKind.Library);
-        bool transfers = _scene.Stack is not null && _player.Run is { } run && now - run.Start <= run.End;
-        bool pile = _pile.Moving(now);
-        bool light = _pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration;
-        bool shimmer = MapField.UntilNextPass(now - _shownAt) == 0;
-        if (transfers || pile || light || shimmer)
-        {
-            return MapMotion.TransferFrameInterval;
-        }
-
-        (double interval, bool paused) = MapMotion.Resting(false, _scene.Flows, Healthy, library);
-        if (!paused)
-        {
-            return interval;
-        }
-
-        // Nothing moves until the next shimmer pass or the next card to go.
-        double wait = MapField.UntilNextPass(now - _shownAt);
-        if (_player.NextDeadline is { } deadline)
-        {
-            wait = Math.Min(wait, Math.Max(0, deadline - now));
-        }
-
-        return wait;
+        return MapMotion.ClockInterval(new MapClockInputs(
+            AnimationsEnabled: Motion,
+            Loaded: _loaded,
+            WindowVisible: WindowClocks.Running,
+            PaneShown: _paneShown && Visibility == Visibility.Visible,
+            HasLibrary: _scene.Stack is not null && _scene.Nodes.Any(n => n.Kind == MapNodeKind.Library),
+            Flows: _scene.Flows,
+            Healthy: Healthy,
+            TransferPlaying: _scene.Stack is not null && _player.Run is { } run && now - run.Start <= run.End,
+            PileMoving: _pile.Moving(now),
+            LightFading: _pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration,
+            SecondsShown: now - _shownAt,
+            NextDeadlineIn: _player.NextDeadline is { } deadline ? deadline - now : null));
     }
 
     private void Kick()
@@ -999,18 +1124,7 @@ public sealed partial class TracesMapView : UserControl
             ds.DrawGeometry(path, colour, width, style);
             if (arc.Style == MapArcStyle.Flowing && Healthy)
             {
-                // The moving dash, 18 points a second from the arc's start
-                // (FlowMapView.swift:290-295; dashPhase: -phase * scale).
-                float flowWidth = (float)(width * MapGeometry.FlowingWidthFactor);
-                using var flow = new CanvasStrokeStyle
-                {
-                    StartCap = CanvasCapStyle.Round,
-                    EndCap = CanvasCapStyle.Round,
-                    DashCap = CanvasCapStyle.Round,
-                    CustomDashStyle = MapGeometry.FlowingDash.Select(d => (float)(d * fit.Scale / flowWidth)).ToArray(),
-                    DashOffset = (float)MapMotion.DashOffsetInWidths(MapMotion.DashPhase(seconds, fit.Scale, !motion), flowWidth),
-                };
-                ds.DrawGeometry(path, Ink("statusOn", arc.Dim), flowWidth, flow);
+                MapPainter.FlowingDash(ds, path, fit.Scale, seconds, !motion, Ink("statusOn", arc.Dim));
             }
         }
     }

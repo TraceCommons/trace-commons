@@ -644,6 +644,10 @@ public sealed partial class MainWindow
         InspectorGapColumn.Width = new GridLength(layout.Inspector is null ? 0 : MonitorPaneLayout.PaneGap);
         InspectorColumn.Width = new GridLength(layout.Inspector ?? 0);
         MapPane.Visibility = layout.Map is null ? Visibility.Collapsed : Visibility.Visible;
+        if (_map is not null)
+        {
+            _map.PaneShown = layout.Map is not null;
+        }
         InspectorPane.Visibility = layout.Inspector is null ? Visibility.Collapsed : Visibility.Visible;
         if (_moveRun is null)
         {

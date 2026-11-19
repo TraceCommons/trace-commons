@@ -192,4 +192,25 @@ internal static class MapPainter
 
         ds.DrawCircle(c, (float)r, White(0.35), 1);
     }
+
+    /// <summary>
+    /// A flowing arc's moving dash over <paramref name="path"/>: [4, 8] at
+    /// 1.3 times the line, round caps, its phase 18 points a second from the
+    /// arc's start (FlowMapView.swift:290-295, <c>dashPhase: -phase * scale</c>).
+    /// Direct2D counts the dash and its offset in stroke widths.
+    /// </summary>
+    public static void FlowingDash(CanvasDrawingSession ds, CanvasGeometry path, double scale, double seconds, bool reduceMotion, Color colour)
+    {
+        float width = (float)(MapGeometry.ArcWidth * scale * MapGeometry.FlowingWidthFactor);
+        using var flow = new CanvasStrokeStyle
+        {
+            StartCap = CanvasCapStyle.Round,
+            EndCap = CanvasCapStyle.Round,
+            DashCap = CanvasCapStyle.Round,
+            CustomDashStyle = new[] { (float)(MapGeometry.FlowingDash[0] * scale / width), (float)(MapGeometry.FlowingDash[1] * scale / width) },
+            DashOffset = (float)MapMotion.DashOffsetInWidths(MapMotion.DashPhase(seconds, scale, reduceMotion), width),
+        };
+        ds.DrawGeometry(path, colour, width, flow);
+    }
 }
+

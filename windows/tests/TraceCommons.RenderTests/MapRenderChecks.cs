@@ -3,6 +3,7 @@ using System.IO;
 using System.Numerics;
 using System.Threading.Tasks;
 using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Geometry;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop.Map;
 using Windows.UI;
@@ -73,6 +74,63 @@ public static partial class RenderChecks
         }
 
         return string.Join("; ", lines);
+    }
+
+    /// <summary>
+    /// The flowing arc's dashes, drawn by the window's painter on a straight
+    /// line at 0 s and 1/6 s, move 3 points from the arc's start toward its
+    /// end, as the Mac's do (FlowMapView.swift:84 and :294, phase 18 points a
+    /// second, <c>dashPhase: -phase * scale</c>). Direct2D's dash offset is
+    /// in stroke widths and its sign is not CoreGraphics'; this reads the
+    /// drawn pixels, not the number.
+    /// </summary>
+    [RenderTest]
+    public static string FlowingDashesMoveFromTheArcsStart(CanvasDevice device, string outDir)
+    {
+        bool[] At(double seconds)
+        {
+            using var target = new CanvasRenderTarget(device, 200, 20, 96f);
+            using (CanvasDrawingSession ds = target.CreateDrawingSession())
+            {
+                ds.Clear(Color.FromArgb(0, 0, 0, 0));
+                using var builder = new CanvasPathBuilder(device);
+                builder.BeginFigure(10, 10);
+                builder.AddCubicBezier(new Vector2(70, 10), new Vector2(130, 10), new Vector2(190, 10));
+                builder.EndFigure(CanvasFigureLoop.Open);
+                using CanvasGeometry line = CanvasGeometry.CreatePath(builder);
+                MapPainter.FlowingDash(ds, line, 1, seconds, reduceMotion: false, Color.FromArgb(255, 0, 0, 0));
+            }
+
+            byte[] px = target.GetPixelBytes();
+            var on = new bool[200];
+            for (int x = 0; x < 200; x++)
+            {
+                on[x] = px[(10 * 200 + x) * 4 + 3] >= 128;
+            }
+
+            return on;
+        }
+
+        bool[] before = At(0), after = At(1.0 / 6);
+        int Matches(int shift)
+        {
+            int n = 0;
+            for (int x = 30; x < 170; x++)
+            {
+                n += after[x] == before[x - shift] ? 1 : 0;
+            }
+
+            return n;
+        }
+
+        int forward = Matches(3), backward = Matches(-3);
+        string numbers = $"forward={forward} backward={backward} of 140";
+        if (forward < 134 || forward <= backward + 20)
+        {
+            throw new InvalidOperationException(numbers + " (want the dashes 3 px further along, toward the end)");
+        }
+
+        return numbers;
     }
 
     /// <summary>
