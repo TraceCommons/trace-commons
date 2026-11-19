@@ -1197,7 +1197,9 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     /// </summary>
     private FrameworkElement AddToolTile(bool enabled)
     {
-        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+        // The words are inset, not the tile: the dashed outline, the hover
+        // fill and the focus ring are one rounded shape, as the Mac's tile.
+        var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(32, 0, 32, 0) };
         var plus = new FontIcon { Glyph = "\uE710", FontSize = 11, FontFamily = new FontFamily(FirstRunStagePainter.IconFamily), Foreground = Brush(FirstRunTokens.TextSecondary) };
         AutomationProperties.SetAccessibilityView(plus, AccessibilityView.Raw);
         label.Children.Add(plus);
@@ -1211,19 +1213,28 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             StrokeDashArray = new DoubleCollection { 4, 3 },
             IsHitTestVisible = false,
         };
-        var face = new Grid { Height = 36, Padding = new Thickness(32, 0, 32, 0) };
+        var face = new Grid { Height = 36 };
         face.Children.Add(outline);
         face.Children.Add(label);
         var button = Key(new Button
         {
             Content = face,
             Padding = new Thickness(0),
+            CornerRadius = new CornerRadius(12),
             Background = new SolidColorBrush(Colors.Transparent),
             BorderThickness = new Thickness(0),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             IsEnabled = enabled,
         }, "add-tool");
+        // A plain button, as the Mac's (.buttonStyle(.plain)): no fill on
+        // hover or press; hovering shows the caption's tooltip (.help).
+        foreach (string state in new[] { "PointerOver", "Pressed", "Disabled" })
+        {
+            button.Resources["ButtonBackground" + state] = new SolidColorBrush(Colors.Transparent);
+            button.Resources["ButtonBorderBrush" + state] = new SolidColorBrush(Colors.Transparent);
+        }
+
         AutomationProperties.SetName(button, Copy.Tools.AddTool);
         AutomationProperties.SetHelpText(button, Copy.Tools.AddToolCaption);
         ToolTipService.SetToolTip(button, Copy.Tools.AddToolCaption);
