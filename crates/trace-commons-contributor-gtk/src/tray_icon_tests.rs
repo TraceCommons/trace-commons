@@ -388,7 +388,7 @@ fn the_burst_stays_in_the_marks_column_and_ends_on_the_rest_frame() {
         assert_eq!(pixels_at(&plain, scheme, Some(1.7)), rest);
         for t in [0.0, 0.05, 0.2, 0.45, 0.9, 1.4] {
             let frame = pixels_at(&plain, scheme, Some(t));
-            assert!(frame != rest, "{t}: nothing drawn");
+            assert!(frame != rest, "{t}");
             for y in 0..22 {
                 for x in (0..4).chain(18..22) {
                     let i = (y * 22 + x) * 4;

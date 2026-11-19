@@ -170,7 +170,11 @@ thread_local! {
 pub fn current_order() -> Vec<Tab> {
     #[cfg(not(test))]
     {
-        ordered(&ORDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+        ordered(
+            &ORDER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
     #[cfg(test)]
     {
@@ -182,7 +186,9 @@ pub fn current_order() -> Vec<Tab> {
 pub fn set_current_order(order: &str) {
     #[cfg(not(test))]
     {
-        *ORDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = order.to_string();
+        *ORDER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = order.to_string();
     }
     #[cfg(test)]
     {

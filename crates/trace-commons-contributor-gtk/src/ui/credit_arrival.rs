@@ -198,16 +198,16 @@ pub fn request_attention(window: &gtk::Window) {
 pub fn clear_attention_when_active(window: &gtk::Window) {
     use gtk::prelude::*;
     window.connect_is_active_notify(|window| {
-        if !window.is_active() {
-            return;
-        }
         #[cfg(target_os = "linux")]
-        if let Some(x11) = window
-            .surface()
-            .and_then(|surface| surface.downcast::<gdk4_x11::X11Surface>().ok())
+        if window.is_active()
+            && let Some(x11) = window
+                .surface()
+                .and_then(|surface| surface.downcast::<gdk4_x11::X11Surface>().ok())
         {
             x11.set_urgency_hint(false);
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = window;
     });
 }
 
