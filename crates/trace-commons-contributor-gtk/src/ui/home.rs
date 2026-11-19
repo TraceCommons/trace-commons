@@ -36,6 +36,12 @@ pub struct HomeView {
     pub balance: balance::BalanceSection,
     waiting: gtk::Label,
     contributed: gtk::Label,
+    /// The Not contributed tile, shown while something waits here: its
+    /// count, and the size beside it.
+    not_contributed: (gtk::FlowBoxChild, gtk::Label, gtk::Label),
+    /// Credit earned and Credit pending (`HomeAccountTiles`).
+    credit_earned: gtk::Label,
+    credit_pending: gtk::Label,
     inference: gtk::Box,
     links: Vec<(gtk::Button, &'static str)>,
     prefs: RefCell<HomePrefs>,
@@ -81,23 +87,38 @@ impl HomeView {
         content.append(&inference);
 
         content.append(&heading(words.home_history.section_traces));
-        let tiles = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .min_children_per_line(1)
-            .max_children_per_line(2)
-            .column_spacing(space::M as u32)
-            .row_spacing(space::M as u32)
-            .homogeneous(true)
-            .build();
-        tiles.add_css_class("tc-insights-summary-grid");
+        // Waiting, Contributed and, while something waits here, Not
+        // contributed: three tiles on one line, as the Mac's grid.
+        let tiles = tile_row();
         let (waiting_button, waiting) = tile(words.waiting);
         let (contributed_button, contributed) = tile(words.contributed);
         tiles.insert(&waiting_button, -1);
         tiles.insert(&contributed_button, -1);
         links.push((waiting_button, "queue"));
         links.push((contributed_button, "history"));
+        let (waiting_here, count, size) = size_tile(words.home_history.uncontributed);
+        tiles.insert(&waiting_here, -1);
+        links.push((waiting_here, "queue"));
+        let not_contributed = (
+            tiles
+                .last_child()
+                .and_downcast::<gtk::FlowBoxChild>()
+                .expect("the tile's place"),
+            count,
+            size,
+        );
+        not_contributed.0.set_visible(false);
         content.append(&tiles);
         content.append(&heading(words.home_history.section_account));
+        // Credit earned and Credit pending, each a way to Private AI.
+        let credit = tile_row();
+        let (earned_button, credit_earned) = tile(words.credit_received);
+        let (pending_button, credit_pending) = tile(words.credit_pending_title);
+        credit.insert(&earned_button, -1);
+        credit.insert(&pending_button, -1);
+        links.push((earned_button, super::PRIVATE_INFERENCE_SCREEN));
+        links.push((pending_button, super::PRIVATE_INFERENCE_SCREEN));
+        content.append(&credit);
         let balance = balance::BalanceSection::new();
         balance.use_flat_style();
         content.append(&balance.root);
@@ -198,6 +219,9 @@ impl HomeView {
             balance,
             waiting,
             contributed,
+            not_contributed,
+            credit_earned,
+            credit_pending,
             inference: inference_status,
             links,
             prefs: RefCell::new(prefs),
@@ -299,6 +323,24 @@ impl HomeView {
         let counts = crate::home::Counts::from_answers(None, rollup);
         self.contributed
             .set_text(&crate::home::figure(counts.contributed));
+    }
+
+    /// The Not contributed tile from the queue: shown with its count and
+    /// size while anything waits here, gone otherwise.
+    pub fn render_uncontributed(&self, entries: &[model::QueueEntry]) {
+        let waiting = crate::home::Uncontributed::of(entries);
+        let (place, count, size) = &self.not_contributed;
+        place.set_visible(waiting.count > 0);
+        count.set_text(&waiting.count.to_string());
+        size.set_text(&waiting.size().unwrap_or_default());
+    }
+
+    /// Credit earned and Credit pending from the last rollup and the
+    /// commons' condition; a dash for what either has not said.
+    pub fn render_credit(&self, rollup: Option<&crate::home::Rollup>, condition: Option<&str>) {
+        let (earned, pending) = crate::home::credit_tiles(rollup, condition);
+        self.credit_earned.set_text(&earned);
+        self.credit_pending.set_text(&pending);
     }
 
     pub fn render_inference(&self, settings: Option<&model::Settings>) {
@@ -653,6 +695,46 @@ fn tile(title: &str) -> (gtk::Button, gtk::Label) {
     (button, value)
 }
 
+/// A line of equal tiles, three to a line as the Mac's grid, fewer as the
+/// pane narrows.
+fn tile_row() -> gtk::FlowBox {
+    let row = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(space::M as u32)
+        .row_spacing(space::M as u32)
+        .homogeneous(true)
+        .build();
+    row.add_css_class("tc-insights-summary-grid");
+    row
+}
+
+/// A tile whose count has the size beside it (`HomeNotContributedCard` as
+/// a third tile): the count, and the size in the caption's ink.
+fn size_tile(title: &str) -> (gtk::Button, gtk::Label, gtk::Label) {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+    let label = gtk::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+    let count = gtk::Label::builder().label("—").xalign(0.0).build();
+    count.add_css_class("title-3");
+    let size = gtk::Label::builder().xalign(0.0).build();
+    size.add_css_class("caption");
+    size.set_valign(gtk::Align::Baseline);
+    count.set_valign(gtk::Align::Baseline);
+    line.append(&count);
+    line.append(&size);
+    content.append(&label);
+    content.append(&line);
+    let button = gtk::Button::builder().child(&content).hexpand(true).build();
+    button.add_css_class("tc-insights-summary");
+    (button, count, size)
+}
+
 fn heading(title: &str) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(title)
@@ -666,6 +748,94 @@ fn heading(title: &str) -> gtk::Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's tiles, laid out and drawn: Waiting, Contributed and Not
+    /// contributed on one line under Traces while something waits here
+    /// (its count and size), and Credit earned and Credit pending under
+    /// Account, a dash until read; none with an icon. On main Home had
+    /// only the first two.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_home_draws_the_macs_tiles() {
+        gtk::init().unwrap();
+        let words = monitor_screens_copy();
+        let view = HomeView::new(false);
+        let window = gtk::Window::builder()
+            .default_width(560)
+            .default_height(900)
+            .child(&view.root)
+            .build();
+        window.present();
+        let settle = || {
+            let context = glib::MainContext::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+            }
+        };
+        settle();
+        let (place, count, size) = &view.not_contributed;
+        assert!(!place.is_mapped(), "nothing waits: no Not contributed tile");
+        let entry = |state: &str, bytes| model::QueueEntry {
+            state: state.into(),
+            size_bytes: bytes,
+            ..model::QueueEntry::default()
+        };
+        view.render_uncontributed(&[
+            entry("pending", 100 * 1024),
+            entry("pending", 45 * 1024),
+            entry("uploaded", 1),
+        ]);
+        settle();
+        assert!(place.is_mapped(), "the Not contributed tile is drawn");
+        assert_eq!(count.text(), "2");
+        assert_eq!(
+            size.text(),
+            words
+                .home_history
+                .uncontributed_size
+                .replace("{size}", "145 KB")
+        );
+        // The three on one line.
+        let waiting = view
+            .waiting
+            .ancestor(gtk::FlowBoxChild::static_type())
+            .unwrap();
+        let top = |w: &gtk::Widget| w.compute_bounds(&window).unwrap().y();
+        assert_eq!(top(&waiting), top(place.upcast_ref()));
+        // Credit earned and pending: words and a dash, then the figures.
+        for (label, word) in [
+            (&view.credit_earned, words.credit_received),
+            (&view.credit_pending, words.credit_pending_title),
+        ] {
+            assert!(label.is_mapped(), "{word} is drawn");
+            assert_eq!(label.text(), "—", "{word} before a read");
+            let tile = label.ancestor(gtk::Button::static_type()).unwrap();
+            let mut child = tile.first_child().and_then(|b| b.first_child());
+            let mut texts = Vec::new();
+            while let Some(widget) = child {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    texts.push(label.text().to_string());
+                }
+                assert!(!widget.is::<gtk::Image>(), "{word} has an icon");
+                child = widget.next_sibling();
+            }
+            assert_eq!(texts.first().map(String::as_str), Some(word));
+        }
+        let rollup: crate::home::Rollup = serde_json::from_value(
+            serde_json::json!({"credit_final": 10.0, "credit_pending": 2.5}),
+        )
+        .unwrap();
+        view.render_credit(Some(&rollup), Some("Paid weekly"));
+        assert_eq!(view.credit_earned.text(), "10");
+        assert_eq!(view.credit_pending.text(), "2.5");
+        view.render_uncontributed(&[]);
+        settle();
+        assert!(!place.is_mapped());
+        window.close();
+    }
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]

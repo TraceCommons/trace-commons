@@ -1085,6 +1085,7 @@ impl App {
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            app.home.render_uncontributed(&entries);
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
@@ -1125,6 +1126,10 @@ impl App {
                 serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
             });
             app.home.render_rollup(home_rollup.as_ref());
+            app.home.render_credit(
+                home_rollup.as_ref(),
+                app.credit_condition.borrow().as_deref(),
+            );
             *app.summary_rollup.borrow_mut() = home_rollup;
             app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
@@ -1144,6 +1149,10 @@ impl App {
                 *app.credit_condition.borrow_mut() = result
                     .ok()
                     .and_then(|value| monitor::summary::pending_condition(&value));
+                app.home.render_credit(
+                    app.summary_rollup.borrow().as_ref(),
+                    app.credit_condition.borrow().as_deref(),
+                );
                 app.shell.inspector.render_summary(app);
             },
         );
