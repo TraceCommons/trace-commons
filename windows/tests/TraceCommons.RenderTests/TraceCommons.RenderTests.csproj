@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Win2D render tests (spec W1-D2 (a), landing with W2).
+
+    An executable rather than an xunit project, built exactly as spike S1's
+    probe was (net8.0-windows10.0.19041.0, minimum 10.0.17763, unpackaged,
+    self-contained Windows App SDK, custom Main), because that is the
+    configuration measured to draw offscreen with CanvasRenderTarget on the
+    test box. It renders without starting a XAML application.
+
+    Win2D cannot create a CanvasDevice in session 0 (S1: 0x887A0022 from
+    CanvasDevice::InitializePrimaryOutput), which is where SSH, S4U and SYSTEM
+    tasks and service-hosted runners run. The harness detects that and skips
+    with the reason, or fails when TC_RENDER_TESTS_REQUIRED=1 (the box's /IT
+    run sets it, so a render that did not happen there is a failure).
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>TraceCommons.RenderTests</RootNamespace>
+    <AssemblyName>TraceCommons.RenderTests</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <UseWinUI>true</UseWinUI>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <WindowsPackageType>None</WindowsPackageType>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.240923002" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <!-- Approved 2026-11-18; the only stable version whose floor equals the
+         Windows App SDK pin (spike S1). Microsoft's signed package, under its
+         binary licence (owner, 2026-11-18). -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
+  </ItemGroup>
+
+  <!-- The Mac's own renders the Windows draws are compared with. -->
+  <ItemGroup>
+    <None Include="Fixtures/*.png" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="render-tests.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

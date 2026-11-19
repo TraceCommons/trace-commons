@@ -11,13 +11,21 @@ using TraceCommons.Interop;
 
 namespace TraceCommons.App.ViewModels;
 
-public sealed record SavedInsight(string Id, string Label);
+public sealed record SavedInsight(string Id, string Label)
+{
+    /// <summary>A list item is named by its ToString in UI Automation: the row's label, never the record's fields.</summary>
+    public override string ToString() => Label;
+}
 public sealed record EvidenceTarget(string SnapshotId, long Version);
 public sealed record OutcomeEvidenceRow(string Id, string SnapshotId, string Label, string Details, string UnlinkLabel);
 public sealed record ModelReferenceRow(string Label);
 public sealed record SummaryEvidenceLink(string Id, string Label);
 public sealed record SummaryRow(string Label, string Details, IReadOnlyList<SummaryEvidenceLink> Evidence);
-public sealed record EpisodeRow(string Id, string Label);
+public sealed record EpisodeRow(string Id, string Label)
+{
+    /// <summary>A list item is named by its ToString in UI Automation: the row's label.</summary>
+    public override string ToString() => Label;
+}
 public sealed record EpisodeMemberRow(string Id, string Label, string Details);
 public sealed record EpisodeTarget(string Id, ulong Revision, ulong MembershipRevision, long PresentationVersion);
 public sealed record CardEvidenceLink(string Id, string Label);
@@ -855,7 +863,11 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     }
 }
 
-public sealed record AnalyticsChoice(string Value, string Label);
+public sealed record AnalyticsChoice(string Value, string Label)
+{
+    /// <summary>A list item is named by its ToString in UI Automation: the choice's label.</summary>
+    public override string ToString() => Label;
+}
 /// <summary>A plain bar: its length in pixels, or a gap (no bar, never a zero bar) when the figure is unknown.</summary>
 public sealed record AnalyticsBar(string Label, double Length, string Figure, bool Gap);
 public sealed record AnalyticsFigureLine(string Figure, string Line, string Change);

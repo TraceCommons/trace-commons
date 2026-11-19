@@ -12,6 +12,9 @@ pub mod native_collection;
 pub mod opencode;
 pub mod options;
 pub mod profiles;
+pub mod red_team;
+pub mod red_team_release;
+pub mod sandbox;
 pub mod secrets;
 pub mod session_binding;
 pub mod sessions;
@@ -23,6 +26,9 @@ pub mod tool_setup;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Feature flag gating Red Team managed sessions (macOS only).
+pub const RED_TEAM_FLAG: &str = "red_team_sessions";
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
 )]
@@ -31,6 +37,7 @@ pub enum ToolId {
     Claude,
     Codex,
     Opencode,
+    RedTeam,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -91,7 +98,7 @@ pub struct Selection {
 }
 
 /// Fixed error vocabulary: paths, account labels and credentials stay out of logs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManagedError {
     #[error("managed selection conflict; refresh and try again")]
     Conflict,
@@ -113,7 +120,7 @@ pub enum ManagedError {
     SignInRequired,
     #[error("sign in to NEAR AI before launching")]
     NearAiSignInRequired,
-    /// DRAFT, NEEDS APPROVAL (2026-11-04).
+    /// Owner-approved 2026-11-19.
     #[error("open the {} app before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("Update and reopen {} before launching Codex.", crate::brand::APP_NAME)]
@@ -152,7 +159,31 @@ pub enum ManagedError {
     /// ticket was sent. Shells show the general failure line.
     #[error("the terminal app's command failed")]
     TerminalCallFailed,
+    /// Red Team sessions are disabled by feature flag or unsupported on this OS.
+    #[error("Red Team sessions are not available in this app build.")]
+    RedTeamUnavailable,
+    /// Red Team sessions require NEAR AI sign-in or a saved NEAR AI key.
+    #[error("Red Team sessions require a NEAR AI account.")]
+    RedTeamNeedsNearAi,
+    /// A Red Team input path was refused before creating the VM.
+    #[error("{0}")]
+    SandboxInputRefused(String),
+    /// A Red Team network allowlist entry was refused before creating the VM.
+    #[error("{0}")]
+    SandboxHostRefused(String),
 }
+
+/// The daemon's label for [`ManagedError::RedTeamUnavailable`].
+pub const RED_TEAM_UNAVAILABLE_LABEL: &str = "red_team_unavailable";
+
+/// The daemon's label for [`ManagedError::RedTeamNeedsNearAi`].
+pub const RED_TEAM_NEEDS_NEAR_AI_LABEL: &str = "red_team_needs_near_ai";
+
+/// The daemon's label for [`ManagedError::SandboxInputRefused`].
+pub const SANDBOX_INPUT_REFUSED_LABEL: &str = "sandbox_input_refused";
+
+/// The daemon's label for [`ManagedError::SandboxHostRefused`].
+pub const SANDBOX_HOST_REFUSED_LABEL: &str = "sandbox_host_refused";
 
 /// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
 /// CLI turns back into its sentence and the shells map to the shared

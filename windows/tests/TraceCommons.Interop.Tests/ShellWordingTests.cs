@@ -115,8 +115,10 @@ public class ShellWordingTests
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
             { "TraceCommons.App/Controls/SettingsView.xaml", 15 },
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
-            // "For 1 hour" became "1 hour".
-            { "TraceCommons.App/MainWindow.xaml", 17 },
+            // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
+            // button's hand-written accessible name, which also spelled the
+            // former app name, is gone; the button is named by its label.
+            { "TraceCommons.App/MainWindow.xaml", 16 },
             { "TraceCommons.App/OnboardingWindow.xaml", 11 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };

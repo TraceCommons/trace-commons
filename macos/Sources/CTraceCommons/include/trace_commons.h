@@ -382,6 +382,12 @@ char*       tc_channel_mismatch_line(void);
  */
 char*       tc_channel_window_label(void);
 
+/* The app's name (brand.rs APP_NAME), for a shell that titles a window the
+ * system names it by. Returns an owned string; free it with tc_string_free.
+ * NULL only on a caught panic.
+ */
+char*       tc_app_name(void);
+
 /* The state directory the core would pick, so a shell that chooses its own
  * directory still gets the core's refusal of the other channel's.
  *

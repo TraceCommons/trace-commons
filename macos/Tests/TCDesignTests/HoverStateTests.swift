@@ -147,7 +147,15 @@ final class HoverStateTests: XCTestCase {
         XCTAssertFalse(buttons.contains("Capsule().fill(hoverFill)"), "a glass button's hover stacks on its fill")
         let containers = try XCTUnwrap(sources["Containers.swift"])
         XCTAssertTrue(containers.contains("hover: Self.hoverFill(interactive: interactive)"))
+        // Read the option row alone: other views in the file (the strip's
+        // credit burst) use 0.55 for their own reasons.
         let panel = try XCTUnwrap(sources["MenuBarPanel.swift"])
-        XCTAssertFalse(panel.contains("0.55"), "the option row dims twice")
+        let rowStart = try XCTUnwrap(panel.range(of: "public struct GlassOptionRow"))
+        let rowEnd = panel.range(of: "\npublic struct ", range: rowStart.upperBound..<panel.endIndex)?.lowerBound
+            ?? panel.endIndex
+        let row = String(panel[rowStart.lowerBound..<rowEnd])
+        XCTAssertTrue(row.contains(".buttonStyle(GlassPressStyle())"), "the option row lost the shared disabled opacity")
+        XCTAssertFalse(row.contains(".opacity(isEnabled"), "the option row dims twice")
+        XCTAssertFalse(row.contains("0.55"), "the option row dims twice")
     }
 }
