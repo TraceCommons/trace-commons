@@ -44,6 +44,12 @@ public sealed partial class MainWindow
         // comes back (the map reads the setting on every tick while it runs).
         Activated += (_, _) => _map?.Recheck();
 
+        // And when the system says the motion setting changed: UISettings'
+        // own event did not come for it on the test box, so a map stopped by
+        // motion going off stayed still when it came back on.
+        MotionSettingWatch.Install(WinRT.Interop.WindowNative.GetWindowHandle(this));
+        MotionSettingWatch.Changed += () => _map?.Recheck();
+
         MapToggle.Visibility = Visibility.Visible;
         MapToggle.Click += (_, _) =>
         {
