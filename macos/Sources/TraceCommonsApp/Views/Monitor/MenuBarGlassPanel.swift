@@ -655,10 +655,15 @@ struct MenuBarStripLabel: View {
     /// body runs on every model publish; the bitmap is drawn only when its
     /// inputs change.
     @State private var cache = MenuBarStripImageCache()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(BalanceArrival.IconAnimation.preferenceKey) private var creditIconAnimationOn = true
+    /// Elapsed seconds into an active credit-arrival burst, or nil at rest.
+    @State private var creditBurst: Double?
 
     var body: some View {
         let available = model.startup == .running && !store.stale
-        let inputs = MenuBarStripInputs.of(model: model, store: store, scale: displayScale)
+        let inputs = MenuBarStripInputs.of(
+            model: model, store: store, scale: displayScale, creditBurst: creditBurst)
         // The mark's words, only while the strip draws the mark: the badge
         // and condition come from a different read than the nudge, and a
         // ring or halo the strip hid is never spoken or shown as a tooltip.
@@ -678,6 +683,33 @@ struct MenuBarStripLabel: View {
             .task(id: model.liveData.map(ObjectIdentifier.init)) {
                 store.attach(model.daemonData, configDirectory: model.configDirectory)
                 await store.run()
+            }
+            // Gold gleam and mini coin burst across the strip whenever credits
+            // arrive live during this session.
+            .task(id: model.creditArrivalCount) {
+                guard model.creditArrivalCount > 0, creditIconAnimationOn else {
+                    creditBurst = nil
+                    return
+                }
+                let wait = reduceMotion
+                    ? BalanceArrival.IconAnimation.reduceMotionHold
+                    : BalanceArrival.IconAnimation.frameInterval
+                for elapsed in BalanceArrival.IconAnimation.frameTimes(reduceMotion: reduceMotion) {
+                    guard creditIconAnimationOn else {
+                        creditBurst = nil
+                        return
+                    }
+                    creditBurst = elapsed
+                    try? await Task.sleep(for: wait)
+                    guard !Task.isCancelled else {
+                        creditBurst = nil
+                        return
+                    }
+                }
+                creditBurst = nil
+            }
+            .onChange(of: creditIconAnimationOn) { _, on in
+                if !on { creditBurst = nil }
             }
     }
 
@@ -699,7 +731,8 @@ struct MenuBarStripLabel: View {
                 condition: inputs.condition,
                 badge: inputs.badge,
                 mark: inputs.mark,
-                graph: inputs.graph)
+                graph: inputs.graph,
+                creditBurst: inputs.creditBurst)
                 .padding(.trailing, GlassMenuBarStrip.haloReach)
                 .environment(\.colorScheme, scheme))
             renderer.scale = inputs.scale
@@ -721,9 +754,13 @@ struct MenuBarStripInputs: Equatable {
     let scale: CGFloat
     /// Whether the graph is drawn: only after a few days of trace data.
     let graph: Bool
+    /// Elapsed seconds into an active credit-arrival burst, or nil at rest.
+    var creditBurst: Double? = nil
 
     @MainActor
-    static func of(model: AppModel, store: MenuPanelStore, scale: CGFloat) -> MenuBarStripInputs {
+    static func of(
+        model: AppModel, store: MenuPanelStore, scale: CGFloat, creditBurst: Double? = nil
+    ) -> MenuBarStripInputs {
         let available = model.startup == .running && !store.stale
         // The strip draws the columns, so it is unavailable when either read
         // behind them did not answer, never the last bars as current.
@@ -740,7 +777,8 @@ struct MenuBarStripInputs: Equatable {
             badge: MenuPanelStatus.badge(model.decisionsOwed),
             mark: MenuPanelStatus.mark(store.status?.nudge, available: available),
             scale: scale,
-            graph: store.stripShowsGraph)
+            graph: store.stripShowsGraph,
+            creditBurst: creditBurst)
     }
 }
 

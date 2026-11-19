@@ -53,9 +53,7 @@ fn completed_tenants() -> Vec<String> {
 /// config, so writing it here is not a new exposure, and hashing it would
 /// buy nothing while costing two dependencies.
 fn completion_file() -> Option<std::path::PathBuf> {
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|d| d.join("trace-commons").join("onboarded.json"))
+    crate::shell_state_file("onboarded.json")
 }
 
 fn setup_complete(status: &Status, legacy_complete: bool) -> bool {

@@ -1500,6 +1500,11 @@ pub struct MonitorHomeHistoryCopy {
     pub promotions_title: &'static str,
     pub promotions_toggle: &'static str,
     pub promotions_caption: &'static str,
+    /// Settings' switch for the Dock and menu-bar icon credit-arrival
+    /// animation (on by default; off disables both icon animations).
+    pub credit_icon_animation_title: &'static str,
+    pub credit_icon_animation_toggle: &'static str,
+    pub credit_icon_animation_caption: &'static str,
     /// The contribution list card's eyebrow and heading.
     pub submissions: &'static str,
     pub contribution_history: &'static str,
@@ -1848,6 +1853,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             promotions_toggle: "Show promotions",
             // Approved by the owner 2026-11-04 (Settings copy pass 2, P232).
             promotions_caption: "News from NEAR AI, such as a new model.",
+            credit_icon_animation_title: "Credit arrivals",
+            credit_icon_animation_toggle: "Animate Dock and menu bar icons",
+            credit_icon_animation_caption: "Burst gold coins on the Dock and menu bar icons when credits arrive.",
             submissions: "Submissions",
             contribution_history: "Contribution history",
             reading_history: "Reading local history\u{2026}",

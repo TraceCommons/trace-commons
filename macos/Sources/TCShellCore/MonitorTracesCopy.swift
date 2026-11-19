@@ -830,6 +830,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
     public let promotionsTitle: String
     public let promotionsToggle: String
     public let promotionsCaption: String
+    public let creditIconAnimationTitle: String
+    public let creditIconAnimationToggle: String
+    public let creditIconAnimationCaption: String
     public let submissions: String
     public let contributionHistory: String
     public let readingHistory: String
@@ -894,6 +897,9 @@ public struct MonitorHomeHistoryCopy: MonitorWordTable {
         case promotionsTitle = "promotions_title"
         case promotionsToggle = "promotions_toggle"
         case promotionsCaption = "promotions_caption"
+        case creditIconAnimationTitle = "credit_icon_animation_title"
+        case creditIconAnimationToggle = "credit_icon_animation_toggle"
+        case creditIconAnimationCaption = "credit_icon_animation_caption"
         case submissions
         case contributionHistory = "contribution_history"
         case readingHistory = "reading_history"

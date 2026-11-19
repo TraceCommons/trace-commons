@@ -21,8 +21,14 @@ public static class Program
         AppInstance.GetCurrent().Activated += (_, activation) => Activations.Enqueue(activation);
         try
         {
-            var holder = AppInstance.FindOrRegisterForKey("TraceCommons.Main");
-            if (!holder.IsCurrent && Redirect(holder)) return 0;
+            // A recorded-sample launch stays out of single-instancing: it
+            // would hand itself to a running app and show that app's data,
+            // or hold the key and take a real launch's activation.
+            if (!IsSampleLaunch)
+            {
+                var holder = AppInstance.FindOrRegisterForKey("TraceCommons.Main");
+                if (!holder.IsCurrent && Redirect(holder)) return 0;
+            }
         }
         catch (Exception)
         {
@@ -39,6 +45,20 @@ public static class Program
         });
         return 0;
     }
+
+    /// <summary>
+    /// Whether this launch reads recorded samples instead of a daemon
+    /// (<c>TRACE_COMMONS_SAMPLE</c>, Debug builds only; always false in
+    /// Release). Such a launch changes nothing on this machine outside the
+    /// window: no single-instance key, URL scheme, run at login or witness
+    /// files.
+    /// </summary>
+    internal static bool IsSampleLaunch =>
+#if DEBUG
+        SampleDaemon.IsRequested();
+#else
+        false;
+#endif
 
     internal static void ReceiveActivations(Action<AppActivationArguments> receive) => Activations.Attach(receive);
 

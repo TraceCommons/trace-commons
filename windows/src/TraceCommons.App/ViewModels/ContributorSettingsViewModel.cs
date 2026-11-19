@@ -1954,7 +1954,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// </remarks>
     public async Task ConfigureWitnessAsync()
     {
-        if (!IsLoaded || IsBusy || _witnessCopy is null)
+        if (!IsLoaded || IsBusy || _witnessCopy is null || Program.IsSampleLaunch)
         {
             return;
         }
@@ -1994,7 +1994,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// </remarks>
     public async Task ClearWitnessAsync()
     {
-        if (!IsLoaded || IsBusy || _witnessCopy is null)
+        if (!IsLoaded || IsBusy || _witnessCopy is null || Program.IsSampleLaunch)
         {
             return;
         }

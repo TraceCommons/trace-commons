@@ -844,6 +844,10 @@ final class AppModel: ObservableObject {
     /// money made before anything was read.
     @Published private(set) var balanceStatus: BalanceStatus = .unreported
     @Published private(set) var balanceRefreshing = false
+    /// Incremented each time `balanceStatus.receivedTotalNanos` increases
+    /// during this session; drives the Dock and menu-bar icon animations.
+    @Published private(set) var creditArrivalCount = 0
+    private var creditArrivalTracker = BalanceArrival.Tracker()
     private var balanceReadGeneration = 0
 
     /// The ceremony this shell started, while it is still going.
@@ -1018,12 +1022,21 @@ final class AppModel: ObservableObject {
             switch outcome {
             case .success(let status):
                 self.recordRead(BalanceSurface.statusMethod, answered: true)
-                self.publishIfChanged(\.balanceStatus, status)
+                self.recordBalanceStatus(status)
             case .failure:
                 self.recordRead(BalanceSurface.statusMethod, answered: false)
                 // An old amount must not look like a successful refresh.
                 self.publishIfChanged(\.balanceStatus, BalanceStatus(state: "unavailable"))
             }
+        }
+    }
+
+    /// Publishes a newly read balance status and notes live credit arrivals
+    /// for the Dock and menu-bar icon animations.
+    func recordBalanceStatus(_ status: BalanceStatus) {
+        publishIfChanged(\.balanceStatus, status)
+        if creditArrivalTracker.observe(status.receivedTotalNanos) {
+            creditArrivalCount &+= 1
         }
     }
 
@@ -1986,6 +1999,7 @@ final class AppModel: ObservableObject {
             refreshNearAiBalance()
         case .unknown(let name):
             if name == "managed_changed" { refreshManagedSessions() }
+            if name == "history_changed" { refreshHistory() }
         }
     }
 
@@ -2141,9 +2155,19 @@ final class AppModel: ObservableObject {
             self.publishIfChanged(\.historyAnswered, true)
         }
         let rollup = perform("history_rollup", work: { try $0.historyRollup() }, whenCurrent: current) {
-            self.publishIfChanged(\.rollup, $0)
+            self.recordHistoryRollup($0)
         }
         return (history, rollup)
+    }
+
+    /// Publishes a newly read history rollup and notes live Trace Commons
+    /// credit arrivals for the Dock and menu-bar icon animations (even when
+    /// not signed into NEAR AI).
+    func recordHistoryRollup(_ rollup: HistoryRollup) {
+        publishIfChanged(\.rollup, rollup)
+        if creditArrivalTracker.observeCreditFinal(rollup.creditFinal) {
+            creditArrivalCount &+= 1
+        }
     }
 
     @discardableResult

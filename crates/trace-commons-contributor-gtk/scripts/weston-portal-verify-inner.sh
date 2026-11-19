@@ -192,6 +192,7 @@ else
     ui::style::tests::both_schemes_parse_with_insights_styles \
     ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
+    ui::settings::navigation::tests::mounted_settings_opened_at_a_section_scrolls_there_on_first_show \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
@@ -256,6 +257,13 @@ else
     ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
     ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
     ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::edge_surfaces::tests::mounted_rail_switch_is_hidden_until_the_session_is_known \
+    ui::edge_surfaces::tests::mounted_rail_slides_and_fades_under_reduced_motion \
+    ui::edge_surfaces::tests::mounted_compact_graph_is_shown_without_its_controls \
+    ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend \
+    ui::edge_surfaces::tests::mounted_the_popovers_private_ai_card_follows_the_mac \
+    ui::edge_surfaces::tests::mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys \
+    edge::gnome::tests::mounted_the_placed_windows_carry_their_marker_and_the_brand_name \
     ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
     ui::first_run_screens::mounted_tests::tools_start_unticked_and_continue_waits_for_a_watch \

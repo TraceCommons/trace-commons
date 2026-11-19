@@ -12,6 +12,9 @@ main+inspector or main+map+inspector, and <appearance> is light or dark. The
 macOS hook (macos/Sources/TraceCommonsApp/DebugScreenshot.swift) writes these
 names; a Linux capture must use the same ones.
 
+The second side is named Linux unless PARITY_SIDE names it (Windows for the
+Windows captures).
+
 Usage: gallery.py <mac-dir> <linux-dir> <out.html>
 """
 
@@ -100,12 +103,17 @@ def _img(path: str, alt: str) -> str:
     return f'<img alt="{html.escape(alt)}" src="data:image/png;base64,{data}">'
 
 
-def render(result: Result) -> str:
+def side_name(environ) -> str:
+    """The second side's name: PARITY_SIDE, or Linux."""
+    return environ.get("PARITY_SIDE") or "Linux"
+
+
+def render(result: Result, side: str = "Linux") -> str:
     out = [
         "<!doctype html>",
         '<html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>Mac and Linux captures</title>",
+        f"<title>Mac and {html.escape(side)} captures</title>",
         "<style>",
         ":root{--bg:#f6f6f7;--fg:#1d1d1f;--muted:#6e6e73;--rule:#d2d2d7}",
         "@media (prefers-color-scheme: dark){:root{--bg:#1c1c1e;--fg:#f5f5f7;--muted:#a1a1a6;--rule:#3a3a3c}}",
@@ -116,25 +124,25 @@ def render(result: Result) -> str:
         "img{max-width:100%;height:auto;border:1px solid var(--rule)}",
         "@media (max-width:700px){.row{grid-template-columns:1fr}}",
         "</style></head><body>",
-        "<h1>Mac and Linux captures</h1>",
+        f"<h1>Mac and {html.escape(side)} captures</h1>",
         f"<p>{len(result.pairs)} paired, {len(result.mac_only)} macOS only, "
-        f"{len(result.linux_only)} Linux only, {len(result.unparsed)} not named to the grammar.</p>",
+        f"{len(result.linux_only)} {html.escape(side)} only, {len(result.unparsed)} not named to the grammar.</p>",
     ]
     for pair in result.pairs:
         name = pair.key.filename()
         out += [
             f"<section><h2>{html.escape(name)}</h2><div class=\"row\">",
             f"<figure>{_img(pair.mac, 'macOS ' + name)}<figcaption>macOS</figcaption></figure>",
-            f"<figure>{_img(pair.linux, 'Linux ' + name)}<figcaption>Linux</figcaption></figure>",
+            f"<figure>{_img(pair.linux, side + ' ' + name)}<figcaption>{html.escape(side)}</figcaption></figure>",
             "</div></section>",
         ]
     for label, keys, directory in (
         ("macOS only", result.mac_only, result.mac_dir),
-        ("Linux only", result.linux_only, result.linux_dir),
+        (f"{side} only", result.linux_only, result.linux_dir),
     ):
         if not keys:
             continue
-        out.append(f"<section><h2>{label}</h2>")
+        out.append(f"<section><h2>{html.escape(label)}</h2>")
         for key in keys:
             name = key.filename()
             path = os.path.join(directory, name)
@@ -160,17 +168,18 @@ def main(argv: List[str]) -> int:
         if not os.path.isdir(directory):
             print(f"not a directory: {directory}", file=sys.stderr)
             return 2
+    side = side_name(os.environ)
     result = collect(mac_dir, linux_dir)
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(render(result))
+        f.write(render(result, side))
     print(
         f"{out_path}: {len(result.pairs)} paired, {len(result.mac_only)} macOS only, "
-        f"{len(result.linux_only)} Linux only, {len(result.unparsed)} unparsed"
+        f"{len(result.linux_only)} {side} only, {len(result.unparsed)} unparsed"
     )
     for key in result.mac_only:
         print(f"macOS only: {key.filename()}")
     for key in result.linux_only:
-        print(f"Linux only: {key.filename()}")
+        print(f"{side} only: {key.filename()}")
     for side, name in result.unparsed:
         print(f"unparsed ({side}): {name}")
     return 0

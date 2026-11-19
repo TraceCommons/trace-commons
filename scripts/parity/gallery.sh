@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Pair macOS and Linux window captures into one self-contained HTML page.
+# Pair macOS and Linux (or Windows) window captures into one self-contained
+# HTML page.
 #
 # Usage: scripts/parity/gallery.sh <mac-dir> <linux-dir> [out.html]
+#        PARITY_SIDE=Windows scripts/parity/gallery.sh <mac-dir> <windows-dir> [out.html]
 #
 # Captures are named <set>-<tab>-<panes>-<appearance>.png (see gallery.py).
 # macOS captures come from the debug app's ImageRenderer hook:
