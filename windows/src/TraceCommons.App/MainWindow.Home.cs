@@ -25,7 +25,6 @@ public sealed partial class MainWindow
     private readonly LocalInsights _homeInsights = new();
     private DispatcherQueueTimer? _creditTimer;
     private TaskbarCredit? _taskbarCredit;
-    private bool _windowActive;
     private bool _homeLoading;
     private string? _insightsHeading;
     private string? _insightsIntro;
@@ -73,11 +72,9 @@ public sealed partial class MainWindow
         };
         _home.Showing = ViewModel.ShowingHome;
 
-        Activated += (_, e) =>
-        {
-            _windowActive = e.WindowActivationState != WindowActivationState.Deactivated;
-            SystemSettingWatch.Refresh();
-        };
+        // Whether the window is active is W5's _windowActive
+        // (MainWindow.Look.cs), which the taskbar flag reads too.
+        Activated += (_, _) => SystemSettingWatch.Refresh();
 
         // Home's own reads follow the daemon while Home is on screen, as the
         // tray's do: the window opens on Home, so no page change would ever
