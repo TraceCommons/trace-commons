@@ -22,6 +22,7 @@ internal static class GlassComposition
     public static void Run(UIElement element, string property, float from, float to, MotionSpec spec, Action? completed = null)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(element);
+        EnsureTranslation(visual, property);
         visual.StopAnimation(property);
         if (!GlassMotionSettings.MayMove)
         {
@@ -53,8 +54,22 @@ internal static class GlassComposition
     public static void Settle(UIElement element, string property, float value)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(element);
+        EnsureTranslation(visual, property);
         visual.StopAnimation(property);
         Set(visual, property, value);
+    }
+
+    /// <summary>
+    /// Translation is a property set entry that exists only once written;
+    /// stopping or animating it before then throws "property not found".
+    /// </summary>
+    private static void EnsureTranslation(Visual visual, string property)
+    {
+        if (property.StartsWith("Translation", StringComparison.Ordinal)
+            && visual.Properties.TryGetVector3("Translation", out _) != CompositionGetValueStatus.Succeeded)
+        {
+            visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
+        }
     }
 
     private static void Set(Visual visual, string property, float value)

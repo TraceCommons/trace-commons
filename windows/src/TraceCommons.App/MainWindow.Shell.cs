@@ -1106,6 +1106,9 @@ public sealed partial class MainWindow
     private static void ResetMotion(FrameworkElement card)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
+        // Translation must exist before it can be stopped: StopAnimation on a
+        // card that never moved threw "property not found" at launch.
+        visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
         visual.Opacity = 1;
