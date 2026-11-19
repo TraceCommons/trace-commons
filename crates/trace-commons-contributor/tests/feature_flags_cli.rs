@@ -47,7 +47,13 @@ fn local_set_without_daemon_refuses_without_creating_state() {
     let result = Command::new(env!("CARGO_BIN_EXE_near-ai"))
         .arg("--config-dir")
         .arg(&absent)
-        .args(["--json", "feature-flags", "set", "insights_skills", "on"])
+        .args([
+            "--json",
+            "feature-flags",
+            "set",
+            "skills_server_catalog",
+            "on",
+        ])
         .output()
         .unwrap();
     assert!(!result.status.success());
@@ -70,11 +76,17 @@ async fn local_set_cli_changes_real_daemon_and_survives_restart() {
             let result = Command::new(env!("CARGO_BIN_EXE_near-ai"))
                 .arg("--config-dir")
                 .arg(dir)
-                .args(["--json", "feature-flags", "set", "insights_skills", value])
+                .args([
+                    "--json",
+                    "feature-flags",
+                    "set",
+                    "skills_server_catalog",
+                    value,
+                ])
                 // A CLI caller's environment does not reconfigure the running daemon.
                 .env(
                     feature_flags::ENVIRONMENT_OVERRIDE_VARIABLE,
-                    r#"{"insights_skills":false}"#,
+                    r#"{"skills_server_catalog":false}"#,
                 )
                 .output()
                 .unwrap();
@@ -93,13 +105,13 @@ async fn local_set_cli_changes_real_daemon_and_survives_restart() {
         .await
         .unwrap();
     let on = set(dir.path(), "on").await;
-    assert!(on.is_enabled("insights_skills"));
+    assert!(on.is_enabled("skills_server_catalog"));
     assert!(
         daemon
             .shared
             .feature_flags
             .snapshot()
-            .is_enabled("insights_skills")
+            .is_enabled("skills_server_catalog")
     );
     daemon.close();
     let daemon = start_embedded(ConfigStore::open(dir.path().to_owned()).unwrap())
@@ -110,13 +122,13 @@ async fn local_set_cli_changes_real_daemon_and_survives_restart() {
             .shared
             .feature_flags
             .snapshot()
-            .is_enabled("insights_skills")
+            .is_enabled("skills_server_catalog")
     );
     let off = set(dir.path(), "off").await;
-    assert!(!off.is_enabled("insights_skills"));
-    assert!(!off.local_overrides["insights_skills"]);
+    assert!(!off.is_enabled("skills_server_catalog"));
+    assert!(!off.local_overrides["skills_server_catalog"]);
     let clear = set(dir.path(), "default").await;
-    assert!(!clear.is_enabled("insights_skills"));
+    assert!(!clear.is_enabled("skills_server_catalog"));
     assert!(clear.local_overrides.is_empty());
     daemon.close();
     let daemon = start_embedded(ConfigStore::open(dir.path().to_owned()).unwrap())
@@ -127,7 +139,7 @@ async fn local_set_cli_changes_real_daemon_and_survives_restart() {
             .shared
             .feature_flags
             .snapshot()
-            .is_enabled("insights_skills")
+            .is_enabled("skills_server_catalog")
     );
     assert!(
         daemon
@@ -144,9 +156,13 @@ async fn local_set_cli_changes_real_daemon_and_survives_restart() {
 fn process_environment_is_read_by_runtime_and_reported_without_persistence() {
     let dir = tempfile::tempdir().unwrap();
     for (raw, enabled, invalid) in [
-        (r#"{"insights_skills":true}"#, true, false),
-        (r#"{"insights_skills":false}"#, false, false),
-        (r#"{"insights_skills":true,"unknown":true}"#, false, true),
+        (r#"{"skills_server_catalog":true}"#, true, false),
+        (r#"{"skills_server_catalog":false}"#, false, false),
+        (
+            r#"{"skills_server_catalog":true,"unknown":true}"#,
+            false,
+            true,
+        ),
         ("{}", false, false),
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_near-ai"))
@@ -162,7 +178,7 @@ fn process_environment_is_read_by_runtime_and_reported_without_persistence() {
             String::from_utf8_lossy(&result.stderr)
         );
         let snapshot: feature_flags::Snapshot = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(snapshot.is_enabled("insights_skills"), enabled);
+        assert_eq!(snapshot.is_enabled("skills_server_catalog"), enabled);
         assert_eq!(snapshot.environment_variable_error.is_some(), invalid);
         assert!(snapshot.local_overrides.is_empty());
         assert_eq!(
@@ -170,5 +186,49 @@ fn process_environment_is_read_by_runtime_and_reported_without_persistence() {
             0,
             "environment inspection must never persist its choices"
         );
+    }
+}
+
+#[test]
+fn production_cli_cannot_enable_experimental_features() {
+    if feature_flags::build_profile_identity()
+        .unwrap()
+        .environment
+        .as_str()
+        != "production"
+    {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let flags = [
+        "insights_skills",
+        "red_team_sessions",
+        "claude_desktop_private_ai",
+    ];
+    let overrides: std::collections::BTreeMap<_, _> =
+        flags.into_iter().map(|id| (id, true)).collect();
+    let result = Command::new(env!("CARGO_BIN_EXE_near-ai"))
+        .arg("--config-dir")
+        .arg(directory.path())
+        .args(["--json", "feature-flags"])
+        .env(
+            feature_flags::ENVIRONMENT_OVERRIDE_VARIABLE,
+            serde_json::to_string(&overrides).unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let snapshot: feature_flags::Snapshot = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        snapshot.environment_variable_error.as_deref(),
+        Some("feature-environment-override-unavailable")
+    );
+    for flag in flags {
+        assert!(!snapshot.is_enabled(flag), "{flag}");
+        assert!(!snapshot.local_override_allowed[flag], "{flag}");
     }
 }
