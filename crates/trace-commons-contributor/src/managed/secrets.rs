@@ -37,6 +37,7 @@ impl RedactedSecret {
         Self(value)
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }

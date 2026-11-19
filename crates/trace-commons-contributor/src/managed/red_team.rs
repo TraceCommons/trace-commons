@@ -2,9 +2,12 @@
 //! running the sandboxed session on a blocking thread, and handling the
 //! `red-team tool <name>` bridge subcommand.
 
-use super::{ManagedError, ToolId, sessions::LaunchContext};
+#[cfg(target_os = "macos")]
+use super::ToolId;
+use super::{ManagedError, sessions::LaunchContext};
 use crate::config::ConfigStore;
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", test))]
 use uuid::Uuid;
 
 /// Relative path under the config directory where Red Team session outputs
@@ -154,6 +157,7 @@ pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
 /// Copy each validated input file or directory into
 /// `<config>/red-team/<session_id>/in/`. Never symlinks; editing a staged copy
 /// never mutates the original.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn stage_inputs(
     store: &ConfigStore,
     session_id: Uuid,
@@ -197,6 +201,7 @@ pub(crate) fn stage_inputs(
     Ok(Some(in_dir))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn copy_no_symlinks(src: &Path, dst: &Path) -> anyhow::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
@@ -325,6 +330,7 @@ pub struct RunOutcome {
 
 /// Publish the preserved OpenCode store when `collect_traces` is set and
 /// compute the final `(SessionState, Option<CollectionState>)` for the row.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn finalize_outcome(
     store: &ConfigStore,
     context: &LaunchContext,
