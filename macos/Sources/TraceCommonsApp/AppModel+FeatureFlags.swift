@@ -6,7 +6,12 @@ extension AppModel {
         featureFlagReadGeneration &+= 1
         let requestGeneration = featureFlagReadGeneration
         Task.detached(priority: .utility) {
-            let snapshot = try? client.featureFlagsSnapshot()
+            let read = Result { try client.featureFlagsSnapshot() }
+            let snapshot = try? read.get()
+            switch read {
+            case .success(let s): FeatureBreadcrumb.flagsRead(claudeDesktop: s.isEnabled("claude_desktop_private_ai"), source: s.source.rawValue)
+            case .failure(let error): FeatureBreadcrumb.flagsFailed(error)
+            }
             await MainActor.run {
                 guard self.featureFlagClient === client, self.featureFlagReadGeneration == requestGeneration else { return }
                 guard let snapshot else { self.featureFlags = nil; return }
