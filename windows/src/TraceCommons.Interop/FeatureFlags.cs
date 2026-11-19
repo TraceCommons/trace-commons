@@ -24,15 +24,14 @@ public sealed record BuildFeatureProfile(int SchemaVersion, string Environment, 
             using JsonDocument document = JsonDocument.Parse(json);
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty("schema_version", out JsonElement version) || version.ValueKind != JsonValueKind.Number
-                || !version.TryGetInt32(out int schema)
+                || Integral(root, "schema_version") is not { } schemaValue || schemaValue > int.MaxValue
                 || Text(root, "environment") is not { } environment
                 || Text(root, "profile_digest") is not { } digest)
             {
                 return null;
             }
 
-            return new BuildFeatureProfile(schema, environment, digest);
+            return new BuildFeatureProfile((int)schemaValue, environment, digest);
         }
         catch (JsonException)
         {
@@ -52,6 +51,20 @@ public sealed record BuildFeatureProfile(int SchemaVersion, string Environment, 
 
     internal static string? Text(JsonElement o, string key) =>
         o.TryGetProperty(key, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    /// <summary>
+    /// A non-negative whole number, in any notation Swift's JSONDecoder takes
+    /// for an integer: <c>1</c>, <c>1.0</c> and <c>1e0</c> are 1, while
+    /// <c>1.5</c>, a negative, or anything past <see cref="ulong.MaxValue"/>
+    /// is none (pinned to a probe of FeatureFlags.swift).
+    /// </summary>
+    internal static ulong? Integral(JsonElement o, string key)
+    {
+        if (!o.TryGetProperty(key, out JsonElement v) || v.ValueKind != JsonValueKind.Number) return null;
+        if (v.TryGetUInt64(out ulong exact)) return exact;
+        if (!v.TryGetDecimal(out decimal value) || value < 0 || value != decimal.Truncate(value) || value > ulong.MaxValue) return null;
+        return (ulong)value;
+    }
 }
 
 /// <summary>One flag's decision as the daemon made it.</summary>
@@ -59,7 +72,7 @@ public sealed record FeatureFlagDecision(bool Enabled, bool Pending, bool Capabi
 
 /// <summary>
 /// The daemon's <c>feature_flags_snapshot</c>, never a second evaluator
-/// (<c>FeatureFlagSnapshot</c>, FeatureFlags.swift:21-71). A reply that does
+/// (<c>FeatureFlagSnapshot</c>, FeatureFlags.swift:21-64). A reply that does
 /// not decode, or fails the Mac's checks, is no snapshot: every flag off.
 /// </summary>
 public sealed record FeatureFlagSnapshot(
@@ -72,15 +85,13 @@ public sealed record FeatureFlagSnapshot(
     public static FeatureFlagSnapshot? Parse(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) return null;
-        if (!root.TryGetProperty("schema_version", out JsonElement version) || version.ValueKind != JsonValueKind.Number
-            || !version.TryGetInt32(out int schema) || schema != 1) return null;
+        if (BuildFeatureProfile.Integral(root, "schema_version") != 1) return null;
         if (BuildFeatureProfile.Text(root, "environment") is not { } environment
             || BuildFeatureProfile.Text(root, "profile_digest") is not { } digest
             || BuildFeatureProfile.Text(root, "instance_id") is not { } instance
             || BuildFeatureProfile.Text(root, "sampled_at") is not { } sampled
             || BuildFeatureProfile.Text(root, "source") is not { } source || !Sources.Contains(source)
-            || !root.TryGetProperty("generation", out JsonElement generationValue)
-            || generationValue.ValueKind != JsonValueKind.Number || !generationValue.TryGetUInt64(out ulong generation)
+            || BuildFeatureProfile.Integral(root, "generation") is not { } generation
             || !root.TryGetProperty("fresh", out JsonElement freshValue)
             || freshValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
             || !root.TryGetProperty("flags", out JsonElement flagsValue) || flagsValue.ValueKind != JsonValueKind.Object)
@@ -91,7 +102,7 @@ public sealed record FeatureFlagSnapshot(
         ulong? revision = null;
         if (root.TryGetProperty("revision", out JsonElement revisionValue) && revisionValue.ValueKind != JsonValueKind.Null)
         {
-            if (revisionValue.ValueKind != JsonValueKind.Number || !revisionValue.TryGetUInt64(out ulong r)) return null;
+            if (BuildFeatureProfile.Integral(root, "revision") is not { } r) return null;
             revision = r;
         }
 
@@ -116,9 +127,11 @@ public sealed record FeatureFlagSnapshot(
             flags[flag.Name] = new FeatureFlagDecision(enabled, pending, blocked, timing);
         }
 
-        // The Mac's guard (FeatureFlags.swift:61-64): a positive generation,
+        // The Mac's guard (FeatureFlags.swift:54-57): a positive generation,
         // a UUID instance, a known environment and a lowercase hex digest.
-        if (generation == 0 || !Guid.TryParseExact(instance, "D", out _) || !BuildFeatureProfile.Environments.Contains(environment)
+        // UUID(uuidString:) takes only the bare 36-character form, either
+        // case; Guid's parser would also take one padded with whitespace.
+        if (generation == 0 || instance.Length != 36 || !Guid.TryParseExact(instance, "D", out _) || !BuildFeatureProfile.Environments.Contains(environment)
             || !IsDigest(digest))
         {
             return null;
@@ -133,11 +146,12 @@ public sealed record FeatureFlagSnapshot(
     /// <summary>
     /// Whether <paramref name="newer"/> may replace this one: the same build,
     /// and either another daemon instance or a later generation
-    /// (<c>acceptsSuccessor</c>, FeatureFlags.swift:66-69).
+    /// (<c>acceptsSuccessor</c>, FeatureFlags.swift:60-63). Instance ids
+    /// compare as exact strings, as Swift's do.
     /// </summary>
     public bool AcceptsSuccessor(FeatureFlagSnapshot newer) =>
         Environment == newer.Environment && ProfileDigest == newer.ProfileDigest
-        && (!string.Equals(InstanceId, newer.InstanceId, StringComparison.OrdinalIgnoreCase) || newer.Generation > Generation);
+        && (!string.Equals(InstanceId, newer.InstanceId, StringComparison.Ordinal) || newer.Generation > Generation);
 
     internal static bool IsDigest(string value) =>
         value.Length == 64 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');

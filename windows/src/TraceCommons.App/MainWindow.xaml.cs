@@ -97,8 +97,8 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
-    private OnboardingWindow? _onboarding;
-    private OnboardingWindow? _automaticOnboarding;
+    private FirstRunWindow? _onboarding;
+    private FirstRunWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
     private bool _activationReady;
@@ -159,6 +159,9 @@ public sealed partial class MainWindow : Window
         _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
         _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
         WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
+#if DEBUG
+        _flags.Changed += TraceFeatureFlags;
+#endif
         WindowClocks.Changed += running =>
         {
             if (InsightsPane.Content is InsightsView insights) insights.ViewModel.SetClocksRunning(running);
@@ -191,6 +194,48 @@ public sealed partial class MainWindow : Window
         // The Monitor window's shell: toolbar row, tabs, panes, notices,
         // keyboard map and clocks (MainWindow.Shell.cs).
         InitializeShell();
+    }
+
+    /// <summary>
+    /// The daemon's feature flags (<see cref="FeatureFlagGate"/>). Every flag
+    /// reads off until a snapshot of this build arrives.
+    /// </summary>
+    private readonly FeatureFlagGate _flags;
+
+#if DEBUG
+    /// <summary>
+    /// Debug builds only, and only when <c>TC_DEBUG_FEATURE_FLAGS_LOG</c>
+    /// names a file: one line per snapshot the window holds, for checking the
+    /// reader against a real daemon on a Windows box. Nothing on screen.
+    /// </summary>
+    private void TraceFeatureFlags()
+    {
+        string? path = Environment.GetEnvironmentVariable("TC_DEBUG_FEATURE_FLAGS_LOG");
+        if (string.IsNullOrEmpty(path)) return;
+        FeatureFlagSnapshot? s = _flags.Current;
+        string line = s is null
+            ? "none"
+            : $"instance={s.InstanceId} generation={s.Generation} source={s.Source} "
+              + $"{FeatureFlagGate.InsightsSkills}={_flags.IsEnabled(FeatureFlagGate.InsightsSkills)} "
+              + $"unknown_flag={_flags.IsEnabled("no_such_flag")} flags=[{string.Join(",", System.Linq.Enumerable.Select(s.Flags, f => f.Key + ":" + f.Value.Enabled))}]";
+        try
+        {
+            System.IO.File.AppendAllText(path, $"{DateTime.UtcNow:O} host_generation={_host.ConnectionGeneration} {line}\n");
+        }
+        catch (Exception)
+        {
+        }
+    }
+#endif
+
+    /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
+    private bool ReadsNoFlags()
+    {
+#if DEBUG
+        return _host.IsSample;
+#else
+        return false;
+#endif
     }
 
     /// <summary>Hide to a reachable tray; otherwise confirm before stopping the daemon.</summary>
@@ -418,23 +463,27 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Asks which session folders to watch, then resumes startup.
+    /// No session roots yet. On a device never set up, the first run asks,
+    /// on its Tools step, and starts the daemon there, as the Mac's does
+    /// (W7); the startup this window could not finish resumes once it has.
+    /// A device set up before keeps the roots window.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// A window rather than a page: until this is answered there is no daemon,
-    /// so the queue behind it has nothing to show and no menu it offers would
-    /// work.
-    /// </para>
-    /// <para>
-    /// Discovery runs on a background thread. It counts session files
-    /// recursively under both stores, which on a working developer's machine
-    /// is thousands of them, and that is a visible hang if it happens on the
-    /// UI thread. Same reasoning as the daemon start above.
-    /// </para>
+    /// A window rather than a page: until this is answered there is no
+    /// daemon, so the queue behind it has nothing to show. Discovery runs on
+    /// a background thread: it counts session files recursively, which is a
+    /// visible hang on the UI thread.
     /// </remarks>
     private async Task ShowSessionRootsAsync()
     {
+        OnboardingState onboarding = OnboardingState.Default();
+        if (!onboarding.AnyComplete())
+        {
+            OpenOnboarding(onboarding, automatic: true).Activate();
+            return;
+        }
+
+        // Set up before, roots since withdrawn: only the roots are asked.
         IReadOnlyList<SourceCandidate> candidates = await Task
             .Run(SourceDiscovery.ProbeThisMachine)
             .ConfigureAwait(true);
@@ -677,14 +726,28 @@ public sealed partial class MainWindow : Window
         onboarding.Activate();
     }
 
-    private OnboardingWindow OpenOnboarding(OnboardingState state, bool automatic = false)
+    private FirstRunWindow OpenOnboarding(OnboardingState state, bool automatic = false)
     {
         if (_onboarding is not null)
         {
             if (!automatic) _automaticOnboarding = null;
             return _onboarding;
         }
-        var onboarding = new OnboardingWindow(_host, state);
+        var onboarding = new FirstRunWindow(_host, state);
+        onboarding.DaemonStarted += OnSessionRootsDeclared;
+        // A refused grant finished on Ask: the first run's last line, said
+        // on the queue pane once its window has gone (AppModel.firstRunNotice).
+        onboarding.Finished += line =>
+        {
+            if (line is not null)
+            {
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    ViewModel.ShowQueue();
+                    ViewModel.ShowNotice(line);
+                });
+            }
+        };
         _onboarding = onboarding;
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
@@ -726,6 +789,13 @@ public sealed partial class MainWindow : Window
         // own onboarding state, and every call it makes is refused anyway.
         if (_host.IsSample)
         {
+            // Screenshots of one step (FirstRunPreview): opened on a daemon
+            // that refuses everything, never this machine's state.
+            if (global::TraceCommons.Interop.FirstRun.FirstRunPreview.StepFrom(Environment.GetEnvironmentVariable(global::TraceCommons.Interop.FirstRun.FirstRunPreview.EnvironmentVariable)) is global::TraceCommons.Interop.FirstRun.FirstRunStep step)
+            {
+                var preview = new FirstRunWindow(_host, OnboardingState.Default(), step);
+                preview.Activate();
+            }
             return;
         }
 #endif
@@ -1103,7 +1173,7 @@ public sealed partial class MainWindow : Window
         var onboarding = OpenOnboarding(OnboardingState.Default());
         if (!alreadyOpen && target == HealthNavigationTarget.Connect)
         {
-            onboarding.ViewModel.GetStarted();
+            onboarding.GetStarted();
         }
 
         onboarding.Activate();
@@ -1140,18 +1210,6 @@ public sealed partial class MainWindow : Window
             MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
         ViewModel.ShowMissionDrafts();
         await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
-    }
-
-    private readonly FeatureFlagGate _flags;
-
-    /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
-    private bool ReadsNoFlags()
-    {
-#if DEBUG
-        return _host.IsSample;
-#else
-        return false;
-#endif
     }
 
     /// <summary>The flags changed: Insights adds or removes its Skills tab (InsightsView.swift:306-308).</summary>

@@ -18,7 +18,7 @@ fn test_shared(dir: &std::path::Path) -> DaemonShared {
     let mut shared = DaemonShared::load(store).unwrap();
     shared.feature_flags = crate::feature_flags::Runtime::open(
         crate::feature_flags::registry().unwrap(),
-        crate::feature_flags::test_signing::pin(crate::feature_flags::embedded_profile().unwrap()),
+        crate::feature_flags::test_signing::testing_profile(),
         shared.store.dir(),
         chrono::Utc::now(),
     )

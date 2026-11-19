@@ -328,6 +328,8 @@ pub(crate) mod tests {
     #[test]
     fn agent_can_choose_data_uses_and_complete_without_ui() {
         let (_dir, shared) = enrolled(false);
+        let setup_scope = shared.status_value()["setup_scope"].clone();
+        assert!(setup_scope.is_string());
         assert_eq!(view(&shared)["blocked_reason"], "setup-scopes-required");
         assert!(finish(&shared, None).error.is_some());
         let result = finish(&shared, Some(json!(["model_training"])));
@@ -335,6 +337,7 @@ pub(crate) mod tests {
         let cfg = shared.store.load_config().unwrap().unwrap();
         assert_eq!(cfg.consent_scopes_chosen, Some(true));
         assert!(cfg.consent_scopes.contains(&"model_training".into()));
+        assert_eq!(shared.status_value()["setup_scope"], setup_scope);
         assert_eq!(shared.status_value()["setup_complete"], true);
     }
 

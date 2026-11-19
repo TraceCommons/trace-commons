@@ -158,7 +158,7 @@ internal static class NativeMethods
     /// tc_subscribe, declaring the opt-in events this subscriber can draw
     /// (<c>subscribe</c>'s <c>accepts</c>) as a borrowed JSON array of names;
     /// the window declares <c>feature_flags_changed</c>, as the Mac does
-    /// (AppModel.swift:1856). Lifetime rules are tc_subscribe's.
+    /// (AppModel.swift:1859). Lifetime rules are tc_subscribe's.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern ulong tc_subscribe_with_accepts(
@@ -1301,6 +1301,39 @@ internal static class NativeMethods
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_first_run_copy_json();
+
+    // The first run's Terms step and Traces line (W7). tc_terms_document_json
+    // fetches the published terms (blocking; call off the UI thread) and sets
+    // *err to an owned label on failure; tc_first_run_estimate_line words the
+    // Traces line from {"traces": n, "earns_credit": b}, NULL for none. Both
+    // return owned strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_terms_document_json(out IntPtr err);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_first_run_estimate_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string request);
+
+    // What a folder picked with "add your tool" is (W7): an owned JSON array
+    // of tc_discover_sources rows, one per kind whose layout matches, [] for
+    // none; NULL for a non-UTF-8 path or a caught panic. Reads directory
+    // entries and metadata only. Release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_describe_folder(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    // The Automatic path's disclosures (W7): the scrub sheet's sentences for
+    // the configuration in config_dir (NULL when unreadable), and whether the
+    // core lets the grant be asked for from what the person was shown
+    // ({ready, blockers, witness_signing_address}; NULL for unreadable
+    // progress). Owned strings; release with tc_string_free.
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_automatic_contribution_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string configDir);
+
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_flow1_grant_request_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string progressJson);
 
     // Owned JSON strings; release with tc_string_free.
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]

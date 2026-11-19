@@ -274,7 +274,7 @@ enum JoinScreenLayout {
     /// Once the daemon enrolled an invite the field is read-only, so an
     /// enrolled person cannot paste a second one.
     static func inviteIsEditable(_ state: FirstRunState) -> Bool {
-        state.enrolledInvite == nil
+        state.enrolledInvite == nil && !state.nearAIEnrolled
     }
 
     /// The card shows its invite field unless an invite was joined: an
@@ -719,11 +719,13 @@ struct JoinScreen: View {
     // MARK: - Start sharing
 
     private func start() {
-        // What Start sends matches what Uses showed: the required use
-        // included when sharing; nothing for Private AI only.
         let ready = JoinScreenLayout.startState(
             runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
         if ready != runner.state { runner.state = ready }
+        if runner.canRetryCompletion {
+            run { await UsesStart.plainStart(runner: runner, pending: $0) }
+            return
+        }
         switch UsesScreenLayout.startRoute(runner.state) {
         case .disclose:
             disclosure = SharingDisclosureFlow()

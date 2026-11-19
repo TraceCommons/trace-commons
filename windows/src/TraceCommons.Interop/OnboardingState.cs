@@ -68,6 +68,9 @@ public sealed class OnboardingState
         return Read().Contains(tenantId);
     }
 
+    /// <summary>Whether onboarding was ever finished on this device, for any tenant.</summary>
+    public bool AnyComplete() => Read().Count > 0;
+
     /// <summary>Shared completion is proof only for a live, identified enrollment.</summary>
     public static bool HasSharedCompletion(DaemonStatus? status) =>
         status is { LoggedIn: true, SetupComplete: true }
