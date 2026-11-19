@@ -590,6 +590,15 @@ window.tc-glass-window:backdrop .tc-glass-tabs {
   font-weight: 600;
 }
 
+/* A lifted tab stands on a control's surface (`GlassRuleTabs`, owner
+   2026-11-05): `glassSurface(.control, radius: control)` with
+   `.shadow(color: .black.opacity(0.18), radius: 8, y: 3)`, a CSS blur of
+   twice SwiftUI's radius. `tab_motion::TabLift` fades it in with the lift. */
+.tc-glass-tabs .tc-tab-lift {
+  border-radius: 11px;
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.18);
+}
+
 /* The toolbar's capsule holds the Graph, Map and Inspector toggles
    (`GlassToolbarGroup`): a glass control, 2px around and between its
    buttons. Each toggle is `GlassToolbarButton`'s 28 by 24 capsule, its glyph

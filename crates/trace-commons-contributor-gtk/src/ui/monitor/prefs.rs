@@ -31,6 +31,45 @@ pub struct PanePrefs {
     /// the rocket and station unless explicitly `false`, then the laptop
     /// and the orb. Only the drawing changes, never what is sent.
     pub traces_map_rocket: bool,
+    /// The person's tab order, under the Mac's `monitor.tabOrder` form:
+    /// the movable tabs' raw values, comma-separated (`tabs::stored`).
+    pub tab_order: TabOrder,
+}
+
+/// The three movable tabs in the person's order, stored as the Mac's
+/// comma-separated raw values and read back through `tabs::ordered`, so an
+/// unknown, repeated or missing name falls back as the Mac's does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TabOrder(pub [super::tabs::Tab; 3]);
+
+impl Default for TabOrder {
+    fn default() -> Self {
+        TabOrder::from_stored("")
+    }
+}
+
+impl TabOrder {
+    pub fn from_stored(stored: &str) -> Self {
+        let order = super::tabs::ordered(stored);
+        TabOrder([order[1], order[2], order[3]])
+    }
+
+    pub fn stored(self) -> String {
+        super::tabs::stored(&self.0)
+    }
+}
+
+impl serde::Serialize for TabOrder {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.stored())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TabOrder {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = String::deserialize(deserializer)?;
+        Ok(TabOrder::from_stored(&stored))
+    }
 }
 
 impl Default for PanePrefs {
@@ -43,6 +82,7 @@ impl Default for PanePrefs {
             main_width: pane_layout::MAIN_WIDTH,
             seeded: false,
             traces_map_rocket: true,
+            tab_order: TabOrder::default(),
         }
     }
 }
@@ -151,9 +191,23 @@ mod tests {
             main_width: 512.0,
             seeded: true,
             traces_map_rocket: false,
+            tab_order: TabOrder::from_stored("Insights,Traces,Inference"),
         };
         let bytes = serde_json::to_vec(&chosen).unwrap();
+        assert!(
+            String::from_utf8_lossy(&bytes).contains(r#""tab_order":"Insights,Traces,Inference""#),
+            "kept in the Mac's form"
+        );
         assert_eq!(PanePrefs::from_bytes(&bytes), chosen);
+        // An older file has the default order; a damaged one falls back
+        // name by name, as `Tab.ordered` does.
+        assert_eq!(PanePrefs::from_bytes(b"{}").tab_order, TabOrder::default());
+        assert_eq!(
+            PanePrefs::from_bytes(br#"{"tab_order":"Traces,Bogus"}"#)
+                .tab_order
+                .stored(),
+            "Traces,Inference,Insights"
+        );
     }
 
     #[test]

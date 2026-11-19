@@ -81,7 +81,7 @@ struct State {
     at: Cell<Location>,
     /// `None` until the core has said.
     requires_onboarding: Cell<Option<bool>>,
-    prefs: RefCell<PanePrefs>,
+    prefs: Rc<RefCell<PanePrefs>>,
     map_view: Cell<MapView>,
     /// The focus button: the map shows only the selection's tool.
     map_focus: Cell<bool>,
@@ -201,6 +201,236 @@ impl EmberGlide {
         };
         self.drawn = Some(drawn);
         drawn
+    }
+}
+
+/// A drag under way on the strip (`GlassRuleTabs`' `dragging`,
+/// `dragOrigin`, `moved`).
+#[derive(Default)]
+struct TabDrag {
+    tab: Option<Tab>,
+    origin: usize,
+    moved: bool,
+    /// The tab's left in the strip when the drag began: the gesture's
+    /// translation is the tab's own, and the tab moves as the strip
+    /// reorders, so this turns it into the pointer's travel on the strip
+    /// (the Mac's `.global` coordinate space).
+    start_x: f64,
+}
+
+/// The strip's tab order and the drag that changes it: every tab but Home
+/// lifts under the pointer and while pressed, follows a drag and trades
+/// places past a neighbour's middle, and drops into its slot. The order is
+/// kept with the panes' choices and read by the accelerators and the tray
+/// (`tabs::current_order`).
+struct TabOrdering {
+    strip: glib::WeakRef<gtk::Box>,
+    tabs: Vec<(Tab, gtk::ToggleButton)>,
+    drag: RefCell<TabDrag>,
+    /// The shell's kept choices, which the order is saved with.
+    prefs: Rc<RefCell<PanePrefs>>,
+}
+
+impl TabOrdering {
+    fn lift(button: &gtk::ToggleButton) -> Option<tab_motion::TabLift> {
+        button.parent().and_downcast::<tab_motion::TabLift>()
+    }
+
+    /// Whether `tab` may be dragged now: a movable tab, with every tab
+    /// shown (before onboarding the strip is not the person's order).
+    fn movable(&self, tab: Tab) -> bool {
+        tab.movable() && self.tabs.iter().all(|(_, button)| button.get_visible())
+    }
+
+    /// Puts the strip's tabs in the person's order, and each tab's chord
+    /// tooltip with its place.
+    fn arrange(&self) {
+        let Some(strip) = self.strip.upgrade() else {
+            return;
+        };
+        let mut previous: Option<gtk::Widget> = None;
+        for (index, tab) in tabs::current_order().into_iter().enumerate() {
+            let Some((_, button)) = self.tabs.iter().find(|(t, _)| *t == tab) else {
+                continue;
+            };
+            button.set_tooltip_text(crate::ui::shortcuts::screen_accel_label(index).as_deref());
+            if let Some(lift) = Self::lift(button) {
+                strip.reorder_child_after(&lift, previous.as_ref());
+                previous = Some(lift.upcast());
+            }
+        }
+    }
+
+    /// `onMove`: `tab` takes `target`'s place; kept, and the chords follow.
+    fn move_to(&self, tab: Tab, target: Tab) {
+        let order = tabs::moving(tab, target, &tabs::current_order());
+        let stored = tabs::stored(&order);
+        tabs::set_current_order(&stored);
+        let prefs = {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.tab_order = super::prefs::TabOrder::from_stored(&stored);
+            *prefs
+        };
+        prefs.save();
+        self.arrange();
+        if let Some(application) = self
+            .strip
+            .upgrade()
+            .and_then(|strip| strip.root())
+            .and_downcast::<gtk::Window>()
+            .and_then(|window| window.application())
+        {
+            crate::ui::shortcuts::bind_screen_accels(&application);
+        }
+    }
+
+    fn up(&self, tab: Tab, button: &gtk::ToggleButton, hovered: bool, pressed: bool) {
+        let dragging = self.drag.borrow().tab == Some(tab);
+        if let Some(lift) = Self::lift(button) {
+            lift.set_lifted(self.movable(tab) && (hovered || pressed || dragging));
+        }
+    }
+
+    fn wire(this: &Rc<Self>, tab: Tab, button: &gtk::ToggleButton) {
+        let Some(lift) = Self::lift(button) else {
+            return;
+        };
+        let hovered = Rc::new(Cell::new(false));
+        let pressed = Rc::new(Cell::new(false));
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            motion.connect_enter(move |_, _, _| {
+                hovered.set(true);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, true, pressed.get());
+                }
+            });
+        }
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            motion.connect_leave(move |_| {
+                hovered.set(false);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, false, pressed.get());
+                }
+            });
+        }
+        lift.add_controller(motion);
+
+        // A press lifts the tab; a drag past six points moves it and the
+        // release then opens nothing (the gesture claims the press from
+        // the button); a press let go in place opens it as a click does.
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            drag.connect_drag_begin(move |_, _, _| {
+                pressed.set(true);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, hovered.get(), true);
+                }
+            });
+        }
+        {
+            let (this, button) = (Rc::downgrade(this), button.clone());
+            drag.connect_drag_update(move |gesture, translation, _| {
+                let Some(this) = this.upgrade() else { return };
+                if !this.movable(tab) {
+                    return;
+                }
+                if this.follow(tab, &button, translation) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+            });
+        }
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            let end = move || {
+                pressed.set(false);
+                let Some(this) = this.upgrade() else { return };
+                *this.drag.borrow_mut() = TabDrag::default();
+                if let Some(lift) = Self::lift(&button) {
+                    lift.drop_into_slot();
+                }
+                this.up(tab, &button, hovered.get(), false);
+            };
+            let end = Rc::new(end);
+            let ended = Rc::clone(&end);
+            drag.connect_drag_end(move |_, _, _| ended());
+            drag.connect_cancel(move |_, _| end());
+        }
+        lift.add_controller(drag);
+    }
+
+    /// `follow(_:translation:)`: the dragged tab keeps its place under the
+    /// pointer as the strip reorders. True once it has moved far enough
+    /// that letting go no longer opens it.
+    fn follow(&self, tab: Tab, button: &gtk::ToggleButton, translation: f64) -> bool {
+        let order = tabs::current_order();
+        let Some(from) = order.iter().position(|t| *t == tab) else {
+            return false;
+        };
+        let movable: Vec<usize> = (0..order.len()).filter(|i| order[*i].movable()).collect();
+        let (Some(&first), Some(&last)) = (movable.first(), movable.last()) else {
+            return false;
+        };
+        // The tabs share the strip equally (`stripWidth / count`): one
+        // tab's own width, without the strip's side padding.
+        let Some(lift) = Self::lift(button) else {
+            return false;
+        };
+        let tab_width = f64::from(lift.width());
+        let x = self
+            .strip
+            .upgrade()
+            .and_then(|strip| lift.compute_point(&strip, &gtk::graphene::Point::new(0.0, 0.0)))
+            .map_or(0.0, |point| f64::from(point.x()));
+        let (moved, translation) = {
+            let mut drag = self.drag.borrow_mut();
+            if drag.tab != Some(tab) {
+                *drag = TabDrag {
+                    tab: Some(tab),
+                    origin: from,
+                    moved: false,
+                    start_x: x,
+                };
+            }
+            let travel = translation + (x - drag.start_x);
+            if tabs::has_moved(travel) {
+                drag.moved = true;
+            }
+            (drag.moved, travel)
+        };
+        let origin = self.drag.borrow().origin;
+        let offset = translation - (from as f64 - origin as f64) * tab_width;
+        let to = tabs::landing(from, offset, tab_width, (first, last));
+        if to != from {
+            self.move_to(tab, order[to]);
+        }
+        lift.set_drag(offset - (to as f64 - from as f64) * tab_width);
+        moved
     }
 }
 
@@ -381,6 +611,9 @@ pub struct Shell {
     /// The ember's glide, read by the mounted tests.
     #[cfg_attr(not(test), allow(dead_code))]
     ember_glide: Rc<RefCell<EmberGlide>>,
+    /// The strip's order and drag, read by the mounted tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    tab_order: Rc<TabOrdering>,
     /// The Private AI tab's dot, and the tone it is drawn in.
     inference_dot: gtk::DrawingArea,
     inference_tone: Rc<Cell<style::Tone>>,
@@ -554,8 +787,26 @@ impl Shell {
             if let Some((_, first)) = tab_buttons.first() {
                 button.set_group(Some(first));
             }
-            strip.append(&button);
+            // Lifted and moved as `GlassRuleTabs` moves a movable tab
+            // (`tab_motion::TabLift`); shown and hidden with its tab.
+            let lift = tab_motion::TabLift::new(&button);
+            button
+                .bind_property("visible", &lift, "visible")
+                .sync_create()
+                .build();
+            strip.append(&lift);
             tab_buttons.push((tab, button));
+        }
+        // The panes' kept choices, the tab order among them; read in below.
+        let kept = Rc::new(RefCell::new(PanePrefs::default()));
+        let tab_order = Rc::new(TabOrdering {
+            strip: strip.downgrade(),
+            tabs: tab_buttons.clone(),
+            drag: RefCell::default(),
+            prefs: Rc::clone(&kept),
+        });
+        for (tab, button) in &tab_buttons {
+            TabOrdering::wire(&tab_order, *tab, button);
         }
 
         // The selected tab's ember line and halo (`GlassRuleTabs.emberGlow`)
@@ -1001,6 +1252,10 @@ impl Shell {
         root.set_kept_widths(prefs.main_width, prefs.map_width);
         // The Traces map's style, as the person last chose it.
         map.set_style(prefs.map_style());
+        // The tabs in the person's order.
+        tabs::set_current_order(&prefs.tab_order.stored());
+        *kept.borrow_mut() = prefs;
+        tab_order.arrange();
 
         let shell = Self {
             root,
@@ -1011,7 +1266,7 @@ impl Shell {
             state: State {
                 at: Cell::new(Location::default()),
                 requires_onboarding: Cell::new(None),
-                prefs: RefCell::new(prefs),
+                prefs: kept,
                 map_view: Cell::new(MapView::default()),
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
@@ -1024,6 +1279,7 @@ impl Shell {
             app: RefCell::new(Weak::new()),
             tabs: tab_buttons,
             ember_glide,
+            tab_order,
             inference_dot,
             inference_tone,
             breadcrumb,
@@ -2164,6 +2420,83 @@ mod tests {
         mounted.window.close();
     }
 
+    /// `GlassRuleTabs`' lift and drag: a movable tab under the pointer
+    /// rises on the lift spring (overshooting, as SwiftUI's does); dragged
+    /// past its neighbour's middle it takes that place, the order is kept
+    /// and the chords follow it; let go it drops into its slot on the drop
+    /// spring. Home never lifts.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_tab_lifts_drags_into_place_and_drops() {
+        gtk::init().expect("GTK display");
+        let mounted = mounted(false);
+        mounted.window.present();
+        let shell = &mounted.shell;
+        let settings = gtk::Settings::default().expect("settings");
+        settings.set_gtk_enable_animations(true);
+        pump();
+        let button = |tab: Tab| {
+            shell
+                .tabs
+                .iter()
+                .find(|(t, _)| *t == tab)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let lift = |tab: Tab| TabOrdering::lift(&button(tab)).expect("lift");
+        let ordering = &shell.tab_order;
+
+        ordering.up(Tab::Home, &button(Tab::Home), true, false);
+        assert!(!lift(Tab::Home).is_lifted(), "Home lifted");
+
+        ordering.up(Tab::Traces, &button(Tab::Traces), true, false);
+        let over = Cell::new(false);
+        pump_until(|| {
+            let amount = lift(Tab::Traces).amount();
+            over.set(over.get() || amount > 1.0);
+            !lift(Tab::Traces).imp_running() && amount == 1.0
+        });
+        assert!(over.get(), "the lift did not overshoot on its spring");
+
+        // Dragged right past Insights' middle: Traces takes its place.
+        let width = f64::from(button(Tab::Traces).width());
+        assert!(
+            !ordering.follow(Tab::Traces, &button(Tab::Traces), 3.0),
+            "moved at 3 points"
+        );
+        assert!(ordering.follow(Tab::Traces, &button(Tab::Traces), width * 0.6));
+        assert_eq!(
+            tabs::current_order(),
+            vec![Tab::Home, Tab::Inference, Tab::Insights, Tab::Traces]
+        );
+        assert_eq!(
+            shell.state.prefs.borrow().tab_order.stored(),
+            "Inference,Insights,Traces"
+        );
+        assert_eq!(
+            button(Tab::Traces).tooltip_text().map(|t| t.to_string()),
+            crate::ui::shortcuts::screen_accel_label(3)
+        );
+        let left = lift(Tab::Traces).drag();
+        assert!((left - (width * 0.6 - width)).abs() < 1.0, "{left}");
+        // Let go: it drops into its slot on the spring.
+        *ordering.drag.borrow_mut() = TabDrag::default();
+        lift(Tab::Traces).drop_into_slot();
+        assert!(lift(Tab::Traces).dropping());
+        pump_until(|| !lift(Tab::Traces).dropping());
+        assert_eq!(lift(Tab::Traces).drag(), 0.0);
+        ordering.up(Tab::Traces, &button(Tab::Traces), false, false);
+        pump_until(|| lift(Tab::Traces).amount() == 0.0);
+
+        // Under reduced motion the lift is there at once.
+        settings.set_gtk_enable_animations(false);
+        ordering.up(Tab::Insights, &button(Tab::Insights), true, false);
+        assert_eq!(lift(Tab::Insights).amount(), 1.0);
+        settings.set_gtk_enable_animations(true);
+        tabs::set_current_order("");
+    }
+
     /// A tab chosen draws the ember on its way there, on the strip's
     /// spring, and it comes to rest on the tab; with GTK's animations off
     /// it is there at once.
@@ -2180,9 +2513,11 @@ mod tests {
         shell.pick_tab(Tab::Traces);
         let target = {
             let traces = &shell.tabs[2].1;
-            let bounds = traces
-                .compute_bounds(traces.parent().as_ref().expect("strip"))
-                .expect("bounds");
+            let strip = traces
+                .parent()
+                .and_then(|lift| lift.parent())
+                .expect("strip");
+            let bounds = traces.compute_bounds(&strip).expect("bounds");
             f64::from(bounds.x())
         };
         assert!(shell.ember_glide.borrow().from.is_some(), "a glide began");

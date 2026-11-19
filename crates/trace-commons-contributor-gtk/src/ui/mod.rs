@@ -147,7 +147,7 @@ pub fn peek_state_dir() -> std::path::PathBuf {
 /// drafts are sub-pages behind the breadcrumb, and Settings is its own
 /// window. Each still opens by its old name (`App::open_screen`).
 pub(crate) fn screens() -> Vec<(&'static str, &'static str)> {
-    monitor::tabs::Tab::ALL
+    monitor::tabs::current_order()
         .into_iter()
         .map(|tab| (tab.name(), tab.title()))
         .collect()
