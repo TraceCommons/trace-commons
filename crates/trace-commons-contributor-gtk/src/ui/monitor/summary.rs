@@ -360,6 +360,9 @@ pub struct Inputs {
     pub projects: Vec<Project>,
     /// The last `history_rollup` read that worked; `None` unread or failed.
     pub rollup: Option<crate::home::Rollup>,
+    /// `history_rollup` has not answered yet: the contributed line is a
+    /// skeleton bar, never a line with a dash in it.
+    pub rollup_loading: bool,
     /// The commons' pending condition, from `commons_credit_summary`.
     pub condition: Option<String>,
     pub history: Option<Vec<HistoryRecord>>,
@@ -398,7 +401,17 @@ fn section(title: &str, content: &impl IsA<gtk::Widget>) -> gtk::Box {
     card
 }
 
+/// The placeholder's width: about "57 contributed" wide
+/// (`SummaryDecisionLine.loadingWidth`).
+pub const LOADING_WIDTH: i32 = 96;
+
 fn decision_line(line: Line, words: &str) -> gtk::Box {
+    decision_line_loading(line, words, false)
+}
+
+/// A decision line, or with `loading` its glyph beside the Mac's
+/// skeleton bar in place of the words (`SummaryDecisionLine.loading`).
+fn decision_line_loading(line: Line, words: &str, loading: bool) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, space::S5);
     let icon = gtk::Image::from_icon_name(line.icon());
     icon.set_pixel_size(12);
@@ -406,7 +419,13 @@ fn decision_line(line: Line, words: &str) -> gtk::Box {
     icon.set_size_request(20, -1);
     icon.set_accessible_role(gtk::AccessibleRole::Presentation);
     row.append(&icon);
-    row.append(&text(words, &["tc-type-body", "tc-summary-ink"]));
+    if loading {
+        let bar = super::super::glass_feedback::skeleton(Some(LOADING_WIDTH));
+        bar.set_valign(gtk::Align::Center);
+        row.append(&bar);
+    } else {
+        row.append(&text(words, &["tc-type-body", "tc-summary-ink"]));
+    }
     row
 }
 
@@ -463,12 +482,13 @@ pub fn view(inputs: &Inputs) -> gtk::Box {
             &waiting(inputs.status.as_ref()),
         ),
     ));
-    decisions.append(&decision_line(
+    decisions.append(&decision_line_loading(
         Line::Contributed,
         &fill(
             words.counts.contributed_count,
             &contributed(inputs.rollup.as_ref()),
         ),
+        inputs.rollup_loading,
     ));
     decisions.append(&decision_line(
         Line::Pending,
@@ -769,6 +789,17 @@ mod tests {
     /// Mounted: the summary's cards, in the Mac's order, its legend dashes
     /// before anything is read, and its cards on the glass tiers that dim
     /// with the pane.
+    /// The skeleton's width is the Mac's.
+    #[test]
+    fn the_loading_bar_is_the_macs_width() {
+        let swift = include_str!(
+            "../../../../../macos/Sources/TraceCommonsApp/Views/Monitor/SummaryInspector.swift"
+        );
+        assert!(swift.contains("static let loadingWidth: CGFloat = 96"));
+        assert!(swift.contains("GlassSkeleton(width: Self.loadingWidth)"));
+        assert_eq!(LOADING_WIDTH, 96);
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_summary_is_the_macs_cards() {
@@ -821,6 +852,32 @@ mod tests {
         }
         // With the tree and status read: statistics and safeguards too.
         assert_eq!(count, 5);
+        // Until `history_rollup` answers, the contributed line is the
+        // Mac's skeleton bar, 96 wide, and says nothing.
+        let waiting = view(&Inputs {
+            rollup_loading: true,
+            ..Inputs::default()
+        });
+        let mut labels = Vec::new();
+        collect(waiting.upcast_ref(), &mut labels);
+        let contributed_line = fill(words.counts.contributed_count, DASH);
+        assert!(!labels.contains(&contributed_line), "{labels:?}");
+        fn bars(widget: &gtk::Widget) -> Vec<gtk::DrawingArea> {
+            let mut found: Vec<gtk::DrawingArea> = widget.clone().downcast().into_iter().collect();
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                found.extend(bars(&next));
+                child = next.next_sibling();
+            }
+            found
+        }
+        let bars = bars(waiting.upcast_ref());
+        assert_eq!(bars.len(), 1, "one skeleton");
+        assert_eq!(bars[0].content_width(), LOADING_WIDTH);
+        // Answered, it is the line again.
+        let mut labels = Vec::new();
+        collect(view(&Inputs::default()).upcast_ref(), &mut labels);
+        assert!(labels.contains(&contributed_line), "{labels:?}");
         assert!(
             read.last_child()
                 .expect("safeguards")

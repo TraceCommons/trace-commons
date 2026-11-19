@@ -280,6 +280,10 @@ pub struct App {
     /// count it did not give stays unknown); `None` before the first answer
     /// and after a failed read, so the summary never shows a stale figure.
     pub summary_rollup: RefCell<Option<crate::home::Rollup>>,
+    /// Whether `history_rollup` has answered at all, worked or failed: until
+    /// it has, the summary's contributed line is a skeleton bar
+    /// (`HomeStore.isLoading("history_rollup")`).
+    pub summary_rollup_answered: std::cell::Cell<bool>,
     /// The commons' statement of what pending credit waits on, from the
     /// last `commons_credit_summary` read (`HomeFormat.pendingCondition`).
     pub credit_condition: RefCell<Option<String>>,
@@ -560,6 +564,7 @@ impl App {
             account_change: account_change::ChangeView::default(),
             rollup: RefCell::new(HistoryRollup::default()),
             summary_rollup: RefCell::new(None),
+            summary_rollup_answered: std::cell::Cell::new(false),
             credit_condition: RefCell::new(None),
             undo: RefCell::new(None),
             undo_writing: RefCell::new(Default::default()),
@@ -1131,6 +1136,7 @@ impl App {
                 app.credit_condition.borrow().as_deref(),
             );
             *app.summary_rollup.borrow_mut() = home_rollup;
+            app.summary_rollup_answered.set(true);
             app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
             if let Ok(Ok(rollup)) = result {
