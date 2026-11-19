@@ -31,6 +31,9 @@ public sealed class ShellPreferences
     /// <summary>The one instance the app's windows share, so a switch in Settings is seen by the window at once.</summary>
     public static ShellPreferences Shared => SharedPreferences.Value;
 
+    /// <summary>Choices hold for this run only and are never written: a sample launch writes nothing.</summary>
+    public bool ReadOnly { get; set; }
+
     /// <summary>Raised after any choice changes.</summary>
     public event Action? Changed;
 
@@ -82,6 +85,11 @@ public sealed class ShellPreferences
         if (changed)
         {
             Changed?.Invoke();
+        }
+
+        if (ReadOnly)
+        {
+            return;
         }
 
         try

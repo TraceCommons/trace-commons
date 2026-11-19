@@ -141,7 +141,7 @@ public sealed class HomeView : UserControl
     /// <summary>Draws <paramref name="model"/>. Only what changed is rebuilt; the glyphs keep their clock.</summary>
     public void Show(HomeOverviewModel model)
     {
-        if (_model == model)
+        if (model.Same(_model))
         {
             return;
         }
@@ -302,8 +302,10 @@ public sealed class HomeView : UserControl
         {
             Text = hero.Title,
             Foreground = ink,
-            FontSize = 26,
-            FontWeight = FontWeights.Black,
+
+            // The display type, heavy (HeroCard.swift:105-106).
+            FontSize = HomeTrayInks.Measures.DisplaySize,
+            FontWeight = FontWeights.ExtraBold,
             TextWrapping = TextWrapping.WrapWholeWords,
         });
         if (hero.Subtitle is string subtitle)
@@ -314,7 +316,7 @@ public sealed class HomeView : UserControl
                 Foreground = ink,
                 Opacity = HeroCard.SubtitleInk,
                 TextWrapping = TextWrapping.WrapWholeWords,
-                Style = (Style)Application.Current.Resources["TcBodyTextStyle"],
+                FontSize = HomeTrayInks.Measures.LabelSize,
             });
         }
 
@@ -327,6 +329,7 @@ public sealed class HomeView : UserControl
                 Foreground = ink,
                 Opacity = model.InsightsBars.Count == 0 ? HeroCard.ContentInk : 1,
                 FontWeight = model.InsightsBars.Count == 0 ? FontWeights.SemiBold : FontWeights.Bold,
+                FontSize = model.InsightsBars.Count == 0 ? HomeTrayInks.Measures.LabelSize : HomeTrayInks.Measures.HeadingSize,
                 TextWrapping = TextWrapping.WrapWholeWords,
             });
         }
@@ -344,6 +347,7 @@ public sealed class HomeView : UserControl
                 {
                     Text = action,
                     FontWeight = FontWeights.SemiBold,
+                    FontSize = HomeTrayInks.Measures.LabelSize,
                     Foreground = new SolidColorBrush(Argb(HomeTrayInks.HeroButtonInk)),
                 },
             });
@@ -512,10 +516,10 @@ public sealed class HomeView : UserControl
         switch (effect.Kind)
         {
             case BalanceArrival.EffectKind.Highlight:
-                StartBurst();
+                StartBurstAfterLayout();
                 break;
             case BalanceArrival.EffectKind.CountUp:
-                StartBurst();
+                StartBurstAfterLayout();
                 _countSteps = BalanceArrival.CountSteps(effect.FromNanos, effect.ToNanos, BalanceArrival.CountFrames);
                 _countIndex = 0;
                 _countScale = scale;
@@ -545,6 +549,10 @@ public sealed class HomeView : UserControl
         }
     }
 
+    /// <summary>Starts the burst once the tile has its place: a tile drawn this turn has no layout yet.</summary>
+    private void StartBurstAfterLayout() =>
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, StartBurst);
+
     /// <summary>
     /// Gold coins burst out of the Balance tile's centre (<c>GlassCoinBurst</c>),
     /// over everything on Home: in flight for 1.7 s once a display frame, or
@@ -552,7 +560,7 @@ public sealed class HomeView : UserControl
     /// </summary>
     private void StartBurst()
     {
-        if (_balanceTile is null)
+        if (_balanceTile is null || _balanceTile.ActualWidth <= 0)
         {
             return;
         }

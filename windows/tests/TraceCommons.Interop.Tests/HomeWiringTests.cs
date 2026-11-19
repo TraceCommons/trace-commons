@@ -15,9 +15,9 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public class HomeWiringTests
 {
-    private static string Recorded(string set, string method) => File.ReadAllText(Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..",
-        "macos", "Sources", "TCShellCore", "DataContract", "RecordedSamples", set, method + ".json"));
+    /// <summary>The Mac's recorded replies, copied beside the test assembly (as <see cref="SampleDaemonTests"/> reads them).</summary>
+    private static string Recorded(string set, string method) =>
+        File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "RecordedSamples", set, method + ".json"));
 
     /// <summary>DockCreditAnimator.swift:93-130: off plays nothing; reduce motion one still frame held 1.6 s and no attention.</summary>
     [Fact]
@@ -190,6 +190,59 @@ public class HomeWiringTests
         Assert.Equal("2", model.TraceTiles[2].Value);
         Assert.Equal(HomeFacts.Dash, model.TraceTiles[0].Value);
         Assert.Equal(2, model.AccountTiles.Count);
+    }
+
+    /// <summary>
+    /// Checklist F1: Home's two new reads, named once, against the sample
+    /// client: the credit summary is recorded and answered, the glance is
+    /// not and is refused, so a sample launch draws the Insights chart symbol.
+    /// </summary>
+    [Fact]
+    public void TheSampleClientAnswersOrRefusesHomesNewReads()
+    {
+        var sample = new SampleDaemon("normalDay", Path.Combine(AppContext.BaseDirectory, "RecordedSamples"));
+        DaemonResponse credit = DaemonResponse.Parse(sample.Call(HomeFacts.CommonsCreditSummaryMethod));
+        Assert.False(credit.IsError);
+        Assert.NotNull(CommonsCredit.Parse(credit.Result));
+        DaemonResponse glance = DaemonResponse.Parse(sample.Call(HomeFacts.InsightsGlanceMethod));
+        Assert.True(glance.IsError);
+        Assert.Equal(SampleDaemon.UnrecordedLabel, glance.Error!.Message);
+        Assert.Empty(HomeFacts.Bars(glance.Result));
+    }
+
+    /// <summary>Two reads of an unchanged daemon draw the same Home, so nothing is rebuilt (checklist O2).</summary>
+    [Fact]
+    public void AnUnchangedReadIsTheSameHome()
+    {
+        var pending = new List<QueueEntry> { new() { State = "pending" } };
+        HomeOverviewModel Build(int waiting) => HomeOverviewModel.From(
+            new HomeOverviewModel.Reads(new DaemonStatus { DecisionsOwed = waiting }, new HistoryRollup(), null, null, pending, null, Campaign.Compiled(), true, true, null, "Insights", "Intro."),
+            MonitorShellCopy.Top, k => MonitorShellCopy.Section("home_history", k), "Balance", Figures);
+        Assert.True(Build(2).Same(Build(2)));
+        Assert.False(Build(2).Same(Build(3)));
+        Assert.False(Build(2).Same(null));
+    }
+
+    /// <summary>
+    /// AppModel.swift:1690-1698: only a label the Mac shows as health takes
+    /// the tray to attention; no label is live. (The witness and gate-held
+    /// exceptions need their own cards' replies; the rule is in
+    /// <see cref="TrayStrip.Unhealthy"/>.)
+    /// </summary>
+    [Fact]
+    public void OnlyAHealthLabelTheMacShowsIsAttention()
+    {
+        var calm = new DaemonStatus { DecisionsOwed = 0 };
+        Assert.False(TrayStrip.Unhealthy(calm));
+        Assert.Equal(StripCondition.Live, TrayStrip.FromStatus(calm).Strip.Condition);
+
+        var fault = new DaemonStatus { DecisionsOwed = 0, Health = new DaemonHealth { LastErrorLabel = "upload-failed" } };
+        Assert.True(TrayStrip.Unhealthy(fault));
+        Assert.Equal(StripCondition.Attention, TrayStrip.FromStatus(fault).Strip.Condition);
+
+        // witness-saturated with no witness card to say it: still attention.
+        var saturated = new DaemonStatus { DecisionsOwed = 0, Health = new DaemonHealth { LastErrorLabel = TrayStrip.WitnessSaturatedLabel } };
+        Assert.True(TrayStrip.Unhealthy(saturated));
     }
 
     /// <summary>The compact figure today's tokens are written in (<c>.notation(.compactName)</c>).</summary>

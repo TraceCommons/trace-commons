@@ -195,7 +195,7 @@ public static class TrayStrip
             return (new Strip(StripCondition.Unavailable, null, StripMark.None), null);
         }
 
-        StripCondition condition = Condition(status.DecisionsOwed, !status.IsHealthy, status.Paused, available: true, stale: false, statusAnswered: true);
+        StripCondition condition = Condition(status.DecisionsOwed, Unhealthy(status), status.Paused, available: true, stale: false, statusAnswered: true);
         int? badge = Badge(status.DecisionsOwed);
         string? mark = null;
         StripMarkWords? words = null;
@@ -217,6 +217,37 @@ public static class TrayStrip
         var strip = new Strip(condition, badge, LitMark(mark, available: true));
         return (strip, MarkWords(mark, words, available: true, badge, condition));
     }
+
+    /// <summary>
+    /// <c>model.health != nil</c> (AppModel.swift:1690-1698): a health label,
+    /// unless it is <c>witness-saturated</c> while the witness card is drawn,
+    /// or the gate-held label while the held-folder notice is drawn, since
+    /// each of those says the same thing with more. Not every label: the
+    /// Linux port read every label as unhealthy first (#2186, 0266ab54b).
+    /// </summary>
+    public static bool Unhealthy(DaemonStatus status)
+    {
+        string? label = status.Health?.LastErrorLabel;
+        if (string.IsNullOrEmpty(label))
+        {
+            return false;
+        }
+
+        if (label == WitnessSaturatedLabel && WitnessCapacitySurface.Notice(status.WitnessCapacity) is not null)
+        {
+            return false;
+        }
+
+        if (label == SwitchOnNotices.GateHeldLabel && SwitchOnNotices.Held(status.AutomaticContributionHeld) is not null)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>The daemon's label for a busy privacy witness (<c>daemon::health::LABEL_WITNESS_SATURATED</c>).</summary>
+    public const string WitnessSaturatedLabel = "witness-saturated";
 
     /// <summary>The pixel face of a badge character, rows top to bottom, a set bit per lit cell from the left.</summary>
     internal static int[]? Face(char c) => c switch

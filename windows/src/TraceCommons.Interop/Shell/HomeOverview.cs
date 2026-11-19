@@ -143,6 +143,22 @@ public sealed record HomeOverviewModel(
             insightsLine);
     }
 
+    /// <summary>
+    /// Whether <paramref name="other"/> draws the same Home: every heading,
+    /// tile, hero and bar equal. A record's own equality compares its lists
+    /// by reference, so two reads of an unchanged daemon would look new and
+    /// rebuild Home (losing focus and restarting the glyphs; checklist O2).
+    /// </summary>
+    public bool Same(HomeOverviewModel? other) =>
+        other is not null
+        && TracesHeading == other.TracesHeading
+        && AccountHeading == other.AccountHeading
+        && InsightsLine == other.InsightsLine
+        && TraceTiles.SequenceEqual(other.TraceTiles)
+        && AccountTiles.SequenceEqual(other.AccountTiles)
+        && Heroes.SequenceEqual(other.Heroes)
+        && InsightsBars.SequenceEqual(other.InsightsBars);
+
     private static string? NonEmpty(string? word) => string.IsNullOrEmpty(word) ? null : word;
 
     /// <summary>

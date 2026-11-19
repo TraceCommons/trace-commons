@@ -1539,6 +1539,15 @@ def render_windows_home_tray(tokens: dict) -> str:
             number(value, f"{section}.{name}")
             label = f"{pascal(name)}Radius" if section == "radius" else pascal(name)
             out.append(f"        public const double {label} = {float(value)!r};")
+    # The type sizes Home's hero cards use (HeroCard.swift: display for the
+    # title, label for the line and the pill; HomeInsightsVisual.swift:
+    # heading for today's figure), in points at the default text size.
+    for name in ["display", "heading", "label"]:
+        value = flat_value(tokens, "type", name, "dark")
+        if value != flat_value(tokens, "type", name, "light"):
+            raise TokenError(f"type.{name}: expected one value in both appearances")
+        number(value["size"], f"type.{name}.size")
+        out.append(f"        public const double {pascal(name)}Size = {float(value['size'])!r};")
     out.append("    }")
     for scheme in ("dark", "light"):
         out.append("")

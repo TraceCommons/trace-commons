@@ -52,6 +52,15 @@ public readonly record struct GlanceBar(string Tool, ulong Tokens);
 /// </summary>
 public static class HomeFacts
 {
+    /// <summary>
+    /// The daemon reads Home sends that Windows did not send before (W11):
+    /// the commons' credit summary and today's Insights glance. The recorded
+    /// samples hold the first and not the second, so a sample launch draws
+    /// the Insights hero with its chart symbol.
+    /// </summary>
+    public const string CommonsCreditSummaryMethod = "commons_credit_summary";
+    public const string InsightsGlanceMethod = "insights_glance";
+
     /// <summary>The unknown figure: a dash, never a zero (HomeViews.swift:2014-2018).</summary>
     public const string Dash = "—";
 

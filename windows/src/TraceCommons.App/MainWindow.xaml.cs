@@ -449,9 +449,10 @@ public sealed partial class MainWindow : Window
             // is on screen (AppModel.recordBalanceStatus).
             Task<DaemonResponse> balanceTask = _host.CallAsync(DaemonProtocol.Methods.NearAiBalance);
 
-            await Task.WhenAll(statusTask, pendingTask, rollupTask, projectsTask, balanceTask)
+            ObserveBalanceWhenRead(balanceTask);
+
+            await Task.WhenAll(statusTask, pendingTask, rollupTask, projectsTask)
                 .ConfigureAwait(true);
-            ObserveBalance(balanceTask.Result);
 
             if (statusTask.Result.ResultAs<DaemonStatus>() is not DaemonStatus status)
             {

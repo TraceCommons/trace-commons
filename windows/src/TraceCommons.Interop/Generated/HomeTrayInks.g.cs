@@ -39,6 +39,9 @@ public static class HomeTrayInks
         public const double CardGap = 10.0;
         public const double CardPaddingHorizontal = 14.0;
         public const double PanePadding = 12.0;
+        public const double DisplaySize = 22.0;
+        public const double HeadingSize = 17.0;
+        public const double LabelSize = 12.0;
     }
 
     /// <summary>The dark appearance.</summary>

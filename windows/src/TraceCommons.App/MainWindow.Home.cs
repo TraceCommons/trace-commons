@@ -40,6 +40,9 @@ public sealed partial class MainWindow
     /// <summary>Called once from the constructor, after the tray is wired.</summary>
     private void InitializeHome()
     {
+        // A sample launch writes nothing to this machine (Program.IsSampleLaunch):
+        // its switches and the Balance tile's last reading stay in memory.
+        _prefs.ReadOnly = Program.IsSampleLaunch;
         HomePane.Children.Insert(0, _home);
         _home.LinkRequested += OnHomeLink;
         _home.CampaignClosed += () =>
@@ -132,9 +135,9 @@ public sealed partial class MainWindow
         _homeLoading = true;
         try
         {
-            Task<DaemonResponse> credit = _host.CallAsync("commons_credit_summary");
+            Task<DaemonResponse> credit = _host.CallAsync(HomeFacts.CommonsCreditSummaryMethod);
             Task<DaemonResponse> balance = _host.CallAsync(DaemonProtocol.Methods.NearAiBalance);
-            Task<DaemonResponse> glance = _host.CallAsync("insights_glance");
+            Task<DaemonResponse> glance = _host.CallAsync(HomeFacts.InsightsGlanceMethod);
             Task<DaemonResponse> status = _host.CallAsync(DaemonProtocol.Methods.Status);
             Task<DaemonResponse> rollup = _host.CallAsync(DaemonProtocol.Methods.HistoryRollup);
             Task<DaemonResponse> pending = _host.CallAsync(DaemonProtocol.Methods.ListPending);
@@ -146,7 +149,9 @@ public sealed partial class MainWindow
             _homeGlance = glance.Result.IsError ? null : glance.Result.Result;
             ObserveBalance(balance.Result);
 
-            if (_insightsHeading is null)
+            // A sample launch reads only the recorded set: never the local
+            // Insights store (Program.IsSampleLaunch).
+            if (_insightsHeading is null && !Program.IsSampleLaunch)
             {
                 try
                 {
@@ -246,6 +251,16 @@ public sealed partial class MainWindow
         if (_creditTracker.Observe(received))
         {
             Celebrate();
+        }
+    }
+
+    /// <summary>The tray's balance read, observed when it lands: it never holds the strip.</summary>
+    private async void ObserveBalanceWhenRead(Task<DaemonResponse> read)
+    {
+        DaemonResponse response = await read.ConfigureAwait(true);
+        if (!_closed)
+        {
+            ObserveBalance(response);
         }
     }
 
