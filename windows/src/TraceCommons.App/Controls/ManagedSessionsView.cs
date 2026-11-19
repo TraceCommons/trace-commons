@@ -204,7 +204,16 @@ public sealed class ManagedSessionsView : UserControl
         int at = ManagedFocus.Find(buttons.Select(ButtonName).ToList(), key);
         if (at < 0) return;
         Button match = buttons[at];
-        DispatcherQueue?.TryEnqueue(() => match.Focus(FocusState.Programmatic));
+        // Its section is brought into view too: on the box (2026-11-19) the
+        // page was left scrolled to the view's foot after the launch dialog
+        // closed, with the focused Start button and its card out of sight.
+        UIElement section = match;
+        while (Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(section) is UIElement parent && parent != _root) section = parent;
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            match.Focus(FocusState.Programmatic);
+            section.StartBringIntoView();
+        });
     }
 
     private void RenderContent()
@@ -433,6 +442,17 @@ public sealed class ManagedSessionsView : UserControl
         // Open is the default action (ManagedFolderExplainer.swift:62,
         // isDefault): focus starts on it, so Enter opens the tool rather than
         // the folder picker.
+        // Until the person first presses a key or the pointer, focus that
+        // lands anywhere else goes back to Open: on the box (2026-11-19) a
+        // second opening in a row had the dialog move focus to the first
+        // button of its content after Opened.
+        bool settling = true;
+        dialog.PreviewKeyDown += (_, _) => settling = false;
+        dialog.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => settling = false), true);
+        dialog.GotFocus += (_, e) =>
+        {
+            if (settling && e.OriginalSource is not Button { Name: "PrimaryButton" }) FocusPrimary(dialog);
+        };
         dialog.Opened += (_, _) => FocusPrimary(dialog);
         ContentDialogResult result = await dialog.ShowAsync();
         art.Release();
