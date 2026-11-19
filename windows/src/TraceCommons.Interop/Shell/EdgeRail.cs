@@ -161,7 +161,8 @@ public sealed class EdgeRailHover
     /// The rail's slide at <paramref name="seconds"/> into an open or close:
     /// how far right of its place it is (0 placed, 1 a whole rail width out)
     /// and its opacity. Moves in from the trailing edge with a fade; under
-    /// reduce motion it only fades (EdgeRailView.swift:54).
+    /// reduce motion it has no offset, and the window asks for its last
+    /// frame at once: the Mac requests no animation then (EdgeRailView.swift:82).
     /// </summary>
     public static (double Offset, double Opacity, bool Done) Slide(bool opening, double seconds, bool reduceMotion)
     {

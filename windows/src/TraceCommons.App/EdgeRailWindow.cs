@@ -166,7 +166,7 @@ internal sealed class EdgeRailWindow : Window
         }
     }
 
-    /// <summary>The slide: from the trailing edge with a fade over 0.25 s on the token curve; a fade alone under reduce motion.</summary>
+    /// <summary>The slide: from the trailing edge with a fade over 0.25 s on the token curve; under reduce motion it opens and closes at once, as the Mac's nil animation does (EdgeRailView.swift:82).</summary>
     private void StartSlide(bool opening)
     {
         _slidingOpen = opening;
