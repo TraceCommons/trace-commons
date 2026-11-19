@@ -91,6 +91,13 @@ pub struct Tween {
     ease: Option<Ease>,
 }
 
+/// At rest at 0.
+impl Default for Tween {
+    fn default() -> Self {
+        Self::at_rest(0.0)
+    }
+}
+
 impl Tween {
     pub fn at_rest(value: f64) -> Self {
         Self {
