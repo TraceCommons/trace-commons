@@ -28,10 +28,12 @@ namespace TraceCommons.App;
 /// ships real transcripts and is unrecoverable.
 /// </para>
 /// <para>
-/// <b>The interruption budget.</b> <see cref="ShowDigest"/> is the only path
-/// in this app that can interrupt, and it is gated by
-/// <see cref="DigestCadence"/> on top of the daemon's own spacing. See that
-/// class for why there are two gates.
+/// <b>The interruption budget.</b> <see cref="ShowDigest"/> and
+/// <see cref="ShowNotice"/> are the only paths in this app that can
+/// interrupt. The digest is gated by <see cref="DigestCadence"/> on top of
+/// the daemon's own spacing (see that class for why there are two gates); a
+/// re-engagement notice is the daemon's alone, under its per-kind switches
+/// and caps (daemon/reengage.rs), as on the Mac.
 /// </para>
 /// <para>
 /// <b>Its own window, not the app's.</b> A tray icon needs an HWND to send
@@ -48,6 +50,12 @@ public sealed class TrayIcon : IDisposable
 {
     /// <summary>Raised when the contributor asks for the window.</summary>
     public event Action? OpenRequested;
+
+    /// <summary>
+    /// A click on the balloon itself. The window decides what that means:
+    /// a re-engagement notice's default action, otherwise raising the window.
+    /// </summary>
+    public event Action? BalloonClicked;
 
     public event Action? ReviewRequested;
 
@@ -244,8 +252,18 @@ public sealed class TrayIcon : IDisposable
     /// </para>
     /// </remarks>
     /// <returns>Whether a notification was actually shown.</returns>
-    public bool ShowDigest(string body)
+    public bool ShowDigest(string body) => ShowNotice(DigestText.Title, body);
+
+    /// <summary>
+    /// Shows a balloon with <paramref name="title"/> and
+    /// <paramref name="body"/>, unchanged but for the shell's length limits.
+    /// A re-engagement notice's words are the daemon's; a balloon carries no
+    /// buttons, so a click is its default action and ignoring it is Not now.
+    /// </summary>
+    /// <returns>Whether a notification was actually shown.</returns>
+    public bool ShowNotice(string title, string body)
     {
+        ArgumentNullException.ThrowIfNull(title);
         ArgumentNullException.ThrowIfNull(body);
 
         if (!_added)
@@ -256,7 +274,7 @@ public sealed class TrayIcon : IDisposable
         var data = NewData();
         data.uFlags = NIF_INFO;
         data.szInfo = Clamp(body, 255);
-        data.szInfoTitle = Clamp(DigestText.Title, 63);
+        data.szInfoTitle = Clamp(title, 63);
 
         // NIIF_NONE: no system icon in the balloon. NIIF_USER would show the
         // tray icon, which at balloon size is the mark stretched from 16px
@@ -381,10 +399,15 @@ public sealed class TrayIcon : IDisposable
             {
                 case NIN_SELECT:
                 case NIN_KEYSELECT:
-                case NIN_BALLOONUSERCLICK:
-                    // A click on the icon or on the digest balloon. The only
-                    // thing either does is raise the window.
+                    // A click on the icon. The only thing it does is raise
+                    // the window.
                     OpenRequested?.Invoke();
+                    return IntPtr.Zero;
+
+                case NIN_BALLOONUSERCLICK:
+                    // A click on the balloon: the window decides, and
+                    // nothing it can decide sends a trace.
+                    BalloonClicked?.Invoke();
                     return IntPtr.Zero;
 
                 case WM_CONTEXTMENU:

@@ -213,3 +213,105 @@ public class NotificationKindsTests
         Assert.Equal("[\"reengage_due\"]", JsonSerializer.Serialize(ReengageNotice.AcceptedEvents(true)));
     }
 }
+
+/// <summary>
+/// The Notifications store (<c>NudgeSettingsStore</c>): every write is
+/// followed by a fresh read, so a switch shows what the daemon stored; a
+/// refused write says so and changes nothing drawn.
+/// </summary>
+public class NotificationKindsStoreTests
+{
+    private const string Settings = """{"notifications_enabled": true, "notify": {"digest": true, "verdicts_landed": false, "idle_sessions": true, "near_ai_credit": true}, "verdicts_offer_pending": true}""";
+
+    private sealed class FakeDaemon
+    {
+        public List<(string Method, string Params)> Calls { get; } = new();
+        public string SettingsJson { get; set; } = Settings;
+        public bool RefuseWrites { get; set; }
+        public bool FailReads { get; set; }
+
+        public System.Threading.Tasks.Task<DaemonResponse> Call(string method, string json)
+        {
+            Calls.Add((method, json));
+            string frame = method == DaemonProtocol.Methods.GetSettings
+                ? (FailReads ? """{"error":{"code":"unavailable","message":"x"}}""" : $$"""{"result":{{SettingsJson}}}""")
+                : (RefuseWrites ? """{"error":{"code":"bad_params","message":"x"}}""" : """{"result":{"ok":true}}""");
+            return System.Threading.Tasks.Task.FromResult(DaemonResponse.Parse(frame));
+        }
+    }
+
+    private static NotificationKindsStore Store(FakeDaemon daemon) =>
+        new(daemon.Call) { RefusalLine = () => "refused" };
+
+    [Fact]
+    public async System.Threading.Tasks.Task NothingIsDrawnUntilTheSettingsAnswer()
+    {
+        var daemon = new FakeDaemon { FailReads = true };
+        NotificationKindsStore store = Store(daemon);
+        Assert.Empty(store.Rows);
+        await store.ReadAsync();
+        Assert.True(store.ReadFailed);
+        Assert.Empty(store.Rows);
+        Assert.Empty(store.Offers(OfferPlace.History));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ASwitchWritesItsKindThenReadsWhatTheDaemonStored()
+    {
+        var daemon = new FakeDaemon();
+        NotificationKindsStore store = Store(daemon);
+        await store.ReadAsync();
+        Assert.False(store.Rows.Single(r => r.Kind == "verdicts_landed").IsOn);
+
+        daemon.SettingsJson = Settings.Replace("\"verdicts_landed\": false", "\"verdicts_landed\": true", StringComparison.Ordinal);
+        await store.SetAsync("verdicts_landed", true);
+
+        Assert.Equal(("set_notify_kind", """{"kind":"verdicts_landed","on":true}"""), daemon.Calls[1]);
+        Assert.Equal(DaemonProtocol.Methods.GetSettings, daemon.Calls[2].Method);
+        Assert.True(store.Rows.Single(r => r.Kind == "verdicts_landed").IsOn);
+        Assert.Null(store.Refusal);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ARefusedWriteSaysSoAndKeepsTheStoredValue()
+    {
+        var daemon = new FakeDaemon();
+        NotificationKindsStore store = Store(daemon);
+        await store.ReadAsync();
+        daemon.RefuseWrites = true;
+        await store.SetAsync("digest", false);
+        Assert.Equal("refused", store.Refusal);
+        Assert.True(store.Rows.Single(r => r.Kind == "digest").IsOn);
+        Assert.Null(store.RefusedOfferKind);
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task AnOffersAnswerIsWrittenAndTheOfferGoesWithTheFreshRead()
+    {
+        var daemon = new FakeDaemon();
+        NotificationKindsStore store = Store(daemon);
+        await store.ReadAsync();
+        NotifyOffer offer = Assert.Single(store.Offers(OfferPlace.History));
+
+        daemon.SettingsJson = Settings.Replace(", \"verdicts_offer_pending\": true", string.Empty, StringComparison.Ordinal);
+        await store.AnswerAsync(offer, accept: false);
+
+        Assert.Equal(("set_settings", """{"verdicts_offer_pending":false}"""), daemon.Calls[1]);
+        Assert.Empty(store.Offers(OfferPlace.History));
+    }
+
+    [Fact]
+    public async System.Threading.Tasks.Task ARefusedOfferAnswerIsSaidUnderThatOffer()
+    {
+        var daemon = new FakeDaemon();
+        NotificationKindsStore store = Store(daemon);
+        await store.ReadAsync();
+        NotifyOffer offer = Assert.Single(store.Offers(OfferPlace.History));
+        daemon.RefuseWrites = true;
+        await store.AnswerAsync(offer, accept: true);
+        Assert.Equal(("set_notify_kind", """{"kind":"verdicts_landed","on":true}"""), daemon.Calls[1]);
+        Assert.Equal("verdicts_landed", store.RefusedOfferKind);
+        Assert.Equal("refused", store.Refusal);
+        Assert.Single(store.Offers(OfferPlace.History));
+    }
+}

@@ -419,3 +419,103 @@ public sealed record ReengageNotice(string Kind, string Title, string Body, Nudg
             ? text
             : null;
 }
+
+/// <summary>
+/// Settings > Notifications' switches and the one-time offers, read and
+/// written through the daemon (<c>NudgeSettingsStore</c>): a switch is drawn
+/// only from a value the daemon reported, every taken write is followed by a
+/// fresh read so a switch shows what the daemon stored, and a refused write
+/// says so under what it was about.
+/// </summary>
+public sealed class NotificationKindsStore
+{
+    private readonly Func<string, string, System.Threading.Tasks.Task<DaemonResponse>> _call;
+    private NotificationSettingsState? _state;
+    private string? _settingsJson;
+
+    public NotificationKindsStore(Func<string, string, System.Threading.Tasks.Task<DaemonResponse>> call)
+    {
+        _call = call ?? throw new ArgumentNullException(nameof(call));
+    }
+
+    /// <summary>The settings have answered at least once.</summary>
+    public bool SettingsAnswered => _state is not null;
+
+    /// <summary>The latest settings read failed.</summary>
+    public bool ReadFailed { get; private set; }
+
+    /// <summary>A write is out.</summary>
+    public bool Busy { get; private set; }
+
+    /// <summary>The refused write's line, until the next write.</summary>
+    public string? Refusal { get; private set; }
+
+    /// <summary>The offer whose answer was refused; null when the refused write was a switch.</summary>
+    public string? RefusedOfferKind { get; private set; }
+
+    /// <summary>The request-failed line the Mac shows. Settable so tests need not load the core.</summary>
+    public Func<string> RefusalLine { get; init; } = () => MonitorShellCopy.Top("request_failed");
+
+    /// <summary>The core's nudge words. Settable so tests need not load the core.</summary>
+    public Func<string, string?> Word { get; init; } = NudgeWords.Word;
+
+    /// <summary>The digest switch's help for the reported schedule. Settable for tests.</summary>
+    public Func<string?, string?> DigestHelp { get; init; } = NudgeWords.DigestHelp;
+
+    /// <summary>The switches (<see cref="NotificationKinds.Rows"/>).</summary>
+    public IReadOnlyList<NotifySwitchRow> Rows =>
+        NotificationKinds.Rows(_state, Word, _state is null ? null : DigestHelp(_settingsJson));
+
+    /// <summary>The line under the switches, or null.</summary>
+    public string? Footnote => NotificationKinds.Footnote(Rows, Word);
+
+    /// <summary>The offer <paramref name="place"/> draws.</summary>
+    public IReadOnlyList<NotifyOffer> Offers(OfferPlace place) => NotificationKinds.Offers(_state, Word, place);
+
+    /// <summary>Reads the settings. A failed read keeps nothing it cannot confirm: no switch is drawn from it.</summary>
+    public async System.Threading.Tasks.Task ReadAsync()
+    {
+        DaemonResponse response = await _call(DaemonProtocol.Methods.GetSettings, "{}").ConfigureAwait(true);
+        string? json = response.IsError ? null : response.Result?.GetRawText();
+        NotificationSettingsState? state = NotificationSettingsState.Parse(json);
+        ReadFailed = state is null;
+        _state = state;
+        _settingsJson = state is null ? null : json;
+    }
+
+    /// <summary>One kind's switch, then a fresh read.</summary>
+    public System.Threading.Tasks.Task SetAsync(string kind, bool on) =>
+        WriteAsync(NotificationKinds.SetKind(kind, on), offerKind: null);
+
+    /// <summary>An offer's Enable (the kind on) or No thanks (the marker cleared), then a fresh read.</summary>
+    public System.Threading.Tasks.Task AnswerAsync(NotifyOffer offer, bool accept) =>
+        WriteAsync(accept ? NotificationKinds.Accept(offer) : NotificationKinds.Decline(offer), offer.Kind);
+
+    private async System.Threading.Tasks.Task WriteAsync(NudgeRequest request, string? offerKind)
+    {
+        if (Busy)
+        {
+            return;
+        }
+
+        Busy = true;
+        Refusal = null;
+        RefusedOfferKind = null;
+        try
+        {
+            DaemonResponse response = await _call(request.Method, request.ParamsJson).ConfigureAwait(true);
+            if (response.IsError)
+            {
+                Refusal = RefusalLine();
+                RefusedOfferKind = offerKind;
+                return;
+            }
+
+            await ReadAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            Busy = false;
+        }
+    }
+}

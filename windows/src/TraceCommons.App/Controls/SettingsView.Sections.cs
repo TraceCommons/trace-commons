@@ -120,6 +120,7 @@ public sealed partial class SettingsView
         ReferralsHost.Content = new ReferralsSection(host);
         GeneralHost.Content = new GeneralSection();
         InsightsHost.Content = new InsightsSection(host);
+        NotificationsHost.Content = new NotificationsSection(host);
         CliOptionsHost.Content = new CliOptionsCard(host);
         _updates = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty), updateChecks);
         UpdatesHost.Content = _updates;

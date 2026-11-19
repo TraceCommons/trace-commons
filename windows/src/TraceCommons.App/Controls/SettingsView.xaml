@@ -781,7 +781,8 @@
                               IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
                               Toggled="OnStartAtLoginToggled" />
-
+                <!-- Notifications, drawn under Startup as on the Mac, which names no row of its own for it. -->
+                <ContentControl IsTabStop="False" x:Name="NotificationsHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
                 <TextBlock x:Name="RuleUpdates" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyUpdates" Spacing="12">

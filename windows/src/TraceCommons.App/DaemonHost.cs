@@ -84,6 +84,21 @@ public sealed class DaemonHost : IAsyncDisposable
     public event Action<int>? Lagged;
 
     /// <summary>
+    /// Raised on the UI thread for a <c>reengage_due</c> this build can post
+    /// (<see cref="ReengageNotice"/>). Delivered only while
+    /// <see cref="AcceptedEvents"/> declares it.
+    /// </summary>
+    public event Action<ReengageNotice>? ReengageDue;
+
+    /// <summary>
+    /// The opt-in events this app renders, declared when the subscription is
+    /// made (<c>tc_subscribe_with_accepts</c>). Set before the daemon starts:
+    /// <c>reengage_due</c> only while the tray can show a notification
+    /// (<see cref="ReengageNotice.AcceptedEvents"/>).
+    /// </summary>
+    public IReadOnlyList<string> AcceptedEvents { get; set; } = Array.Empty<string>();
+
+    /// <summary>
     /// Raised on the UI thread when the daemon's preview scheduler finishes
     /// and delivers one card's result -- the only way a card queued or
     /// running when it was requested ever gets filled in, since a build that
@@ -222,7 +237,7 @@ public sealed class DaemonHost : IAsyncDisposable
 
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent);
+        _subscription = daemon.Subscribe(OnDaemonEvent, AcceptedEvents);
     }
 
     /// <summary>
@@ -379,6 +394,14 @@ public sealed class DaemonHost : IAsyncDisposable
                         evt.ContributedProjects,
                         evt.CreditPending,
                         evt.Contribution));
+                    break;
+
+                case DaemonProtocol.Events.ReengageDue:
+                    if (ReengageNotice.From(evt) is { } notice)
+                    {
+                        ReengageDue?.Invoke(notice);
+                    }
+
                     break;
 
                 case DaemonProtocol.Events.Lagged:
