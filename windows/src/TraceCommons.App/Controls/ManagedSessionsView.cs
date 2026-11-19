@@ -219,7 +219,10 @@ public sealed class ManagedSessionsView : UserControl
         // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
         if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
         _root.Children.Add(actions);
-        if (_snapshot.InstallTools.Length > 0)
+        // Signed in, the card above holds the Install links (box,
+        // 2026-11-19: both drew them); signed out, this block stands in for
+        // the Mac's setup row (ManagedSessionsView.swift:34-36).
+        if (_snapshot.InstallTools.Length > 0 && !_snapshot.NearAiSignedIn)
         {
             // One bare refresh glyph beside the heading; no per-tool copies.
             var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
