@@ -76,7 +76,8 @@ async fn issuer(lookup: Value) -> (u16, tokio::task::JoinHandle<()>) {
 
 /// Replace the values that change on every run with fixed ones, by field
 /// name: the sign-in attempt's id, the loopback port and `state` nonce in
-/// its page address, and the time a grant was given.
+/// its page address, the time a grant was given, and the platform's
+/// default terminal.
 fn steady(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -102,6 +103,10 @@ fn steady(value: &mut Value) {
                             .collect();
                         url.query_pairs_mut().clear().extend_pairs(pairs);
                         *field = json!(url.to_string());
+                    }
+                    // Each platform has its own default terminal.
+                    ("managed_terminal", Value::String(_)) => {
+                        *field = json!("terminal");
                     }
                     ("granted_at", Value::String(_)) => {
                         *field = json!("2026-11-19T00:00:00Z");

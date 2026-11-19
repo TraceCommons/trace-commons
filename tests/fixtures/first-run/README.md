@@ -23,13 +23,16 @@ the one host that is refused is under `.invalid`.
 
 ## Values replaced before comparing
 
-These change on every run, so the test replaces them by field name before
-it prints or compares:
+These change from run to run or from platform to platform, so the test
+replaces them by field name before it prints or compares:
 
 - `attempt_id`: `00000000-0000-4000-8000-000000000001`.
 - `browser_url`: the loopback port becomes `49152` and the `state` nonce
   becomes `fixture-state`.
 - `granted_at`: `2026-11-19T00:00:00Z`.
+- `managed_terminal` (in `set_settings.json`): each platform defaults to
+  its own terminal (`TerminalSetting::default`), so it is recorded as
+  macOS's `terminal`.
 
 ## How each was produced
 
