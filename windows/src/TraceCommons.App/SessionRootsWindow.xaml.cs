@@ -29,6 +29,7 @@ public sealed partial class SessionRootsWindow : Window
         InitializeComponent();
         // The app's name from brand.rs (tc_app_name), never a literal (W10).
         Title = TraceCommons.Interop.Shell.MonitorWords.AppName;
+        WindowClocks.Watch(this);
 
         ViewModel = new SessionRootsViewModel(host, candidates);
         ViewModel.Finished += OnFinished;

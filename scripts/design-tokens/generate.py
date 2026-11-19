@@ -1544,7 +1544,7 @@ def render_gtk(tokens: dict) -> str:
 
 # WinUI keys the views already bind to, kept so the views need no edit, and
 # the role (and, for a translucent border, the alpha byte per scheme) each
-# now reads. The names predate the purple; see DesignSystem.xaml.
+# now reads (WINDOWS_FLAT_ROLES). The names predate the accent.
 WINDOWS_LEGACY_KEYS = [
     ("TcGreenBrandBrush", "accent", None),
     # Selection bars and progress bars on the window and the nav chrome; the
@@ -1561,8 +1561,8 @@ WINDOWS_LEGACY_KEYS = [
     ("TcCoralTextBrush", "statusOutsideText", None),
 ]
 # Glass tokens only the Windows shell names as brushes, outside the shared
-# roles: (key, token). The Private AI tab's grey dot (GlassStatus.off) is
-# statusOff, as on the Mac (PrivateInferenceView.swift:38).
+# roles: (key, token), flat. The Private AI tab's grey dot (GlassStatus.off)
+# is statusOff, as on the Mac (PrivateInferenceView.swift:38).
 WINDOWS_TOKEN_KEYS = [
     ("TcStatusOffBrush", "statusOff"),
 ]
@@ -1573,7 +1573,7 @@ WINDOWS_HC_GROUND_ROLES = {"onAccent", "onStatus"}
 
 
 def render_windows(tokens: dict) -> str:
-    values = role_values(tokens)
+    values = windows_role_values(tokens)
     out = [
         '<?xml version="1.0" encoding="utf-8"?>',
         "<!--",
@@ -1582,11 +1582,11 @@ def render_windows(tokens: dict) -> str:
         "    regenerate. The generator's check mode fails in CI if this file and",
         "    the JSON disagree.",
         "",
-        "    The brand accent and the text-safe status colours. DesignSystem.xaml",
-        "    merges this dictionary and keeps everything else: grounds, ink, type,",
-        "    spacing and the WinUI control styles. The TcGreen, TcGold and TcCoral",
-        "    keys are the names the views already bind to; they now carry the",
-        "    purple accent and the status tokens.",
+        "    The brand accent and the text-safe status colours, as the Mac's flat",
+        "    theme draws them (spec W5: the flat blue, not the classic purple).",
+        "    GlassTokens.xaml carries the grounds, ink, type, spacing and motion.",
+        "    The TcGreen, TcGold and TcCoral keys are the names the views already",
+        "    bind to; they carry the accent and the status tokens.",
         "-->",
         "<ResourceDictionary",
         '    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"',
@@ -1608,7 +1608,7 @@ def render_windows(tokens: dict) -> str:
             color = f"#{alphas[scheme]}{hex_[1:]}" if alphas else hex_
             out.append(f'            <SolidColorBrush x:Key="{name}" Color="{color}" />')
         for name, token in WINDOWS_TOKEN_KEYS:
-            out.append(f'            <SolidColorBrush x:Key="{name}" Color="{scheme_hex(tokens, token, scheme)}" />')
+            out.append(f'            <SolidColorBrush x:Key="{name}" Color="{flat_color(tokens, token, scheme)["hex"].upper()}" />')
         out.append("        </ResourceDictionary>")
     out.append("")
     out.append("        <!-- High contrast: the system's colours, as in DesignSystem.xaml. -->")
@@ -1624,6 +1624,507 @@ def render_windows(tokens: dict) -> str:
     out.append("        </ResourceDictionary>")
     out.append("    </ResourceDictionary.ThemeDictionaries>")
     out.append("</ResourceDictionary>")
+    out.append("")
+    return "\n".join(out)
+
+
+# ---- Windows: the glass look (spec W5) -----------------------------------
+#
+# The WinUI app takes the Mac's flat look (owner, G-2 (a) and W5, 2026-11-18):
+# its tier fills, ink, rules, radii, spacing, type and motion, generated here
+# into Themes/GlassTokens.xaml and, for code and the net8.0 tests, into
+# TraceCommons.Interop/Shell/GlassTokens.g.cs. Every fill is the painted one
+# Linux draws (`glass_palette`), the Mac's look under Reduce Transparency;
+# over Mica the panes take `glass_blur_palette`'s translucent stack instead,
+# which reads at 4.5:1 over a black or a white desktop by construction.
+# Nothing here changes the Swift or GTK outputs.
+
+WINDOWS_GLASS_OUTPUT = REPO / "windows" / "src" / "TraceCommons.App" / "Themes" / "GlassTokens.xaml"
+WINDOWS_GLASS_CS_OUTPUT = REPO / "windows" / "src" / "TraceCommons.Interop" / "Shell" / "GlassTokens.g.cs"
+
+# The Windows brand roles under the flat theme (owner, 2026-11-18: the Mac
+# look; the accent is the flat blue, not the classic purple). (role, token)
+# for each scheme, read through `flat_color` so the flat overrides apply:
+# the primary action's fill is the CTA's, and a line on a ground the ember.
+WINDOWS_FLAT_ROLES = [
+    ("accent", "ctaFill"),
+    ("accentLine", "tabEmber"),
+    ("accentText", "purpleText"),
+    ("onAccent", "textOnAccent"),
+    ("statusOn", "statusOn"),
+    ("statusOnText", "statusOnText"),
+    ("statusAsk", "statusAsk"),
+    ("statusAskText", "statusAskText"),
+    ("statusOutside", "statusOutside"),
+    ("statusOutsideText", "statusOutsideText"),
+    ("onStatus", "textOnStatus"),
+]
+
+# Painted brushes: (key, palette entry). Opaque, flattened over the pane.
+WINDOWS_GLASS_TIER_KEYS = [(tier, "TcGlass" + pascal(tier) + "Brush") for tier, *_ in GLASS_TIERS]
+WINDOWS_GLASS_INK_KEYS = [
+    ("TcGlassSceneBrush", "scene"),
+    ("TcGlassInkBrush", "ink"),
+    ("TcGlassInkSecondaryBrush", "inkSecondary"),
+    ("TcGlassInkTertiaryBrush", "textTertiary"),
+    ("TcGlassSelectedInkBrush", "selectedInk"),
+    ("TcGlassRuleBrush", "rule"),
+    ("TcGlassRuleInactiveBrush", "ruleInactive"),
+    ("TcGlassControlHoverBrush", "controlHover"),
+    ("TcGlassRowHoverBrush", "rowHover"),
+    ("TcGlassTabEmberBrush", "tabEmber"),
+    ("TcGlassToolbarGlyphBrush", "toolbarGlyph"),
+    ("TcGlassStatusOnBrush", "statusOn"),
+    ("TcGlassStatusAskBrush", "statusAsk"),
+    ("TcGlassStatusOffBrush", "statusOff"),
+]
+# Colours a control draws with that the painted palette does not carry:
+# (key, token, kind). "fill" is a flat gradient's one colour, "color" a
+# colour token; both are flattened over the pane when `opaque`.
+WINDOWS_GLASS_CONTROL_KEYS = [
+    ("TcGlassCtaBrush", "ctaFill", "fill", True),
+    ("TcGlassCtaInkBrush", "textOnAccent", "color", True),
+    ("TcGlassToggleOnBrush", "toggleOnSettings", "color", True),
+    ("TcGlassToggleOffBrush", "toggleOff", "color", True),
+    ("TcGlassToggleKnobOnBrush", "textOnAccent", "color", True),
+    ("TcGlassToggleKnobOffBrush", "toggleKnobOff", "color", True),
+    ("TcGlassCheckboxOnBrush", "checkboxOnFill", "fill", True),
+    ("TcGlassStatusOutsideBrush", "statusOutside", "color", True),
+    ("TcGlassModalScrimBrush", "modalScrim", "color", False),
+    ("TcGlassTintAccentBrush", "tintAccent", "color", False),
+]
+# The translucent overlays a control lays over whatever it sits on, as the
+# Mac draws them: (key, (hex, alpha) per scheme or a token, source line).
+# GlassPress.swift:107 `Color.black.opacity(washOpacity)`, darkening 0.08
+# (:14); GlassSkeleton `GlassColor.ink(0.08)` (Feedback.swift:93);
+# GlassSpinner's track `GlassColor.ink(0.18)` (Feedback.swift:51).
+WINDOWS_GLASS_INK_OVERLAYS = [
+    ("TcGlassSkeletonBrush", 0.08),
+    ("TcGlassSpinnerTrackBrush", 0.18),
+]
+PRESS_DARKENING = 0.08
+
+# WinUI keys the views bind to, now drawn from the glass palette, so no
+# view needs an edit: (key, palette entry or ("translucent", token)).
+WINDOWS_LEGACY_GLASS_KEYS = [
+    ("TcWindowBackgroundBrush", "pane"),
+    ("TcSidebarBackgroundBrush", "pane"),
+    ("TcChromeBackgroundBrush", "pane"),
+    ("TcSurfaceCardBrush", "card"),
+    ("TcSurfaceInsetBrush", "well"),
+    ("TcHairlineBrush", "rule"),
+    ("TcHairlineDividerBrush", "rule"),
+    ("TcInkPrimaryBrush", "ink"),
+    ("TcInkSecondaryBrush", "inkSecondary"),
+    ("TcInkTertiaryBrush", "textTertiary"),
+    ("TcSurfaceScrimBrush", ("translucent", "rowHover")),
+    ("TcSurfaceSelectedBrush", ("translucent", "tintAccent")),
+]
+WINDOWS_HC = {
+    "ground": "ApplicationPageBackgroundThemeBrush",
+    "ink": "TextFillColorPrimaryBrush",
+    "secondary": "TextFillColorSecondaryBrush",
+    "tertiary": "TextFillColorTertiaryBrush",
+    "rule": "DividerStrokeColorDefaultBrush",
+}
+# High contrast: every key aliases the system colour of its job.
+WINDOWS_HC_GLASS = {
+    "TcGlassSceneBrush": "ground", "TcGlassInkBrush": "ink", "TcGlassInkSecondaryBrush": "secondary",
+    "TcGlassInkTertiaryBrush": "tertiary", "TcGlassSelectedInkBrush": "ground", "TcGlassRuleBrush": "rule",
+    "TcGlassRuleInactiveBrush": "rule", "TcGlassControlHoverBrush": "ground", "TcGlassRowHoverBrush": "ground",
+    "TcGlassTabEmberBrush": "ink", "TcGlassToolbarGlyphBrush": "ink", "TcGlassStatusOnBrush": "ink",
+    "TcGlassStatusAskBrush": "ink", "TcGlassStatusOffBrush": "ink", "TcGlassCtaBrush": "ink",
+    "TcGlassCtaInkBrush": "ground", "TcGlassToggleOnBrush": "ink", "TcGlassToggleOffBrush": "rule",
+    "TcGlassToggleKnobOnBrush": "ground", "TcGlassToggleKnobOffBrush": "ink", "TcGlassCheckboxOnBrush": "ink",
+    "TcGlassStatusOutsideBrush": "ink", "TcGlassModalScrimBrush": "ground", "TcGlassTintAccentBrush": "ground",
+    "TcGlassSkeletonBrush": "rule", "TcGlassSpinnerTrackBrush": "rule", "TcGlassSpinnerArcBrush": "ink",
+    "TcGlassPressWashBrush": "ground", "TcGlassPaneOverMaterialBrush": "ground",
+    "TcGlassPaneOverMaterialInactiveBrush": "ground", "TcWindowBackgroundBrush": "ground",
+    "TcSidebarBackgroundBrush": "ground", "TcChromeBackgroundBrush": "ground", "TcSurfaceCardBrush": "ground",
+    "TcSurfaceInsetBrush": "ground", "TcHairlineBrush": "rule", "TcHairlineDividerBrush": "rule",
+    "TcInkPrimaryBrush": "ink", "TcInkSecondaryBrush": "secondary", "TcInkTertiaryBrush": "tertiary",
+    "TcSurfaceScrimBrush": "ground", "TcSurfaceSelectedBrush": "ground",
+}
+# Legacy type and spacing keys whose value a token now gives: (key, token).
+WINDOWS_LEGACY_TYPE_SIZES = [
+    ("TcTitleScreenFontSize", "title"),
+    ("TcTitleSectionFontSize", "heading"),
+    ("TcTitleCardFontSize", "body"),
+    ("TcBodyFontSize", "body"),
+    ("TcLabelControlFontSize", "label"),
+    ("TcCaptionFontSize", "caption"),
+    ("TcEyebrowFontSize", "eyebrow"),
+    ("TcMonoCodeFontSize", "mono"),
+    ("TcMonoTranscriptFontSize", "mono"),
+]
+WINDOWS_LEGACY_SPACE = [
+    ("TcSpace05", "s1"), ("TcSpace1", "s2"), ("TcSpace15", "s3"), ("TcSpace2", "s4"),
+    ("TcSpace25", "s5"), ("TcSpace3", "s6"), ("TcSpace35", "s7"), ("TcSpace4", "s8"),
+    ("TcSpace5", "s9"), ("TcSpace6", "s10"),
+]
+WINDOWS_LEGACY_RADII = [
+    ("TcControlCornerRadius", "control"),
+    ("TcCardCornerRadius", "card"),
+    ("TcPillCornerRadius", "pill"),
+]
+WINDOWS_FONTS = [
+    ("TcUiFontFamily", "Segoe UI Variable Text, Segoe UI"),
+    ("TcChromeFontFamily", "Segoe UI"),
+    ("TcMonoFontFamily", "Consolas"),
+]
+XAML_WEIGHTS = {"regular": "Normal", "medium": "Medium", "semibold": "SemiBold", "bold": "Bold", "heavy": "ExtraBold"}
+
+
+def argb(entry: dict, where: str) -> str:
+    """A colour entry as XAML's #AARRGGBB."""
+    rgb(entry["hex"], where)
+    a = round(float(entry.get("alpha", 1)) * 255)
+    return f"#{a:02X}{entry['hex'][1:].upper()}"
+
+
+def hex_entry(hex_: str) -> dict:
+    return {"hex": hex_, "alpha": 1}
+
+
+def windows_role_values(tokens: dict) -> dict[str, list[tuple[str, str, str]]]:
+    """{scheme: [(role, token, #RRGGBB)]}: the Windows roles, flat and opaque."""
+    out: dict[str, list[tuple[str, str, str]]] = {}
+    for scheme in SCHEMES:
+        rows = []
+        for role, token in WINDOWS_FLAT_ROLES:
+            entry = flat_fill(tokens, token, scheme) if token in tokens["gradient"] else flat_color(tokens, token, scheme)
+            if float(entry.get("alpha", 1)) != 1:
+                raise TokenError(f"windows role {role}: {token} must be opaque")
+            rows.append((role, token, entry["hex"].upper()))
+        out[scheme] = rows
+        values = {role: hex_ for role, _, hex_ in rows}
+        for fill, label in FILL_LABEL_PAIRS:
+            ratio = contrast(values[label], values[fill])
+            if ratio < 4.5:
+                raise TokenError(f"windows {scheme}: {label} on {fill} is {ratio:.2f}:1, under 4.5:1")
+    return out
+
+
+def windows_glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
+    """{key: #AARRGGBB} for every brush GlassTokens.xaml defines in a scheme.
+    Text roles are checked at 4.5:1 and lines at 3:1 on every ground the
+    Windows shell draws them on, focused and not."""
+    painted = glass_palette(tokens, scheme)
+    ground = painted["pane"]
+    out: dict[str, str] = {}
+    for tier, key in WINDOWS_GLASS_TIER_KEYS:
+        out[key] = argb(hex_entry(painted[tier]), key)
+        out[key[:-5] + "InactiveBrush"] = argb(hex_entry(painted[tier + "Inactive"]), key)
+    for key, entry in WINDOWS_GLASS_INK_KEYS:
+        out[key] = argb(hex_entry(painted[entry]), key)
+    for key, token, kind, opaque in WINDOWS_GLASS_CONTROL_KEYS:
+        entry = flat_fill(tokens, token, scheme) if kind == "fill" else flat_color(tokens, token, scheme)
+        out[key] = argb(hex_entry(opaque_over(entry, ground)) if opaque else entry, key)
+    ink = flat_color(tokens, "ink", scheme)
+    for key, alpha in WINDOWS_GLASS_INK_OVERLAYS:
+        out[key] = argb({"hex": ink["hex"], "alpha": alpha}, key)
+    out["TcGlassSpinnerArcBrush"] = out["TcGlassInkSecondaryBrush"]
+    out["TcGlassPressWashBrush"] = argb({"hex": "#000000", "alpha": PRESS_DARKENING}, "press")
+    blur = glass_blur_palette(tokens, scheme)
+    for key, entry in (("TcGlassPaneOverMaterialBrush", "pane"), ("TcGlassPaneOverMaterialInactiveBrush", "paneInactive")):
+        r, g, b, a = (float(v) for v in re.findall(r"[\d.]+", blur[entry]))
+        out[key] = argb({"hex": "#" + "".join(f"{round(c):02x}" for c in (r, g, b)), "alpha": a}, key)
+    for key, source in WINDOWS_LEGACY_GLASS_KEYS:
+        if isinstance(source, tuple):
+            out[key] = argb(flat_color(tokens, source[1], scheme), key)
+        else:
+            out[key] = argb(hex_entry(painted[source]), key)
+    # The floors, on the grounds text sits on in this shell.
+    roles = {role: hex_ for role, _, hex_ in windows_role_values(tokens)[scheme]}
+    # The tiers that hold text (GLASS_TEXT_TIERS), focused and not. A well
+    # holds a field's own text in ink, checked on its own below.
+    grounds = {name: painted[name] for name in GLASS_TEXT_TIERS}
+    grounds.update({name + "Inactive": painted[name + "Inactive"] for name in GLASS_TEXT_TIERS})
+    texts = {"ink": painted["ink"], "inkSecondary": painted["inkSecondary"], "inkTertiary": painted["textTertiary"],
+             **{r: roles[r] for r in ("accentText", "statusOnText", "statusAskText", "statusOutsideText")}}
+    lines = {r: roles[r] for r in ("accentLine", "statusOn", "statusAsk", "statusOutside")}
+    for floor, inks in ((4.5, texts), (3.0, lines)):
+        for name, colour in inks.items():
+            for surface, fill in grounds.items():
+                ratio = contrast(colour, fill)
+                if ratio < floor:
+                    raise TokenError(f"windows {scheme}: {name} on {surface} is {ratio:.2f}:1, under {floor}:1")
+    for ink in ("ink", "inkSecondary"):
+        for well in ("well", "wellInactive"):
+            ratio = contrast(painted[ink], painted[well])
+            if ratio < 4.5:
+                raise TokenError(f"windows {scheme}: {ink} on {well} is {ratio:.2f}:1, under 4.5:1")
+    for fill, label in (("TcGlassCtaBrush", "TcGlassCtaInkBrush"), ("TcGlassControlSelectedBrush", "TcGlassSelectedInkBrush")):
+        ratio = contrast("#" + out[label][3:], "#" + out[fill][3:])
+        if ratio < 4.5:
+            raise TokenError(f"windows {scheme}: {label} on {fill} is {ratio:.2f}:1, under 4.5:1")
+    # A switch's knob on its track when on: 3:1. Off, the Mac's light knob
+    # is white on a 24% black track (about 2:1 on the light pane); that is
+    # the Mac's own value, kept and reported, not raised here.
+    for track, knob in (("TcGlassToggleOnBrush", "TcGlassToggleKnobOnBrush"),):
+        ratio = contrast("#" + out[knob][3:], "#" + out[track][3:])
+        if ratio < 3.0:
+            raise TokenError(f"windows {scheme}: {knob} on {track} is {ratio:.2f}:1, under 3:1")
+    return out
+
+
+def windows_glass_colours(tokens: dict, scheme: str) -> dict[str, str]:
+    """The Color resources: the ember line and its halo (Navigation.swift
+    emberGlow), and the shadow under a floating surface and a modal."""
+    ember, halo = flat_color(tokens, "tabEmber", scheme), flat_color(tokens, "tabEmberHalo", scheme)
+    # Each with its clear twin, the same colour at alpha 0, so a gradient to
+    # nothing fades the colour out rather than through black.
+    out = {"TcGlassTabEmberColor": argb(ember, "tabEmber"),
+           "TcGlassTabEmberClearColor": argb(dict(ember, alpha=0), "tabEmber"),
+           "TcGlassTabEmberHaloColor": argb(halo, "tabEmberHalo"),
+           "TcGlassTabEmberHaloClearColor": argb(dict(halo, alpha=0), "tabEmberHalo")}
+    for name in ("paneEdge", "modal"):
+        out[f"TcGlassShadow{pascal(name)}Color"] = argb(flat_layers(tokens, name, scheme)[0], name)
+    return out
+
+
+def windows_flat_radius(tokens: dict) -> dict[str, object]:
+    out = {}
+    for name in tokens["radius"]:
+        light, dark = flat_value(tokens, "radius", name, "light"), flat_value(tokens, "radius", name, "dark")
+        if light != dark:
+            raise TokenError(f"radius {name}: the flat theme must give one value in both appearances")
+        out[name] = light
+    return out
+
+
+def xaml_number(value: object, where: str) -> str:
+    number(value, where)
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
+def render_windows_glass(tokens: dict) -> str:
+    out = [
+        '<?xml version="1.0" encoding="utf-8"?>',
+        "<!--",
+        "    GENERATED by scripts/design-tokens/generate.py from",
+        "    design-tokens/glass.tokens.json. Do not edit; edit the JSON and",
+        "    regenerate. The generator's check mode fails in CI if this file and",
+        "    the JSON disagree.",
+        "",
+        "    The Mac's flat look for the WinUI app (spec W5): the tier fills, ink,",
+        "    rules and control colours painted as the Mac draws them under Reduce",
+        "    Transparency; the panes over Mica; radii, spacing, sizes, type and",
+        "    motion. The Tc keys the views already bind to (TcWindowBackgroundBrush,",
+        "    TcInkPrimaryBrush and the rest) carry the glass values, so no view",
+        "    changes to take the look. Every brush has a dark, a light and a high",
+        "    contrast value, and every tier an Inactive twin for an unfocused window.",
+        "-->",
+        "<ResourceDictionary",
+        '    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"',
+        '    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">',
+        "",
+        "    <ResourceDictionary.ThemeDictionaries>",
+    ]
+    keys = None
+    for scheme, dictionary in (("dark", "Default"), ("light", "Light")):
+        palette = windows_glass_palette(tokens, scheme)
+        keys = list(palette)
+        out.append("")
+        out.append(f"        <!-- {'Dark. WinUI names the dark dictionary Default.' if scheme == 'dark' else 'Light.'} -->")
+        out.append(f'        <ResourceDictionary x:Key="{dictionary}">')
+        for key, value in palette.items():
+            out.append(f'            <SolidColorBrush x:Key="{key}" Color="{value}" />')
+        # Colours for code and gradients: the ember's halo and line, and the
+        # floating surfaces' shadow.
+        for key, value in windows_glass_colours(tokens, scheme).items():
+            out.append(f'            <Color x:Key="{key}">{value}</Color>')
+        out.append("        </ResourceDictionary>")
+    out.append("")
+    out.append("        <!-- High contrast: the system's colours, by each key's job. -->")
+    out.append('        <ResourceDictionary x:Key="HighContrast">')
+    for key in keys:
+        job = WINDOWS_HC_GLASS.get(key)
+        if job is None and key.startswith("TcGlass") and key.endswith("InactiveBrush"):
+            job = "ground"
+        if job is None and (key, ) and any(key == k for _, k in WINDOWS_GLASS_TIER_KEYS):
+            job = "ground"
+        if job is None:
+            raise TokenError(f"windows high contrast: no system colour for {key}")
+        out.append(f'            <StaticResource x:Key="{key}" ResourceKey="{WINDOWS_HC[job]}" />')
+    # The ember still marks the tab shown: a solid line in the system's
+    # highlight colour, end to end. The halo, a glow, is off.
+    for key in ("TcGlassTabEmberColor", "TcGlassTabEmberClearColor"):
+        out.append(f'            <StaticResource x:Key="{key}" ResourceKey="SystemColorHighlightColor" />')
+    for key in ("TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
+        out.append(f'            <Color x:Key="{key}">Transparent</Color>')
+    out.append('            <Color x:Key="TcGlassShadowPaneEdgeColor">Transparent</Color>')
+    out.append('            <Color x:Key="TcGlassShadowModalColor">Transparent</Color>')
+    out.append("        </ResourceDictionary>")
+    out.append("    </ResourceDictionary.ThemeDictionaries>")
+    out.append("")
+    out.append("    <!-- Font families: Segoe UI Variable (owner, Windows; falls back to")
+    out.append("         Segoe UI where the variable family is missing). Here so the type")
+    out.append("         styles below resolve them from this dictionary. -->")
+    for key, family in WINDOWS_FONTS:
+        out.append(f'    <FontFamily x:Key="{key}">{family}</FontFamily>')
+    out.append("")
+    out.append("    <!-- Radii (the flat theme's; one value in both appearances). -->")
+    radius = windows_flat_radius(tokens)
+    for name, value in radius.items():
+        out.append(f'    <CornerRadius x:Key="TcGlassRadius{pascal(name)}">{xaml_number(value, name)}</CornerRadius>')
+    for key, name in WINDOWS_LEGACY_RADII:
+        out.append(f'    <CornerRadius x:Key="{key}">{xaml_number(radius[name], name)}</CornerRadius>')
+    inner = radius["card"] - 1
+    out.append("    <!-- A card is drawn as a 1px border, so an element bleeding to its inside")
+    out.append("         edge is one pixel tighter than the card itself. -->")
+    out.append(f'    <CornerRadius x:Key="TcCardInnerBottomCornerRadius">0,0,{xaml_number(inner, "card")},{xaml_number(inner, "card")}</CornerRadius>')
+    out.append("")
+    out.append("    <!-- Spacing, in device-independent pixels (the Mac's points). -->")
+    for name, value in tokens["space"].items():
+        out.append(f'    <x:Double x:Key="TcGlassSpace{pascal(name)}">{xaml_number(value, name)}</x:Double>')
+    for key, name in WINDOWS_LEGACY_SPACE:
+        out.append(f'    <x:Double x:Key="{key}">{xaml_number(tokens["space"][name], name)}</x:Double>')
+    out.append("")
+    out.append("    <!-- Sizes. -->")
+    for name, value in tokens["size"].items():
+        out.append(f'    <x:Double x:Key="TcGlassSize{pascal(name)}">{xaml_number(value, name)}</x:Double>')
+    out.append("")
+    out.append("    <!-- Opacities. -->")
+    for name, value in tokens["opacity"].items():
+        out.append(f'    <x:Double x:Key="TcGlassOpacity{pascal(name)}">{xaml_number(value, name)}</x:Double>')
+    out.append("")
+    out.append("    <!-- Motion: durations in seconds and the one curve's control points.")
+    out.append("         Animations are built from code (GlassMotion), never from WinUI's")
+    out.append("         own timings. -->")
+    for name, value in tokens["motion"].items():
+        out.append(f'    <x:Double x:Key="TcGlassMotion{pascal(name)}">{xaml_number(value, name)}</x:Double>')
+    out.append("")
+    out.append("    <!-- Type: one style per role. Tracking is in the thousandths of an em")
+    out.append("         that CharacterSpacing takes. -->")
+    for role, entry in tokens["type"].items():
+        out.append(f'    <x:Double x:Key="TcGlassType{pascal(role)}FontSize">{xaml_number(entry["size"], role)}</x:Double>')
+        out.append(f'    <x:Double x:Key="TcGlassType{pascal(role)}LineHeight">{xaml_number(entry["lineHeight"], role)}</x:Double>')
+    for key, role in WINDOWS_LEGACY_TYPE_SIZES:
+        out.append(f'    <x:Double x:Key="{key}">{xaml_number(tokens["type"][role]["size"], role)}</x:Double>')
+    for role, entry in tokens["type"].items():
+        family = "TcMonoFontFamily" if entry.get("design") == "monospaced" else "TcUiFontFamily"
+        out.append(f'    <Style x:Key="TcGlassType{pascal(role)}TextStyle" TargetType="TextBlock">')
+        out.append(f'        <Setter Property="FontFamily" Value="{{StaticResource {family}}}" />')
+        out.append(f'        <Setter Property="FontSize" Value="{xaml_number(entry["size"], role)}" />')
+        out.append(f'        <Setter Property="LineHeight" Value="{xaml_number(entry["lineHeight"], role)}" />')
+        out.append('        <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />')
+        out.append(f'        <Setter Property="FontWeight" Value="{XAML_WEIGHTS[entry.get("weight", "regular")]}" />')
+        if entry.get("tracking"):
+            spacing = round(entry["tracking"] / entry["size"] * 1000)
+            out.append(f'        <Setter Property="CharacterSpacing" Value="{spacing}" />')
+        out.append("    </Style>")
+    out.append("</ResourceDictionary>")
+    out.append("")
+    return "\n".join(out)
+
+
+def cs_double(value: object, where: str) -> str:
+    number(value, where)
+    text = repr(float(value))
+    return text
+
+
+def render_windows_glass_cs(tokens: dict) -> str:
+    out = [
+        "// GENERATED by scripts/design-tokens/generate.py from",
+        "// design-tokens/glass.tokens.json. Do not edit; edit the JSON and",
+        "// regenerate. The generator's check mode fails in CI if this file and",
+        "// the JSON disagree.",
+        "",
+        "using System.Collections.Generic;",
+        "",
+        "namespace TraceCommons.Interop.Shell;",
+        "",
+        "/// <summary>",
+        "/// The glass tokens as the Windows shell draws them (spec W5): the flat",
+        "/// theme's motion, sizes, radii, spacing and opacities, and each scheme's",
+        "/// brushes as #AARRGGBB, the same values Themes/GlassTokens.xaml carries.",
+        "/// </summary>",
+        "public static partial class GlassTokens",
+        "{",
+    ]
+    def section(name, values, kind="double"):
+        out.append(f"    public static class {name}")
+        out.append("    {")
+        for key, value in values.items():
+            out.append(f"        public const double {pascal(key)} = {cs_double(value, key)};")
+        out.append("    }")
+        out.append("")
+    section("Motion", tokens["motion"])
+    section("Size", tokens["size"])
+    section("Radius", windows_flat_radius(tokens))
+    section("Space", tokens["space"])
+    section("Opacity", tokens["opacity"])
+    out.append("    /// <summary>A type role: size, line height and weight (400 to 800).</summary>")
+    out.append("    public readonly record struct TypeRole(double Size, double LineHeight, int Weight, double Tracking, bool Monospaced);")
+    out.append("")
+    out.append("    public static class Type")
+    out.append("    {")
+    for role, entry in tokens["type"].items():
+        weight = GLASS_WEIGHTS[entry.get("weight", "regular")]
+        mono = "true" if entry.get("design") == "monospaced" else "false"
+        out.append(f"        public static readonly TypeRole {pascal(role)} = new({cs_double(entry['size'], role)}, "
+                   f"{cs_double(entry['lineHeight'], role)}, {weight}, {cs_double(entry.get('tracking', 0), role)}, {mono});")
+    out.append("    }")
+    out.append("")
+    out.append("    /// <summary>Every brush in a scheme by its XAML key, #AARRGGBB.</summary>")
+    out.append("    public static IReadOnlyDictionary<string, string> Brushes(bool dark) => dark ? DarkBrushes : LightBrushes;")
+    out.append("")
+    for scheme in ("dark", "light"):
+        palette = windows_glass_palette(tokens, scheme)
+        roles = windows_role_values(tokens)[scheme]
+        out.append(f"    private static readonly IReadOnlyDictionary<string, string> {pascal(scheme)}Brushes = new Dictionary<string, string>")
+        out.append("    {")
+        for key, value in palette.items():
+            out.append(f'        ["{key}"] = "{value}",')
+        for role, _, hex_ in roles:
+            out.append(f'        ["Tc{pascal(role)}Brush"] = "#FF{hex_[1:]}",')
+        for key, value in windows_glass_colours(tokens, scheme).items():
+            out.append(f'        ["{key}"] = "{value}",')
+        out.append("    };")
+        out.append("")
+    out[-1:] = ["}", ""]
+    return "\n".join(out)
+
+
+WINDOWS_GLYPHS_CS_OUTPUT = REPO / "windows" / "src" / "TraceCommons.Interop" / "Shell" / "GlassGlyphs.g.cs"
+
+
+def render_windows_glyphs_cs(glyphs: list[dict]) -> str:
+    """The Mac's own glyphs (W5-D2 (a)): Glyphs.swift's path data, viewBox,
+    stroke and drawn size, for the shell to build a XAML or Win2D geometry."""
+    out = [
+        "// GENERATED by scripts/design-tokens/generate.py from",
+        "// macos/Sources/TCDesign/Components/Glyphs.swift. Do not edit; edit the",
+        "// Swift and regenerate. The generator's check mode fails in CI if this",
+        "// file and the Swift disagree.",
+        "",
+        "using System.Collections.Generic;",
+        "",
+        "namespace TraceCommons.Interop.Shell;",
+        "",
+        "/// <summary>One of the Mac's glyphs: SVG path data in its viewBox, its stroke",
+        "/// width in viewBox units (0 for a filled glyph) and the size it is drawn at.</summary>",
+        "public sealed record GlassGlyph(string Name, string Data, double ViewWidth, double ViewHeight, double Stroke, double Width, double Height);",
+        "",
+        "/// <summary>The Mac's GlassGlyph set (Glyphs.swift), by its Swift case name.</summary>",
+        "public static class GlassGlyphs",
+        "{",
+    ]
+    for g in glyphs:
+        stroke = cs_double(g["stroke"] if g["stroke"] is not None else 0, g["name"])
+        out.append(f'    public static readonly GlassGlyph {pascal(g["name"])} = new("{g["name"]}", "{g["data"]}", '
+                   f'{cs_double(g["width"], g["name"])}, {cs_double(g["height"], g["name"])}, {stroke}, '
+                   f'{cs_double(g["size"][0], g["name"])}, {cs_double(g["size"][1], g["name"])});')
+    out.append("")
+    out.append("    public static readonly IReadOnlyList<GlassGlyph> All = new[]")
+    out.append("    {")
+    for g in glyphs:
+        out.append(f"        {pascal(g['name'])},")
+    out.append("    };")
+    out.append("}")
     out.append("")
     return "\n".join(out)
 
@@ -1677,6 +2178,9 @@ def outputs(tokens: dict) -> list[tuple[Path, str]]:
         (OUTPUT, render(tokens)),
         (GTK_OUTPUT, render_gtk(tokens)),
         (WINDOWS_OUTPUT, render_windows(tokens)),
+        (WINDOWS_GLASS_OUTPUT, render_windows_glass(tokens)),
+        (WINDOWS_GLASS_CS_OUTPUT, render_windows_glass_cs(tokens)),
+        (WINDOWS_GLYPHS_CS_OUTPUT, render_windows_glyphs_cs(parse_glyphs(GLYPHS.read_text()))),
         (WINDOWS_FIRST_RUN_OUTPUT, render_windows_first_run(tokens)),
     ]
 

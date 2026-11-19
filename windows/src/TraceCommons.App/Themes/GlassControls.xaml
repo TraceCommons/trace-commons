@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Stock controls re-templated to the Mac's shapes and motion (spec W5-D3 (a)),
+    keeping each control's own automation peer: the switch, the spinner (a
+    ProgressRing), the refresh pill (a Button) and the loading bar.
+
+    Every colour is a generated token (GlassTokens.xaml). The templates
+    carry only their visual states' names: each state's values, each
+    transition's duration and curve, and the switch's size, knob and inset
+    are built into them by GlassTemplate from GlassTemplateMotion (the
+    control's look:GlassTemplate.Kind), whose numbers the Interop tests pin
+    to the Mac's. Never WinUI's own timings. Each template root sets
+    GlassVisualStateManager, which builds them on the first state change and
+    skips the transitions while the system's animations are off or the
+    control cannot be seen, so a control then goes straight to its final
+    state.
+
+    XML comments cannot contain a double hyphen.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:look="using:TraceCommons.App.Look">
+
+    <!--
+        The switch (Controls.swift:1110-1188, GlassToggleStyle, Settings kind):
+        a 40 by 24 capsule, toggleOff or toggleOnSettings, an 18 knob inset 3,
+        textOnAccent when on and toggleKnobOff when off. The knob slides 16 on
+        ease-out over 0.22 s (Controls.swift:1145-1147, :1167), and the track
+        and knob colours change on the same curve. Pressed, the track darkens
+        by a 0.08 black wash over 0.15 s on the token curve (GlassPress.swift).
+        Disabled, 0.45 opacity (Opacity.disabled).
+
+        The parts the stock ToggleSwitch looks for are kept, so a drag still
+        moves the knob: SwitchKnobBounds is the knob's travel (the track less
+        its insets, 34 wide, so 34 less the 18 knob is the 16 the Mac slides),
+        SwitchKnob and KnobTranslateTransform the knob, SwitchThumb the drag.
+    -->
+    <Style x:Key="TcGlassSwitchStyle" TargetType="ToggleSwitch">
+        <Setter Property="Foreground" Value="{ThemeResource TcGlassInkBrush}" />
+        <Setter Property="HorizontalAlignment" Value="Left" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcGlassTypeBodyFontSize}" />
+        <Setter Property="ManipulationMode" Value="System,TranslateX" />
+        <!-- The Mac's switch carries no On or Off word beside it; its state
+             is the knob and the track (and the toggle state for UI Automation). -->
+        <Setter Property="OnContent" Value="" />
+        <Setter Property="OffContent" Value="" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="FocusVisualMargin" Value="-4" />
+        <Setter Property="look:GlassTemplate.Kind" Value="Switch" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleSwitch">
+                    <Grid Background="{TemplateBinding Background}">
+                        <VisualStateManager.CustomVisualStateManager>
+                            <look:GlassVisualStateManager />
+                        </VisualStateManager.CustomVisualStateManager>
+                        <!-- States only: GlassTemplate builds each state's values and
+                             each transition's duration and curve from
+                             GlassTemplateMotion, by the control's
+                             look:GlassTemplate.Kind. -->
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed" />
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="SwitchArea.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
+                                        <Setter Target="LabelArea.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="ToggleStates">
+                                <VisualState x:Name="Dragging" />
+                                <VisualState x:Name="Off" />
+                                <VisualState x:Name="On" />
+                            </VisualStateGroup>
+                            <VisualStateGroup x:Name="ContentStates">
+                                <VisualState x:Name="OffContent">
+                                    <VisualState.Setters>
+                                        <Setter Target="OffContentPresenter.Opacity" Value="1" />
+                                        <Setter Target="OnContentPresenter.Opacity" Value="0" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                                <VisualState x:Name="OnContent">
+                                    <VisualState.Setters>
+                                        <Setter Target="OffContentPresenter.Opacity" Value="0" />
+                                        <Setter Target="OnContentPresenter.Opacity" Value="1" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+
+                        <!-- The label, then the switch, as the Mac's GlassToggleStyle
+                             lays them out (HStack, label first); the first run's
+                             small switch puts the switch first. GlassTemplate sets
+                             the columns and the gap. -->
+                        <Grid HorizontalAlignment="Left" VerticalAlignment="Top">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition x:Name="LabelGap" Width="0" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Grid x:Name="SwitchAreaGrid" Grid.ColumnSpan="3" Background="Transparent" Control.IsTemplateFocusTarget="True" />
+                            <Grid x:Name="LabelArea" Grid.Column="0" VerticalAlignment="Center">
+                                <ContentPresenter x:Name="HeaderContentPresenter"
+                                                  Content="{TemplateBinding Header}"
+                                                  ContentTemplate="{TemplateBinding HeaderTemplate}"
+                                                  Foreground="{ThemeResource TcGlassInkBrush}"
+                                                  IsHitTestVisible="False"
+                                                  TextWrapping="Wrap"
+                                                  VerticalAlignment="Center"
+                                                  Visibility="Collapsed" />
+                                <ContentPresenter x:Name="OffContentPresenter"
+                                                  Opacity="0"
+                                                  VerticalAlignment="Center"
+                                                  IsHitTestVisible="False"
+                                                  Content="{TemplateBinding OffContent}"
+                                                  ContentTemplate="{TemplateBinding OffContentTemplate}"
+                                                  Foreground="{TemplateBinding Foreground}" />
+                                <ContentPresenter x:Name="OnContentPresenter"
+                                                  Opacity="0"
+                                                  VerticalAlignment="Center"
+                                                  IsHitTestVisible="False"
+                                                  Content="{TemplateBinding OnContent}"
+                                                  ContentTemplate="{TemplateBinding OnContentTemplate}"
+                                                  Foreground="{TemplateBinding Foreground}" />
+                            </Grid>
+                            <Grid x:Name="SwitchArea"
+                                  Grid.Column="2"
+                                  VerticalAlignment="Center">
+                                <Border x:Name="OffTrack" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassToggleOffBrush}" />
+                                <Border x:Name="OnTrack" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassToggleOnBrush}" Opacity="0" />
+                                <Border x:Name="PressWash" CornerRadius="{StaticResource TcGlassRadiusPill}" Background="{ThemeResource TcGlassPressWashBrush}" Opacity="0" />
+                                <Border x:Name="SwitchKnobBounds" />
+                                <Grid x:Name="SwitchKnob" HorizontalAlignment="Left" VerticalAlignment="Center">
+                                    <Grid.RenderTransform>
+                                        <TranslateTransform x:Name="KnobTranslateTransform" />
+                                    </Grid.RenderTransform>
+                                    <Ellipse x:Name="KnobOff" Fill="{ThemeResource TcGlassToggleKnobOffBrush}" />
+                                    <Ellipse x:Name="KnobOn" Fill="{ThemeResource TcGlassToggleKnobOnBrush}" Opacity="0" />
+                                </Grid>
+                                <Thumb x:Name="SwitchThumb" AutomationProperties.AccessibilityView="Raw">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Rectangle Fill="Transparent" />
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Grid>
+                        </Grid>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!--
+        A bare ItemsControl or ContentControl is a layout host with no
+        automation peer, yet both are tab stops by default, so Tab landed on
+        them and a screen reader heard a nameless pane (box tab walk,
+        2026-11-19: ten such stops in Settings, more on Private AI, Traces
+        and History). The controls inside them keep their own stops. These
+        apply to the exact types only: a ListView, a Button or any other
+        subclass keeps its own focus behaviour.
+    -->
+    <Style TargetType="ItemsControl">
+        <Setter Property="IsTabStop" Value="False" />
+    </Style>
+    <Style TargetType="ContentControl">
+        <Setter Property="IsTabStop" Value="False" />
+    </Style>
+
+    <!-- Every ToggleSwitch in the app takes the Mac's switch. -->
+    <Style TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}" />
+
+    <!-- The watch switch (GlassToggleStyle .watch): 38 by 22, the knob inset 2,
+         sliding over 0.15 s. -->
+    <Style x:Key="TcGlassWatchSwitchStyle" TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}">
+        <Setter Property="look:GlassTemplate.Kind" Value="WatchSwitch" />
+    </Style>
+
+    <!-- The first run's small switch (FirstRunStage.swift:463-492): 30 by 18,
+         a 14 knob inset 2, 0.2 s on the token curve, the switch before its
+         label, and no press wash. -->
+    <Style x:Key="TcGlassFirstRunSwitchStyle" TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}">
+        <Setter Property="look:GlassTemplate.Kind" Value="FirstRunSwitch" />
+    </Style>
+
+    <!--
+        The spinner (Feedback.swift:15-63): a ring in ink at 0.18 and a quarter
+        arc in the secondary ink, both 1.5 wide; GlassSpinner shapes the arc
+        and turns it.
+    -->
+    <Style x:Key="TcGlassSpinnerStyle" TargetType="look:GlassSpinner">
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="look:GlassSpinner">
+                    <Grid>
+                        <Ellipse Stroke="{ThemeResource TcGlassSpinnerTrackBrush}" StrokeThickness="{StaticResource TcGlassSizeSpinnerStroke}" />
+                        <Path x:Name="Arc"
+                              Stroke="{ThemeResource TcGlassSpinnerArcBrush}"
+                              StrokeThickness="{StaticResource TcGlassSizeSpinnerStroke}"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round">
+                            <Path.RenderTransform>
+                                <RotateTransform />
+                            </Path.RenderTransform>
+                        </Path>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The loading bar (Feedback.swift:97-102): ink at 0.08 in the control radius. -->
+    <Style x:Key="TcGlassSkeletonStyle" TargetType="look:GlassSkeleton">
+        <Setter Property="Height" Value="{StaticResource TcGlassSizeSkeletonHeight}" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="look:GlassSkeleton">
+                    <Border Background="{ThemeResource TcGlassSkeletonBrush}" CornerRadius="{StaticResource TcGlassRadiusControl}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!--
+        The refresh pill (Containers.swift:150-182, GlassRefreshPill): the
+        word in the label type, then the refresh glyph (SymbolGlyphs
+        arrow.clockwise, U+E72C), on the control surface, as tall as the large
+        round button (28) with its height for a radius. Under the pointer the
+        control's hover fill fades in over 0.15 s on the token curve
+        (GlassHover.swift:40); pressed, a 0.08 black wash, the same timing
+        (GlassPress.swift:107-127). Disabled while refreshing, at 0.45.
+    -->
+    <Style x:Key="TcGlassRefreshButtonStyle" TargetType="look:GlassRefreshButton">
+        <Setter Property="Height" Value="{StaticResource TcGlassSizeControlLarge}" />
+        <Setter Property="Foreground" Value="{ThemeResource TcGlassInkBrush}" />
+        <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
+        <Setter Property="FontSize" Value="{StaticResource TcGlassTypeLabelFontSize}" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Padding" Value="10,0,10,0" />
+        <Setter Property="UseSystemFocusVisuals" Value="True" />
+        <Setter Property="look:GlassTemplate.Kind" Value="RefreshPill" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="look:GlassRefreshButton">
+                    <Grid x:Name="Root" CornerRadius="14" Background="{ThemeResource TcGlassControlBrush}">
+                        <VisualStateManager.CustomVisualStateManager>
+                            <look:GlassVisualStateManager />
+                        </VisualStateManager.CustomVisualStateManager>
+                        <VisualStateManager.VisualStateGroups>
+                            <VisualStateGroup x:Name="CommonStates">
+                                <VisualState x:Name="Normal" />
+                                <VisualState x:Name="PointerOver" />
+                                <VisualState x:Name="Pressed" />
+                                <VisualState x:Name="Disabled">
+                                    <VisualState.Setters>
+                                        <Setter Target="Root.Opacity" Value="{StaticResource TcGlassOpacityDisabled}" />
+                                    </VisualState.Setters>
+                                </VisualState>
+                            </VisualStateGroup>
+                        </VisualStateManager.VisualStateGroups>
+                        <Border x:Name="HoverFill" Background="{ThemeResource TcGlassControlHoverBrush}" Opacity="0" />
+                        <Border x:Name="PressWash" Background="{ThemeResource TcGlassPressWashBrush}" Opacity="0" />
+                        <StackPanel Orientation="Horizontal" Spacing="{StaticResource TcGlassSpaceS2}" Padding="{TemplateBinding Padding}" VerticalAlignment="Center">
+                            <ContentPresenter Content="{TemplateBinding Content}" VerticalAlignment="Center" />
+                            <FontIcon x:Name="Glyph"
+                                      Glyph="&#xE72C;"
+                                      FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                      FontSize="12"
+                                      VerticalAlignment="Center"
+                                      RenderTransformOrigin="0.5,0.5"
+                                      AutomationProperties.AccessibilityView="Raw">
+                                <FontIcon.RenderTransform>
+                                    <RotateTransform />
+                                </FontIcon.RenderTransform>
+                            </FontIcon>
+                        </StackPanel>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>

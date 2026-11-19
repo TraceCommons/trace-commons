@@ -310,8 +310,11 @@ public sealed partial class MainWindow
         {
             bool shown = tab == _at.Tab;
             button.IsChecked = shown;
-            rule.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            // The ember (MainWindow.Look.cs) marks the tab shown, and glides.
+            rule.Visibility = Visibility.Collapsed;
         }
+
+        MoveTabEmber();
 
         RenderBreadcrumb();
         RefreshNotices();
@@ -801,7 +804,7 @@ public sealed partial class MainWindow
     private void OnClocksChanged(bool mayTick)
     {
         ViewModel.SetClocksRunning(mayTick);
-        WindowClocks.Set(mayTick);
+        WindowClocks.Set(mayTick, Content?.XamlRoot);
         if (!mayTick)
         {
             _visibilityDebounceTimer.Stop();
@@ -857,10 +860,7 @@ public sealed partial class MainWindow
     /// (WindowRoot's background) and records whether Mica is supported, so
     /// W5 lands the material here without moving anything else.
     /// </summary>
-    private void ApplyWindowMaterial()
-    {
-        Debug.WriteLine($"monitor: mica supported={MicaController.IsSupported()}");
-    }
+    private void ApplyWindowMaterial() => ApplyGlassMaterial();
 
     // ---- Settings window ---------------------------------------------------
 
