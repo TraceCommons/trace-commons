@@ -300,6 +300,8 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleTools" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyTools" Spacing="12">
+                <!-- The CLI options card, first in Tools as on the Mac (ToolsSection.swift:36). -->
+                <ContentControl IsTabStop="False" x:Name="CliOptionsHost" HorizontalContentAlignment="Stretch" />
                 <!--
                     The routing surface.
 

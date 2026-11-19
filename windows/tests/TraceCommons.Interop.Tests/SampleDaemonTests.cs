@@ -140,7 +140,7 @@ public class SampleDaemonTests
         foreach (string method in new[]
         {
             "set_settings", "enroll", "withdraw", "unenroll", "preview", "preview_body",
-            "search_original", "account_devices_list", "",
+            "search_original", "account_devices_list", "managed_cli_options_set", "managed_snapshot", "",
             "../normalDay/status", "..\\normalDay\\status", "status.json", "Status", "status ",
         })
         {

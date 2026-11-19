@@ -113,6 +113,7 @@ public sealed partial class SettingsView
         ReferralsHost.Content = new ReferralsSection(host);
         GeneralHost.Content = new GeneralSection();
         InsightsHost.Content = new InsightsSection(host);
+        CliOptionsHost.Content = new CliOptionsCard(host);
         UpdatesHost.Content = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty));
         var watcher = new WatchingSection(host);
         watcher.PausedChanged += DrawHeaderChip;
