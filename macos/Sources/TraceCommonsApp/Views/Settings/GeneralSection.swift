@@ -18,12 +18,36 @@ struct GeneralSection: View {
     /// Home's promotion card (owner, 2026-10-27): off, it never shows.
     /// Home reads the same key, so it changes at once.
     @AppStorage(HomeClosedCards.promotionsKey) private var promotionsOn = true
+    /// Dock and menu-bar icon animation when credits arrive: on by default;
+    /// off disables both icon animations immediately.
+    @AppStorage(BalanceArrival.IconAnimation.preferenceKey) private var creditIconAnimationOn = true
 
     var body: some View {
         appearanceCard
         edgeRailCard
         mapStyleCard
         promotionsCard
+        creditIconAnimationCard
+    }
+
+    /// Whether the Dock and menu-bar icons animate when credits arrive.
+    @ViewBuilder
+    private var creditIconAnimationCard: some View {
+        if let words = MonitorWords.table?.homeHistory {
+            GlassEyebrowCard(words.creditIconAnimationTitle) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Toggle(words.creditIconAnimationToggle, isOn: $creditIconAnimationOn)
+                        .toggleStyle(GlassToggleStyle(.settings))
+                        .onChange(of: creditIconAnimationOn) { _, on in
+                            if !on { DockCreditAnimator.shared.stop() }
+                        }
+                    Text(words.creditIconAnimationCaption)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 
     /// Whether Home shows promotions, such as a new model on NEAR AI

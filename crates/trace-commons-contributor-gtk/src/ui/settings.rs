@@ -19,7 +19,8 @@
 
 #[path = "settings_navigation.rs"]
 mod navigation;
-use navigation::{Section, Sections};
+pub(crate) use navigation::Section;
+use navigation::Sections;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -127,6 +128,11 @@ pub struct SettingsView {
     pub promotions_switch: gtk::Switch,
     /// The credit-arrival switch (`GeneralSection.creditIconAnimationCard`).
     pub credit_icon_switch: gtk::Switch,
+    /// The edge rail's switch (`ui::edge_surfaces`).
+    pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
+    /// Scrolls Settings to a section, for the edge rail's and the
+    /// popover's buttons.
+    select_section: std::rc::Rc<dyn Fn(Section)>,
     /// The background-app-registration row, filled in once
     /// `portal::spawn_request`'s classification lands -- see
     /// `render_background`. `None` until then, which is why it starts on
@@ -268,6 +274,11 @@ impl Default for SettingsView {
 }
 
 impl SettingsView {
+    /// Shows `section` in the Settings window, scrolled to it.
+    pub(crate) fn show_section(&self, section: Section) {
+        (self.select_section)(section);
+    }
+
     pub fn new() -> Self {
         community_brand::install();
 
@@ -673,6 +684,10 @@ impl SettingsView {
         sections
             .body(Section::Startup)
             .append(&super::appearance::settings_card());
+        // The edge rail's switch, under the same "Desktop" eyebrow the Mac
+        // gives it; shown once the session is known to support a rail.
+        let edge_rail = super::edge_surfaces::rail_switch();
+        sections.body(Section::Startup).append(&edge_rail.card);
 
         // Home's promotion switch, as the Mac's General section has it: the
         // core's card heading, the switch and the line under it.
@@ -723,7 +738,8 @@ impl SettingsView {
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         sections.body(Section::Changes).append(&audit);
 
-        let root = navigation::Navigation::new(sections).root;
+        let navigation = navigation::Navigation::new(sections);
+        let (root, select_section) = (navigation.root, navigation.select);
 
         Self {
             root,
@@ -749,6 +765,8 @@ impl SettingsView {
             map_style_switch,
             promotions_switch,
             credit_icon_switch,
+            edge_rail,
+            select_section,
             background_state: RefCell::new(None),
             background_body,
             public,
@@ -1088,7 +1106,7 @@ fn offer_pause(app: &Rc<App>) {
 /// 9am local time on the next day, expressed as an instant. The daemon
 /// rejects a timestamp already in the past, so this is always at least a
 /// few hours out.
-fn tomorrow_morning() -> chrono::DateTime<chrono::Utc> {
+pub(crate) fn tomorrow_morning() -> chrono::DateTime<chrono::Utc> {
     let local = chrono::Local::now();
     let tomorrow = local.date_naive().succ_opt().unwrap_or(local.date_naive());
     tomorrow

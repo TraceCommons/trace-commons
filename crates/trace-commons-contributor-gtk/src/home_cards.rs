@@ -234,9 +234,7 @@ fn file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return test_file();
     }
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("trace-commons").join("home.json"))
+    crate::shell_state_file("home.json")
 }
 
 #[cfg(test)]

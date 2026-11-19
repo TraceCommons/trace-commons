@@ -67,7 +67,7 @@ impl Uncontributed {
             trace_commons_contributor::preview_copy::monitor_screens_copy()
                 .home_history
                 .uncontributed_size
-                .replace("{size}", &crate::model::human_bytes(self.bytes))
+                .replace("{size}", &crate::model::file_bytes(self.bytes))
         })
     }
 }
@@ -134,7 +134,9 @@ mod tests {
                 words
                     .home_history
                     .uncontributed_size
-                    .replace("{size}", "145 KB")
+                    // 148,480 bytes, as the Mac's `countStyle: .file`
+                    // (decimal) draws it, not 145 binary kilobytes.
+                    .replace("{size}", "148 KB")
                     .as_str()
             )
         );

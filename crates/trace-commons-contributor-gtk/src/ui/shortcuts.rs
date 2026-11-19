@@ -366,6 +366,9 @@ mod tests {
                     // sends a first connect to.
                     assert_eq!(screen, super::super::PRIVATE_INFERENCE_SCREEN);
                 }
+                crate::tray::TrayRequest::Panel(_) => {
+                    panic!("the chord never opens the menu-bar panel")
+                }
             }
         }
     }

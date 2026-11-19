@@ -920,6 +920,26 @@ GLASS_COLOURS = [
 ]
 
 
+GLASS_TRANSLUCENT_COLOURS = [
+    ("edgeRailHandle", "edge_rail_handle"),
+]
+
+# The sizes the GTK shell's edge rail and menu-bar panel draw at, by name:
+# only these, so a size no GTK code reads is not emitted for it.
+GLASS_SIZES = [
+    "edgeRailWidth",
+    "edgeRailTile",
+    "edgeRailRuleWidth",
+    "edgeRailPeekWidth",
+    "edgeRailOpenHeight",
+    "edgeRailZoneWidth",
+    "edgeRailZoneHeight",
+    "edgeRailHandleWidth",
+    "edgeRailHandleHeight",
+    "listRow",
+]
+
+
 def render_glass_css(tokens: dict, scheme: str) -> str:
     palette = glass_palette(tokens, scheme)
     theme = tokens["themes"]["flat" + scheme.title()]
@@ -931,6 +951,10 @@ def render_glass_css(tokens: dict, scheme: str) -> str:
         out.append(f"@define-color tc_glass_{snake(tier)}_inactive {palette[tier + 'Inactive']};")
     for key, name in GLASS_COLOURS:
         out.append(f"@define-color tc_glass_{name} {palette[key]};")
+    # Translucent on purpose: the closed edge rail's handle is drawn straight
+    # on the desktop, with no pane under it to be opaque over.
+    for token, name in GLASS_TRANSLUCENT_COLOURS:
+        out.append(f"@define-color tc_glass_{name} {css_rgba(flat_color(tokens, token, scheme), token)};")
     for tier, css, radius_token, edge, _ in GLASS_TIERS:
         where = f"glass tier {tier}"
         out.append(
@@ -1012,6 +1036,18 @@ def render_glass_rust(tokens: dict) -> list[str]:
             hex_ = flat_color(tokens, token, scheme)["hex"].upper()
             out.append(f"        /// `{token}`, {scheme}.")
             out.append(f'        pub const {name}_{scheme.upper()}: &str = "{hex_}";')
+    out.append("    }")
+    out.append("    pub mod size {")
+    for key in GLASS_SIZES:
+        value = tokens["size"][key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TokenError(f"size.{key}: {value!r} is not a whole number of px")
+        out.append(f"        pub const {snake(key).upper()}: i32 = {value};")
+    out.append("    }")
+    out.append("    pub mod motion {")
+    for key in ("slide",):
+        out.append(f"        /// `motion.{key}`, in milliseconds.")
+        out.append(f"        pub const {snake(key).upper()}_MS: u32 = {round(tokens['motion'][key] * 1000)};")
     out.append("    }")
     out.append("}")
     return out

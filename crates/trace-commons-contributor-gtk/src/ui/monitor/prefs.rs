@@ -161,9 +161,7 @@ fn file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("trace-commons").join("monitor-window.json"))
+    crate::shell_state_file("monitor-window.json")
 }
 
 #[cfg(test)]
