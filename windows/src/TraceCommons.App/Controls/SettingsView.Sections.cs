@@ -38,10 +38,17 @@ public sealed partial class SettingsView
     /// <summary>Updates' Check Now: the window checks through its updater.</summary>
     public event System.EventHandler? CheckForUpdatesRequested;
 
+    /// <summary>
+    /// Redraws Settings > Updates, so its last-check line reads against the
+    /// clock now when the kept window is shown again.
+    /// </summary>
+    public void RefreshUpdates() => _updates?.Draw();
+
     private readonly Dictionary<SettingsSection, TextBlock> _rules = new();
     private readonly Dictionary<SettingsSection, StackPanel> _bodies = new();
     private readonly Dictionary<SettingsSection, ContentControl> _notices = new();
     private PayoutLinkSection? _payouts;
+    private UpdatesSection? _updates;
     private DaemonHost? _sectionsHost;
 
     /// <summary>The window's onboarding gate; awaiting until the status is read.</summary>
@@ -50,7 +57,7 @@ public sealed partial class SettingsView
     /// <summary>The status reads behind <see cref="_gate"/>; the newest read wins.</summary>
     private SettingsGateReader? _gateReader;
 
-    private void BuildSections(DaemonHost host)
+    private void BuildSections(DaemonHost host, UpdateCheckClock updateChecks)
     {
         SettingsCards.Styles = Resources;
         SettingsTitleText.Text = MonitorWords.SettingsTitle;
@@ -114,7 +121,8 @@ public sealed partial class SettingsView
         GeneralHost.Content = new GeneralSection();
         InsightsHost.Content = new InsightsSection(host);
         CliOptionsHost.Content = new CliOptionsCard(host);
-        UpdatesHost.Content = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty));
+        _updates = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty), updateChecks);
+        UpdatesHost.Content = _updates;
         var watcher = new WatchingSection(host);
         watcher.PausedChanged += DrawHeaderChip;
         WatcherHost.Content = watcher;

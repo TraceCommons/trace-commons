@@ -121,6 +121,11 @@ public struct ShellWordsCopy: Decodable, Equatable, Sendable {
         public let copy: String
         public let checksDaily: String
         public let checksAutomatically: String
+        /// Windows only (the Mac draws `checksDaily`); decoded so the
+        /// export and this table keep one field set.
+        public let checksEveryEightHours: String
+        /// Windows only (the Mac draws `checksAutomatically`).
+        public let installsWhenClosed: String
         public let managedByHomebrew: String
         public let homebrewReplaces: String
         public let updatesUnavailable: String

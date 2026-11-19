@@ -94,6 +94,7 @@ public sealed partial class MainWindow
     private readonly List<(MonitorTab Tab, ToggleButton Button, Rectangle Rule)> _tabs = new();
 
     private SettingsWindow? _settingsWindow;
+    private SettingsView? _settingsView;
 
     private readonly UISettings _uiSettings = new();
 
@@ -859,7 +860,7 @@ public sealed partial class MainWindow
     {
         if (_settingsWindow is null)
         {
-            var settings = new SettingsView(_host, ViewModel.LegacyOffer);
+            var settings = new SettingsView(_host, ViewModel.LegacyOffer, ViewModel.UpdateChecks);
             // Settings no longer holds the model-calls switch; it holds a
             // pointer at the destination that does, and this is what turns
             // that pointer into navigation.
@@ -878,10 +879,18 @@ public sealed partial class MainWindow
             // Updates' Check Now asks the deployment service through the
             // window's updater, which raises the update banner here.
             settings.CheckForUpdatesRequested += async (_, _) => await ViewModel.CheckForUpdateAsync();
+            _settingsView = settings;
             _settingsWindow = new SettingsWindow(settings);
-            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+            _settingsWindow.Closed += (_, _) =>
+            {
+                _settingsWindow = null;
+                _settingsView = null;
+            };
         }
 
+        // Updates' last-check line reads against the clock now, not when
+        // the kept window was first built.
+        _settingsView?.RefreshUpdates();
         _settingsWindow.ShowNearOwner(AppWindow);
     }
 

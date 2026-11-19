@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -24,11 +25,12 @@ public sealed partial class SettingsView : UserControl
     private bool _tokenContributionDialogOpen;
     private bool _inferenceEvidenceDialogOpen;
 
-    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer)
+    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer, UpdateCheckClock updateChecks)
     {
         LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
+        ArgumentNullException.ThrowIfNull(updateChecks);
         InitializeComponent();
-        BuildSections(host);
+        BuildSections(host, updateChecks);
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
 
@@ -376,23 +378,6 @@ public sealed partial class SettingsView : UserControl
     private async void OnWitnessClear(object sender, RoutedEventArgs e)
     {
         await Settings.ClearWitnessAsync();
-    }
-
-    private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-    {
-        if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))
-        {
-            return;
-        }
-
-        BehaviorSetting setting = sender.Name switch
-        {
-            "QuiescenceMinutes" => BehaviorSetting.QuiescenceMinutes,
-            "ApprovalHoldSeconds" => BehaviorSetting.ApprovalHoldSeconds,
-            "DigestHours" => BehaviorSetting.DigestHours,
-            _ => throw new InvalidOperationException("unknown behavior setting"),
-        };
-        await Settings.SaveBehaviorAsync(setting, args.NewValue);
     }
 
     /// <summary>
