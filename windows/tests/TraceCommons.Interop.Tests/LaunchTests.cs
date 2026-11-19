@@ -260,6 +260,16 @@ public sealed class LaunchTests
     }
 
     [Fact]
+    public void ASettingChangeThatTurnsAnimationsOffRestsTheArt()
+    {
+        // Box, 2026-11-19: turning animations off mid-move raised no
+        // UISettings.AnimationsEnabledChanged while the window kept the
+        // foreground, and the folder slid on; WM_SETTINGCHANGE does arrive.
+        Assert.True(LaunchHandoff.RestsOnSettingChange(animationsEnabled: false));
+        Assert.False(LaunchHandoff.RestsOnSettingChange(animationsEnabled: true));
+    }
+
+    [Fact]
     public void WithAnimationsOffTheArtIsItsRestFrameFromTheStart()
     {
         // ManagedFolderExplainer.swift:187, :218-219: Reduce Motion draws the rest frame.

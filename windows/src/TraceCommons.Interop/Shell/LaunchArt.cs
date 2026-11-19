@@ -162,6 +162,14 @@ public static class LaunchHandoff
     /// </summary>
     public static bool RestsOnUnloaded(bool stillLoaded) => !stillLoaded;
 
+    /// <summary>
+    /// Whether a system setting change (WM_SETTINGCHANGE, read again from
+    /// <c>UISettings.AnimationsEnabled</c>) puts a moving art at rest. On the
+    /// box (Windows Server 2025, 2026-11-19) turning animations off raised no
+    /// <c>AnimationsEnabledChanged</c> while the window kept the foreground.
+    /// </summary>
+    public static bool RestsOnSettingChange(bool animationsEnabled) => !animationsEnabled;
+
     /// <summary>The folder at <paramref name="elapsed"/> seconds from the art appearing.</summary>
     public static (double X, double Y, double Scale) Folder(double elapsed, bool animationsEnabled)
     {
