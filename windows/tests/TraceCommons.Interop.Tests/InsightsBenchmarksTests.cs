@@ -170,6 +170,13 @@ public sealed class InsightsBenchmarksTests
     [InlineData(10_000L, "$0.01")]
     [InlineData(4_120L, "$0.0041")]
     [InlineData(37L, "$0.00004")]
+    // One significant digit, rounded first: a carry drops a decimal, as the
+    // Mac's .significantDigits(1) does (review round 2, low 3).
+    [InlineData(94L, "$0.00009")]
+    [InlineData(95L, "$0.0001")]
+    [InlineData(99L, "$0.0001")]
+    [InlineData(9L, "$0.000009")]
+    [InlineData(1L, "$0.000001")]
     public void DollarsAreTheMacs(long micros, string expected) =>
         Assert.Equal(expected, InsightsBenchmarkWords.Dollars(micros));
 
@@ -247,5 +254,56 @@ public sealed class InsightsBenchmarksTests
         credential.Busy = true;
         credential.Busy = false;
         Assert.Equal(new[] { true, false }, seen);
+    }
+
+    // ---- Review round 2, low 4: the three surviving mutants ----
+
+    // The pickers' rows are indexes; the model maps them to the Mac's 4 and
+    // 13 weeks (InsightsBenchmarksTab.swift:294, `[4, 13]`) and its
+    // populations, so the request the period picker sends is pinned here.
+    [Fact]
+    public async Task ThePickersRowsAskForTheMacsPeriodsAndPopulations()
+    {
+        var asked = new List<string>();
+        var model = new InsightsBenchmarksModel((method, parameters) =>
+        {
+            asked.Add(parameters);
+            return Task.FromResult(DaemonResponse.Parse("{\"id\":1,\"result\":{\"enabled\":true,\"categories\":[]}}"));
+        }, W);
+        Assert.Equal(new[] { 4, 13 }, model.PeriodChoices.Select(c => c.Weeks));
+        await model.ChooseAsync(periodIndex: 1, populationIndex: 0);
+        await model.ChooseAsync(periodIndex: 0, populationIndex: 1);
+        await model.ChooseAsync(periodIndex: -1, populationIndex: 0);
+        await model.ChooseAsync(periodIndex: 2, populationIndex: 0);
+        Assert.Equal(new[] { "{\"weeks\":13}", "{\"weeks\":4,\"population\":\"spawned\"}" }, asked);
+        Assert.Equal(0, model.PeriodIndex);
+        Assert.Equal(1, model.PopulationIndex);
+    }
+
+    // Yours: most traces first, then by name (InsightsBenchmarksTab.swift rows).
+    [Fact]
+    public void YoursListsMostTracesFirstThenByName()
+    {
+        var category = new BenchmarkCategory("feature", 12, new[]
+        {
+            new BenchmarkModel("b-model", "codex", 2, null, null, null),
+            new BenchmarkModel("c-model", "claude_code", 7, null, null, null),
+            new BenchmarkModel("a-model", "claude_code", 2, null, null, null),
+        }, null, null, null, null);
+        Assert.Equal(new[] { "c-model", "a-model", "b-model" }, InsightsBenchmarkWords.Rows(category, W).Select(r => r.Model));
+    }
+
+    // A reply without min_sessions waits for the daemon's own default, five
+    // (InsightsBenchmarksTab.swift `answer.minSessions ?? 5`).
+    [Fact]
+    public void ACardWithNoPickWaitsForFiveTracesWhenTheReplyDoesNotSay()
+    {
+        var answer = new InsightsBenchmarks(true, true, 4, null, 2, null, new[]
+        {
+            new BenchmarkCategory("docs", 2, new[] { new BenchmarkModel("m", "codex", 2, null, null, null) }, null, null, null, null),
+        });
+        BenchmarkCard card = Assert.Single(InsightsBenchmarkWords.Cards(answer, W));
+        Assert.Empty(card.Picks);
+        Assert.Equal(InsightsBenchmarkWords.Fill(W("analytics_bench_compare_later"), new Dictionary<string, string> { ["n"] = "5" }), card.CompareLater);
     }
 }

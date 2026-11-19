@@ -217,9 +217,13 @@ public static class InsightsBenchmarkWords
         long m = Math.Max(0, micros);
         if (m > 0 && m < 100)
         {
+            // One significant digit (.significantDigits(1)): rounded first,
+            // then the decimals counted from the rounded figure, so 95-99
+            // micros carry to "$0.0001", not "$0.00010".
             decimal value = m / 1_000_000m;
-            int digits = -(int)Math.Floor(Math.Log10((double)value));
-            return Math.Round(value, digits, MidpointRounding.ToEven).ToString("$0." + new string('0', digits), Us);
+            decimal rounded = Math.Round(value, -(int)Math.Floor(Math.Log10((double)value)), MidpointRounding.ToEven);
+            int digits = -(int)Math.Floor(Math.Log10((double)rounded));
+            return rounded.ToString("$0." + new string('0', digits), Us);
         }
 
         return InferenceLedger.Money(m);
@@ -447,6 +451,22 @@ public sealed class InsightsBenchmarksModel : INotifyPropertyChanged
         population == "own"
             ? "{\"weeks\":" + weeks.ToString(CultureInfo.InvariantCulture) + "}"
             : "{\"weeks\":" + weeks.ToString(CultureInfo.InvariantCulture) + ",\"population\":" + JsonSerializer.Serialize(population) + "}";
+
+    /// <summary>
+    /// The pickers' rows: the period and population at those indexes, as the
+    /// Mac's pickers bind <c>weeks</c> and <c>population</c>. A row that is
+    /// not there asks nothing.
+    /// </summary>
+    public Task ChooseAsync(int periodIndex, int populationIndex)
+    {
+        if (periodIndex < 0 || periodIndex >= InsightsBenchmarkWords.PeriodWeeks.Count
+            || populationIndex < 0 || populationIndex >= InsightsBenchmarkWords.Populations.Count)
+        {
+            return Task.CompletedTask;
+        }
+
+        return SelectAsync(InsightsBenchmarkWords.PeriodWeeks[periodIndex], InsightsBenchmarkWords.Populations[populationIndex]);
+    }
 
     public Task SelectAsync(int weeks, string population)
     {

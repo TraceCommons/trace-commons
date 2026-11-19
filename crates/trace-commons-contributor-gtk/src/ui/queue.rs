@@ -107,6 +107,8 @@ pub struct QueueView {
     /// Exposed so `App` can debounce a scroll settle against this same
     /// viewport -- see `App::schedule_visible_preview_update`.
     pub scroller: gtk::ScrolledWindow,
+    /// Brings the selected row into view as the selection moves.
+    scroll_driver: Rc<super::glass_motion::Driver>,
 }
 
 impl Default for QueueView {
@@ -310,6 +312,7 @@ impl QueueView {
             .margin_end(space::XL)
             .margin_top(space::M)
             .build();
+        super::glass_motion::expander(&first_contribution);
         let steps = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         for text in [
             guide.start,
@@ -355,6 +358,7 @@ impl QueueView {
             disclosure,
             empty,
             scroller,
+            scroll_driver: Rc::default(),
         }
     }
 }
@@ -603,6 +607,7 @@ pub fn render(app: &Rc<App>) {
         let expander = gtk::Expander::builder()
             .label(copy::no_longer_waiting(total))
             .build();
+        super::glass_motion::expander(&expander);
         let inner = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         inner.set_margin_top(space::S);
         for (label, count) in counts.iter() {
@@ -650,6 +655,10 @@ pub(crate) fn render_list(app: &Rc<App>) {
     // The selection, revealed once when it moves (`reveal`): a trace
     // selected from elsewhere opens its folder.
     let selection = app.shell.inspector.selection();
+    // A moved selection is kept on screen (`TracesTreeView`'s
+    // `scroll(to:)`), once its rebuilt row is laid out.
+    let moved = *view.revealed.borrow() != selection;
+    let mut selected_row: Option<gtk::Widget> = None;
     if *view.revealed.borrow() != selection {
         let open = traces_list::revealing(&selection, &tree, &view.expanded.borrow());
         *view.expanded.borrow_mut() = open;
@@ -658,23 +667,22 @@ pub(crate) fn render_list(app: &Rc<App>) {
     let expanded = view.expanded.borrow().clone();
     for folder in &tree.folders {
         let open = expanded.contains(&folder.id);
-        view.list.append(&traces_list::folder_row(
-            app,
-            folder,
-            open,
-            selection == inspector::Selection::Folder(folder.id.clone()),
-        ));
+        let chosen = selection == inspector::Selection::Folder(folder.id.clone());
+        let row = traces_list::folder_row(app, folder, open, chosen);
+        if chosen {
+            selected_row = Some(row.clone());
+        }
+        view.list.append(&row);
         if !open {
             continue;
         }
         let off = folder.mode == Some(ProjectMode::Ignore);
         for entry in &folder.sessions {
-            let widget = traces_list::session_row(
-                app,
-                entry,
-                off,
-                selection == inspector::Selection::Session(entry.entry_id.clone()),
-            );
+            let chosen = selection == inspector::Selection::Session(entry.entry_id.clone());
+            let widget = traces_list::session_row(app, entry, off, chosen);
+            if chosen {
+                selected_row = Some(widget.clone());
+            }
             // Kept so a scroll settle can ask each row its own bounds
             // against the scroller -- see
             // `App::schedule_visible_preview_update`.
@@ -683,6 +691,9 @@ pub(crate) fn render_list(app: &Rc<App>) {
                 .insert(entry.entry_id.clone(), widget.clone());
             view.list.append(&widget);
         }
+    }
+    if moved && let Some(row) = selected_row {
+        traces_list::scroll_into_view(&view.scroller, &row, &view.scroll_driver);
     }
 
     // The set of rows just changed, so re-derive what is on screen once

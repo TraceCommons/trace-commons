@@ -317,6 +317,30 @@ impl ToolStack {
         )
     }
 
+    /// The card's height `tall` of the way from closed to open (past
+    /// either as its spring overshoots).
+    pub fn height_at(&self, tall: f64) -> f64 {
+        let (closed, open) = (self.height(false), self.height(true));
+        closed + (open - closed) * tall
+    }
+
+    /// Where the coin at `index` (fractional while it moves) sits, its
+    /// pile `lay` of the way from closed to open.
+    pub fn coin_center_at(&self, index: f64, lay: f64) -> Point {
+        let step = Self::STEP + (Self::OPEN_STEP - Self::STEP) * lay;
+        let middle = (self.tools.len() as f64 - 1.0) / 2.0;
+        Point::new(self.center.x, self.center.y + (index - middle) * step)
+    }
+
+    /// The card's rectangle `tall` and `wide` of the way open.
+    pub fn card_at(&self, fit: &MapGeometry, tall: f64, wide: f64) -> (f64, f64, f64, f64) {
+        let s = fit.scale;
+        let height = self.height_at(tall) * s;
+        let width = (Self::WIDTH + (Self::OPEN_WIDTH - Self::WIDTH) * wide) * s;
+        let left = fit.point(self.port_left());
+        (left.x, left.y - height / 2.0, width, height)
+    }
+
     /// The card's rectangle in the field, `(x, y, width, height)`: the
     /// pile opens only while the pointer is over this.
     pub fn card(&self, fit: &MapGeometry, open: bool, wide: bool) -> (f64, f64, f64, f64) {

@@ -876,6 +876,7 @@ public sealed partial class MainWindow
                 await ViewModel.RefreshAsync();
             };
             settings.AboutRequested += (_, _) => ShowAboutWindow();
+            AttachSpendOrganizations(settings);
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }

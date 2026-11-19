@@ -107,10 +107,8 @@ public sealed partial class InsightsView : UserControl, IDisposable
     }
     private async void OnBenchmarksChoice(object sender, SelectionChangedEventArgs args)
     {
-        int population = BenchPopulation.SelectedIndex, period = BenchPeriod.SelectedIndex;
-        if (_closed || population < 0 || period < 0) return;
-        await ViewModel.Benchmarks.SelectAsync(
-            InsightsBenchmarkWords.PeriodWeeks[period], InsightsBenchmarkWords.Populations[population]);
+        if (_closed) return;
+        await ViewModel.Benchmarks.ChooseAsync(BenchPeriod.SelectedIndex, BenchPopulation.SelectedIndex);
     }
 
     /// <summary>A share row read as one element, as <c>.accessibilityElement(children: .combine)</c> does.</summary>
@@ -133,10 +131,22 @@ public sealed partial class InsightsView : UserControl, IDisposable
     private static void OnFractionChanged(DependencyObject element, DependencyPropertyChangedEventArgs args)
     {
         if (element is not FrameworkElement bar || VisualTreeHelperParent(bar) is not FrameworkElement track) return;
-        void Size() => bar.Width = Math.Max(4, track.ActualWidth * GetFraction(bar));
-        track.SizeChanged += (_, _) => Size();
-        Size();
+        // One SizeChanged handler per track, however often the fraction
+        // changes; it reads the fraction current when the track resizes.
+        if (!Tracked.TryGetValue(track, out _))
+        {
+            Tracked.Add(track, bar);
+            track.SizeChanged += (_, _) => SizeBar(bar, track);
+        }
+
+        SizeBar(bar, track);
     }
+
+    /// <summary>The tracks whose bar already follows their width.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<FrameworkElement, FrameworkElement> Tracked = new();
+
+    private static void SizeBar(FrameworkElement bar, FrameworkElement track) =>
+        bar.Width = Math.Max(4, track.ActualWidth * GetFraction(bar));
 
     private static DependencyObject? VisualTreeHelperParent(FrameworkElement element) => element.Parent;
 

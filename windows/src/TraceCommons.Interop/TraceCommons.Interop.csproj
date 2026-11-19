@@ -53,6 +53,11 @@
     <None Include="$(MSBuildThisFileDirectory)../../../macos/Sources/TCShellCore/DataContract/RecordedSamples/**/*.json"
           Link="RecordedSamples/%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
+    <!--
+      The Windows-only extras (SampleDaemon.ExtraVariable), off unless named.
+      Already None items by default, so updated, not included again.
+    -->
+    <None Update="SampleExtras/**/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

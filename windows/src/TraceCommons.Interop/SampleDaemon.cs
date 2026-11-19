@@ -79,12 +79,35 @@ public sealed class SampleDaemon
         "armedFolder",
     };
 
-    private readonly string _root;
+    /// <summary>
+    /// The variable naming a Windows-only extra beside the set. Only
+    /// <see cref="SpendOrganizationsExtra"/> exists; it is never on by default,
+    /// so the standard sets still draw what the Mac's draw.
+    /// </summary>
+    public const string ExtraVariable = "TRACE_COMMONS_SAMPLE_EXTRA";
 
-    public SampleDaemon(string set, string root)
+    /// <summary>
+    /// Two throwaway spending organizations and no choice made, so the Private
+    /// AI prompt and the Settings picker draw (W19-D2). The Mac records no
+    /// listing, because the recorder has no NEAR AI sign-in; this one is pinned
+    /// to the daemon's own answer by
+    /// <c>the_windows_spend_organization_sample_is_this_listing</c>
+    /// (spend_org_tests.rs). There is no recorded switch: a pick is refused
+    /// as unrecorded and the listing stays as it was.
+    /// </summary>
+    public const string SpendOrganizationsExtra = "spendOrganizations";
+
+    /// <summary>The directory beside the assembly that holds the extras.</summary>
+    public const string ExtrasDir = "SampleExtras";
+
+    private readonly string _root;
+    private readonly string? _extra;
+
+    public SampleDaemon(string set, string root, string? extra = null)
     {
         Set = set ?? throw new ArgumentNullException(nameof(set));
         _root = root ?? throw new ArgumentNullException(nameof(root));
+        _extra = extra;
     }
 
     /// <summary>The set this client answers from.</summary>
@@ -119,7 +142,7 @@ public sealed class SampleDaemon
     /// unrecognised name is logged once, as a fixed label and the set used,
     /// never the value itself.
     /// </summary>
-    public static SampleDaemon? FromValue(string? value, string root, Action<string> log)
+    public static SampleDaemon? FromValue(string? value, string root, Action<string> log, string? extra = null)
     {
         ArgumentNullException.ThrowIfNull(log);
         SampleChoice? choice = Choose(value);
@@ -133,8 +156,17 @@ public sealed class SampleDaemon
             log($"tracecommons-sample:{EnvironmentVariable}-unrecognised,fallback={chosen.Set}");
         }
 
-        return new SampleDaemon(chosen.Set, root);
+        return new SampleDaemon(chosen.Set, root, Extra(extra, root));
     }
+
+    /// <summary>
+    /// The extras directory <paramref name="value"/> names, matched exactly;
+    /// null for unset or anything else.
+    /// </summary>
+    public static string? Extra(string? value, string root) =>
+        string.Equals(value, SpendOrganizationsExtra, StringComparison.Ordinal)
+            ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, SpendOrganizationsExtra)
+            : null;
 
     /// <summary>
     /// Whether this launch reads recorded samples: <c>TRACE_COMMONS_SAMPLE</c>
@@ -151,7 +183,8 @@ public sealed class SampleDaemon
     public static SampleDaemon? FromEnvironment() => FromValue(
         Environment.GetEnvironmentVariable(EnvironmentVariable),
         DefaultRoot(),
-        line => System.Diagnostics.Debug.WriteLine(line));
+        line => System.Diagnostics.Debug.WriteLine(line),
+        Environment.GetEnvironmentVariable(ExtraVariable));
 
     /// <summary>
     /// The state directory the host reports in sample mode, for the reads
@@ -184,7 +217,9 @@ public sealed class SampleDaemon
         }
 
         string file = method + ".json";
-        foreach (string path in new[] { Path.Combine(_root, Set, file), Path.Combine(_root, SharedDir, file) })
+        var paths = new List<string> { Path.Combine(_root, Set, file), Path.Combine(_root, SharedDir, file) };
+        if (_extra is not null) paths.Add(Path.Combine(_extra, file));
+        foreach (string path in paths)
         {
             string text;
             try

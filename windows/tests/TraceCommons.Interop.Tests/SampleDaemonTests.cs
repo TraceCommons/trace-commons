@@ -508,4 +508,43 @@ public class SampleDaemonTests
 
     private static string ShellSource(string relativePath) =>
         File.ReadAllText(Path.Combine(ShellSourceRoot, relativePath + ".txt"));
+
+    // ---- The spending-organization extra (W19-D2) ----
+
+    private static SampleDaemon WithExtra(string set, string? extra) =>
+        SampleDaemon.FromValue(set, Root, _ => { }, extra)!;
+
+    // Off unless named exactly, so the standard sets draw what the Mac's do.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("SpendOrganizations")]
+    [InlineData("spendOrganizations ")]
+    [InlineData("../RecordedSamples/normalDay")]
+    public void TheSpendingListingIsUnrecordedUnlessTheExtraIsNamed(string? extra)
+    {
+        DaemonResponse response = Answer(WithExtra("normalDay", extra), SpendOrganizationModel.ListMethod);
+        Assert.True(response.IsError);
+        Assert.Equal(SampleDaemon.UnrecordedLabel, response.Error!.Message);
+    }
+
+    // Named, the listing draws the prompt and the picker; a pick is still
+    // unrecorded, so nothing pretends to switch; and coreDown still fails.
+    [Fact]
+    public void TheSpendingExtraListsTwoOrganizationsAndRecordsNoSwitch()
+    {
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SpendOrganizationsExtra);
+        DaemonResponse listing = Answer(sample, SpendOrganizationModel.ListMethod);
+        Assert.False(listing.IsError);
+        SpendOrganizations status = SpendOrganizations.Parse(listing.Result!.Value);
+        Assert.True(status.ShowsPicker);
+        Assert.True(status.ShowsPrompt);
+        Assert.Equal(2, status.Organizations.Count);
+
+        DaemonResponse select = Answer(sample, SpendOrganizationModel.SelectMethod);
+        Assert.Equal(SampleDaemon.UnrecordedLabel, select.Error!.Message);
+
+        DaemonResponse down = Answer(WithExtra(SampleDaemon.CoreDown, SampleDaemon.SpendOrganizationsExtra), SpendOrganizationModel.ListMethod);
+        Assert.Equal(SampleDaemon.NotRunningLabel, down.Error!.Message);
+    }
 }

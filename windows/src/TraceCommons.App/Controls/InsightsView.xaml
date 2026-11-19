@@ -12,6 +12,16 @@
         be used is hidden, not drawn disabled.
     -->
     <Pivot x:Name="Tabs" SelectionChanged="OnTabChanged">
+        <!--
+            The Mac's tab bar labels (GlassSegmentedTabs, Navigation.swift:
+            TypeScale.label, 12, and 8 either side), so all five headers fit
+            the 440 pane rather than scrolling Overview off to the left
+            (review round 2, low 6). The keys are the Pivot template's own.
+        -->
+        <Pivot.Resources>
+            <x:Double x:Key="PivotHeaderItemFontSize">12</x:Double>
+            <Thickness x:Key="PivotHeaderItemMargin">8,0,8,0</Thickness>
+        </Pivot.Resources>
         <PivotItem Header="{Binding [analytics_tab_overview]}">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">

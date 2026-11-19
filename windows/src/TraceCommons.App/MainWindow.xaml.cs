@@ -1229,9 +1229,11 @@ public sealed partial class MainWindow : Window
     {
         if (PrivateInferencePane.Content is null)
         {
-            var page = new PrivateInferenceView(_host);
-            // The spending-organization prompt's action opens Settings (W19-D2).
+            var page = new PrivateInferenceView(_host, SpendOrganizations);
+            // The Private AI Settings card opens Settings; the spending
+            // prompt's action opens it at the organization picker (W19-D2).
             page.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
+            page.ChooseSpendOrganizationRequested += (_, _) => ShowSpendOrganizationSettings();
             PrivateInferencePane.Content = page;
         }
 

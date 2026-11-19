@@ -707,9 +707,7 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
     // The Automatic switch, or its empty column so every Submit lines up.
     match automatic_switch(folder) {
         Some(on) => {
-            let switch = gtk::Switch::new();
-            switch.set_active(on);
-            switch.add_css_class("tc-tree-switch");
+            let switch = super::super::glass_switch::GlassSwitch::watch(on);
             switch.set_valign(gtk::Align::Center);
             let name = words
                 .tree
@@ -903,6 +901,98 @@ pub fn session_row(app: &Rc<App>, entry: &QueueEntry, off: bool, selected: bool)
         .append(&kebab(words.tree.dismiss_session, &popover));
     select_on_click(&frame.root, app, Selection::Session(entry.entry_id.clone()));
     frame.root.upcast()
+}
+
+/// `GlassMotion.fast`: how long the list takes to bring a row into view
+/// (`TracesTreeView.scroll(to:)`, `withAnimation(GlassMotion.fast)`).
+pub const SCROLL_SECONDS: f64 = 0.15;
+
+/// Where the list scrolls to show a row from `top` to `bottom` (in the
+/// list's own coordinates) in a view `page` tall now at `value`, of
+/// `upper` in all: SwiftUI's `scrollTo(_:)` with no anchor, the least
+/// movement that shows the whole row, its top when it is taller than the
+/// view. `None` when it is already shown.
+pub fn scroll_target(value: f64, page: f64, upper: f64, top: f64, bottom: f64) -> Option<f64> {
+    let wanted = if top < value || bottom - top > page {
+        top
+    } else if bottom > value + page {
+        bottom - page
+    } else {
+        return None;
+    };
+    let wanted = wanted.clamp(0.0, (upper - page).max(0.0));
+    ((wanted - value).abs() > 0.5).then_some(wanted)
+}
+
+/// The list's scroll `t` seconds into a move from `from` to `to`, on the
+/// token curve over [`SCROLL_SECONDS`].
+pub fn scrolled(from: f64, to: f64, t: f64) -> f64 {
+    from + (to - from) * crate::ui::glass_motion::curve(t / SCROLL_SECONDS)
+}
+
+/// Brings `row` into `scroller`'s view once it is laid out, moving on the
+/// token curve at display rate, or at once under reduced motion.
+pub fn scroll_into_view(
+    scroller: &gtk::ScrolledWindow,
+    row: &gtk::Widget,
+    driver: &Rc<crate::ui::glass_motion::Driver>,
+) {
+    let row = row.downgrade();
+    let driver = Rc::clone(driver);
+    let frames = std::cell::Cell::new(0u32);
+    scroller.add_tick_callback(move |scroller, _| {
+        // The first tick runs before the rebuilt rows' layout.
+        frames.set(frames.get() + 1);
+        if frames.get() < 2 {
+            return glib::ControlFlow::Continue;
+        }
+        let Some(row) = row.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        // The content's own coordinates: a viewport GTK added around it
+        // scrolls with the view, so its child is what holds the rows.
+        let Some(content) =
+            scroller
+                .child()
+                .and_then(|child| match child.downcast_ref::<gtk::Viewport>() {
+                    Some(viewport) => viewport.child(),
+                    None => Some(child),
+                })
+        else {
+            return glib::ControlFlow::Break;
+        };
+        let Some(bounds) = row.compute_bounds(&content) else {
+            return glib::ControlFlow::Break;
+        };
+        let adjustment = scroller.vadjustment();
+        let from = adjustment.value();
+        let top = f64::from(bounds.y());
+        let Some(to) = scroll_target(
+            from,
+            adjustment.page_size(),
+            adjustment.upper(),
+            top,
+            top + f64::from(bounds.height()),
+        ) else {
+            return glib::ControlFlow::Break;
+        };
+        let moving = adjustment.clone();
+        driver.start(
+            scroller,
+            SCROLL_SECONDS,
+            0.0,
+            move |t| {
+                let now = if crate::ui::glass_motion::animations_enabled() {
+                    scrolled(from, to, t)
+                } else {
+                    to
+                };
+                moving.set_value(now);
+            },
+            || {},
+        );
+        glib::ControlFlow::Break
+    });
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -1384,5 +1474,44 @@ mod tests {
         assert!(!row_offers_send(&held, false));
         assert_eq!(held_word(&entry("a", "p")), None);
         assert!(row_offers_send(&entry("a", "p"), false));
+    }
+
+    /// `TracesTreeView.scroll(to:)`: `GlassMotion.fast`, 0.15 s on the
+    /// token curve, read from the Swift and the generated tokens.
+    #[test]
+    fn the_list_scrolls_a_row_into_view_as_the_macs_does() {
+        let read = |path: &str| {
+            std::fs::read_to_string(format!(
+                "{}/../../macos/Sources/{path}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap()
+        };
+        assert!(read("TraceCommonsApp/Views/Monitor/TracesViews.swift").contains(
+            "withAnimation(scrollAnimates ? GlassMotion.fast(GlassMotion.systemReducesMotion) : nil) {\n            proxy.scrollTo(id)"
+        ));
+        assert!(
+            read("TCDesign/Generated/GlassTokens.swift")
+                .contains("public static let fast: Double = 0.15")
+        );
+        assert_eq!(SCROLL_SECONDS, 0.15);
+        // Shown already: no movement.
+        assert_eq!(scroll_target(100.0, 300.0, 1000.0, 150.0, 190.0), None);
+        // Below the view: the least movement, the row's foot at the view's.
+        assert_eq!(
+            scroll_target(100.0, 300.0, 1000.0, 420.0, 460.0),
+            Some(160.0)
+        );
+        // Above: its top at the view's top.
+        assert_eq!(scroll_target(100.0, 300.0, 1000.0, 40.0, 80.0), Some(40.0));
+        // Taller than the view: its top.
+        assert_eq!(scroll_target(0.0, 100.0, 1000.0, 300.0, 520.0), Some(300.0));
+        // Never past the end.
+        assert_eq!(scroll_target(0.0, 300.0, 400.0, 380.0, 420.0), Some(100.0));
+        // On the token curve: SwiftUI's bezier(0.2, 0.8, 0.2, 1) at half
+        // way is 0.946079 of the distance.
+        assert!((scrolled(100.0, 200.0, 0.075) - 194.607_925).abs() < 1e-3);
+        assert!((scrolled(100.0, 200.0, 0.0) - 100.0).abs() < 1e-9);
+        assert!((scrolled(100.0, 200.0, 0.15) - 200.0).abs() < 1e-9);
     }
 }

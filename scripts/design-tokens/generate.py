@@ -504,6 +504,9 @@ def render_insights_css(tokens: dict, scheme: str) -> str:
 GLYPHS = REPO / "macos" / "Sources" / "TCDesign" / "Components" / "Glyphs.swift"
 LOGOS = REPO / "macos" / "Sources" / "TCDesign" / "Logos" / "GlassLogoPaths.swift"
 BRAND_MARK = REPO / "macos" / "Sources" / "TCDesign" / "Logos" / "GlassBrandMark.swift"
+# `GlassMotion.spatial` and `.expressive`: springs the Mac hard-codes, read
+# from the Swift so the GTK shell's copy cannot drift from it.
+GLASS_MOTION = REPO / "macos" / "Sources" / "TCDesign" / "Styling" / "GlassMotion.swift"
 
 # The colours the Traces map draws with on the Mac, as the flat theme draws
 # them: its nodes, the pad, the rocket, the runs' orbs, the coins and their
@@ -1309,6 +1312,9 @@ FIRST_RUN_COLOURS = [
     "textPrimary", "textSecondary", "textTertiary",
     "toolClaude", "toolCodex", "toolAntigravity", "toolOpenCode",
     "tintAccent", "toggleOn",
+    # The first run's own controls (`FirstRunSegmented`, `FirstRunSwitch`,
+    # Join's chosen card), which the GTK first run draws in CSS.
+    "textOnAccent", "toggleOff", "toggleKnobOff", "firstRunControlHover",
 ]
 
 
@@ -1330,6 +1336,62 @@ def render_first_run_rust(tokens: dict) -> list[str]:
             alpha = rust_float(colour.get("alpha", 1))
             out.append(f'        pub const {snake(name).upper()}: Rgba = ("{colour["hex"].lower()}", {alpha});')
         out.append("    }")
+    out.append("}")
+    return out
+
+
+# The Mac's motion (`GlassTokens.Motion`, `GlassMotion`): every duration in
+# seconds, the token curve, and the two `.spring(duration:bounce:)` springs,
+# for the GTK shell's `glass_motion` and its CSS transitions. Its own module,
+# apart from `glass::motion`, so each can grow without touching the other.
+MOTION_DURATIONS = ["fast", "standard", "slow", "reveal", "slide", "spin", "pulse"]
+SPRINGS = ["spatial", "expressive"]
+
+
+def parse_springs(source: str) -> dict[str, tuple[float, float]]:
+    """Each `static func <name>(_ reduceMotion: Bool, duration: Double = d)`
+    whose body is `.spring(duration: duration, bounce: b)`, as (d, b)."""
+    springs = {}
+    for name in SPRINGS:
+        match = re.search(
+            rf"func {name}\(_ reduceMotion: Bool, duration: Double = ([0-9.]+)\)[^{{]*\{{[^}}]*"
+            r"\.spring\(duration: duration, bounce: ([0-9.]+)\)",
+            source,
+        )
+        if not match:
+            raise TokenError(f"GlassMotion.swift: no {name} spring")
+        springs[name] = (float(match.group(1)), float(match.group(2)))
+    return springs
+
+
+def render_motion_rust(tokens: dict, springs: dict[str, tuple[float, float]]) -> list[str]:
+    motion = tokens["motion"]
+    out = ["/// The Mac's motion: `GlassTokens.Motion`'s durations in seconds, the",
+           "/// token curve, and `GlassMotion`'s springs as (duration, bounce).",
+           "pub mod motion {"]
+    for name in MOTION_DURATIONS:
+        out.append(f"    /// `motion.{name}`.")
+        out.append(f"    pub const {snake(name).upper()}: f64 = {tile_number(motion[name], name)};")
+    keys = ("easeX1", "easeY1", "easeX2", "easeY2")
+    ease = ", ".join(rust_float(motion[k]) for k in keys)
+    out.append("    /// `GlassMotion.curve`'s control points (x1, y1, x2, y2).")
+    out.append(f"    pub const EASE: [f64; 4] = [{ease}];")
+    css = ", ".join(number(motion[k], k) for k in keys)
+    out.append("    /// The same curve as a CSS timing function.")
+    out.append(f'    pub const EASE_CSS: &str = "cubic-bezier({css})";')
+    for name in SPRINGS:
+        duration, bounce = springs[name]
+        out.append(f"    /// `GlassMotion.{name}`: `.spring(duration:bounce:)`.")
+        out.append(f"    pub const {name.upper()}: (f64, f64) = ({rust_float(duration)}, {rust_float(bounce)});")
+    # What a modal's fade carries in: the blur behind it and its dim.
+    out.append("    /// `size.modalScrimBlur`: the blur behind a modal, in points.")
+    out.append(f"    pub const MODAL_SCRIM_BLUR: f64 = {tile_number(tokens['size']['modalScrimBlur'], 'modalScrimBlur')};")
+    for scheme in SCHEMES:
+        colour = flat_color(tokens, "modalScrim", scheme)
+        if colour["hex"].lower() != "#000000":
+            raise TokenError(f"modalScrim {scheme}: a dim is black, not {colour['hex']}")
+        out.append(f"    /// `modalScrim`'s black, {scheme}: how far a modal dims what it covers.")
+        out.append(f"    pub const MODAL_SCRIM_{scheme.upper()}: f64 = {tile_number(colour['alpha'], 'modalScrim')};")
     out.append("}")
     return out
 
@@ -1404,6 +1466,8 @@ def render_gtk(tokens: dict) -> str:
     out.extend(render_map_rust(tokens))
     out.append("")
     out.extend(render_first_run_rust(tokens))
+    out.append("")
+    out.extend(render_motion_rust(tokens, parse_springs(GLASS_MOTION.read_text())))
     out.append("")
     return "\n".join(out)
 
