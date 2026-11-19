@@ -864,7 +864,14 @@ mod tests {
         let contributed_line = fill(words.counts.contributed_count, DASH);
         assert!(!labels.contains(&contributed_line), "{labels:?}");
         fn bars(widget: &gtk::Widget) -> Vec<gtk::DrawingArea> {
-            let mut found: Vec<gtk::DrawingArea> = widget.clone().downcast().into_iter().collect();
+            // Only the skeleton bars: other drawing areas (a legend's
+            // swatch, say) are not loading placeholders.
+            let mut found: Vec<gtk::DrawingArea> = widget
+                .clone()
+                .downcast::<gtk::DrawingArea>()
+                .into_iter()
+                .filter(|area| area.has_css_class(crate::ui::glass_feedback::SKELETON_CLASS))
+                .collect();
             let mut child = widget.first_child();
             while let Some(next) = child {
                 found.extend(bars(&next));

@@ -173,10 +173,15 @@ pub fn spinner_sized(side: f64) -> gtk::DrawingArea {
 /// repeating Core Animation, which runs at the display's rate.
 pub const SKELETON_INTERVAL: f64 = 0.0;
 
+/// The class every skeleton bar carries, so a view can find its bars
+/// among its other drawing areas.
+pub const SKELETON_CLASS: &str = "tc-skeleton";
+
 /// The Mac's skeleton bar, `width` wide, or the width offered for `None`.
 /// Hidden from assistive tech: the words beside it say what is loading.
 pub fn skeleton(width: Option<i32>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
+    area.add_css_class(SKELETON_CLASS);
     area.set_content_height(tile::SKELETON_HEIGHT as i32);
     match width {
         Some(width) => {
