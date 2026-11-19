@@ -2715,7 +2715,10 @@ pub struct TraceMap {
     pub zoom_in: gtk::Button,
     stage: gtk::Stack,
     foot: gtk::Box,
-    spinner: gtk::Spinner,
+    /// `GlassSpinner(size: FlowMapView.loadingSpinner)`, shown while
+    /// `loading`.
+    spinner: gtk::DrawingArea,
+    loading: std::cell::Cell<bool>,
     reads: RefCell<Reads>,
     pub transfers: Rc<Transfers>,
 }
@@ -2753,7 +2756,7 @@ impl TraceMap {
 
         // Before the first reply the map is empty only because it is
         // unread: a spinner says so.
-        let spinner = gtk::Spinner::new();
+        let spinner = super::super::glass_feedback::spinner_sized(LOADING_SPINNER);
         spinner.set_halign(gtk::Align::Center);
         spinner.set_valign(gtk::Align::Center);
         spinner.set_can_target(false);
@@ -2869,6 +2872,7 @@ impl TraceMap {
             stage,
             foot,
             spinner,
+            loading: std::cell::Cell::new(false),
             reads: RefCell::new(Reads::default()),
             transfers,
         };
@@ -2907,8 +2911,7 @@ impl TraceMap {
         // The legend, the zoom and the spinner are the Traces map's: the
         // Mac's Private AI map has none of them.
         self.foot.set_visible(traces);
-        self.spinner
-            .set_visible(traces && self.spinner.is_spinning());
+        self.spinner.set_visible(traces && self.loading.get());
     }
 
     /// `harness_list`'s answer, or `None` after a failed or unreadable
@@ -3034,7 +3037,7 @@ impl TraceMap {
             app.shell.map_focus_tool(app),
         );
         let loading = inputs.gate.state == ScreenState::Loading;
-        self.spinner.set_spinning(loading);
+        self.loading.set(loading);
         self.spinner
             .set_visible(loading && self.stage.visible_child_name().as_deref() == Some("traces"));
         if self.canvas.imp().on_select_folder.borrow().is_none() {
@@ -3092,6 +3095,9 @@ impl TraceMap {
 
 /// The transfer cards' widest, as the Mac's.
 pub const TRANSFER_CARD_WIDTH: i32 = 460;
+
+/// The map's loading spinner, `FlowMapView.loadingSpinner`.
+const LOADING_SPINNER: f64 = 20.0;
 
 /// One legend item: a rule's dot, or the dashed ring of a tool that is not
 /// watched, and its word.

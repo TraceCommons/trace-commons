@@ -8,13 +8,13 @@
 //!   (0.8 s) at up to 60 frames a second.
 //! - `Skeleton`: a faint bar (ink 0.08, the control radius, 12 points
 //!   tall) whose opacity breathes to `skeletonDim` (0.5) and back over
-//!   `motion.pulse` (1.6 s) on the token curve.
+//!   `motion.pulse` (1.6 s) on the token curve, every frame.
 //! - `Turn`: holds a refresh button's icon and turns it once, over
 //!   `motion.spin`, when it is pressed, at up to 30 frames a second.
 //!
-//! All three stand still with `gtk-enable-animations` off, and none ticks
-//! while it is not shown: GTK runs a widget's frame clock only while it is
-//! mapped.
+//! All three stand still with `gtk-enable-animations` off, following it
+//! live, and none ticks while it is not shown or its window is minimised
+//! or suspended (`glass_motion::keep_ticking`).
 
 use std::cell::Cell;
 
@@ -63,7 +63,12 @@ pub fn refresh_angle(seconds: f64, reduce_motion: bool) -> f64 {
 
 /// Draws the spinner at `angle` degrees, its top-left at the origin.
 pub fn draw_spinner(cr: &gtk::cairo::Context, angle: f64, dark: bool) {
-    let side = tile::SPINNER;
+    draw_spinner_sized(cr, tile::SPINNER, angle, dark);
+}
+
+/// Draws a `side`-point spinner (`GlassSpinner(size:)`): the ring grows,
+/// the stroke stays `spinnerStroke`.
+pub fn draw_spinner_sized(cr: &gtk::cairo::Context, side: f64, angle: f64, dark: bool) {
     let stroke = tile::SPINNER_STROKE;
     let centre = side / 2.0;
     let radius = (side - stroke) / 2.0;
@@ -110,9 +115,14 @@ pub fn draw_skeleton(cr: &gtk::cairo::Context, width: f64, dark: bool) {
 /// The Mac's spinner as a widget. To assistive tech it is a progress bar
 /// with no value, as the stock spinner was.
 pub fn spinner() -> gtk::DrawingArea {
+    spinner_sized(tile::SPINNER)
+}
+
+/// `GlassSpinner(size:)`: the spinner on a `side`-point ring.
+pub fn spinner_sized(side: f64) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
-    area.set_content_width(tile::SPINNER as i32);
-    area.set_content_height(tile::SPINNER as i32);
+    area.set_content_width(side as i32);
+    area.set_content_height(side as i32);
     area.set_halign(gtk::Align::Start);
     area.set_valign(gtk::Align::Center);
     area.set_accessible_role(gtk::AccessibleRole::ProgressBar);
@@ -120,7 +130,9 @@ pub fn spinner() -> gtk::DrawingArea {
     let angle = std::rc::Rc::new(Cell::new(0.0));
     {
         let angle = std::rc::Rc::clone(&angle);
-        area.set_draw_func(move |_, cr, _, _| draw_spinner(cr, angle.get(), tool_tile::dark()));
+        area.set_draw_func(move |_, cr, _, _| {
+            draw_spinner_sized(cr, side, angle.get(), tool_tile::dark())
+        });
     }
     let weak = area.downgrade();
     keep_ticking(area.upcast_ref(), 1.0 / 60.0, move |seconds| {
@@ -131,6 +143,10 @@ pub fn spinner() -> gtk::DrawingArea {
     });
     area
 }
+
+/// The skeleton's frame interval: every frame. The Mac's pulse is a
+/// repeating Core Animation, which runs at the display's rate.
+pub const SKELETON_INTERVAL: f64 = 0.0;
 
 /// The Mac's skeleton bar, `width` wide, or the width offered for `None`.
 /// Hidden from assistive tech: the words beside it say what is loading.
@@ -147,9 +163,7 @@ pub fn skeleton(width: Option<i32>) -> gtk::DrawingArea {
     area.set_accessible_role(gtk::AccessibleRole::Presentation);
     area.set_draw_func(|_, cr, w, _| draw_skeleton(cr, f64::from(w), tool_tile::dark()));
     let weak = area.downgrade();
-    // The Mac's pulse is a repeating animation; 30 frames a second is
-    // plenty for an opacity this slow.
-    keep_ticking(area.upcast_ref(), 1.0 / 30.0, move |seconds| {
+    keep_ticking(area.upcast_ref(), SKELETON_INTERVAL, move |seconds| {
         if let Some(area) = weak.upgrade() {
             area.set_opacity(skeleton_opacity(
                 seconds,
@@ -364,5 +378,58 @@ mod tests {
         assert_eq!(turn.angle(), 0.0);
         window.destroy();
         settings.set_gtk_enable_animations(true);
+    }
+
+    /// The Mac's map spinner is `GlassSpinner(size: 20)`: the same 1.5
+    /// stroke on a 20-point ring (`FlowMapView.loadingSpinner`).
+    #[test]
+    fn a_sized_spinner_keeps_the_stroke_on_a_larger_ring() {
+        let swift = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/Monitor/FlowMapView.swift"
+        );
+        assert!(swift.contains("static let loadingSpinner: CGFloat = 20"));
+        let s = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 80, 80).unwrap();
+        {
+            let cr = gtk::cairo::Context::new(&s).unwrap();
+            cr.scale(4.0, 4.0);
+            Colour::token(map::light::PANE_OPAQUE).set(&cr);
+            let _ = cr.paint();
+            draw_spinner_sized(&cr, 20.0, 0.0, false);
+        }
+        let mut s = s;
+        let stride = s.stride() as usize;
+        let data = s.data().unwrap();
+        let px = |x: f64, y: f64| {
+            let at = (y * 4.0) as usize * stride + (x * 4.0) as usize * 4;
+            [data[at + 2], data[at + 1], data[at]]
+        };
+        // Nine o'clock on the 9.25-point radius: the ring.
+        let ring = px(0.75, 10.0);
+        assert!(ring.iter().zip([198, 199, 202]).all(|(a, b)| a.abs_diff(b) <= 12), "{ring:?}");
+        // Inside the ring: the ground, so the stroke stayed 1.5.
+        let inside = px(2.5, 10.0);
+        assert!(inside.iter().zip([242, 243, 246]).all(|(a, b)| a.abs_diff(b) <= 3), "{inside:?}");
+        // Just past three o'clock, clockwise: the arc.
+        let arc = px(19.0, 11.5);
+        assert!(arc.iter().zip([60, 60, 67]).all(|(a, b)| a.abs_diff(b) <= 40), "{arc:?}");
+    }
+
+    /// No stock spinner is left where the Mac draws its own: the map's
+    /// loading spinner and the first run's Customize card.
+    #[test]
+    fn the_map_and_customize_use_the_glass_spinner() {
+        for (name, source) in [
+            ("first_run.rs", include_str!("first_run.rs")),
+            ("monitor/map.rs", include_str!("monitor/map.rs")),
+        ] {
+            assert!(!source.contains("gtk::Spinner"), "{name} still uses gtk::Spinner");
+        }
+    }
+
+    /// `GlassSkeleton`'s pulse is a repeating Core Animation, drawn at the
+    /// display's rate, so the bar's opacity is set every frame.
+    #[test]
+    fn the_skeleton_breathes_at_the_display_rate() {
+        assert_eq!(SKELETON_INTERVAL, 0.0);
     }
 }

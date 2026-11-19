@@ -867,9 +867,8 @@ impl Coordinator {
         }
         self.update_uses_action();
         clear(&self.customize_box);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
-        self.customize_box.append(&spinner);
+        self.customize_box
+            .append(&super::glass_feedback::spinner());
         self.sync_tools();
         self.commit(
             Commit::Roots,
