@@ -1,5 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop.Shell;
 using Windows.Graphics;
@@ -26,6 +28,24 @@ public sealed partial class SettingsWindow : Window
         InitializeComponent();
         Title = MonitorWords.SettingsTitle;
         SettingsHost.Content = view;
+        view.Loaded += FocusFirstOnce;
+    }
+
+    /// <summary>
+    /// Focus starts on the first control in reading order, at the top of the
+    /// window, as an AppKit window's initial key view is its first. Left to
+    /// itself WinUI put it on a button far down the page, off-screen and
+    /// with no ring to show where it was (box, 2026-11-19). Programmatic, so
+    /// no ring is drawn until a key is pressed.
+    /// </summary>
+    private static void FocusFirstOnce(object sender, RoutedEventArgs e)
+    {
+        var view = (FrameworkElement)sender;
+        view.Loaded -= FocusFirstOnce;
+        if (FocusManager.FindFirstFocusableElement(view) is Control first)
+        {
+            first.Focus(FocusState.Programmatic);
+        }
     }
 
     /// <summary>
