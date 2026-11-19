@@ -232,11 +232,6 @@ public sealed class DaemonHost : IAsyncDisposable
         string? settingsJson = null,
         CancellationToken cancellationToken = default)
     {
-        if (_daemon is not null)
-        {
-            return;
-        }
-
 #if DEBUG
         if (_sample is not null)
         {
@@ -244,6 +239,18 @@ public sealed class DaemonHost : IAsyncDisposable
         }
 #endif
 
+        // One start at a time. The window starts the daemon quietly at
+        // launch (LaunchDaemonStart); a contribution start pressed while that
+        // runs joins it rather than racing it for the state directory's lock,
+        // and the roots screen's answer starts again if that one refused.
+        await _startGate.RunAsync(() => StartDaemonAsync(settingsJson, cancellationToken), () => _daemon is not null, retryAfterFailure: settingsJson is not null)
+            .ConfigureAwait(true);
+    }
+
+    private readonly DaemonStartGate _startGate = new();
+
+    private async Task StartDaemonAsync(string? settingsJson, CancellationToken cancellationToken)
+    {
         Directory.CreateDirectory(_configDir);
 
         // Nothing is watched that the contributor did not name. With no

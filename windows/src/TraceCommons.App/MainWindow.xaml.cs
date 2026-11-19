@@ -381,8 +381,10 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts with local Insights. Contribution startup remains an explicit
-    /// action and retains the existing source declaration and enrollment gates.
+    /// Starts with local Insights, and starts the daemon quietly beside it.
+    /// The contribution screens keep the existing source declaration and
+    /// enrollment gates: a daemon refused for undeclared sources is asked
+    /// for them when one of those screens opens.
     /// </summary>
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
@@ -397,6 +399,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
+        // The Mac starts its daemon at launch and reads its feature flags
+        // then (AppModel.swift:1782, :2085), whichever screen is open, so
+        // this starts one too: Insights needs none, but the flags it gates
+        // Skills on come from it. Quietly: a refusal leaves no daemon and
+        // every flag off, as on the Mac, and nothing on screen; the
+        // contribution start still asks for the sources and reports its own
+        // failure. This also means the watcher now starts at launch, as on
+        // the Mac, rather than at the first contribution screen.
+        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
         ShowInsightsPane();
     }
 
