@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -288,9 +289,17 @@ public sealed class TcDaemon : IDisposable
     /// Returns null if the ABI refused -- a NULL handle or a stopped daemon;
     /// token 0 is never valid.
     /// </summary>
-    public TcSubscription? Subscribe(Action<string> handler)
+    public TcSubscription? Subscribe(Action<string> handler) => Subscribe(handler, null);
+
+    /// <summary>
+    /// <see cref="Subscribe(Action{string})"/>, declaring the opt-in events
+    /// in <paramref name="accepts"/> (<c>tc_subscribe_with_accepts</c>). None
+    /// is exactly <c>tc_subscribe</c>.
+    /// </summary>
+    public TcSubscription? Subscribe(Action<string> handler, IReadOnlyList<string>? accepts)
     {
         ArgumentNullException.ThrowIfNull(handler);
+        string? acceptsJson = accepts is null ? null : System.Text.Json.JsonSerializer.Serialize(accepts);
 
         // Both the delegate and the ctx box must outlive every possible
         // callback, i.e. until tc_unsubscribe RETURNS. The delegate needs its
@@ -303,7 +312,11 @@ public sealed class TcDaemon : IDisposable
         NativeMethods.TcEventCallback callback = OnEvent;
         GCHandle callbackHandle = GCHandle.Alloc(callback);
 
-        ulong token = WithHandle(h => NativeMethods.tc_subscribe(h, callback, ctx), 0UL);
+        ulong token = WithHandle(
+            h => acceptsJson is null
+                ? NativeMethods.tc_subscribe(h, callback, ctx)
+                : NativeMethods.tc_subscribe_with_accepts(h, acceptsJson, callback, ctx),
+            0UL);
 
         if (token == 0)
         {

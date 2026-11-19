@@ -150,6 +150,19 @@ public sealed partial class MainWindow : Window
         _host.QueueChanged += OnTrayWorthyChange;
         _host.StatusChanged += OnTrayWorthyChange;
         _host.DigestDue += OnDigestDue;
+
+        // The daemon's feature flags, read as the Mac reads them: at start,
+        // on its change event (and after a lag or resync), and after a wake.
+        // Insights shows Skills while insights_skills is on.
+        _flags = new FeatureFlagGate(IsSampleWindow() ? null : (method, parameters) => _host.CallAsync(method, parameters));
+        _flags.Changed += OnFeatureFlagsChanged;
+        _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
+        _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
+        WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
+        WindowClocks.Changed += running =>
+        {
+            if (InsightsPane.Content is InsightsView insights) insights.ViewModel.SetClocksRunning(running);
+        };
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
@@ -1129,6 +1142,24 @@ public sealed partial class MainWindow : Window
         await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
     }
 
+    private readonly FeatureFlagGate _flags;
+
+    /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
+    private bool IsSampleWindow()
+    {
+#if DEBUG
+        return _host.IsSample;
+#else
+        return false;
+#endif
+    }
+
+    /// <summary>The flags changed: Insights adds or removes its Skills tab (InsightsView.swift:306-308).</summary>
+    private void OnFeatureFlagsChanged()
+    {
+        if (InsightsPane.Content is InsightsView insights) insights.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
+    }
+
     private async void ShowInsightsPane()
     {
         if (InsightsPane.Content is not InsightsView)
@@ -1139,6 +1170,8 @@ public sealed partial class MainWindow : Window
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
             };
             InsightsPane.Content = page;
+            page.ViewModel.SetClocksRunning(WindowClocks.Running);
+            page.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
         }
         ViewModel.ShowInsights();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
@@ -1159,7 +1192,8 @@ public sealed partial class MainWindow : Window
             return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
         }
 #endif
-        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word));
+        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
+            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)

@@ -334,6 +334,12 @@ public static class DaemonProtocol
         public const string ResyncRequired = "resync_required";
 
         /// <summary>
+        /// The daemon's feature flags changed. Opt-in: sent only to a
+        /// subscriber that declares it (<c>OPT_IN_EVENTS</c>, ipc.rs:745).
+        /// </summary>
+        public const string FeatureFlagsChanged = "feature_flags_changed";
+
+        /// <summary>
         /// A scheduled preview finished and was delivered. Carries the same
         /// object <c>preview_request</c>'s result would -- see
         /// <see cref="PreviewCardOutcome"/> -- and is published only for a
