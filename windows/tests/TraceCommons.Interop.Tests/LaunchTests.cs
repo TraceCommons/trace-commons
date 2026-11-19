@@ -250,6 +250,16 @@ public sealed class LaunchTests
     }
 
     [Fact]
+    public void AnUnloadedRaisedWhileTheArtIsStillShownLeavesTheMoveRunning()
+    {
+        // Box, 2026-11-19: a ContentDialog raises Unloaded on its content
+        // about 340 ms after Loaded while the dialog stays open, so resting
+        // on every Unloaded stopped the move before its first visible frame.
+        Assert.False(LaunchHandoff.RestsOnUnloaded(stillLoaded: true));
+        Assert.True(LaunchHandoff.RestsOnUnloaded(stillLoaded: false));
+    }
+
+    [Fact]
     public void WithAnimationsOffTheArtIsItsRestFrameFromTheStart()
     {
         // ManagedFolderExplainer.swift:187, :218-219: Reduce Motion draws the rest frame.

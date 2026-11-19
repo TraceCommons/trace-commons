@@ -185,6 +185,13 @@ public sealed class LaunchArtView : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        // The dialog's popup raises a late Unloaded while the art is still
+        // shown; resting then stopped the move before its first frame.
+        if (!LaunchHandoff.RestsOnUnloaded(IsLoaded))
+        {
+            return;
+        }
+
         if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
         {
             _settings.AnimationsEnabledChanged -= OnAnimationsEnabledChanged;

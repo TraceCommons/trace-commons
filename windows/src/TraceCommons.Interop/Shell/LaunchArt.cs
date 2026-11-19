@@ -154,6 +154,14 @@ public static class LaunchHandoff
     /// <summary>Under Reduce Motion (animations off) the art starts on its rest frame (:187, :218-219).</summary>
     public static bool StartsAtRest(bool animationsEnabled) => !animationsEnabled;
 
+    /// <summary>
+    /// Whether an Unloaded event puts the art at rest. WinUI can raise
+    /// Unloaded late, after the element has moved into a dialog's popup and
+    /// while it is still shown (box, 2026-11-19: 340 ms after Loaded, with
+    /// no second Loaded); only an art that is no longer loaded rests.
+    /// </summary>
+    public static bool RestsOnUnloaded(bool stillLoaded) => !stillLoaded;
+
     /// <summary>The folder at <paramref name="elapsed"/> seconds from the art appearing.</summary>
     public static (double X, double Y, double Scale) Folder(double elapsed, bool animationsEnabled)
     {
