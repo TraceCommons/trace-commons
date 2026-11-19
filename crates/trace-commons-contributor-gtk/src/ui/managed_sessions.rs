@@ -95,10 +95,34 @@ fn install_button(tool: &Value) -> Option<gtk::Button> {
 }
 /// A bare refresh glyph, its tooltip and accessible name "Refresh".
 fn refresh_glyph(app: &Rc<App>) -> gtk::Button {
-    // Its icon turns once when pressed (`GlassRefreshButton`).
-    let (glyph, _) = super::glass_feedback::refresh_button(&text("refresh"));
-    let app = Rc::clone(app);
-    glyph.connect_clicked(move |_| refresh(&app));
+    kept_glyph(&app.private_inference.managed_refresh, || {
+        // Its icon turns once when pressed (`GlassRefreshButton`).
+        let (glyph, _) = super::glass_feedback::refresh_button(&text("refresh"));
+        let app = Rc::downgrade(app);
+        glyph.connect_clicked(move |_| {
+            if let Some(app) = app.upgrade() {
+                refresh(&app);
+            }
+        });
+        glyph
+    })
+}
+
+/// The one glyph `slot` holds, made on first use and taken out of the
+/// heading it was in, so a rebuild moves it rather than making a new one:
+/// the Mac's button keeps its identity across a redraw, and with it the
+/// turn its press started.
+fn kept_glyph(
+    slot: &std::cell::OnceCell<gtk::Button>,
+    make: impl FnOnce() -> gtk::Button,
+) -> gtk::Button {
+    let glyph = slot.get_or_init(make).clone();
+    if let Some(parent) = glyph.parent() {
+        match parent.downcast::<gtk::Box>() {
+            Ok(heading) => heading.remove(&glyph),
+            Err(_) => glyph.unparent(),
+        }
+    }
     glyph
 }
 fn launch_accounts(snapshot: &Value) -> Vec<Value> {
@@ -974,6 +998,63 @@ mod mounted_tests {
         TEST_SANDBOXED.with(|s| s.set(None));
         crate::ui::service_dialog::set_dismissed(false);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A rebuild of the list moves the one refresh glyph into the new
+    /// heading, and the turn its press started keeps going there.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_refresh_glyph_keeps_its_turn_across_a_rebuild() {
+        gtk::init().expect("GTK display unavailable");
+        gtk::Settings::default()
+            .unwrap()
+            .set_gtk_enable_animations(true);
+        let slot = std::cell::OnceCell::new();
+        let made = std::cell::Cell::new(0);
+        let make = || {
+            made.set(made.get() + 1);
+            super::super::glass_feedback::refresh_button("Refresh").0
+        };
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let window = gtk::Window::new();
+        window.set_child(Some(&root));
+        window.present();
+        let first_heading = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let glyph = kept_glyph(&slot, make);
+        first_heading.append(&glyph);
+        root.append(&first_heading);
+        let context = gtk::glib::MainContext::default();
+        let pump_for = |ms: u64| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                context.iteration(false);
+            }
+        };
+        pump_for(100);
+        glyph.emit_clicked();
+        pump_for(100);
+        // The answer lands: the list is cleared and drawn again.
+        clear(&root);
+        let second_heading = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        let again = kept_glyph(&slot, make);
+        second_heading.append(&again);
+        root.append(&second_heading);
+        assert_eq!(again, glyph, "the rebuild made a new glyph");
+        assert_eq!(made.get(), 1);
+        assert_eq!(
+            again.parent().as_ref(),
+            Some(second_heading.upcast_ref::<gtk::Widget>())
+        );
+        let turn = again
+            .child()
+            .and_then(|c| c.downcast::<super::super::glass_feedback::Turn>().ok())
+            .expect("the glyph's turn");
+        pump_for(150);
+        assert!(
+            turn.angle() > 0.0,
+            "the press's turn stopped at the rebuild"
+        );
+        window.close();
     }
 }
 

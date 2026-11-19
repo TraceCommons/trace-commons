@@ -2045,12 +2045,29 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
         project.contains("../../packaging/Package.appxmanifest"),
         "the WinUI project must use the canonical packaging manifest"
     );
+    // Owner decision 2026-11-19 (parity spec, "Windows floor"): support
+    // Windows 10 22H2 and Windows 11, and raise the app's floor from
+    // 10.0.17763.0 to 10.0.19041.0, the version its target framework names.
+    // The zip and the MSIX now share one floor.
     assert!(
-        project.contains("<TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>"),
-        "MSIX's 19041 floor must not narrow the default unpackaged build's support"
+        project.contains("<TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>"),
+        "the WinUI project's target framework must stay on the 19041 SDK"
+    );
+    assert!(
+        project.contains("<TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>"),
+        "the app's floor must be 10.0.19041.0, matching its target framework"
+    );
+    assert!(
+        !project.contains("10.0.17763.0"),
+        "no part of the WinUI project may keep the old 10.0.17763.0 floor"
     );
 
     let manifest = read("windows/packaging/Package.appxmanifest");
+    assert!(
+        manifest
+            .contains("<TargetDeviceFamily Name=\"Windows.Desktop\" MinVersion=\"10.0.19041.0\""),
+        "the MSIX floor must equal the app project's TargetPlatformMinVersion"
+    );
     assert!(
         manifest.contains("Name=\"Iqlusion.TraceCommons\""),
         "the canonical manifest must retain the established package identity"

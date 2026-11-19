@@ -65,6 +65,8 @@ public class MonitorWordsTests
         JsonElement table = ScreensTable();
         Assert.Equal(table.GetProperty("history").GetString(), MonitorWords.CrumbTitle(new Crumb(CrumbWord.History, MonitorTab.Traces, false)));
         Assert.Equal(table.GetProperty("missions").GetString(), MonitorWords.CrumbTitle(new Crumb(CrumbWord.Missions, MonitorTab.Home, false)));
+        Assert.Equal(table.GetProperty("home_history").GetProperty("mission_catalogue").GetString(), MonitorWords.CrumbTitle(new Crumb(CrumbWord.MissionCatalogue, MonitorTab.Home, false)));
+        Assert.NotEmpty(MonitorWords.CrumbTitle(new Crumb(CrumbWord.MissionCatalogue, MonitorTab.Home, false)));
         Assert.Equal(table.GetProperty("shell").GetProperty("tab_traces").GetString(), MonitorWords.CrumbTitle(new Crumb(CrumbWord.Tab, MonitorTab.Traces, true)));
         Assert.Equal(table.GetProperty("settings").GetString(), MonitorWords.Settings);
         Assert.Equal(table.GetProperty("settings_title").GetString(), MonitorWords.SettingsTitle);

@@ -625,6 +625,65 @@ class HeroTokensTests(unittest.TestCase):
         self.assertIn('pub const TILE_FOLDER_INK: Rgba = ("#8be28b", 1.0);', rendered)
 
 
+
+class SwitchTokensTests(unittest.TestCase):
+    """GlassToggleStyle in the flat theme, for every GTK switch."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_on_track_and_knobs_are_the_macs_flat_values(self):
+        for scheme, track, knob_on, knob_off in [("light", "#0558B6", "#FFFFFF", "#FFFFFF"),
+                                                 ("dark", "#7EBCFF", "#071A2E", "#071A2E")]:
+            css = generate.render_glass_css(self.tokens, scheme)
+            with self.subTest(scheme=scheme):
+                self.assertIn(f"@define-color tc_glass_toggle_on {track};".lower(), css.lower())
+                palette = generate.glass_palette(self.tokens, scheme)
+                self.assertEqual(palette["toggleOn"].upper(), track)
+                self.assertEqual(palette["toggleKnobOn"].upper(), knob_on)
+                self.assertEqual(palette["toggleKnobOff"].upper(), knob_off)
+
+    def test_off_track_is_the_macs_in_dark_and_the_smallest_lift_that_holds_3_in_light(self):
+        # Dark's 38% white holds 3:1 both ways on every ground. Light's 24%
+        # black is about 1.8:1 on its grounds; 43% is the first step at
+        # which the track clears 3:1 on every ground and the white knob
+        # 3:1 on the track.
+        self.assertEqual(generate.switch_off_track(self.tokens, "dark"),
+                         {"hex": "#ffffff", "alpha": 0.38})
+        self.assertEqual(generate.switch_off_track(self.tokens, "light"),
+                         {"hex": "#000000", "alpha": 0.43})
+        self.assertIn("@define-color tc_glass_toggle_off rgba(0, 0, 0, 0.43);",
+                      generate.render_glass_css(self.tokens, "light"))
+        self.assertIn("@define-color tc_glass_toggle_off rgba(255, 255, 255, 0.38);",
+                      generate.render_glass_css(self.tokens, "dark"))
+
+    def test_every_switch_state_clears_3_on_every_ground(self):
+        for scheme in generate.SCHEMES:
+            palette = generate.glass_palette(self.tokens, scheme)
+            off = generate.switch_off_track(self.tokens, scheme)
+            for ground in generate.SWITCH_GROUNDS:
+                under = palette[ground]
+                track = generate.opaque_over(off, under)
+                with self.subTest(scheme=scheme, ground=ground):
+                    self.assertGreaterEqual(generate.contrast(track, under), 3)
+                    self.assertGreaterEqual(generate.contrast(palette["toggleKnobOff"], track), 3)
+                    self.assertGreaterEqual(generate.contrast(palette["toggleOn"], under), 3)
+                    self.assertGreaterEqual(
+                        generate.contrast(palette["toggleKnobOn"], palette["toggleOn"]), 3)
+
+    def test_an_on_track_under_the_floor_is_rejected(self):
+        self.tokens["themes"]["flatLight"]["color"]["toggleOnSettings"] = {"hex": "#d0d4ff"}
+        with self.assertRaisesRegex(generate.TokenError, "switch"):
+            generate.render_glass_css(self.tokens, "light")
+
+    def test_the_secondary_ink_reaches_rust(self):
+        rendered = "\n".join(generate.render_glass_rust(self.tokens))
+        light = generate.glass_palette(self.tokens, "light")["inkSecondary"].upper()
+        dark = generate.glass_palette(self.tokens, "dark")["inkSecondary"].upper()
+        self.assertEqual(light, "#3C3C43")
+        self.assertIn(f'pub const SECONDARY_LIGHT: &str = "{light}";', rendered)
+        self.assertIn(f'pub const SECONDARY_DARK: &str = "{dark}";', rendered)
+
 class FirstRunStageTokensTests(unittest.TestCase):
     def setUp(self):
         self.tokens = json.loads(generate.SOURCE.read_text())
@@ -648,6 +707,47 @@ class FirstRunStageTokensTests(unittest.TestCase):
     def test_first_run_carries_the_motion_curve(self):
         rendered = "\n".join(generate.render_first_run_rust(self.tokens))
         self.assertIn("pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];", rendered)
+
+
+class MotionTokensTests(unittest.TestCase):
+    """`brand_tokens::motion`: every `GlassTokens.Motion` value and the two
+    springs `GlassMotion.swift` hard-codes, so the GTK shell's motion reads
+    the Mac's numbers rather than copies of them."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_motion_module_is_the_macs(self):
+        rendered = "\n".join(generate.render_motion_rust(
+            self.tokens, generate.parse_springs(generate.GLASS_MOTION.read_text())))
+        for line in ("FAST: f64 = 0.15", "STANDARD: f64 = 0.22", "SLOW: f64 = 0.3",
+                     "REVEAL: f64 = 0.18", "SLIDE: f64 = 0.25", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6",
+                     "EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0]",
+                     "SPATIAL: (f64, f64) = (0.9, 0.04)",
+                     "EXPRESSIVE: (f64, f64) = (0.78, 0.32)"):
+            self.assertIn(f"pub const {line};", rendered)
+        self.assertIn('pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";', rendered)
+        self.assertIn("pub mod motion {", rendered)
+
+    def test_springs_are_read_from_the_swift(self):
+        springs = generate.parse_springs(generate.GLASS_MOTION.read_text())
+        self.assertEqual(springs, {"spatial": (0.9, 0.04), "expressive": (0.78, 0.32)})
+
+    def test_a_spring_missing_from_the_swift_is_refused(self):
+        source = generate.GLASS_MOTION.read_text().replace("func expressive", "func renamed")
+        with self.assertRaisesRegex(generate.TokenError, "expressive"):
+            generate.parse_springs(source)
+
+    def test_the_modal_scrim_it_fades_is_the_flat_themes(self):
+        rendered = "\n".join(generate.render_motion_rust(
+            self.tokens, generate.parse_springs(generate.GLASS_MOTION.read_text())))
+        self.assertIn("pub const MODAL_SCRIM_BLUR: f64 = 8.0;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_LIGHT: f64 = 0.25;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_DARK: f64 = 0.4;", rendered)
+
+    def test_the_gtk_output_carries_the_motion_module(self):
+        self.assertIn("pub mod motion {", generate.render_gtk(self.tokens))
 
 
 if __name__ == '__main__':

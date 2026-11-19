@@ -158,6 +158,10 @@ pub struct HomePrefs {
     pub closed_campaign: String,
     /// Settings' "Show promotions", on by default.
     pub shows_promotions: bool,
+    /// Settings' credit-arrival switch (`BalanceArrival.IconAnimation`,
+    /// `CreditIconAnimationEnabled`), on by default: the tray icon's
+    /// celebration and the window's attention request.
+    pub animates_credit_icon: bool,
     /// The Balance figure and received total last shown, so credit that
     /// arrived while the app was closed is marked the next time.
     pub balance_shown: Option<Reading>,
@@ -168,6 +172,7 @@ impl Default for HomePrefs {
         Self {
             closed_campaign: String::new(),
             shows_promotions: true,
+            animates_credit_icon: true,
             balance_shown: None,
         }
     }
@@ -313,9 +318,15 @@ mod tests {
         let older = HomePrefs::from_bytes(br#"{"closed_campaign":"x"}"#);
         assert_eq!(older.closed_campaign, "x");
         assert!(older.shows_promotions);
+        // The credit-arrival switch is on until turned off, as the Mac's
+        // `IconAnimation.isEnabled` reads an unset key.
+        assert!(HomePrefs::default().animates_credit_icon);
+        assert!(older.animates_credit_icon);
+        assert!(!HomePrefs::from_bytes(br#"{"animates_credit_icon":false}"#).animates_credit_icon);
         let chosen = HomePrefs {
             closed_campaign: "fp".into(),
             shows_promotions: false,
+            animates_credit_icon: false,
             balance_shown: Some(Reading {
                 received_nanos: Some(3),
                 remaining_nanos: None,

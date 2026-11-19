@@ -46,6 +46,8 @@ pub(super) struct Coordinator {
     app: Weak<App>,
     window: glib::WeakRef<adw::Window>,
     stack: gtk::Stack,
+    /// The steps crossfading on the spatial spring.
+    fade: Rc<super::first_run_fade::StepFade>,
     heading: adw::WindowTitle,
     state: RefCell<State>,
     tools: Rc<RefCell<Tools>>,
@@ -93,6 +95,8 @@ pub(super) struct Coordinator {
     /// The NEAR AI credit section, drawn once an enrollment is held.
     payout: RefCell<Option<Rc<super::payout_link::PayoutLinkView>>>,
     payout_shown: Cell<bool>,
+    /// Whether Join's account card was last drawn chosen.
+    join_chosen: Cell<bool>,
     /// The animated stage under every step (`FirstRunStage.swift`).
     stage: Rc<super::first_run_stage_view::Stage>,
 }
@@ -148,15 +152,32 @@ fn info(title: &str, text: &str) -> gtk::MenuButton {
     button
 }
 
+/// The first-run window's size, the Mac's: every step at this size.
+pub(super) const WINDOW: (i32, i32) = (860, 760);
+/// The least it can be made, the Mac's `FirstRunProgress.minimumSize`.
+pub(super) const WINDOW_LEAST: (i32, i32) = (760, 640);
+
 pub(super) fn present(app: &Rc<App>) -> adw::Window {
+    present_with(app).0
+}
+
+/// The first-run window and the coordinator that drives it.
+fn present_with(app: &Rc<App>) -> (adw::Window, Rc<Coordinator>) {
     super::style::install();
     super::community_brand::install();
     let copy = first_run_copy();
+    // The Mac's first-run window (`defaultSize(width: 860, height: 760)`,
+    // `FirstRunProgress.minimumSize` 760 by 640): one size for every step.
     let window = adw::Window::builder()
+        // The name window lists and overviews give it; the header draws
+        // its own title widget.
+        .title(crate::copy::APP_NAME)
         .transient_for(&app.window)
         .modal(true)
-        .default_width(680)
-        .default_height(720)
+        .default_width(WINDOW.0)
+        .default_height(WINDOW.1)
+        .width_request(WINDOW_LEAST.0)
+        .height_request(WINDOW_LEAST.1)
         .build();
     StageScheme::hold(&window);
     // The roots window's handoff ends once this window holds the stage.
@@ -164,10 +185,14 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let stack = gtk::Stack::builder()
         .vexpand(true)
         .vhomogeneous(false)
-        // Steps fade into each other, as the Mac's do, so the stage's N and
-        // tiles carry the move between them.
-        .transition_type(gtk::StackTransitionType::Crossfade)
+        // Each step as wide as its own page needs: homogeneous, the stack
+        // sized itself for its hidden pages too and asked GNOME 46's clamp
+        // for 729 to 848, past the column.
+        .hhomogeneous(false)
         .build();
+    // Steps fade into each other on the Mac's spatial spring, so the
+    // stage's N and tiles carry the move between them.
+    let fade = super::first_run_fade::StepFade::new(&stack);
     let heading = adw::WindowTitle::new(crate::copy::APP_NAME, "");
     let error = body_label("");
     error.add_css_class("tc-refused");
@@ -182,6 +207,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         app: Rc::downgrade(app),
         window: window.downgrade(),
         stack: stack.clone(),
+        fade: fade.clone(),
         heading: heading.clone(),
         state: RefCell::new(State {
             daemon_started: true,
@@ -225,6 +251,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         referral: RefCell::new(String::new()),
         payout: RefCell::new(None),
         payout_shown: Cell::new(false),
+        join_chosen: Cell::new(false),
         stage: stage.clone(),
     });
     if let Some(handed) = super::roots::take_first_run_handoff() {
@@ -259,10 +286,13 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     content.append(stage.thread());
     // Every step the same width, as the Mac's frame holds its content to
     // one column (`FirstRunFrame`).
+    // A page never widens the window: the column is its own width at most
+    // (`column`), and what a step holds that is wider (a long folder path)
+    // stays inside the window rather than growing it from step to step.
     let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::External)
         .vexpand(true)
-        .child(&super::first_run_screens::column(&stack))
+        .child(&super::first_run_screens::column(fade.root()))
         .build();
     stage.follow(&scroll);
     content.append(&scroll);
@@ -290,7 +320,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     });
     c.show();
     window.present();
-    window
+    (window, c)
 }
 
 impl Coordinator {
@@ -310,7 +340,7 @@ impl Coordinator {
             move || {
                 if let Some(c) = weak.upgrade() {
                     c.stage.set_agent(true);
-                    c.stack.set_visible_child_name("agent");
+                    c.fade.show("agent");
                 }
             }
         });
@@ -322,7 +352,7 @@ impl Coordinator {
             move || {
                 if let Some(c) = weak.upgrade() {
                     c.stage.set_agent(false);
-                    c.stack.set_visible_child_name("welcome");
+                    c.fade.show("welcome");
                 }
             }
         });
@@ -336,6 +366,14 @@ impl Coordinator {
             }
         });
         tools.root.prepend(&self.stage.slot(Step::Tools));
+        self.stage.set_tools_rows({
+            let tools = Rc::downgrade(&tools);
+            Rc::new(move |since| {
+                if let Some(tools) = tools.upgrade() {
+                    tools.rise_rows(since);
+                }
+            })
+        });
         tools.connect_changed({
             let stage = Rc::downgrade(&self.stage);
             move || {
@@ -443,7 +481,7 @@ impl Coordinator {
             Step::Terms => copy.frame.step_terms,
             Step::Join => copy.frame.step_join,
         });
-        self.stack.set_visible_child_name(name(step));
+        self.fade.show(name(step));
         self.stage.set_agent(false);
         self.stage.set_step(step, !self.busy.get(), {
             let weak = Rc::downgrade(self);
@@ -583,10 +621,10 @@ impl Coordinator {
     fn render_private_ai(&self) {
         clear(&self.private_body);
         let tools = self.tools.borrow();
-        self.private_body.append(&screens::private_ai_body(
-            &tools.connectable(),
-            tools.found_count(),
-        ));
+        let connectable = tools.connectable();
+        let (body, figure) = screens::private_ai_body(&connectable, tools.found_count());
+        self.private_body.append(&body);
+        self.stage.set_private_count(&figure, connectable.len());
     }
 
     fn render_traces(self: &Rc<Self>) {
@@ -624,12 +662,17 @@ impl Coordinator {
         if let Some((headline, note)) =
             screens::traces_lines(found, self.trace_lines.borrow().as_ref(), earns)
         {
-            self.traces_body.append(&body_label(&headline));
+            // The estimate rises into place once the count is done.
+            let estimate = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            estimate.append(&body_label(&headline));
             if let Some(note) = note {
                 let note = body_label(&note);
                 note.add_css_class("tc-meta");
-                self.traces_body.append(&note);
+                estimate.append(&note);
             }
+            let lift = super::lift::Lift::new(&estimate);
+            self.traces_body.append(&lift);
+            self.stage.set_estimate(&lift);
         }
         // Asked once per first run, once something is counted.
         if found.is_some_and(|n| n > 0) && !self.trace_lines_asked.replace(true) {
@@ -843,6 +886,16 @@ impl Coordinator {
                 .map(|p| f64::from(p.y()))
         });
         self.customizing.set(true);
+        // The title and the graphic's captions fade out where they were on
+        // the open spring; the stage fades the graphic itself.
+        let fade_out: fn(f64) -> f64 =
+            |since| super::first_run_stage::motion::customize_fade_out(since, false);
+        let settle =
+            super::first_run_stage::spring_settle(super::first_run_stage::customize::DURATION);
+        self.fade.fade_away(&self.uses_flow, fade_out, settle);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            self.fade.fade_away(title, fade_out, settle);
+        }
         self.stage.set_open(true);
         self.uses_card.set_visible(false);
         self.uses_flow.set_visible(false);
@@ -855,8 +908,9 @@ impl Coordinator {
         }
         self.update_uses_action();
         clear(&self.customize_box);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        // Centred, where the stock spinner it replaced drew.
+        let spinner = super::glass_feedback::spinner();
+        spinner.set_halign(gtk::Align::Center);
         self.customize_box.append(&spinner);
         self.sync_tools();
         self.commit(
@@ -941,6 +995,17 @@ impl Coordinator {
                     arms.add_css_class("tc-meta");
                     arms.set_visible(rules::arms_after_sign_in(&c.state.borrow(), &project));
                     let project = Rc::new(project);
+                    // Ask, Automatic and Never side by side in one well, the
+                    // chosen one's pill filling (`FirstRunSegmented`).
+                    let picker = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                    picker.add_css_class("tc-first-run-segmented");
+                    picker.set_halign(gtk::Align::Start);
+                    picker.set_accessible_role(gtk::AccessibleRole::Group);
+                    picker.update_property(&[gtk::accessible::Property::Label(&fill(
+                        copy.rules.rule_for,
+                        "folder",
+                        &project.project_label,
+                    ))]);
                     for rule in rules::offerable_modes(&project) {
                         let index = match rule {
                             Rule::Ask => 0,
@@ -948,6 +1013,7 @@ impl Coordinator {
                             Rule::Never => 2,
                         };
                         let check = gtk::CheckButton::with_label(choices.choices[index].label);
+                        check.add_css_class("tc-first-run-segment");
                         check.set_group(group.as_ref());
                         if group.is_none() {
                             group = Some(check.clone());
@@ -970,8 +1036,9 @@ impl Coordinator {
                                 }
                             }
                         });
-                        row.append(&check);
+                        picker.append(&check);
                     }
+                    row.append(&picker);
                     // Automatic picked before sign-in is armed at Start, and
                     // says so in Uses' words (`armsAfterSignIn`).
                     row.append(&arms);
@@ -980,6 +1047,7 @@ impl Coordinator {
                         .label(copy.rules.past_sessions)
                         .child(&history)
                         .build();
+                    super::glass_motion::disclosure(&more);
                     more.connect_expanded_notify({
                         let weak = Rc::downgrade(&c);
                         let id = project.project_id.clone();
@@ -1043,6 +1111,8 @@ impl Coordinator {
                         .unwrap_or(rules.past_sessions);
                     let check = gtk::CheckButton::with_label(label);
                     check.set_sensitive(session["selectable"].as_bool() == Some(true));
+                    // The small switch, before its words (`FirstRunSwitch`).
+                    let switch = super::first_run_switch::SmallSwitch::new(check.clone());
                     check.set_active(
                         c.state
                             .borrow()
@@ -1068,7 +1138,7 @@ impl Coordinator {
                             }
                         }
                     });
-                    body.append(&check);
+                    body.append(&switch.root);
                 }
                 if let Some(count) = value["not_listed"].as_u64().filter(|count| *count > 0) {
                     body.append(&body_label(&fill(
@@ -1156,6 +1226,23 @@ impl Coordinator {
         // near.ai, the one way in (owner, 2026-10-12).
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
         card.add_css_class("tc-card");
+        // Outlined in the accent once signed in, over the standard 0.22 s
+        // (`accountCard`'s `chosen`): built as it last read, then restyled.
+        card.add_css_class("tc-join-card");
+        let chosen = state.signed_in;
+        if self.join_chosen.replace(chosen) {
+            card.add_css_class("tc-join-chosen");
+        }
+        super::first_run_fade::restyle_after_drawn(&card, {
+            let card = card.clone();
+            move || {
+                if chosen {
+                    card.add_css_class("tc-join-chosen");
+                } else {
+                    card.remove_css_class("tc-join-chosen");
+                }
+            }
+        });
         card.append(&eyebrow(copy.join.near_ai_eyebrow));
         card.append(&body_label(copy.join.near_ai_text));
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -2387,5 +2474,267 @@ mod dark_tests {
         );
         stage.destroy();
         main.destroy();
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    const APP_MAIN: &str =
+        include_str!("../../../../macos/Sources/TraceCommonsApp/TraceCommonsAppMain.swift");
+    const FIRST_RUN_VIEWS: &str =
+        include_str!("../../../../macos/Sources/TraceCommonsApp/Views/Monitor/FirstRunViews.swift");
+
+    /// The first-run window's size and least size are the Mac's, read from
+    /// its Swift.
+    #[test]
+    fn the_window_is_the_macs_size() {
+        let size = format!(".defaultSize(width: {}, height: {})", WINDOW.0, WINDOW.1);
+        let first_run = APP_MAIN
+            .split("Window(\"First run\"")
+            .nth(1)
+            .expect("the Mac's first-run window");
+        let scene = first_run.split("Window(").next().unwrap();
+        assert!(scene.contains(&size), "the Mac's first run is not {size}");
+        let least = format!(
+            "minimumSize = CGSize(width: {}, height: {})",
+            WINDOW_LEAST.0, WINDOW_LEAST.1
+        );
+        assert!(FIRST_RUN_VIEWS.contains(&least), "not {least}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle(context: &glib::MainContext) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn descendants(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            found.push(widget.clone());
+            descendants(&widget, found);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// The window as drawn: 860 wide on every step, at most 760 needed by
+    /// any (so the Mac's least size holds every step too), and Welcome's
+    /// title, body and both buttons centred in it, as the Mac draws them.
+    /// Each step is driven as a person reaches it (`show`), on this
+    /// computer's own discovery with real-length paths and counts added,
+    /// and its column is drawn the Mac's 560 wide (`frame(maxWidth: 560)`)
+    /// and centred. Before this fix the column was drawn 729 wide on
+    /// Tools and 848 on Traces on GNOME 46 (libadwaita 1.5): the stack
+    /// sized itself for its hidden pages too. KDE (libadwaita 1.9) drew
+    /// 560 before and after.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_every_step_is_one_window_size_and_welcome_is_centred() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.FirstRunWindowTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("tc-first-run-window-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, _jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        let (window, c) = present_with(&app);
+        settle(&context);
+        let mut all = Vec::new();
+        descendants(window.upcast_ref(), &mut all);
+        let stack = all
+            .iter()
+            .find_map(|w| w.clone().downcast::<gtk::Stack>().ok())
+            .expect("the steps");
+
+        // Welcome: every line's centre on the window's.
+        let welcome = stack.child_by_name("welcome").expect("Welcome");
+        let middle = window.width() as f32 / 2.0;
+        let mut lines = Vec::new();
+        descendants(&welcome, &mut lines);
+        let centred: Vec<gtk::Widget> = lines
+            .into_iter()
+            .filter(|w| {
+                w.is::<gtk::Button>()
+                    || (w.is::<gtk::Label>() && w.has_css_class("tc-flow-body"))
+                    || w.accessible_role() == gtk::AccessibleRole::Heading
+            })
+            .collect();
+        assert!(
+            centred.len() >= 4,
+            "title, body and two buttons: {}",
+            centred.len()
+        );
+        for line in &centred {
+            let at = line.compute_bounds(&window).expect("laid out");
+            let centre = at.x() + at.width() / 2.0;
+            assert!(
+                (centre - middle).abs() <= 2.0,
+                "{} centred at {centre}, the window at {middle}",
+                line.type_().name()
+            );
+        }
+
+        let middle = WINDOW.0 as f32 / 2.0;
+        for step in [
+            Step::Tools,
+            Step::PrivateAi,
+            Step::Traces,
+            Step::Uses,
+            Step::Terms,
+            Step::Join,
+        ] {
+            c.state.borrow_mut().step = step;
+            c.show();
+            // Tools reads this computer's folders off the main loop.
+            for _ in 0..4 {
+                settle(&context);
+            }
+            if step == Step::Tools {
+                // Real-length rows beside what discovery found here: a
+                // long home, a nested store, four-figure counts.
+                let home = "/home/a-contributor-with-a-long-name/.local/share";
+                let mut tools = c.tools.borrow_mut();
+                let mut found: Vec<crate::first_run::tools::Found> =
+                    tools.discovered.clone().unwrap_or_default();
+                for (source, folder) in [
+                    (
+                        trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                        ".claude/projects",
+                    ),
+                    (
+                        trace_commons_contributor::source::SOURCE_CODEX,
+                        ".codex/sessions/2026/11",
+                    ),
+                    (
+                        trace_commons_contributor::source::SOURCE_OPENCODE,
+                        "opencode/storage/session/message",
+                    ),
+                ] {
+                    if !found.iter().any(|f| f.source == source && f.exists) {
+                        found.push(crate::first_run::tools::Found {
+                            source: source.to_owned(),
+                            path: format!("{home}/{folder}"),
+                            exists: true,
+                            session_count: 12_345,
+                            total_bytes: Some(9_876_543_210),
+                        });
+                    }
+                }
+                tools.record_discovery(found);
+            }
+            let name = name(step);
+            assert_eq!(window.width(), WINDOW.0, "{name}: the window grew");
+            let (least, _, _, _) = window.measure(gtk::Orientation::Horizontal, -1);
+            assert!(least <= WINDOW_LEAST.0, "{name}: the window needs {least}");
+            let at = stack.compute_bounds(&window).expect("the column laid out");
+            assert_eq!(
+                at.width(),
+                560.0,
+                "{name}: the column is drawn {} wide",
+                at.width()
+            );
+            let centre = at.x() + at.width() / 2.0;
+            assert!(
+                (centre - middle).abs() <= 2.0,
+                "{name}: the column's centre is at {centre}, the window's at {middle}"
+            );
+        }
+        window.close();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name each window is listed by (window lists, overviews, the
+    /// X11 `WM_NAME`): its own title, else the one GDK gives an untitled
+    /// window, the application name. The first run and the Look inside
+    /// sheet are the brand's, and no window is listed by the raw app id
+    /// the process is named by. On the branch before this fix the first
+    /// run and the sheet had no title, so both were listed as
+    /// "ai.tracecommons.Contributor".
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_every_window_is_listed_by_the_brand_never_the_raw_id() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        // As `main` names the process, before any window exists.
+        super::super::name_the_process();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.WindowNameTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-window-names-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, _jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        app.window.present();
+        app.entries.borrow_mut().push(crate::model::QueueEntry {
+            entry_id: "entry-1".into(),
+            state: "pending".into(),
+            ..Default::default()
+        });
+        super::super::preview::open(&app, 0);
+        let first_run = present(&app);
+        settle(&context);
+        let listed = |window: &gtk::Window| {
+            window
+                .title()
+                .map(|title| title.to_string())
+                .or_else(|| glib::application_name().map(|name| name.to_string()))
+                .unwrap_or_default()
+        };
+        let mut names = Vec::new();
+        for item in gtk::Window::toplevels().iter::<glib::Object>() {
+            let window = item.unwrap().downcast::<gtk::Window>().unwrap();
+            if window.is_visible() {
+                names.push((window.type_().name().to_string(), listed(&window)));
+            }
+        }
+        assert!(
+            names.len() >= 3,
+            "the main window, the sheet, the first run: {names:?}"
+        );
+        for (kind, name) in &names {
+            assert!(!name.is_empty(), "{kind} is listed by no name: {names:?}");
+            assert!(
+                !name.contains(super::super::APP_ID),
+                "{kind} is listed as {name}: {names:?}"
+            );
+        }
+        assert_eq!(
+            listed(first_run.upcast_ref()),
+            crate::copy::APP_NAME,
+            "the first run"
+        );
+        let sheet = names.iter().filter(|(kind, _)| kind == "AdwWindow").count();
+        assert!(
+            sheet >= 2,
+            "the sheet and the first run are both open: {names:?}"
+        );
+        for (kind, name) in names.iter().filter(|(kind, _)| kind == "AdwWindow") {
+            assert_eq!(name, crate::copy::APP_NAME, "{kind}");
+        }
+        first_run.close();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

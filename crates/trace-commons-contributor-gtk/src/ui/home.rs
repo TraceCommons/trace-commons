@@ -8,7 +8,7 @@
 //! the Balance card and its figure counts up (`BalanceArrivalFlourish`).
 use super::hero_art::{self, Ground, arrival, bars::Glance};
 use super::hero_card::{self, HeroCard};
-use super::{App, balance, private_inference, style::space};
+use super::{App, private_inference, style::space};
 use crate::home_cards::{self, Campaign, HomePrefs};
 use crate::{copy, model};
 use adw::prelude::*;
@@ -31,11 +31,85 @@ struct Flourish {
     count: RefCell<Option<glib::SourceId>>,
 }
 
+/// One of Home's stat tiles (`HomeStatTile`, #1146's `StatCard`): the
+/// whole tile is the button; its small uppercase caption over the figure,
+/// and a line under the figure when there is one. No icon.
+pub struct StatTile {
+    pub card: gtk::Button,
+    value: gtk::Label,
+    detail: gtk::Label,
+}
+
+impl StatTile {
+    fn new(title: &str) -> Self {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, TILE_GAP);
+        content.append(&caption(title));
+        let value = gtk::Label::builder().label("—").xalign(0.0).build();
+        value.add_css_class("tc-type-heading");
+        value.add_css_class("tc-home-tile-value");
+        content.append(&value);
+        let detail = detail_line();
+        content.append(&detail);
+        let card = gtk::Button::builder().child(&content).hexpand(true).build();
+        card.add_css_class("tc-insights-summary");
+        card.add_css_class("tc-home-tile");
+        Self {
+            card,
+            value,
+            detail,
+        }
+    }
+
+    fn set(&self, value: &str, detail: Option<&str>) {
+        self.value.set_text(value);
+        self.detail.set_text(detail.unwrap_or_default());
+        self.detail.set_visible(detail.is_some());
+    }
+
+    /// Writes over the figure, until the next read draws it again: Home
+    /// counts the balance up in it when NEAR AI credit arrives.
+    pub fn head_writer(&self) -> impl Fn(&str) + 'static {
+        let value = self.value.clone();
+        move |text| value.set_text(text)
+    }
+}
+
+/// The Not contributed tile (`HomeNotContributedCard`): its count with the
+/// size beside it, and the dollar line or estimate under them, when there
+/// is one, across two columns.
+struct NotContributed {
+    card: gtk::Button,
+    count: gtk::Label,
+    size: gtk::Label,
+    detail: gtk::Label,
+}
+
+/// What Home's tiles were last drawn from, each kept from its own read.
+#[derive(Default)]
+struct Facts {
+    entries: Vec<model::QueueEntry>,
+    settlement: Option<model::SettlementEstimate>,
+    credit: Option<crate::home::CreditSummary>,
+    balance: Option<model::NearAiBalance>,
+}
+
 pub struct HomeView {
     pub root: gtk::Box,
-    pub balance: balance::BalanceSection,
+    /// The NEAR AI balance tile, under Account beside the credit tiles.
+    pub balance: StatTile,
     waiting: gtk::Label,
     contributed: gtk::Label,
+    /// The Traces tiles' grid: three columns, as the Mac's.
+    traces: gtk::Grid,
+    not_contributed: NotContributed,
+    /// Credit earned and Credit pending (`HomeAccountTiles`).
+    credit_earned: StatTile,
+    credit_pending: StatTile,
+    /// Beside the Account heading while its figures wait on a sign-in:
+    /// "No data - Sign in".
+    account_sign_in: gtk::Box,
+    sign_in: gtk::Button,
+    facts: RefCell<Facts>,
     inference: gtk::Box,
     links: Vec<(gtk::Button, &'static str)>,
     prefs: RefCell<HomePrefs>,
@@ -81,26 +155,71 @@ impl HomeView {
         content.append(&inference);
 
         content.append(&heading(words.home_history.section_traces));
-        let tiles = gtk::FlowBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .min_children_per_line(1)
-            .max_children_per_line(2)
-            .column_spacing(space::M as u32)
-            .row_spacing(space::M as u32)
-            .homogeneous(true)
-            .build();
-        tiles.add_css_class("tc-insights-summary-grid");
-        let (waiting_button, waiting) = tile(words.waiting);
-        let (contributed_button, contributed) = tile(words.contributed);
-        tiles.insert(&waiting_button, -1);
-        tiles.insert(&contributed_button, -1);
-        links.push((waiting_button, "queue"));
-        links.push((contributed_button, "history"));
-        content.append(&tiles);
-        content.append(&heading(words.home_history.section_account));
-        let balance = balance::BalanceSection::new();
-        balance.use_flat_style();
-        content.append(&balance.root);
+        // Waiting, Contributed and, while something waits here, Not
+        // contributed: one row of three, as the Mac's grid; Not contributed
+        // takes a row of its own across two columns while it has a line to
+        // say.
+        let traces = tile_grid();
+        let waiting_tile = StatTile::new(words.waiting);
+        let contributed_tile = StatTile::new(words.contributed);
+        traces.attach(&waiting_tile.card, 0, 0, 1, 1);
+        traces.attach(&contributed_tile.card, 1, 0, 1, 1);
+        links.push((waiting_tile.card.clone(), "queue"));
+        links.push((contributed_tile.card.clone(), "history"));
+        let not_contributed = not_contributed_tile(words.home_history.uncontributed);
+        not_contributed.card.set_visible(false);
+        traces.attach(&not_contributed.card, 2, 0, 1, 1);
+        links.push((not_contributed.card.clone(), "queue"));
+        content.append(&traces);
+
+        // Account, with "No data - Sign in" beside it while its figures
+        // wait on a sign-in, over Credit earned (the account's total under
+        // it), Credit pending and the NEAR AI balance, each a way to
+        // Private AI.
+        let account = gtk::Box::new(gtk::Orientation::Horizontal, space::S);
+        let account_heading = heading(words.home_history.section_account);
+        account_heading.set_wrap(false);
+        account.append(&account_heading);
+        let account_sign_in = gtk::Box::new(gtk::Orientation::Horizontal, space::XS);
+        let no_data = gtk::Label::new(Some(words.home_history.account_no_data));
+        no_data.add_css_class("tc-home-tile-detail");
+        let dash = gtk::Label::new(Some("\u{2013}"));
+        dash.add_css_class("tc-home-tile-caption-ink");
+        dash.set_accessible_role(gtk::AccessibleRole::Presentation);
+        let managed = trace_commons_contributor::managed::copy::copy();
+        let sign_in = gtk::Button::with_label(
+            managed
+                .get("sign_in_near_ai")
+                .and_then(|word| word.as_str())
+                .unwrap_or_default(),
+        );
+        sign_in.add_css_class("flat");
+        sign_in.add_css_class("tc-home-link");
+        if let Some(name) = managed
+            .get("sign_in_near_ai_accessibility")
+            .and_then(|word| word.as_str())
+            .filter(|name| !name.is_empty())
+        {
+            sign_in.update_property(&[gtk::accessible::Property::Label(name)]);
+        }
+        account_sign_in.append(&no_data);
+        account_sign_in.append(&dash);
+        account_sign_in.append(&sign_in);
+        account_sign_in.set_valign(gtk::Align::Baseline);
+        account_sign_in.set_visible(false);
+        account.append(&account_sign_in);
+        content.append(&account);
+        let credit = tile_grid();
+        let credit_earned = StatTile::new(words.credit_received);
+        let credit_pending = StatTile::new(words.credit_pending_title);
+        let balance = StatTile::new(copy::BALANCE_TITLE);
+        credit.attach(&credit_earned.card, 0, 0, 1, 1);
+        credit.attach(&credit_pending.card, 1, 0, 1, 1);
+        credit.attach(&balance.card, 2, 0, 1, 1);
+        for tile in [&credit_earned, &credit_pending, &balance] {
+            links.push((tile.card.clone(), super::PRIVATE_INFERENCE_SCREEN));
+        }
+        content.append(&credit);
 
         // The NEAR AI campaign, under the tiles; the X closes it as it is
         // now, and it comes back when what it shows changes.
@@ -196,8 +315,15 @@ impl HomeView {
         let view = Self {
             root,
             balance,
-            waiting,
-            contributed,
+            waiting: waiting_tile.value.clone(),
+            contributed: contributed_tile.value.clone(),
+            traces,
+            not_contributed,
+            credit_earned,
+            credit_pending,
+            account_sign_in,
+            sign_in,
+            facts: RefCell::new(Facts::default()),
             inference: inference_status,
             links,
             prefs: RefCell::new(prefs),
@@ -225,6 +351,16 @@ impl HomeView {
                 }
             });
         }
+        // The Account heading's Sign in signs in to what is missing, as the
+        // Mac's does (`HomeFormat.accountSignInRoute`): the account session
+        // when the Credit tiles wait on one, else NEAR AI's sign-in, as the
+        // Private AI tab's balance row starts it.
+        let weak = Rc::downgrade(app);
+        self.sign_in.connect_clicked(move |_| {
+            if let Some(app) = weak.upgrade() {
+                app.home.start_sign_in(&app);
+            }
+        });
         let weak = Rc::downgrade(app);
         self.balance.card.connect_map(move |_| {
             if let Some(app) = weak.upgrade() {
@@ -293,12 +429,128 @@ impl HomeView {
     pub fn render_status(&self, status: Option<&model::Status>) {
         let counts = crate::home::Counts::from_answers(status, None);
         self.waiting.set_text(&crate::home::figure(counts.waiting));
+        // A failed status read draws no dollar line rather than an old one.
+        self.facts.borrow_mut().settlement = status.and_then(|s| s.settlement_estimate.clone());
+        self.draw_not_contributed();
     }
 
     pub fn render_rollup(&self, rollup: Option<&crate::home::Rollup>) {
         let counts = crate::home::Counts::from_answers(None, rollup);
         self.contributed
             .set_text(&crate::home::figure(counts.contributed));
+    }
+
+    /// The Not contributed tile from the queue: shown with its count and
+    /// size while anything waits here, gone otherwise.
+    pub fn render_uncontributed(&self, entries: &[model::QueueEntry]) {
+        self.facts.borrow_mut().entries = entries.to_vec();
+        self.draw_not_contributed();
+    }
+
+    /// A third tile beside Waiting and Contributed with nothing more to
+    /// say; with a line, a row of its own across two columns.
+    fn draw_not_contributed(&self) {
+        let waiting = {
+            let facts = self.facts.borrow();
+            crate::home::Uncontributed::of(&facts.entries, facts.settlement.as_ref())
+        };
+        let tile = &self.not_contributed;
+        tile.card.set_visible(waiting.count > 0);
+        tile.count.set_text(&waiting.count.to_string());
+        tile.size.set_text(&waiting.size().unwrap_or_default());
+        let detail = waiting.detail();
+        tile.detail.set_text(detail.as_deref().unwrap_or_default());
+        tile.detail.set_visible(detail.is_some());
+        let (column, row, width) = if detail.is_some() {
+            (0, 1, 2)
+        } else {
+            (2, 0, 1)
+        };
+        let placed = self.traces.query_child(&tile.card);
+        if placed != (column, row, width, 1) {
+            self.traces.remove(&tile.card);
+            self.traces.attach(&tile.card, column, row, width, 1);
+        }
+    }
+
+    /// Credit earned and Credit pending from the last rollup and the
+    /// commons' condition; a dash for what either has not said.
+    pub fn render_credit(&self, rollup: Option<&crate::home::Rollup>, condition: Option<&str>) {
+        let (earned, pending) = crate::home::credit_tiles(rollup, condition);
+        let total = self
+            .facts
+            .borrow()
+            .credit
+            .as_ref()
+            .and_then(crate::home::CreditSummary::account_total);
+        self.credit_earned.set(&earned, total.as_deref());
+        self.credit_pending.set(&pending, None);
+    }
+
+    /// The last `commons_credit_summary` read: the account's total under
+    /// Credit earned, and whether the Account heading asks for a sign-in.
+    /// A failed read is none, never the earlier answer.
+    pub fn render_credit_summary(&self, value: Option<&serde_json::Value>) {
+        self.facts.borrow_mut().credit =
+            value.and_then(|value| serde_json::from_value(value.clone()).ok());
+        let total = self
+            .facts
+            .borrow()
+            .credit
+            .as_ref()
+            .and_then(crate::home::CreditSummary::account_total);
+        self.credit_earned
+            .detail
+            .set_text(total.as_deref().unwrap_or_default());
+        self.credit_earned.detail.set_visible(total.is_some());
+        self.draw_account_sign_in();
+    }
+
+    /// The NEAR AI balance tile from a read; a dash for a read that did
+    /// not answer.
+    pub fn render_balance(&self, balance: Option<&model::NearAiBalance>) {
+        self.facts.borrow_mut().balance = balance.cloned();
+        let (value, detail) = crate::home::balance_tile(balance);
+        // A count under way writes the figure itself; it ends on the read.
+        if self.flourish.count.borrow().is_none() {
+            self.balance.set(&value, detail.as_deref());
+        } else {
+            self.balance
+                .detail
+                .set_text(detail.as_deref().unwrap_or_default());
+            self.balance.detail.set_visible(detail.is_some());
+        }
+        self.draw_account_sign_in();
+    }
+
+    /// The Account heading's Sign in, routed by the last credit read.
+    fn start_sign_in(&self, app: &Rc<App>) {
+        let route = crate::home::account_sign_in_route(self.facts.borrow().credit.as_ref());
+        match route {
+            crate::home::AccountSignInRoute::Account => {
+                self.sign_in.set_sensitive(false);
+                app.call(route.method(), serde_json::json!({}), |app, _| {
+                    app.home.sign_in.set_sensitive(true);
+                    app.refresh();
+                });
+            }
+            crate::home::AccountSignInRoute::NearAi => {
+                super::credential::act(app, copy::CredentialAction::Obtain);
+            }
+        }
+    }
+
+    /// The Account heading's Sign in waits while a sign-in is under way.
+    pub fn set_sign_in_sensitive(&self, sensitive: bool) {
+        self.sign_in.set_sensitive(sensitive);
+    }
+
+    fn draw_account_sign_in(&self) {
+        let facts = self.facts.borrow();
+        let needs =
+            crate::home::account_needs_sign_in(facts.credit.as_ref(), facts.balance.as_ref());
+        let worded = !self.sign_in.label().unwrap_or_default().is_empty();
+        self.account_sign_in.set_visible(needs && worded);
     }
 
     pub fn render_inference(&self, settings: Option<&model::Settings>) {
@@ -367,6 +619,13 @@ impl HomeView {
         self.prefs.borrow_mut().shows_promotions = on;
         self.prefs.borrow().save();
         self.show_campaign();
+    }
+
+    /// Settings' credit-arrival switch, kept with Home's other choices so
+    /// a later save of those never undoes it.
+    pub fn set_animates_credit_icon(&self, on: bool) {
+        self.prefs.borrow_mut().animates_credit_icon = on;
+        self.prefs.borrow().save();
     }
 
     /// The campaign's X: closed as it is now.
@@ -451,10 +710,7 @@ impl HomeView {
 
     fn restore_head(&self) {
         if let Some(latest) = self.latest.borrow().as_ref() {
-            let text = balance::head_text(latest);
-            if !text.is_empty() {
-                (self.balance.head_writer())(&text);
-            }
+            (self.balance.head_writer())(&crate::home::balance_tile(Some(latest)).0);
         }
     }
 
@@ -472,6 +728,9 @@ impl HomeView {
             .overlay
             .frame_clock()
             .map_or_else(glib::monotonic_time, |clock| clock.frame_time());
+        // Minimised, the coins stand still for the hold, as under reduced
+        // motion: nothing ticks for a window no one can see.
+        let still = still || super::glass_motion::window_hidden(&self.burst);
         flourish.start.set(Some(start));
         flourish.still.set(still);
         self.burst.set_visible(true);
@@ -526,11 +785,12 @@ impl HomeView {
                         flourish.count.borrow_mut().take();
                     }
                     // A read that came in while counting is what stays.
-                    if let Some(text) = latest
-                        .upgrade()
-                        .and_then(|latest| latest.borrow().as_ref().map(balance::head_text))
-                        .filter(|text| !text.is_empty())
-                    {
+                    if let Some(text) = latest.upgrade().and_then(|latest| {
+                        latest
+                            .borrow()
+                            .as_ref()
+                            .map(|latest| crate::home::balance_tile(Some(latest)).0)
+                    }) {
                         section(&text);
                     }
                     return glib::ControlFlow::Break;
@@ -540,10 +800,7 @@ impl HomeView {
                     remaining_nanos: Some(*step),
                     ..template.clone()
                 };
-                let line = crate::balance::view(&reading).remaining_line;
-                if !line.is_empty() {
-                    section(&line);
-                }
+                section(&crate::home::balance_tile(Some(&reading)).0);
                 glib::ControlFlow::Continue
             },
         );
@@ -637,20 +894,77 @@ pub fn refresh(app: &Rc<App>) {
     });
 }
 
-fn tile(title: &str) -> (gtk::Button, gtk::Label) {
-    let content = gtk::Box::new(gtk::Orientation::Vertical, space::S);
+/// The space between a tile's lines, and between tiles (the Mac's s3).
+const TILE_GAP: i32 = super::style::brand_tokens::glass::space::S3;
+
+/// A grid of equal tiles, three to a row as the Mac's.
+fn tile_grid() -> gtk::Grid {
+    let grid = gtk::Grid::builder()
+        .column_homogeneous(true)
+        .column_spacing(TILE_GAP)
+        .row_spacing(TILE_GAP)
+        .build();
+    grid.add_css_class("tc-insights-summary-grid");
+    grid
+}
+
+/// A tile's caption: the eyebrow type, small, uppercase and letter-spaced
+/// (`GlassTokens.TypeScale.eyebrow`), in the tertiary ink. It wraps at a
+/// space, never inside a word, so three tiles fit the narrow pane.
+fn caption(title: &str) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(title)
         .xalign(0.0)
         .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::Word)
         .build();
-    let value = gtk::Label::builder().label("—").xalign(0.0).build();
-    value.add_css_class("title-3");
-    content.append(&label);
-    content.append(&value);
-    let button = gtk::Button::builder().child(&content).hexpand(true).build();
-    button.add_css_class("tc-insights-summary");
-    (button, value)
+    label.add_css_class("tc-type-eyebrow");
+    label.add_css_class("tc-home-tile-caption-type");
+    label.add_css_class("tc-home-tile-caption");
+    label
+}
+
+/// A line under a tile's figure, in the secondary ink; hidden until set.
+fn detail_line() -> gtk::Label {
+    let label = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .visible(false)
+        .build();
+    label.add_css_class("tc-type-caption");
+    label.add_css_class("tc-home-tile-detail");
+    label
+}
+
+/// The Not contributed tile: the count with the size beside it in the
+/// caption type, and the line under them.
+fn not_contributed_tile(title: &str) -> NotContributed {
+    let content = gtk::Box::new(gtk::Orientation::Vertical, TILE_GAP);
+    content.append(&caption(title));
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, TILE_GAP);
+    let count = gtk::Label::builder().label("—").xalign(0.0).build();
+    count.add_css_class("tc-type-heading");
+    count.add_css_class("tc-home-tile-value");
+    let size = gtk::Label::builder().xalign(0.0).build();
+    size.add_css_class("tc-type-caption");
+    size.add_css_class("tc-home-tile-detail");
+    size.set_valign(gtk::Align::Baseline);
+    count.set_valign(gtk::Align::Baseline);
+    line.append(&count);
+    line.append(&size);
+    content.append(&line);
+    let detail = detail_line();
+    content.append(&detail);
+    let card = gtk::Button::builder().child(&content).hexpand(true).build();
+    card.add_css_class("tc-insights-summary");
+    card.add_css_class("tc-home-tile");
+    NotContributed {
+        card,
+        count,
+        size,
+        detail,
+    }
 }
 
 fn heading(title: &str) -> gtk::Label {
@@ -666,6 +980,395 @@ fn heading(title: &str) -> gtk::Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Mac's tiles as the Mac lays them out, drawn in the main pane at
+    /// its 440 px with real-length figures: Waiting, Contributed and Not
+    /// contributed in one row of three; with a line to say, Not
+    /// contributed takes a row of its own across two columns; Credit
+    /// earned (the account's total under it), Credit pending and the NEAR
+    /// AI balance in one row under Account, which says "No data - Sign in"
+    /// while the balance waits on a sign-in. The pane never asks for more
+    /// than 440, no caption or figure is cut, and no tile has an icon. On
+    /// the branch before this fix the tiles were two to a row at 440, the
+    /// balance its own section.
+    ///
+    /// libadwaita is started first, as the app starts it: a hero card's
+    /// drawing reads the style manager, and creating it there mid-frame
+    /// restyled the frame being drawn (the Gtk-CRITICAL under weston, a
+    /// SIGSEGV in a live session).
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_home_draws_the_macs_tiles() {
+        adw::init().unwrap();
+        // The app's own sheet: the tiles' floors and paddings are in it.
+        crate::ui::style::install();
+        let words = monitor_screens_copy();
+        let view = HomeView::new(false);
+        let window = gtk::Window::builder()
+            .default_width(PANE)
+            .default_height(900)
+            .child(&view.root)
+            .build();
+        window.present();
+        let settle = || {
+            let context = glib::MainContext::default();
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+            }
+        };
+        let status: model::Status = serde_json::from_value(serde_json::json!({
+            "decisions_owed": 1234
+        }))
+        .unwrap();
+        view.render_status(Some(&status));
+        let rollup: crate::home::Rollup = serde_json::from_value(serde_json::json!({
+            "all_time": {"contributed": 98765},
+            "credit_final": 12345.6,
+            "credit_pending": 2.5
+        }))
+        .unwrap();
+        view.render_rollup(Some(&rollup));
+        view.render_credit_summary(Some(&serde_json::json!({
+            "points_state": "known",
+            "commons_points_lifetime_earned": 1234567
+        })));
+        view.render_credit(Some(&rollup), Some("Paid weekly"));
+        let signed_out = model::NearAiBalance {
+            state: "no_session".into(),
+            ..Default::default()
+        };
+        view.render_balance(Some(&signed_out));
+        let entry = |bytes| model::QueueEntry {
+            state: "pending".into(),
+            size_bytes: bytes,
+            ..model::QueueEntry::default()
+        };
+        view.render_uncontributed(&[entry(98_000_000), entry(50_000_000), entry(400)]);
+        settle();
+
+        let at = |w: &gtk::Widget| w.compute_bounds(&window).expect("laid out");
+        let fits = |what: &str| {
+            assert_eq!(window.width(), PANE, "{what}: the pane grew");
+            let (least, _, _, _) = view.root.measure(gtk::Orientation::Horizontal, -1);
+            assert!(least <= PANE, "{what}: Home needs {least}");
+        };
+        let one_row = |what: &str, tiles: &[&gtk::Widget]| {
+            let first = at(tiles[0]);
+            for tile in tiles {
+                let bounds = at(tile);
+                assert_eq!(bounds.y(), first.y(), "{what}: {tiles:?} share a row");
+                // Equal columns, to the pixel the grid hands the remainder.
+                assert!(
+                    (bounds.width() - first.width()).abs() <= 1.0,
+                    "{what}: columns {} and {}",
+                    bounds.width(),
+                    first.width()
+                );
+                assert!(
+                    bounds.x() + bounds.width() <= PANE as f32,
+                    "{what}: inside the pane"
+                );
+                // Every line in it at least as wide as it needs: nothing cut.
+                let mut lines = Vec::new();
+                descendants(tile, &mut lines);
+                for line in lines.iter().filter_map(|w| w.downcast_ref::<gtk::Label>()) {
+                    if line.is_visible() && !line.text().is_empty() {
+                        let (least, _, _, _) = line.measure(gtk::Orientation::Horizontal, -1);
+                        assert!(
+                            line.width() >= least,
+                            "{what}: {:?} drawn {} of the {least} it needs",
+                            line.text(),
+                            line.width()
+                        );
+                    }
+                }
+                assert!(
+                    !lines.iter().any(|w| w.is::<gtk::Image>()),
+                    "{what}: an icon"
+                );
+            }
+        };
+        fits("three tiles");
+        let traces = [
+            view.waiting.ancestor(gtk::Button::static_type()).unwrap(),
+            view.contributed
+                .ancestor(gtk::Button::static_type())
+                .unwrap(),
+            view.not_contributed.card.clone().upcast(),
+        ];
+        assert!(
+            view.not_contributed.card.is_mapped(),
+            "Not contributed is drawn"
+        );
+        one_row("Traces", &traces.iter().collect::<Vec<_>>());
+        assert_eq!(view.waiting.text(), "1234");
+        // The captions are drawn uppercase: as wide as the core's word in
+        // capitals, not as the word itself, in the same type.
+        let caption = traces[0]
+            .first_child()
+            .and_then(|content| content.first_child())
+            .and_downcast::<gtk::Label>()
+            .expect("Waiting's caption");
+        assert_eq!(caption.text(), words.waiting, "the core's word, untouched");
+        let twin = |text: &str| {
+            let label = gtk::Label::new(Some(text));
+            label.add_css_class("tc-type-eyebrow");
+            label.add_css_class("tc-home-tile-caption-type");
+            label.set_halign(gtk::Align::Start);
+            view.root.append(&label);
+            label
+        };
+        let (upper, plain) = (twin(&words.waiting.to_uppercase()), twin(words.waiting));
+        settle();
+        let natural = |label: &gtk::Label| label.measure(gtk::Orientation::Horizontal, -1).1;
+        assert!(
+            (natural(&caption) - natural(&upper)).abs() <= 1,
+            "the caption is {} wide, its word in capitals {}",
+            natural(&caption),
+            natural(&upper)
+        );
+        assert_ne!(natural(&upper), natural(&plain));
+        view.root.remove(&upper);
+        view.root.remove(&plain);
+        assert_eq!(view.not_contributed.count.text(), "3");
+        assert_eq!(
+            view.not_contributed.size.text(),
+            words
+                .home_history
+                .uncontributed_size
+                .replace("{size}", "148 MB")
+        );
+        let account = [
+            view.credit_earned.card.clone().upcast::<gtk::Widget>(),
+            view.credit_pending.card.clone().upcast(),
+            view.balance.card.clone().upcast(),
+        ];
+        one_row("Account", &account.iter().collect::<Vec<_>>());
+        assert!(at(&account[0]).y() > at(&traces[0]).y() + at(&traces[0]).height());
+        assert_eq!(view.credit_earned.value.text(), "12,345.6");
+        assert_eq!(
+            view.credit_earned.detail.text(),
+            words
+                .home_history
+                .credit_account_total
+                .replace("{amount}", "1,234,567")
+        );
+        assert!(
+            view.credit_earned.detail.is_mapped(),
+            "the account's total is drawn"
+        );
+        assert_eq!(view.credit_pending.value.text(), "2.5");
+        assert_eq!(view.balance.value.text(), "—");
+        assert!(
+            view.account_sign_in.is_mapped(),
+            "No data - Sign in, signed out"
+        );
+
+        // A read balance: its figure, and no sign-in beside Account.
+        view.render_balance(Some(&model::NearAiBalance {
+            state: "known".into(),
+            scale: Some(9),
+            remaining_nanos: Some(1_234_560_000_000),
+            ..Default::default()
+        }));
+        settle();
+        assert_eq!(view.balance.value.text(), "$1234.56");
+        assert!(!view.account_sign_in.is_mapped());
+        one_row("Account, read", &account.iter().collect::<Vec<_>>());
+
+        // An estimate to say: Not contributed on a row of its own, across
+        // two columns.
+        let estimate = |low, high| model::QueueEntry {
+            credit_estimate: Some(model::CreditEstimate {
+                low,
+                high,
+                drawn: Some(true),
+            }),
+            ..entry(1_000_000)
+        };
+        view.render_uncontributed(&[estimate(1.25, 4.0), estimate(0.5, 2.0)]);
+        settle();
+        fits("Not contributed across two columns");
+        let wide = at(view.not_contributed.card.upcast_ref());
+        let first = at(&traces[0]);
+        assert!(wide.y() > first.y(), "a row of its own");
+        assert_eq!(wide.x(), first.x());
+        assert!(
+            (wide.width() - (2.0 * first.width() + TILE_GAP as f32)).abs() <= 2.0,
+            "two columns: {} against {}",
+            wide.width(),
+            first.width()
+        );
+        assert!(view.not_contributed.detail.is_mapped(), "its line is drawn");
+        one_row(
+            "Waiting and Contributed",
+            &traces[..2].iter().collect::<Vec<_>>(),
+        );
+
+        view.render_uncontributed(&[]);
+        settle();
+        assert!(!view.not_contributed.card.is_mapped());
+        window.close();
+    }
+
+    /// The Account heading's Sign in, pressed in the real App (no daemon:
+    /// every call is recorded and stays unanswered), signs in to what is
+    /// missing as the Mac's does: `account_sign_in` while the Credit tiles
+    /// wait on an account session, NEAR AI's sign-in otherwise. Before this
+    /// fix it always started NEAR AI's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_account_sign_in_calls_what_is_missing() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.HomeSignInTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-home-sign-in-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        let settle = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+            }
+        };
+        let calls = || {
+            let mut seen = Vec::new();
+            while let Ok((_, job)) = jobs.try_recv() {
+                if let crate::worker::Job::Call { method, .. } = job {
+                    seen.push(method);
+                }
+            }
+            seen
+        };
+        settle();
+        calls();
+
+        app.home.render_credit_summary(Some(&serde_json::json!({
+            "points_state": "unknown",
+            "points_unknown_reason": "account-session-required"
+        })));
+        app.home.sign_in.set_sensitive(true);
+        app.home.sign_in.emit_clicked();
+        settle();
+        let pressed = calls();
+        assert!(
+            pressed.iter().any(|method| method == "account_sign_in"),
+            "the account session is signed in to: {pressed:?}"
+        );
+        assert!(
+            !pressed
+                .iter()
+                .any(|method| method == "near_ai_credential_start"),
+            "NEAR AI is not what the credit waits on: {pressed:?}"
+        );
+
+        app.home.render_credit_summary(Some(&serde_json::json!({
+            "points_state": "known",
+            "commons_points_lifetime_earned": 1
+        })));
+        app.home.render_balance(Some(&model::NearAiBalance {
+            state: "no_session".into(),
+            ..Default::default()
+        }));
+        app.home.sign_in.set_sensitive(true);
+        app.home.sign_in.emit_clicked();
+        settle();
+        let pressed = calls();
+        assert!(
+            pressed
+                .iter()
+                .any(|method| method == "near_ai_credential_start"),
+            "NEAR AI's sign-in starts: {pressed:?}"
+        );
+        assert!(
+            !pressed.iter().any(|method| method == "account_sign_in"),
+            "{pressed:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Home's tile captions are drawn at the Mac's eyebrow size, 10, on
+    /// any desktop font: GNOME's 11 pt base set them at 11.3 px and KDE's
+    /// 10 pt at 10.3, and "NOT CONTRIBUTED" and "NEAR AI BALANCE" wrapped
+    /// to two lines in a third of the 440 pane where the Mac sets one.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_tile_captions_are_the_macs_size_on_a_larger_desktop_font() {
+        adw::init().unwrap();
+        // GNOME's own base size.
+        gtk::Settings::default()
+            .expect("settings")
+            .set_gtk_font_name(Some("Sans 11"));
+        crate::ui::style::install();
+        let view = HomeView::new(false);
+        let window = gtk::Window::builder()
+            .default_width(PANE)
+            .default_height(900)
+            .child(&view.root)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+        }
+        let mut all = Vec::new();
+        descendants(view.root.upcast_ref(), &mut all);
+        let captions: Vec<gtk::Label> = all
+            .into_iter()
+            .filter(|w| w.has_css_class("tc-home-tile-caption"))
+            .filter_map(|w| w.downcast::<gtk::Label>().ok())
+            .collect();
+        assert!(
+            captions.len() >= 5,
+            "Home's tile captions: {}",
+            captions.len()
+        );
+        for caption in &captions {
+            let font = caption.pango_context().font_description().expect("a font");
+            let size = font.size() as f64 / gtk::pango::SCALE as f64;
+            // A point size is at GTK's 96 dpi.
+            let px = if font.is_size_absolute() {
+                size
+            } else {
+                size * 96.0 / 72.0
+            };
+            assert!(
+                (px - 10.0).abs() < 0.05,
+                "{:?} drawn at {px} px, not the Mac's 10",
+                caption.text()
+            );
+        }
+        window.close();
+    }
+
+    /// The main pane's width, the Monitor's.
+    const PANE: i32 = crate::ui::monitor::pane_layout::MAIN_WIDTH as i32;
+
+    fn descendants(root: &gtk::Widget, found: &mut Vec<gtk::Widget>) {
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            found.push(widget.clone());
+            descendants(&widget, found);
+            child = widget.next_sibling();
+        }
+    }
 
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
@@ -726,7 +1429,9 @@ mod tests {
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn the_heroes_show_and_close_as_the_macs_do() {
-        gtk::init().unwrap();
+        // libadwaita first, as the app starts it: the card's drawing
+        // reads the style manager, which must not be created mid-frame.
+        adw::init().unwrap();
         let state = std::env::temp_dir().join(format!("tc-home-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&state);
         crate::home_cards::set_test_file(Some(state.clone()));
@@ -747,6 +1452,13 @@ mod tests {
         assert_eq!(fresh.campaign_shown(), Some(false));
         fresh.set_promotions(true);
         assert_eq!(fresh.campaign_shown(), Some(true));
+        // The credit-arrival switch is kept with Home's choices: a later
+        // save of those never turns it back on.
+        fresh.set_animates_credit_icon(false);
+        fresh.set_promotions(true);
+        assert!(!crate::home_cards::HomePrefs::load().animates_credit_icon);
+        fresh.set_animates_credit_icon(true);
+        assert!(crate::home_cards::HomePrefs::load().animates_credit_icon);
 
         // Missions: a dash until the inbox answers, then its line.
         let (missions, line) = fresh.missions.as_ref().unwrap();

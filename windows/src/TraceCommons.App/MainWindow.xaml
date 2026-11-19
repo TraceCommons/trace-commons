@@ -967,6 +967,14 @@
                                 Style="{StaticResource TcSecondaryButtonStyle}"
                                 Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}"
                                 Click="OnShowMissionDrafts" />
+                        <!-- W23: the commons catalogue's way in, shown only
+                             while missions are on and the catalogue was read
+                             (HomeViews.swift:274-277); set from code. -->
+                        <Button x:Name="HomeOpenMissionCatalogue"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Visibility="Collapsed"
+                                AutomationProperties.AutomationId="HomeOpenMissionCatalogue"
+                                Click="OnShowMissions" />
                     </StackPanel>
 
                 <!--
@@ -1000,6 +1008,10 @@
 
                 <ContentPresenter x:Name="MissionDraftsPane"
                                   Visibility="{x:Bind ViewModel.ShowingMissionDrafts, Mode=OneWay}" />
+
+                <!-- W23: the commons catalogue, its own Home page (MainWindow.Missions.cs). -->
+                <ContentPresenter x:Name="MissionsPane"
+                                  Visibility="{x:Bind ViewModel.ShowingMissions, Mode=OneWay}" />
 
                 <!-- Header, queue, recovery bar, decision notice, caveat, week
                      band, progress. -->

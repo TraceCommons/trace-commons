@@ -287,22 +287,65 @@ pub fn accent(scheme: Scheme) -> &'static str {
 
 /// Draws `strip` into a square `px` pixels across.
 pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
-    let unit = px / HEIGHT;
-    // The figure's cell: one point, snapped to whole pixels so the face is
-    // crisp at every size the host asks for.
-    let cell_px = unit.round().max(1.0);
-    let cell = cell_px / unit;
-    let slot = slot(strip, cell);
-    let ink = mark::ink(scheme);
+    draw_at(cr, strip, scheme, px, None);
+}
 
+/// [`draw`], `burst` seconds into a credit arrival's celebration
+/// (`GlassMenuBarStrip.creditBurst`), or at rest for `None`.
+pub fn draw_at(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64, burst: Option<f64>) {
+    draw_mark(cr, scheme, px, burst);
+    draw_slot(cr, strip, scheme, px);
+}
+
+/// `t` when it falls inside a celebration, the only time the mark moves.
+fn celebrating(burst: Option<f64>) -> Option<f64> {
+    burst.filter(|t| (0.0..credit::DURATION_SECONDS).contains(t))
+}
+
+/// The mark alone, at rest or `burst` seconds into a celebration: the one
+/// part of the strip that moves.
+fn draw_mark(cr: &cairo::Context, scheme: Scheme, px: f64, burst: Option<f64>) {
+    let unit = px / HEIGHT;
+    let ink = mark::ink(scheme);
     let _ = cr.save();
     cr.scale(unit, unit);
     let inset = (HEIGHT - MARK_SIZE) / 2.0;
-    mark::set_source(cr, ink);
-    mark::fill_n(cr, (inset, inset), MARK_SIZE);
+    match celebrating(burst) {
+        // The Mac's strip without its graph is the mark's own 14-point
+        // canvas; here that is the mark's column of the square.
+        Some(t) => {
+            let _ = cr.save();
+            cr.translate(inset, 0.0);
+            credit::draw(cr, t, MARK_SIZE, HEIGHT, MARK_SIZE, ink);
+            let _ = cr.restore();
+        }
+        None => {
+            mark::set_source(cr, ink);
+            mark::fill_n(cr, (inset, inset), MARK_SIZE);
+        }
+    }
+    let _ = cr.restore();
+}
 
-    // Clear the mark under the slot, with the gap to spare.
+/// The slot over the mark: the mark cleared under it with the gap to
+/// spare, then the badge or ring. It does not move with the mark.
+fn draw_slot(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
     cr.set_operator(cairo::Operator::DestOut);
+    cut_slot(cr, strip, px);
+    cr.set_operator(cairo::Operator::Over);
+    draw_slot_figure(cr, strip, scheme, px);
+}
+
+/// Fills where the mark is cleared under the slot, in whatever operator
+/// `cr` holds.
+fn cut_slot(cr: &cairo::Context, strip: &Strip, px: f64) {
+    let unit = px / HEIGHT;
+    let cell_px = unit.round().max(1.0);
+    let cell = cell_px / unit;
+    let slot = slot(strip, cell);
+    let _ = cr.save();
+    cr.scale(unit, unit);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
     if let Some((x, y, w, h)) = slot.badge {
         // The gap past the badge, and past the halo's outer edge while one
         // rings it: the Mac's `markOnlyGap + haloReach`.
@@ -324,8 +367,21 @@ pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
         );
         let _ = cr.fill();
     }
-    cr.set_operator(cairo::Operator::Over);
+    let _ = cr.restore();
+}
 
+/// The badge with its figure cut out, its halo, or the ring: what the
+/// slot draws on the cleared ground.
+fn draw_slot_figure(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
+    let unit = px / HEIGHT;
+    // The figure's cell: one point, snapped to whole pixels so the face is
+    // crisp at every size the host asks for.
+    let cell_px = unit.round().max(1.0);
+    let cell = cell_px / unit;
+    let slot = slot(strip, cell);
+    let ink = mark::ink(scheme);
+    let _ = cr.save();
+    cr.scale(unit, unit);
     if let Some((x, y, w, h)) = slot.badge {
         mark::set_source(cr, ink);
         capsule(cr, x, y, w, h);
@@ -377,10 +433,28 @@ pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
 /// `strip` as one `StatusNotifierItem` pixmap `px` pixels square: ARGB32
 /// in network byte order, not premultiplied, as the protocol carries it.
 pub fn pixmap(strip: &Strip, scheme: Scheme, px: i32) -> Option<(i32, i32, Vec<u8>)> {
+    pixmap_at(strip, scheme, px, None)
+}
+
+/// [`pixmap`], `burst` seconds into a credit arrival's celebration.
+pub fn pixmap_at(
+    strip: &Strip,
+    scheme: Scheme,
+    px: i32,
+    burst: Option<f64>,
+) -> Option<(i32, i32, Vec<u8>)> {
     let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
     {
         let cr = cairo::Context::new(&surface).ok()?;
-        draw(&cr, strip, scheme, f64::from(px));
+        match celebrating(burst) {
+            // A celebration's frame: only the mark is drawn anew; the slot
+            // over it comes from the layers drawn once for this strip.
+            Some(_) => {
+                draw_mark(&cr, scheme, f64::from(px), burst);
+                base::compose(&cr, strip, scheme, px)?;
+            }
+            None => draw_at(&cr, strip, scheme, f64::from(px), None),
+        }
     }
     surface.flush();
     let stride = surface.stride() as usize;
@@ -394,6 +468,75 @@ pub fn pixmap(strip: &Strip, scheme: Scheme, px: i32) -> Option<(i32, i32, Vec<u
         }
     }
     Some((px, px, out))
+}
+
+/// The strip's parts a celebration does not move, drawn once per strip,
+/// scheme and size and kept on this thread: the 41 frames of a burst then
+/// draw only the mark.
+mod base {
+    use std::cell::RefCell;
+
+    use gtk::cairo;
+
+    use super::{Scheme, Strip};
+
+    /// Where the mark is cleared (alpha is how much), and what the slot
+    /// draws on the cleared ground.
+    struct Layers {
+        px: i32,
+        cut: cairo::ImageSurface,
+        figure: cairo::ImageSurface,
+    }
+
+    thread_local! {
+        static KEPT: RefCell<Option<(Strip, Scheme, Vec<Layers>)>> = const { RefCell::new(None) };
+        static DRAWN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// How many times the layers have been drawn on this thread.
+    #[cfg(test)]
+    pub fn drawn() -> usize {
+        DRAWN.with(std::cell::Cell::get)
+    }
+
+    fn layers(strip: &Strip, scheme: Scheme, px: i32) -> Option<Layers> {
+        let size = f64::from(px);
+        let cut = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+        {
+            let cr = cairo::Context::new(&cut).ok()?;
+            super::cut_slot(&cr, strip, size);
+        }
+        let figure = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+        {
+            let cr = cairo::Context::new(&figure).ok()?;
+            super::draw_slot_figure(&cr, strip, scheme, size);
+        }
+        DRAWN.with(|n| n.set(n.get() + 1));
+        Some(Layers { px, cut, figure })
+    }
+
+    /// Lays the slot over the mark `cr` has drawn: clears the mark under
+    /// it, then draws the badge or ring.
+    pub fn compose(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: i32) -> Option<()> {
+        KEPT.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            if !matches!(&*kept, Some((s, sc, _)) if s == strip && *sc == scheme) {
+                *kept = Some((*strip, scheme, Vec::new()));
+            }
+            let (_, _, all) = kept.as_mut()?;
+            if !all.iter().any(|layers| layers.px == px) {
+                all.push(layers(strip, scheme, px)?);
+            }
+            let layers = all.iter().find(|layers| layers.px == px)?;
+            cr.set_operator(cairo::Operator::DestOut);
+            cr.set_source_surface(&layers.cut, 0.0, 0.0).ok()?;
+            cr.paint().ok()?;
+            cr.set_operator(cairo::Operator::Over);
+            cr.set_source_surface(&layers.figure, 0.0, 0.0).ok()?;
+            cr.paint().ok()?;
+            Some(())
+        })
+    }
 }
 
 /// Cairo's premultiplied ARGB word as a straight-alpha one.
@@ -411,10 +554,153 @@ fn unpremultiply(word: u32) -> u32 {
 
 /// Every size the host may pick from.
 pub fn pixmaps(strip: &Strip, scheme: Scheme) -> Vec<(i32, i32, Vec<u8>)> {
+    pixmaps_at(strip, scheme, None)
+}
+
+/// [`pixmaps`], `burst` seconds into a credit arrival's celebration.
+pub fn pixmaps_at(strip: &Strip, scheme: Scheme, burst: Option<f64>) -> Vec<(i32, i32, Vec<u8>)> {
     PIXMAP_SIZES
         .iter()
-        .filter_map(|px| pixmap(strip, scheme, *px))
+        .filter_map(|px| pixmap_at(strip, scheme, *px, burst))
         .collect()
+}
+
+/// The credit arrival's gleam, hop and mini coins on the mark
+/// (`GlassMenuBarStrip` "Credit arrival burst", #2197).
+pub mod credit {
+    use std::f64::consts::{PI, TAU};
+
+    use gtk::cairo;
+
+    use crate::ui::hero_art::Rgb;
+    use crate::ui::hero_art::coins::{
+        Coin, DURATION, FLASH_DURATION, GOLD, GOLD_LIGHT, SPARK, draw_coin, opacity,
+    };
+    use crate::ui::mark;
+
+    pub const COIN_COUNT: usize = 10;
+    pub const DRAG: f64 = 3.8;
+    pub const GRAVITY: f64 = 10.0;
+    pub const HOP_DURATION: f64 = 0.35;
+    pub const HOP_PEAK: f64 = 2.0;
+    /// `GlassCoinBurst.duration`: past it the strip is at rest.
+    pub const DURATION_SECONDS: f64 = DURATION;
+
+    /// `stripCoins`: fanned mostly rightward across the strip
+    /// (-0.44 pi .. +0.44 pi), a little jitter each, on the burst's noise.
+    pub fn coins() -> Vec<Coin> {
+        use crate::ui::hero_art::coins::noise;
+        (0..COIN_COUNT)
+            .map(|index| {
+                let slot = index as f64 / (COIN_COUNT - 1).max(1) as f64 - 0.5;
+                Coin {
+                    angle: slot * 0.88 * PI + (noise(index, 21.0) - 0.5) * 0.14,
+                    speed: 44.0 + noise(index, 22.0) * 58.0,
+                    diameter: 2.4 + noise(index, 23.0) * 1.2,
+                    spin: 1.8 + noise(index, 24.0) * 2.0,
+                    phase: noise(index, 25.0),
+                    tilt: (noise(index, 26.0) - 0.5) * 1.0,
+                    delay: noise(index, 27.0) * 0.08,
+                }
+            })
+            .collect()
+    }
+
+    /// `creditGleam(at:)`: how strongly the mark gleams gold.
+    pub fn gleam(t: f64) -> f64 {
+        if !(0.0..DURATION).contains(&t) {
+            return 0.0;
+        }
+        let (rise, hold_until) = (0.15, 0.7);
+        if t < rise {
+            return t / rise;
+        }
+        if t < hold_until {
+            return 1.0;
+        }
+        (1.0 - (t - hold_until) / (DURATION - hold_until)).max(0.0)
+    }
+
+    /// `markHop(at:)`: the mark's rise, negative upward; none at the
+    /// reduced-motion moment (0.45 s).
+    pub fn hop(t: f64) -> f64 {
+        if t <= 0.0 || t >= HOP_DURATION {
+            return 0.0;
+        }
+        -HOP_PEAK * (PI * t / HOP_DURATION).sin()
+    }
+
+    /// `stripCoinOffset(_:at:)`: a coin's place from the mark's centre.
+    pub fn offset(coin: &Coin, t: f64) -> (f64, f64) {
+        let flown = (t - coin.delay).max(0.0);
+        let reach = coin.speed * (1.0 - (-DRAG * flown).exp()) / DRAG;
+        let fall = 0.5 * GRAVITY * flown * flown;
+        (
+            coin.angle.cos() * reach,
+            coin.angle.sin() * reach * 0.45 + fall,
+        )
+    }
+
+    /// The mark's canvas `t` seconds in, `width` by `height` points with
+    /// the mark at `(0, (height - mark) / 2)`, drawn as the Mac's Canvas
+    /// draws it: the flash, the mark in `ink` lifted by the hop, the gold
+    /// over it, then the coins and their sparks. Nothing leaves the canvas.
+    pub fn draw(cr: &cairo::Context, t: f64, width: f64, height: f64, mark: f64, ink: &str) {
+        let _ = cr.save();
+        cr.rectangle(0.0, 0.0, width, height);
+        cr.clip();
+        let centre = (mark / 2.0, height / 2.0);
+        if t < FLASH_DURATION {
+            let f = t / FLASH_DURATION;
+            let left = 1.0 - f;
+            let radius = (height / 2.0) * (0.45 + 0.55 * f);
+            let glow =
+                cairo::RadialGradient::new(centre.0, centre.1, 0.0, centre.0, centre.1, radius);
+            let (light, gold) = (Rgb::hex(GOLD_LIGHT), Rgb::hex(GOLD));
+            glow.add_color_stop_rgba(0.0, light.0, light.1, light.2, 0.85 * left);
+            glow.add_color_stop_rgba(0.5, gold.0, gold.1, gold.2, 0.35 * left);
+            glow.add_color_stop_rgba(1.0, gold.0, gold.1, gold.2, 0.0);
+            let _ = cr.set_source(&glow);
+            cr.arc(centre.0, centre.1, radius, 0.0, TAU);
+            let _ = cr.fill();
+        }
+        let origin = (0.0, (height - mark) / 2.0 + hop(t));
+        mark::set_source(cr, ink);
+        mark::fill_n(cr, origin, mark);
+        let shine = gleam(t);
+        if shine > 0.0 {
+            Rgb::hex(GOLD).source(cr, shine);
+            mark::fill_n(cr, origin, mark);
+        }
+        if t < 0.3 {
+            Rgb::hex(GOLD_LIGHT).source(cr, (1.0 - t / 0.3) * 0.55);
+            mark::fill_n(cr, origin, mark);
+        }
+        cr.push_group();
+        let spark = Rgb::hex(SPARK);
+        for coin in coins() {
+            let flown = t - coin.delay;
+            if flown <= 0.0 {
+                continue;
+            }
+            let (dx, dy) = offset(&coin, t);
+            let point = (centre.0 + dx, centre.1 + dy);
+            if point.0 < 1.0 || point.0 > width - 1.0 || point.1 < 1.0 || point.1 > height - 1.0 {
+                continue;
+            }
+            if flown < 0.45 {
+                let (bx, by) = offset(&coin, (t - 0.04).max(0.0));
+                let dot = coin.diameter * 0.38;
+                spark.source(cr, 0.75 * (1.0 - flown / 0.45));
+                cr.arc(centre.0 + bx, centre.1 + by, dot / 2.0, 0.0, TAU);
+                let _ = cr.fill();
+            }
+            draw_coin(cr, &coin, point, coin.phase + coin.spin * flown);
+        }
+        let _ = cr.pop_group_to_source();
+        let _ = cr.paint_with_alpha(opacity(t));
+        let _ = cr.restore();
+    }
 }
 
 #[cfg(test)]

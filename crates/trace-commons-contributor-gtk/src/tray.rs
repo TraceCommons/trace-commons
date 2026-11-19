@@ -118,6 +118,9 @@ struct IconShared {
     /// The last strip drawn and the scheme it was drawn for.
     drawn: Mutex<Option<(Strip, mark::Scheme)>>,
     pixmaps: Mutex<Vec<Pixmap>>,
+    /// Seconds into a credit arrival's celebration, while one is drawn
+    /// (`MenuBarStripLabel.creditBurst`); `None` at rest.
+    burst: Mutex<Option<f64>>,
     /// The drawn mark's tooltip clause, the core's words; empty while no
     /// mark is drawn.
     tooltip: Mutex<String>,
@@ -155,7 +158,8 @@ impl TrayState {
             let changed = *drawn != Some((strip, scheme));
             if changed {
                 *drawn = Some((strip, scheme));
-                *lock(&self.icon.pixmaps) = tray_icon::pixmaps(&strip, scheme);
+                let burst = *lock(&self.icon.burst);
+                *lock(&self.icon.pixmaps) = tray_icon::pixmaps_at(&strip, scheme, burst);
             }
             changed
         };
@@ -164,6 +168,37 @@ impl TrayState {
                 let _ = tx.send(());
             }
         }
+    }
+
+    /// Draw the last strip `t` seconds into a credit arrival's
+    /// celebration, or at rest for `None`, and tell the host. Main thread.
+    /// A frame equal to the one drawn draws nothing.
+    pub fn set_burst(&self, t: Option<f64>) {
+        {
+            let mut burst = lock(&self.icon.burst);
+            if *burst == t {
+                return;
+            }
+            *burst = t;
+        }
+        let drawn = *lock(&self.icon.drawn);
+        let Some((strip, scheme)) = drawn else {
+            return;
+        };
+        *lock(&self.icon.pixmaps) = tray_icon::pixmaps_at(&strip, scheme, t);
+        if let Some(tx) = lock(&self.icon.changed).as_ref() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// The celebration moment drawn now, if any.
+    pub fn burst(&self) -> Option<f64> {
+        *lock(&self.icon.burst)
+    }
+
+    /// The pixmaps offered now.
+    pub fn offered(&self) -> Vec<Pixmap> {
+        lock(&self.icon.pixmaps).clone()
     }
 
     /// Draw the last strip again for `scheme`, after the desktop's style
