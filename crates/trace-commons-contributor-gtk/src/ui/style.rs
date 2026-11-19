@@ -115,7 +115,13 @@ pub mod brand_tokens;
 /// [`brand_tokens::LIGHT_CSS`], each in a fill/rule weight and a text-safe
 /// twin that clears 4.5:1 as small type.
 ///
-/// Measured (WCAG 2.1, computed not estimated):
+/// The three grounds (`tc_bg`, `tc_surface`, `tc_surface2`) are no longer
+/// the spec's literals measured below: since 2026-11-18 every window and
+/// sheet draws on the Monitor's pane, card and well (the generated
+/// `tc_glass_window_*`), and the contrast tests in this file hold every ink
+/// at its floor on those, in both schemes.
+///
+/// Measured (WCAG 2.1, computed not estimated), on the former grounds:
 ///
 /// ```text
 ///  14.64:1  ink         #20241F on bg         #F6F7F4
@@ -150,9 +156,11 @@ pub mod brand_tokens;
 /// type inside a manifest strip stays on `tc_muted`.
 const LIGHT_TOKENS: &str = r#"
 /* --- Ground and ink, from DESIGN-SPEC §2.1 (light column) --------- */
-@define-color tc_bg        #F6F7F4;   /* bg.window */
-@define-color tc_surface   #FFFFFF;   /* surface.card */
-@define-color tc_surface2  #EEF2F0;   /* surface.inset */
+/* The grounds are the Monitor's: every window and sheet draws on its
+   pane, card and well (the generated `tc_glass_window_*`). */
+@define-color tc_bg        @tc_glass_window_pane;   /* bg.window */
+@define-color tc_surface   @tc_glass_window_card;   /* surface.card */
+@define-color tc_surface2  @tc_glass_window_well;   /* surface.inset */
 @define-color tc_surface_inset @tc_surface2;   /* the spec's name for it */
 @define-color tc_scrim     rgba(0, 0, 0, 0.06);   /* surface.scrim */
 @define-color tc_selected  rgba(0, 0, 0, 0.07);   /* surface.selected */
@@ -263,9 +271,9 @@ const DARK_TOKENS: &str = r#"
 /* --- Ground and ink, from DESIGN-SPEC §2.1 (dark column). Warm
        near-black carrying the light ground's green cast, not the
        blue-black a naive inversion produces. ------------------------ */
-@define-color tc_bg        #23251D;
-@define-color tc_surface   #21241E;
-@define-color tc_surface2  #2A2E27;
+@define-color tc_bg        @tc_glass_window_pane;
+@define-color tc_surface   @tc_glass_window_card;
+@define-color tc_surface2  @tc_glass_window_well;
 @define-color tc_surface_inset @tc_surface2;
 @define-color tc_scrim     rgba(255, 255, 255, 0.08);
 @define-color tc_selected  rgba(255, 255, 255, 0.1);
@@ -665,6 +673,10 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_ink" | "tc_glass_toolbar_glyph" => hex(p.ink),
         "tc_glass_ink_secondary" => hex(p.muted),
         "tc_glass_selected_ink" => hex(p.on_accent),
+        // The other windows' grounds: the skin's, as the Monitor's.
+        "tc_glass_window_pane" => hex(p.bg),
+        "tc_glass_window_card" => hex(p.surface),
+        "tc_glass_window_well" => hex(p.inset),
         "tc_glass_control_on_selection" => hex(p.control_on_selection),
         "tc_glass_control_on_selection_hover" => hex(p.control_on_selection_hover),
         "tc_glass_toolbar_glyph_hidden" => hex(p.tertiary),
@@ -1711,7 +1723,7 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            assert_eq!(glass, 45, "{name}");
+            assert_eq!(glass, 48, "{name}");
         }
     }
 

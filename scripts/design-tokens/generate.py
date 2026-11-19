@@ -685,6 +685,12 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     ratio = contrast(palette["selectedInk"], palette["controlSelected"])
     if ratio < 4.5:
         raise TokenError(f"glass {scheme}: selection text on controlSelected is {ratio:.2f}:1, under 4.5:1")
+    # The painted pane, card and well again, for the shell's other windows
+    # (Settings, the Look inside sheet, the dialogs): the Monitor's own
+    # navy, under names the translucent sheet never redefines, since only
+    # the Monitor has blur behind it.
+    for tier in ("pane", "card", "well"):
+        palette["window" + tier.title()] = fills[tier]
     # A control on a selected row (`GlassGround.selection`): its own fill
     # and hover over the selection, labelled in the selection's ink
     # (`controlInk`), as the Mac's Submit pill on a selected Traces row.
@@ -906,6 +912,9 @@ GLASS_COLOURS = [
     ("statusOn", "status_on"),
     ("statusOff", "status_off"),
     ("tileFolder", "tile_folder"),
+    ("windowPane", "window_pane"),
+    ("windowCard", "window_card"),
+    ("windowWell", "window_well"),
     ("controlOnSelection", "control_on_selection"),
     ("controlOnSelectionHover", "control_on_selection_hover"),
 ]
