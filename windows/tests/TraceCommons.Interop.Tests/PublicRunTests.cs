@@ -23,6 +23,21 @@ public class PublicRunTests
     private const string MacPage =
         "{\"slug\":\"bounded-retry\",\"title\":\"Bounded retry recovery\",\"outcome_summary\":\"The workflow recovered after one limited retry.\",\"workflow\":\"Retry once with the corrected bounded input.\",\"reuse_permission\":\"cc_by_4_0\",\"evidence\":[{\"excerpt\":\"The bounded retry completed on the second attempt.\"}],\"task_success\":\"partial\",\"contributed_version\":\"trace-contribution/1\",\"version\":1,\"published_at\":\"2026-09-10T12:00:00Z\",\"variations\":[]}";
 
+    /// <summary>
+    /// The three methods the inspector sends are the daemon's own
+    /// (crates/trace-commons-contributor/src/daemon/ipc.rs:457, 522, 550),
+    /// as <c>RoutingSurfaceTests.TheProbeMethodIsTheDaemonsOwn</c> pins its
+    /// probe: the sample refusal list names its own literals, so a typo here
+    /// would otherwise pass every test and fail only against a live daemon.
+    /// </summary>
+    [Fact]
+    public void TheDetailAndPublicationMethodsAreTheDaemonsOwn()
+    {
+        Assert.Equal("history_detail", DaemonProtocol.Methods.HistoryDetail);
+        Assert.Equal("publish_public_run", DaemonProtocol.Methods.PublishPublicRun);
+        Assert.Equal("unpublish_public_run", DaemonProtocol.Methods.UnpublishPublicRun);
+    }
+
     private static SessionDetail Detail(string json)
     {
         using JsonDocument doc = JsonDocument.Parse(json);
