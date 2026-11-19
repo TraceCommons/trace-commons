@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -10,8 +9,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
+using TraceCommons.App.Look;
 using TraceCommons.Interop.Shell;
-using Windows.UI.ViewManagement;
 
 namespace TraceCommons.App.Controls;
 
@@ -69,15 +68,15 @@ internal static class StepGeometry
 /// over 1.2 s on the token curve, then rests (<c>ManagedFolderHandoff</c>,
 /// ManagedFolderExplainer.swift:173-252; numbers in <see cref="LaunchHandoff"/>).
 /// Decorative, so hidden from assistive tech. With animations off
-/// (<c>UISettings.AnimationsEnabled</c>) it is the rest frame, and turning
-/// them off mid-move puts it at rest at once. The move is one composition
+/// (<see cref="GlassMotionSettings"/>, W5's one reading of the system
+/// switch, which also hears the window's WM_SETTINGCHANGE) it is the rest
+/// frame, and turning them off mid-move puts it at rest at once. The move is one composition
 /// animation the compositor runs: nothing ticks on this thread, and nothing
 /// runs once it has ended or the art is unloaded.
 /// </summary>
 public sealed class LaunchArtView : UserControl
 {
     private readonly Border _folder;
-    private readonly UISettings _settings = new();
     private readonly LaunchArtLife _life = new();
     private bool _subscribed;
 
@@ -153,7 +152,7 @@ public sealed class LaunchArtView : UserControl
         Visual visual = ElementCompositionPreview.GetElementVisual(_folder);
         visual.CenterPoint = new Vector3((float)(LaunchHandoff.FolderTileSide / 2), (float)(LaunchHandoff.FolderTileSide / 2), 0);
         ElementCompositionPreview.SetIsTranslationEnabled(_folder, true);
-        LaunchArtStep step = _life.Loaded(_settings.AnimationsEnabled);
+        LaunchArtStep step = _life.Loaded(GlassMotionSettings.AnimationsEnabled);
         Watch(_life.Watching);
         if (step == LaunchArtStep.Animate)
         {
@@ -175,16 +174,12 @@ public sealed class LaunchArtView : UserControl
     /// </summary>
     public void Release() => Act(_life.Closed());
 
-    private void OnSettingChange() => Act(_life.SettingChanged(_settings.AnimationsEnabled));
+    /// <summary>The system's animation switch or a window's visibility
+    /// changed (W5's <see cref="GlassMotionSettings"/>, which also hears the
+    /// window's WM_SETTINGCHANGE): rest if animations are now off.</summary>
+    private void OnMotionChanged() => Act(_life.SettingChanged(GlassMotionSettings.AnimationsEnabled));
 
-    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.19041.0")]
-    private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
-    {
-        bool enabled = sender.AnimationsEnabled;
-        DispatcherQueue?.TryEnqueue(() => Act(_life.SettingChanged(enabled)));
-    }
-
-    /// <summary>Joins or leaves the watch list and the animations event, as the life says.</summary>
+    /// <summary>Follows the motion setting while the life says the art is watched.</summary>
     private void Watch(bool watching)
     {
         if (watching == _subscribed)
@@ -193,26 +188,13 @@ public sealed class LaunchArtView : UserControl
         }
 
         _subscribed = watching;
-        // Followed live from Windows 10 2004; before it, read once on Loaded.
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
-        {
-            if (watching)
-            {
-                _settings.AnimationsEnabledChanged += OnAnimationsEnabledChanged;
-            }
-            else
-            {
-                _settings.AnimationsEnabledChanged -= OnAnimationsEnabledChanged;
-            }
-        }
-
         if (watching)
         {
-            SettingChangeWatch.Add(this);
+            GlassMotionSettings.Changed += OnMotionChanged;
         }
         else
         {
-            SettingChangeWatch.Remove(this);
+            GlassMotionSettings.Changed -= OnMotionChanged;
         }
     }
 
@@ -229,52 +211,6 @@ public sealed class LaunchArtView : UserControl
         visual.StopAnimation("Scale.X");
         visual.StopAnimation("Scale.Y");
         Place(visual, LaunchHandoff.Folder(LaunchHandoff.Duration, false));
-    }
-
-    /// <summary>
-    /// Hears WM_SETTINGCHANGE on the window an art is shown in. On the box
-    /// (Windows Server 2025, 2026-11-19) turning animations off mid-move
-    /// raised no <c>AnimationsEnabledChanged</c> while the window kept the
-    /// foreground, and the folder slid on to the end; the system does
-    /// broadcast WM_SETTINGCHANGE to every top-level window. The subclass is
-    /// installed once per window, under its own id, and does nothing while
-    /// no art is shown.
-    /// </summary>
-    private static class SettingChangeWatch
-    {
-        private const uint WmSettingChange = 0x001A;
-        private static readonly UIntPtr SubclassId = (UIntPtr)14;
-        private static readonly SubclassProc Proc = WndProc;
-        private static readonly HashSet<IntPtr> Windows = new();
-        private static readonly LaunchArtWatchList<LaunchArtView> Shown = new();
-
-        private delegate IntPtr SubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
-
-        [DllImport("comctl32.dll")]
-        private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc proc, UIntPtr id, UIntPtr data);
-
-        [DllImport("comctl32.dll")]
-        private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-        public static void Add(LaunchArtView art)
-        {
-            Shown.Add(art);
-            if (art.XamlRoot?.ContentIslandEnvironment is not { } island) return;
-            IntPtr hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(island.AppWindowId);
-            if (hwnd != IntPtr.Zero && Windows.Add(hwnd)) SetWindowSubclass(hwnd, Proc, SubclassId, UIntPtr.Zero);
-        }
-
-        public static void Remove(LaunchArtView art) => Shown.Remove(art);
-
-        private static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
-        {
-            if (msg == WmSettingChange)
-            {
-                foreach (LaunchArtView art in Shown.Snapshot()) art.OnSettingChange();
-            }
-
-            return DefSubclassProc(hwnd, msg, wParam, lParam);
-        }
     }
 
     private static void Animate(Visual visual)

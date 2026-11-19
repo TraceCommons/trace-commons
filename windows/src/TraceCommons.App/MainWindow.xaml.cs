@@ -973,48 +973,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnDeclineArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.DeclineArming,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}}}""")
-            .ConfigureAwait(true);
-    }
+    /// <summary>
+    /// "Not now" against the arming offer. The daemon silences the offer for
+    /// thirty days; the card leaves on its yes only (<see cref="ArmingOfferFlow"/>).
+    /// </summary>
+    private async void OnDeclineArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.DeclineAsync();
 
     /// <summary>
-    /// Arms the offered project.
+    /// Arms the offered project. No confirmation sheet: this card IS the
+    /// confirmation (owner, 2026-11-11). Locked from the press, a check on the
+    /// daemon's yes, and the card leaves after the hold; a refusal keeps it
+    /// with the core's line (<see cref="ArmingOfferFlow"/>).
     /// </summary>
-    /// <remarks>
-    /// No confirmation sheet: this card IS the confirmation. It names the
-    /// project, states the evidence, and asks the question outright, so a
-    /// second dialog saying the same thing would be a step rather than a
-    /// safeguard. Settings, where arming is picked from a list rather than
-    /// offered, does confirm.
-    /// </remarks>
-    private async void OnAcceptArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.SetProjectMode,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}},"mode":"auto_upload"}""")
-            .ConfigureAwait(true);
-        await ViewModel.RefreshAsync().ConfigureAwait(true);
-    }
+    private async void OnAcceptArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.AcceptAsync();
 
     /// <summary>
     /// The button on the legacy invite migration notice.

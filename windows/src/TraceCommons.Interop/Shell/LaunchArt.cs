@@ -166,12 +166,11 @@ public static class LaunchHandoff
     public const double FolderTileSide = 30;
 
     /// <summary>
-    /// The folder's glyph: Segoe Fluent Icons FolderFill (U+E8D5), filled as
-    /// the Mac's SF Symbol <c>folder.fill</c> (Indicators.swift:306),
-    /// in place of the outline Folder (U+E8B7) that left the 203/204 pixel
-    /// difference on the box (review of #2207).
+    /// The folder's glyph: the Mac's SF Symbol <c>folder.fill</c>
+    /// (Indicators.swift:306) from the one symbol table (W5-D2), Segoe
+    /// FolderFill (U+E8D5).
     /// </summary>
-    public const string FolderGlyph = "\uE8D5";
+    public static string FolderGlyph => SymbolGlyphs.Table["folder.fill"].Text;
 
     /// <summary>Under Reduce Motion (animations off) the art starts on its rest frame (:187, :218-219).</summary>
     public static bool StartsAtRest(bool animationsEnabled) => !animationsEnabled;
@@ -280,32 +279,4 @@ public sealed class LaunchArtLife
         Resting = true;
         return LaunchArtStep.Rest;
     }
-}
-
-/// <summary>
-/// The arts that hear a window's WM_SETTINGCHANGE: added on Loaded, removed
-/// when released. The window subclass reads it on each setting change.
-/// </summary>
-public sealed class LaunchArtWatchList<T>
-    where T : class
-{
-    private readonly List<T> _shown = new();
-
-    /// <summary>How many arts are watched.</summary>
-    public int Count => _shown.Count;
-
-    /// <summary>Watches <paramref name="art"/>, once.</summary>
-    public void Add(T art)
-    {
-        if (!_shown.Contains(art))
-        {
-            _shown.Add(art);
-        }
-    }
-
-    /// <summary>Stops watching <paramref name="art"/>.</summary>
-    public void Remove(T art) => _shown.Remove(art);
-
-    /// <summary>The watched arts, copied, so a handler may remove itself.</summary>
-    public T[] Snapshot() => _shown.ToArray();
 }

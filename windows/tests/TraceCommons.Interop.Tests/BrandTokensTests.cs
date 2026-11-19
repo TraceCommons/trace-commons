@@ -17,10 +17,10 @@ namespace TraceCommons.Interop.Tests;
 /// <c>Themes/BrandTokens.xaml</c> is generated from
 /// <c>design-tokens/glass.tokens.json</c> by
 /// <c>scripts/design-tokens/generate.py</c>, and that script's check mode
-/// holds it to the JSON. What the generator cannot know is this shell's
-/// grounds, which live in <c>DesignSystem.xaml</c>, so contrast is measured
-/// here: WCAG 2.1 relative luminance, computed from the committed values,
-/// 4.5:1 for text and 3:1 for a fill, rule or indicator, in light and dark.
+/// holds it to the JSON. The grounds are the glass tiers, generated into
+/// <c>Themes/GlassTokens.xaml</c> (spec W5); contrast is measured here on the
+/// committed values: WCAG 2.1 relative luminance, 4.5:1 for text and 3:1 for
+/// a fill, rule or indicator, in light and dark.
 /// </para>
 /// <para>
 /// Reads the markup as text, as <see cref="XamlCommentSyntaxTests"/> does,
@@ -29,13 +29,19 @@ namespace TraceCommons.Interop.Tests;
 /// </remarks>
 public class BrandTokensTests
 {
+    // The grounds text and indicators sit on: the window's pane, its chrome,
+    // a card and a control, focused and not (GlassTokens.xaml). The inset
+    // well holds a field's own ink only (GlassTokensTests).
     private static readonly string[] Grounds =
     {
         "TcWindowBackgroundBrush",
         "TcSidebarBackgroundBrush",
         "TcChromeBackgroundBrush",
         "TcSurfaceCardBrush",
-        "TcSurfaceInsetBrush",
+        "TcGlassCardQuietBrush",
+        "TcGlassControlBrush",
+        "TcGlassPaneInactiveBrush",
+        "TcGlassCardInactiveBrush",
     };
 
     // Type: every brush a TextBlock or FontIcon takes as its foreground.
@@ -69,7 +75,7 @@ public class BrandTokensTests
     public void EveryTextBrushClearsFourPointFiveOnEveryGround(string theme)
     {
         Dictionary<string, string> brand = Palette(BrandTokens, theme);
-        Dictionary<string, string> system = Palette(DesignSystem, theme);
+        Dictionary<string, string> system = Palette(GlassTokens, theme);
         var failures = new List<string>();
         foreach (string ink in TextBrushes)
         {
@@ -92,7 +98,7 @@ public class BrandTokensTests
     public void EveryLineBrushClearsThreeOnEveryGround(string theme)
     {
         Dictionary<string, string> brand = Palette(BrandTokens, theme);
-        Dictionary<string, string> system = Palette(DesignSystem, theme);
+        Dictionary<string, string> system = Palette(GlassTokens, theme);
         var failures = new List<string>();
         foreach (string line in LineBrushes)
         {
@@ -120,7 +126,7 @@ public class BrandTokensTests
     public void ThePrimaryActionIsAMeasuredPair(string theme)
     {
         Dictionary<string, string> brand = Palette(BrandTokens, theme);
-        Dictionary<string, string> system = Palette(DesignSystem, theme);
+        Dictionary<string, string> system = Palette(GlassTokens, theme);
 
         Assert.Contains("Value=\"{ThemeResource TcAccentBrush}\"", PrimaryButtonStyle());
         Assert.Contains("Value=\"{ThemeResource TcOnAccentBrush}\"", PrimaryButtonStyle());
@@ -140,21 +146,28 @@ public class BrandTokensTests
     }
 
     /// <summary>
-    /// The brand is purple: the old green and mint are gone from the theme,
-    /// and the accent keys carry the token values.
+    /// The accent is the Mac's flat blue, not the classic purple (spec W5,
+    /// checklist C1): the primary fill is <c>ctaFill</c>'s flat stop,
+    /// GlassTokens.swift:415 (#7EBCFF, light #0558B6); a line on a ground is
+    /// <c>tabEmber</c>, :178 (#0091FD, light #056BDC); accent text is
+    /// <c>purpleText</c>'s flat value, :24 (#C6E1FF, light #023E83). The
+    /// purple and the old green and mint are gone from the theme.
     /// </summary>
     [Fact]
-    public void TheAccentIsTheBrandPurple()
+    public void TheAccentIsTheMacsFlatBlue()
     {
-        Assert.Equal("#6D14F3", Palette(BrandTokens, "Light")["TcAccentBrush"]);
-        Assert.Equal("#8A3DFF", Palette(BrandTokens, "Default")["TcAccentBrush"]);
-        Assert.Equal("#6D14F3", Palette(BrandTokens, "Light")["TcMarkAccentBrush"]);
-        Assert.Equal("#8A3DFF", Palette(BrandTokens, "Default")["TcMarkAccentBrush"]);
+        Assert.Equal("#0558B6", Palette(BrandTokens, "Light")["TcAccentBrush"]);
+        Assert.Equal("#7EBCFF", Palette(BrandTokens, "Default")["TcAccentBrush"]);
+        Assert.Equal("#056BDC", Palette(BrandTokens, "Light")["TcAccentLineBrush"]);
+        Assert.Equal("#0091FD", Palette(BrandTokens, "Default")["TcAccentLineBrush"]);
+        Assert.Equal("#023E83", Palette(BrandTokens, "Light")["TcAccentTextBrush"]);
+        Assert.Equal("#C6E1FF", Palette(BrandTokens, "Default")["TcAccentTextBrush"]);
 
-        foreach (string retired in new[] { "00D4AA", "178F70", "137C61", "0F7256", "3FBE9A", "5CD3AF" })
+        foreach (string retired in new[] { "6D14F3", "8A3DFF", "C9B3FF", "00D4AA", "178F70", "137C61", "0F7256", "3FBE9A", "5CD3AF" })
         {
             Assert.DoesNotContain(retired, DesignSystem, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain(retired, BrandTokens, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(retired, GlassTokens, StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -203,11 +216,14 @@ public class BrandTokensTests
     public void TheDesignSystemMergesTheBrandTokens()
     {
         Assert.Contains("<ResourceDictionary Source=\"ms-appx:///Themes/BrandTokens.xaml\" />", DesignSystem);
+        Assert.Contains("<ResourceDictionary Source=\"ms-appx:///Themes/GlassTokens.xaml\" />", DesignSystem);
     }
 
     private static string BrandTokens => Source("BrandTokens.xaml.txt");
 
     private static string DesignSystem => Source("DesignSystem.xaml.txt");
+
+    private static string GlassTokens => Source("GlassTokens.xaml.txt");
 
     private static string PrimaryButtonStyle()
     {
@@ -250,7 +266,14 @@ public class BrandTokensTests
             string hex = brush.Groups[2].Value;
             if (hex.Length == 8)
             {
-                continue;
+                // Translucent brushes have no one colour to measure; an
+                // opaque #FFRRGGBB is the colour itself.
+                if (!hex.StartsWith("FF", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                hex = hex.Substring(2);
             }
 
             palette[brush.Groups[1].Value] = "#" + hex.ToUpperInvariant();

@@ -54,7 +54,7 @@ public class UnresolvedBucketCopyTests
     public void OnboardingAndSettingsShareTheSameWords()
     {
         Assert.Same(UnresolvedBucketCopy.Label, WatchCopy.UnknownLabel);
-        Assert.Same(UnresolvedBucketCopy.Note, WatchCopy.UnknownNote);
+        Assert.Equal(UnresolvedBucketCopy.Note, WatchCopy.UnknownNote);
     }
 
     /// <summary>

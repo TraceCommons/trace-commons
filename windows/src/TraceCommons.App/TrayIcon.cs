@@ -329,7 +329,7 @@ public sealed class TrayIcon : IDisposable
         return CreateWindowEx(
             0,
             _className,
-            "Near.ai",
+            TraceCommons.Interop.Shell.MonitorWords.AppName,
             WS_POPUP,
             0, 0, 0, 0,
             IntPtr.Zero,
@@ -521,7 +521,7 @@ public sealed class TrayIcon : IDisposable
                 AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             }
 
-            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Near.ai");
+            AppendMenu(menu, MF_STRING, MenuIdOpen, $"Open {TraceCommons.Interop.Shell.MonitorWords.AppName}");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
             // About (spec W24-D1 (a)), in the core's words.
             AppendMenu(menu, MF_STRING, MenuIdAbout, AboutLines.Title);
@@ -642,7 +642,7 @@ public sealed class TrayIcon : IDisposable
             // two legible digits, so the count lives in the tooltip and in
             // the menu header, both of which a screen reader can also read,
             // and the icon carries only "there is something".
-            TrayIconState.Attention => lightTaskbar ? 0xFF6D14F3U : 0xFF8A3DFFU,
+            TrayIconState.Attention => lightTaskbar ? 0xFF0558B6U : 0xFF7EBCFFU,
 
             // The spec says an amber dot. This design system has no amber;
             // statusOutside (TcStatusOutsideBrush, which the coral keys now

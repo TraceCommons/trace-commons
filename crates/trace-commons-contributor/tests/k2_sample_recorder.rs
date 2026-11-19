@@ -670,6 +670,16 @@ fn normalize(value: &mut Value, key: Option<&str>) {
             );
             *s = format!("sha256:{}", "0".repeat(64));
         }
+        // The setup scope hashes the same throwaway store's identity, so it
+        // differs on every run too. Keep its wire type (a bare hex SHA-256)
+        // and check its shape, but record one fixed value.
+        Value::String(s) if key == Some("setup_scope") => {
+            assert!(
+                s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()),
+                "setup scope is a complete hex SHA-256 digest"
+            );
+            *s = "0".repeat(64);
+        }
         // The default terminal is the first app the recording platform
         // offers: "terminal" on macOS, "gnome_terminal" on Linux. The samples
         // are macOS's, and the drift check runs on Linux in CI, so record

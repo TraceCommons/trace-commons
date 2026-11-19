@@ -292,38 +292,18 @@ public sealed class LaunchTests
         // Review of #2207: the late Unloaded returns early, so an art whose
         // dialog raised no second one stayed watched for the app's life.
         // The dialog's close releases it; the watch list is then empty.
-        var watched = new LaunchArtWatchList<object>();
-        var art = new object();
         var life = new LaunchArtLife();
         life.Loaded(animationsEnabled: true);
-        if (life.Watching) watched.Add(art);
         life.Unloaded(stillLoaded: true);
-        if (!life.Watching) watched.Remove(art);
-        Assert.Equal(1, watched.Count);
+        Assert.True(life.Watching);
 
         // The close touches no visual: the art has left the tree.
         Assert.Equal(LaunchArtStep.None, life.Closed());
         Assert.False(life.Watching);
-        if (!life.Watching) watched.Remove(art);
-        Assert.Equal(0, watched.Count);
         // A setting change after the release does nothing, and a late
         // Unloaded after the close does not rest it twice.
         Assert.Equal(LaunchArtStep.None, life.SettingChanged(animationsEnabled: false));
         Assert.Equal(LaunchArtStep.None, life.Unloaded(stillLoaded: false));
-    }
-
-    [Fact]
-    public void TheWatchListHoldsEachArtOnceAndIsSafeToChangeWhileRead()
-    {
-        var watched = new LaunchArtWatchList<object>();
-        var a = new object();
-        var b = new object();
-        watched.Add(a);
-        watched.Add(a);
-        watched.Add(b);
-        Assert.Equal(2, watched.Count);
-        foreach (object art in watched.Snapshot()) watched.Remove(art);
-        Assert.Equal(0, watched.Count);
     }
 
     [Fact]
@@ -386,6 +366,7 @@ public sealed class LaunchTests
         // Indicators.swift:306 `folder.fill`: Segoe Fluent Icons FolderFill,
         // not the outline Folder (U+E8B7) the box diff showed.
         Assert.Equal("\uE8D5", LaunchHandoff.FolderGlyph);
+        Assert.Equal(0xE8D5, SymbolGlyphs.Table["folder.fill"].CodePoint);
     }
 
     // ---- The card's foot, failure and focus -------------------------------

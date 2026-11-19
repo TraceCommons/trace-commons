@@ -2,19 +2,19 @@
 <!--
     The Trace Commons design system, Windows edition.
 
-    Every colour, size and radius here is transcribed from
-    design-import/DESIGN-SPEC.md - section 2.1 for the native palette, 3.1/3.2
-    for type, 4.1/4.2 for spacing and radii - taking the Windows column
-    wherever the spec gives per-platform values. Nothing in this file is
-    invented; where the spec is silent the deviation is called out in a comment
-    at the point it occurs.
+    The look is the Mac's flat glass (spec W5, owner 2026-11-18: "the Mac
+    look, as close as Windows allows"). Its values are generated from
+    design-tokens/glass.tokens.json by scripts/design-tokens/generate.py into
+    two dictionaries merged below: GlassTokens.xaml (grounds, tiers, ink,
+    rules, control colours, radii, spacing, sizes, type and motion) and
+    BrandTokens.xaml (the accent and the status colours). Edit the JSON and
+    regenerate rather than writing a value here.
 
-    The brand accent and the status colours are the exception: they are
-    generated into BrandTokens.xaml from design-tokens/glass.tokens.json by
-    scripts/design-tokens/generate.py, and merged below. Purple everywhere is
-    the owner's decision of 2026-10-02, provisional until the designer's final
-    brand lands; it replaces the green and the mint this file used to pin.
-    Edit the JSON and regenerate rather than writing a brand hex here.
+    This file keeps only what no token covers: the font families, a few
+    legacy type sizes and spacing steps that have no token, the transcript's
+    redaction chip, the blue and gold washes, the mark's ink and field, the
+    text styles the views bind to (built on the generated sizes), and the
+    two button styles.
 
     Two conventions worth knowing before editing:
 
@@ -34,6 +34,7 @@
          the brand keys from this dictionary, whatever merges it. -->
     <ResourceDictionary.MergedDictionaries>
         <ResourceDictionary Source="ms-appx:///Themes/BrandTokens.xaml" />
+        <ResourceDictionary Source="ms-appx:///Themes/GlassTokens.xaml" />
     </ResourceDictionary.MergedDictionaries>
 
     <ResourceDictionary.ThemeDictionaries>
@@ -42,35 +43,13 @@
              header note on why it is not called "Dark". -->
         <ResourceDictionary x:Key="Default">
 
-            <!-- Grounds and surfaces. The five dark greys are within six units
-                 of each other on purpose: they encode elevation (spec 2.1). -->
-            <SolidColorBrush x:Key="TcWindowBackgroundBrush" Color="#23251D" />
-            <SolidColorBrush x:Key="TcSidebarBackgroundBrush" Color="#262922" />
-            <SolidColorBrush x:Key="TcChromeBackgroundBrush" Color="#2B2D28" />
-            <SolidColorBrush x:Key="TcSurfaceCardBrush" Color="#21241E" />
-            <SolidColorBrush x:Key="TcSurfaceInsetBrush" Color="#2A2E27" />
-            <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#14FFFFFF" />
-            <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#1AFFFFFF" />
-
-            <!-- Hairlines. Two of them: card edges and structural dividers. -->
-            <SolidColorBrush x:Key="TcHairlineBrush" Color="#3B4038" />
-            <SolidColorBrush x:Key="TcHairlineDividerBrush" Color="#373A33" />
-
-            <!-- Ink. -->
-            <SolidColorBrush x:Key="TcInkPrimaryBrush" Color="#E8EAE3" />
-            <SolidColorBrush x:Key="TcInkSecondaryBrush" Color="#A6AC9F" />
-            <!-- Contrast-corrected; see the note in the light dictionary. -->
-            <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#878D81" />
-
-            <!-- The accent (TcAccent*, TcGreen*, TcOnAccentBrush,
+            <!-- Grounds, tiers, rules and ink are in GlassTokens.xaml; the
+                 accent (TcAccent*, TcGreen*, TcOnAccentBrush,
                  TcActiveTabBorderBrush, TcMarkAccentBrush) and the status
-                 colours (TcStatus*, TcGold*, TcCoral*) are in BrandTokens.xaml,
-                 generated from the design tokens. Purple, where this used to
-                 pin the green. The TcGreen names predate the purple and are
-                 kept because the views bind to them. In dark the fill purple
-                 (#8A3DFF) carries the primary button's white label; a bar or
-                 border drawn straight on the chrome takes the lighter line
-                 purple instead, since the fill measures under 3:1 there. -->
+                 colours (TcStatus*, TcGold*, TcCoral*) in BrandTokens.xaml.
+                 Both are generated from the design tokens, flat theme. The
+                 TcGreen names predate the accent and are kept because the
+                 views bind to them. -->
 
             <!--
                 Blue: "held for privacy review". The mockups carry both
@@ -107,39 +86,11 @@
             <SolidColorBrush x:Key="TcRedactionChipForegroundBrush" Color="#F0EBDD" />
         </ResourceDictionary>
 
+
         <ResourceDictionary x:Key="Light">
 
-            <SolidColorBrush x:Key="TcWindowBackgroundBrush" Color="#F6F7F4" />
-            <SolidColorBrush x:Key="TcSidebarBackgroundBrush" Color="#ECEEE8" />
-            <SolidColorBrush x:Key="TcChromeBackgroundBrush" Color="#F3F3F0" />
-            <SolidColorBrush x:Key="TcSurfaceCardBrush" Color="#FFFFFF" />
-            <SolidColorBrush x:Key="TcSurfaceInsetBrush" Color="#EEF2F0" />
-            <SolidColorBrush x:Key="TcSurfaceScrimBrush" Color="#0F000000" />
-            <SolidColorBrush x:Key="TcSurfaceSelectedBrush" Color="#12000000" />
-
-            <SolidColorBrush x:Key="TcHairlineBrush" Color="#D9DFDC" />
-            <SolidColorBrush x:Key="TcHairlineDividerBrush" Color="#DDDFD8" />
-
-            <SolidColorBrush x:Key="TcInkPrimaryBrush" Color="#20241F" />
-            <SolidColorBrush x:Key="TcInkSecondaryBrush" Color="#5C635B" />
-            <!--
-                Spec ink.tertiary is #8A9086 light and #82887C dark, and both
-                are refused here. Every role the spec gives this token is small
-                text, and the stated pair clears 4.5:1 in none of the four
-                combinations it has to survive: 3.04:1 on the ground and 3.27:1
-                on a card in light, 4.26:1 and 4.31:1 in dark. What ships
-                instead is the nearest accessible twin on the same hue and
-                saturation, 4.58:1 and 4.93:1 light, 4.55:1 and 4.61:1 dark.
-
-                This is the same substitution the macOS and Linux clients make,
-                with the same two hexes, so the three clients agree. One
-                further limit carried over with it: the dark twin measures
-                4.05:1 against surface.inset, so small type inside a manifest
-                strip stays on ink.secondary rather than this token.
-            -->
-            <SolidColorBrush x:Key="TcInkTertiaryBrush" Color="#6D7269" />
-
-            <!-- Accent and status colours: BrandTokens.xaml. -->
+            <!-- Grounds, ink, accent and status colours: GlassTokens.xaml and
+                 BrandTokens.xaml. -->
 
             <!-- #315FBA, not #315FBB. See the note in the dark dictionary. -->
             <SolidColorBrush x:Key="TcBlueBrandBrush" Color="#315FBA" />
@@ -178,20 +129,8 @@
         -->
         <ResourceDictionary x:Key="HighContrast">
 
-            <StaticResource x:Key="TcWindowBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcSidebarBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcChromeBackgroundBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcSurfaceCardBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcSurfaceInsetBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcSurfaceScrimBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcSurfaceSelectedBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
 
-            <StaticResource x:Key="TcHairlineBrush" ResourceKey="DividerStrokeColorDefaultBrush" />
-            <StaticResource x:Key="TcHairlineDividerBrush" ResourceKey="DividerStrokeColorDefaultBrush" />
 
-            <StaticResource x:Key="TcInkPrimaryBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcInkSecondaryBrush" ResourceKey="TextFillColorSecondaryBrush" />
-            <StaticResource x:Key="TcInkTertiaryBrush" ResourceKey="TextFillColorTertiaryBrush" />
 
             <!-- The accent and status keys alias the same system brushes in
                  BrandTokens.xaml. -->
@@ -209,64 +148,31 @@
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 
-    <!--
-        Font families (spec 3.1, Windows column).
-
-        Segoe UI Variable Text is the body optical size; window chrome and the
-        smallest controls use plain Segoe UI, which is what the spec calls for
-        and also what Windows itself draws in a title bar. Both fall back to
-        Segoe UI on Windows builds that predate the variable family.
-    -->
-    <FontFamily x:Key="TcUiFontFamily">Segoe UI Variable Text, Segoe UI</FontFamily>
-    <FontFamily x:Key="TcChromeFontFamily">Segoe UI</FontFamily>
-    <FontFamily x:Key="TcMonoFontFamily">Consolas</FontFamily>
+    <!-- Font families: GlassTokens.xaml (Segoe UI Variable, the owner's
+         choice for Windows, falling back to Segoe UI). -->
 
     <!-- Type sizes (spec 3.2). Sizes are identical across platforms; only the
          weights differ, and Windows takes each one step lighter than macOS. -->
-    <x:Double x:Key="TcTitleScreenFontSize">15</x:Double>
-    <x:Double x:Key="TcTitleSectionFontSize">17</x:Double>
     <x:Double x:Key="TcMetricValueFontSize">20</x:Double>
     <x:Double x:Key="TcMetricValueMonoFontSize">18</x:Double>
     <x:Double x:Key="TcHeadingAlertFontSize">16</x:Double>
-    <x:Double x:Key="TcTitleCardFontSize">13</x:Double>
-    <x:Double x:Key="TcBodyFontSize">13</x:Double>
     <x:Double x:Key="TcBodyDenseFontSize">12.5</x:Double>
-    <x:Double x:Key="TcLabelControlFontSize">12</x:Double>
-    <x:Double x:Key="TcCaptionFontSize">11</x:Double>
     <x:Double x:Key="TcCaptionSmallFontSize">10.5</x:Double>
-    <x:Double x:Key="TcEyebrowFontSize">10</x:Double>
     <x:Double x:Key="TcMonoFigureFontSize">12</x:Double>
     <x:Double x:Key="TcMonoChipFontSize">11</x:Double>
     <x:Double x:Key="TcMonoBadgeFontSize">10</x:Double>
-    <x:Double x:Key="TcMonoCodeFontSize">11</x:Double>
-    <x:Double x:Key="TcMonoTranscriptFontSize">11</x:Double>
 
     <!-- Spacing (spec 4.1). The scale is the set of values the mockups
          actually use; it is not a generated ramp, and adding a step to it
          should mean the design added one. -->
-    <x:Double x:Key="TcSpace05">2</x:Double>
-    <x:Double x:Key="TcSpace1">4</x:Double>
-    <x:Double x:Key="TcSpace15">6</x:Double>
-    <x:Double x:Key="TcSpace2">8</x:Double>
-    <x:Double x:Key="TcSpace25">10</x:Double>
-    <x:Double x:Key="TcSpace3">12</x:Double>
-    <x:Double x:Key="TcSpace35">14</x:Double>
-    <x:Double x:Key="TcSpace4">16</x:Double>
     <x:Double x:Key="TcSpace45">18</x:Double>
-    <x:Double x:Key="TcSpace5">20</x:Double>
     <x:Double x:Key="TcSpace55">22</x:Double>
-    <x:Double x:Key="TcSpace6">24</x:Double>
     <x:Double x:Key="TcSpace7">28</x:Double>
     <x:Double x:Key="TcSpace8">32</x:Double>
 
-    <!-- Radii (spec 4.2, Windows values: controls 4, cards 8, window 8). -->
-    <CornerRadius x:Key="TcControlCornerRadius">4</CornerRadius>
-    <CornerRadius x:Key="TcCardCornerRadius">8</CornerRadius>
+    <!-- Radii: the glass radii are in GlassTokens.xaml. The window's own
+         corner is the system's (8 on Windows 11), not a token. -->
     <CornerRadius x:Key="TcWindowCornerRadius">8</CornerRadius>
-    <CornerRadius x:Key="TcPillCornerRadius">999</CornerRadius>
-    <!-- A card is drawn as a 1px border, so an element bleeding to its inside
-         edge is one pixel tighter than the card itself. -->
-    <CornerRadius x:Key="TcCardInnerBottomCornerRadius">0,0,7,7</CornerRadius>
 
     <!-- Borders: 1px hairlines, never shadows, inside the window (spec 4.4). -->
     <Thickness x:Key="TcHairlineThickness">1</Thickness>
@@ -327,7 +233,7 @@
     <Style x:Key="TcBodyTextStyle" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{StaticResource TcUiFontFamily}" />
         <Setter Property="FontSize" Value="{StaticResource TcBodyFontSize}" />
-        <Setter Property="LineHeight" Value="19" />
+        <Setter Property="LineHeight" Value="{StaticResource TcGlassTypeBodyLineHeight}" />
         <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
         <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
