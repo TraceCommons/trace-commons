@@ -1150,7 +1150,8 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
 ///
 /// Windows Terminal reads a `;` anywhere in its command line as the start
 /// of another command, so any argument holding one is refused rather than
-/// escaped. Ptyxis refuses a folder holding `%`, `#` or `?` (see
+/// escaped, and it expands `%NAME%` in the command it starts, so a helper
+/// path or config folder holding `%` is refused too. Ptyxis refuses a folder holding `%`, `#` or `?` (see
 /// [`program_plan`]).
 #[cfg(any(windows, target_os = "linux", test))]
 fn plan(
@@ -1191,6 +1192,17 @@ fn program_plan(
     // and open elsewhere when the result does not exist; told none, each
     // opens in its working directory, so that is where they are started.
     let started_in = matches!(app, TerminalApp::Konsole | TerminalApp::Kitty);
+    // Windows Terminal expands `%NAME%` in the command it starts, with no
+    // escape (measured with Windows Terminal 1.25.3131.0: a config folder
+    // `cfg %USERNAME% x` reached the helper as `cfg tcdev x`). The folder it
+    // is told by `-d` arrived unexpanded, so only the command is refused.
+    if app == TerminalApp::WindowsTerminal
+        && command
+            .iter()
+            .any(|arg| arg.to_string_lossy().contains('%'))
+    {
+        return Err(ManagedError::InvalidRequest);
+    }
     let mut args =
         terminal_args(app, (!started_in).then_some(cwd)).ok_or(ManagedError::InvalidRequest)?;
     args.extend(command);

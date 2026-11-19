@@ -357,7 +357,16 @@ directly. herdr's Windows named pipe is not spoken yet.
 Windows Terminal reads `;` anywhere in its command line as the start of a new
 command (same page: "Commands provide the action, or list of actions separated
 by semicolons"). A launch whose folder, helper path or config folder holds a
-`;` is refused there rather than escaped.
+`;` is refused there rather than escaped. Windows Terminal also expands
+`%NAME%` in the command it starts, with no escape: measured on Windows
+Server 2025 with Windows Terminal 1.25.3131.0 (2026-11-19), a config folder
+`cfg %USERNAME% x` reached the helper as `cfg tcdev x`. A helper path or
+config folder holding `%` is refused. The folder, told by `-d`, arrived
+unexpanded, as did spaces, `'`, `& ^ ( ) ! = ,`, a leading `-`, a backtick,
+`$`, non-ASCII text and the drive root, so none of those is refused. The
+check is `windows/scripts/managed-terminal-launch-smoke.ps1`, which runs
+`managed::terminal::windows_tests::real_windows_terminals_receive_the_folder_and_every_argument`
+in the interactive session; any terminal added for Windows must pass it.
 
 **Left out.**
 
