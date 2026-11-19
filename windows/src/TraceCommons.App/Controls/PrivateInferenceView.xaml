@@ -114,7 +114,9 @@
                     <StackPanel Orientation="Horizontal" Spacing="8" MinHeight="28"
                                 ToolTipService.ToolTip="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}"
                                 AutomationProperties.HelpText="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}">
+                        <!-- A StackPanel has no automation peer, so the sentence rides on the title. -->
                         <TextBlock Text="{x:Bind ViewModel.Heading.Title, Mode=OneWay}"
+                                   AutomationProperties.HelpText="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}"
                                    AutomationProperties.HeadingLevel="Level2"
                                    FontSize="13" FontWeight="SemiBold"
                                    Foreground="{ThemeResource TcInkPrimaryBrush}"

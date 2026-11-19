@@ -212,4 +212,40 @@ public sealed class InsightsBenchmarksTests
         Assert.Equal((0, 1, 2), (InsightsViewModel.OverviewTab, InsightsViewModel.PatternsTab, InsightsViewModel.BenchmarksTab));
         Assert.Equal("Benchmarks", W("analytics_tab_benchmarks"));
     }
+
+    // The pickers echo the chosen values whenever they rebind (each publish):
+    // an echo never reads, even with a read in flight, and the option lists
+    // are the same objects, so a rebind does not re-select.
+    [Fact]
+    public async Task APickerEchoDuringAReadAsksNothingMore()
+    {
+        var gate = new TaskCompletionSource<DaemonResponse>();
+        int calls = 0;
+        var model = new InsightsBenchmarksModel((m, p) => { calls++; return gate.Task; }, W);
+        IReadOnlyList<BenchmarkChoice> periods = model.PeriodChoices;
+        Task first = model.LoadAsync();
+        Assert.True(model.Busy);
+        // Not awaited: an echo that read again would wait on the same gate.
+        Task echo = model.SelectAsync(4, "own");
+        Assert.Equal(1, calls);
+        Assert.True(echo.IsCompleted);
+        Assert.Same(periods, model.PeriodChoices);
+        gate.SetResult(DaemonResponse.Parse("{\"id\":1,\"result\":{\"enabled\":true,\"categories\":[]}}"));
+        await first;
+        await model.SelectAsync(4, "own");
+        Assert.Equal(1, calls);
+    }
+
+    // The shared credential activity raises once per change.
+    [Fact]
+    public void TheCredentialActivityRaisesOnlyOnAChange()
+    {
+        var credential = new CredentialActivity();
+        var seen = new List<bool>();
+        credential.Changed += seen.Add;
+        credential.Busy = true;
+        credential.Busy = true;
+        credential.Busy = false;
+        Assert.Equal(new[] { true, false }, seen);
+    }
 }

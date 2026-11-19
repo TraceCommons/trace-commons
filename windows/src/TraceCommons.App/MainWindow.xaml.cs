@@ -329,8 +329,25 @@ public sealed partial class MainWindow : Window
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= OnFirstActivated;
+#if DEBUG
+        // A recorded sample opens on the contribution panes, as it always has
+        // (the captures' opening tab, win-capture-samples.ps1); its Insights
+        // opens from the tab, over the sample service (CreateInsightsModel).
+        if (_host.IsSample)
+        {
+            OpenSampleLanding();
+            return;
+        }
+#endif
         ShowInsightsPane();
     }
+
+#if DEBUG
+    private async void OpenSampleLanding()
+    {
+        if (await StartContributionsAsync()) ViewModel.ShowQueue();
+    }
+#endif
 
     private bool _contributionStartupAttempted;
     private bool _contributionStartupBusy;

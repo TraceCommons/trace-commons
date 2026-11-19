@@ -418,11 +418,14 @@ public sealed class InsightsBenchmarksModel : INotifyPropertyChanged
     public string Population { get; private set; } = "own";
 
     /// <summary>The population picker's options, in its order, in the core's words.</summary>
-    public IReadOnlyList<BenchmarkChoice> PopulationChoices =>
+    public IReadOnlyList<BenchmarkChoice> PopulationChoices => _populationChoices ??=
         InsightsBenchmarkWords.Populations.Select(p => new BenchmarkChoice(InsightsBenchmarkWords.Population(p, _copy), p, 0)).ToList();
 
+    private IReadOnlyList<BenchmarkChoice>? _populationChoices;
+    private IReadOnlyList<BenchmarkChoice>? _periodChoices;
+
     /// <summary>The period picker's options: 4 and 13 weeks.</summary>
-    public IReadOnlyList<BenchmarkChoice> PeriodChoices =>
+    public IReadOnlyList<BenchmarkChoice> PeriodChoices => _periodChoices ??=
         InsightsBenchmarkWords.PeriodWeeks.Select(w => new BenchmarkChoice(InsightsBenchmarkWords.Period(w, _copy), string.Empty, w)).ToList();
 
     public int PopulationIndex => Math.Max(0, InsightsBenchmarkWords.Populations.ToList().IndexOf(Population));
@@ -447,7 +450,9 @@ public sealed class InsightsBenchmarksModel : INotifyPropertyChanged
 
     public Task SelectAsync(int weeks, string population)
     {
-        if (weeks == Weeks && population == Population && Settled) return Task.CompletedTask;
+        // The pickers echo the values already chosen whenever they rebind;
+        // only a new choice reads (the tab's own load is LoadAsync's).
+        if (weeks == Weeks && population == Population) return Task.CompletedTask;
         Weeks = weeks;
         Population = population;
         return LoadAsync();
