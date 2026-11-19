@@ -205,7 +205,7 @@
                 <TextBlock Text="STARTUP"
                            Style="{StaticResource TcEyebrowTextStyle}"
                            Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
-                <ToggleSwitch Header="Start Near.ai when you sign in"
+                <ToggleSwitch x:Name="StartAtLoginSwitch"
                               IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
                               IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"

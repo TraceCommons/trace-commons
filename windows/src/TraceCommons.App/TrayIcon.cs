@@ -324,7 +324,7 @@ public sealed class TrayIcon : IDisposable
         return CreateWindowEx(
             0,
             _className,
-            "Near.ai",
+            TraceCommons.Interop.Shell.MonitorWords.AppName,
             WS_POPUP,
             0, 0, 0, 0,
             IntPtr.Zero,
@@ -516,7 +516,7 @@ public sealed class TrayIcon : IDisposable
                 AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
             }
 
-            AppendMenu(menu, MF_STRING, MenuIdOpen, "Open Near.ai");
+            AppendMenu(menu, MF_STRING, MenuIdOpen, $"Open {TraceCommons.Interop.Shell.MonitorWords.AppName}");
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);

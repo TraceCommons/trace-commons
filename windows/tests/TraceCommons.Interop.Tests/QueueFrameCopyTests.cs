@@ -58,7 +58,7 @@ public class HealthCopyTests
             "pii-filter-unavailable" => ("Waiting on the privacy scan.", false),
             "privacy-filter-canary-failed" => ("Privacy scan failed its self-test.", false),
             "claim-mint-failed" or "ingest-unreachable" => ("Can't reach the upload server.", false),
-            "queue-full" => ("Near.ai has stopped queuing new traces", true),
+            "queue-full" => ("Near AI Gateway has stopped queuing new traces", true),
             "a-label-nobody-has-written-yet" => ("Contributions on hold.", false),
             _ => throw new ArgumentOutOfRangeException(nameof(label), label, "Add the approved banner expectation."),
         };

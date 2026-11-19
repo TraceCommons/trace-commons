@@ -29,6 +29,9 @@ public sealed partial class OnboardingWindow : Window
     public OnboardingWindow(DaemonHost host, OnboardingState state)
     {
         InitializeComponent();
+        // The app's name from brand.rs (tc_app_name), never a literal (W10).
+        Title = TraceCommons.Interop.Shell.MonitorWords.AppName;
+        AppNameTitle.Text = TraceCommons.Interop.Shell.MonitorWords.AppName;
 
         ViewModel = new OnboardingViewModel(host, state);
         ViewModel.Finished += OnFinished;

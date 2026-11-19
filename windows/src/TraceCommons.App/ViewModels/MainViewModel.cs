@@ -1572,7 +1572,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         catch (TcException exception) when (exception.IsRootsNotDeclared)
         {
             NeedsSessionRoots = true;
-            StatusText = "Near.ai is not watching anything yet.";
+            StatusText = MonitorWords.AppName + " is not watching anything yet.";
             return;
         }
         catch (TcException)
@@ -1580,7 +1580,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // Deliberately not interpolating the exception message. It is a
             // fixed ABI label, but the UI string is more useful for saying
             // what to do about it.
-            StatusText = "Could not start. Another Near.ai instance may already be running.";
+            StatusText = $"Could not start. Another {MonitorWords.AppName} instance may already be running.";
             return;
         }
 
@@ -1829,8 +1829,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void ReportAlreadyRunning(bool withInvite)
     {
         StatusText = withInvite
-            ? "Near.ai is already running. Open that window and paste your invite there."
-            : "Near.ai is already running. Use the window that is already open.";
+            ? MonitorWords.AppName + " is already running. Open that window and paste your invite there."
+            : MonitorWords.AppName + " is already running. Use the window that is already open.";
     }
 
     /// <summary>

@@ -80,7 +80,70 @@ public class NoCommonsNameTests
         Assert.Empty(Findings("namespace TraceCommons.Interop;"));
     }
 
-    private static List<(int Line, string Content)> Findings(string text)
+    /// <summary>
+    /// Lines that keep the app's former name, each with why. Both are the
+    /// <c>tracecommons</c> invite protocol's display name, which owner
+    /// decision W10-D2 has not settled (spec 2026-11-18, "Still open"): the
+    /// manifest's for the packaged build and the registry's for the
+    /// unpackaged one. They change together once it is answered.
+    /// </summary>
+    private static readonly (string File, string Needle)[] FormerNameAllowed =
+    {
+        ("manifest-source/Package.appxmanifest.txt", "<uap:DisplayName>Near.ai invite</uap:DisplayName>"),
+        ("TraceCommons.App/UrlSchemeRegistration.cs.txt", "key.SetValue(string.Empty, \"URL:Near.ai Invite\");"),
+    };
+
+    /// <summary>
+    /// The app's name comes from <c>brand.rs</c> (<c>tc_app_name</c>); the
+    /// name it shipped under before (<c>brand::FORMER_APP_NAMES</c>,
+    /// "Near.ai") appears nowhere a person sees: XAML text, window titles,
+    /// automation names, C# strings and the manifest (W10, checklist J1).
+    /// A URL's host (<c>cloud.near.ai</c>) is not the name.
+    /// </summary>
+    [Fact]
+    public void NothingThisShellShowsUsesTheFormerName()
+    {
+        var offences = new List<string>();
+        foreach (string path in SourceFiles())
+        {
+            string rel = path == ManifestCopy
+                ? "manifest-source/Package.appxmanifest.txt"
+                : Path.GetRelativePath(ShellSourceRoot, path).Replace('\\', '/');
+            string text = File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
+            foreach ((int line, string content) in Findings(text, NamesFormer))
+            {
+                if (FormerNameAllowed.Any(a => a.File == rel && content.Contains(a.Needle, StringComparison.Ordinal)))
+                {
+                    continue;
+                }
+                offences.Add($"{rel}:{line}: {content}");
+            }
+        }
+
+        Assert.True(
+            offences.Count == 0,
+            "The app's name comes from brand.rs (tc_app_name), never the former \"Near.ai\" literal:\n"
+                + string.Join("\n", offences));
+    }
+
+    [Fact]
+    public void TheFormerNameScannerFindsTheNameAndSkipsHostsAndComments()
+    {
+        Assert.Single(Findings("<Window Title=\"Near.ai\">", NamesFormer));
+        Assert.Single(Findings("AutomationProperties.Name=\"Open Near.ai\"", NamesFormer));
+        Assert.Single(Findings("string s = $\"NEAR.AI — {detail}\";", NamesFormer));
+        Assert.Empty(Findings("string url = \"https://cloud.near.ai/dashboard\";", NamesFormer));
+        Assert.Empty(Findings("string url = \"near.ai/login\";", NamesFormer));
+        Assert.Empty(Findings("<!-- the Near.ai window -->", NamesFormer));
+        Assert.Empty(Findings("    /// The Near.ai tray.", NamesFormer));
+    }
+
+    private static bool NamesFormer(string text) =>
+        Regex.IsMatch(text, @"(?<![\w./-])near\.ai(?![\w/])", RegexOptions.IgnoreCase);
+
+    private static List<(int Line, string Content)> Findings(string text) => Findings(text, Names);
+
+    private static List<(int Line, string Content)> Findings(string text, Func<string, bool> names)
     {
         // Blank out XAML/XML comments but keep their newlines, so line
         // numbers stay right.
@@ -98,8 +161,8 @@ public class NoCommonsNameTests
             string here = Collapse(lines[i]);
             // A name broken across a line wrap in markup or a concatenation.
             string next = i + 1 < lines.Length && !IsComment(lines[i + 1]) ? Collapse(lines[i + 1]) : "";
-            bool split = !Names(here) && !Names(next) && Names(here + " " + next);
-            if (Names(here) || split)
+            bool split = !names(here) && !names(next) && names(here + " " + next);
+            if (names(here) || split)
             {
                 found.Add((i + 1, split ? here + " " + next : here));
             }
