@@ -1106,6 +1106,12 @@ public sealed partial class MainWindow
     private static void ResetMotion(FrameworkElement card)
     {
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
+        // A card that never arrived has no Translation property, and stopping
+        // an animation on a property that does not exist throws ("The
+        // specified property was not found", the app's first notice at
+        // launch). Give it the property first, at rest.
+        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
+        visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
         visual.Opacity = 1;
