@@ -3493,3 +3493,7 @@ mod tests {
             .collect()
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "terminal_windows_tests.rs"]
+mod windows_tests;
