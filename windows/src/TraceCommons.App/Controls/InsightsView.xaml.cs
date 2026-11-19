@@ -34,7 +34,39 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         await ViewModel.LoadAsync();
         _activated = true;
-        await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+        await ViewModel.SelectTabAsync(ViewModel.TabAt(Tabs.SelectedIndex));
+    }
+
+    /// <summary>Skills' "review settings" action: Settings opens (InsightsView.swift <c>openSkillsSettings</c>).</summary>
+    public event EventHandler? SkillsSettingsRequested;
+
+    private PivotItem? _skillsItem;
+
+    /// <summary>
+    /// The daemon's <c>insights_skills</c> flag: Skills is added after
+    /// Benchmarks, the Mac's place for it, or removed. Removing it while it
+    /// is shown shows Overview.
+    /// </summary>
+    public void SetSkillsEnabled(bool enabled)
+    {
+        if (_closed) return;
+        if (enabled && _skillsItem is null)
+        {
+            var view = new InsightsSkillsView(ViewModel.Skills, () => SkillsSettingsRequested?.Invoke(this, EventArgs.Empty));
+            _skillsItem = new PivotItem { Header = ViewModel.Skills.Text("skills_title"), Content = view };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(_skillsItem, "insights-tab-skills");
+            _ = ViewModel.SetSkillsEnabled(true);
+            Tabs.Items.Insert(InsightsViewModel.ShownTabs(true).ToList().IndexOf(InsightsViewModel.SkillsTab), _skillsItem);
+        }
+        else if (!enabled && _skillsItem is not null)
+        {
+            bool shown = ReferenceEquals(Tabs.SelectedItem, _skillsItem);
+            PivotItem item = _skillsItem;
+            _skillsItem = null;
+            _ = ViewModel.SetSkillsEnabled(false);
+            if (shown) Tabs.SelectedIndex = 0;
+            Tabs.Items.Remove(item);
+        }
     }
     // Set once the core's words are loaded. The Pivot selects its first tab
     // while the control is built, before then, and that read would present
@@ -43,7 +75,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
     // The tabs read their figures when shown; Analyze reads nothing new.
     private async void OnTabChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(ViewModel.TabAt(Tabs.SelectedIndex));
     }
     // A week picker's own index follows the model; only a choice the model
     // is not already showing reads again.

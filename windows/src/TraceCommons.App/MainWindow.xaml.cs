@@ -1169,6 +1169,7 @@ public sealed partial class MainWindow : Window
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
             };
+            page.SkillsSettingsRequested += (_, _) => ShowSettingsWindow();
             InsightsPane.Content = page;
             page.ViewModel.SetClocksRunning(WindowClocks.Running);
             page.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
