@@ -213,6 +213,13 @@ impl FeatureFlags {
             .is_some_and(|snapshot| snapshot.is_enabled(id))
     }
 
+    /// The daemon was replaced: hold nothing, and drop the answer to any
+    /// read made before (the Mac clears `featureFlags` on a new daemon).
+    pub fn forget(&self) {
+        self.begin_read();
+        self.current.borrow_mut().take();
+    }
+
     /// The snapshot held now.
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.current.borrow().clone()
@@ -336,6 +343,33 @@ mod tests {
         assert!(flags.finish_read(read, None));
         assert!(flags.snapshot().is_none());
         assert!(!flags.is_enabled("insights_skills"));
+    }
+
+    /// A replaced daemon leaves nothing held, as the Mac's `featureFlags =
+    /// nil` on a new daemon, and an answer to a read made before it is
+    /// dropped (the Mac's `featureFlagClient === client` guard).
+    #[test]
+    fn a_replaced_daemon_holds_nothing_and_drops_the_old_read() {
+        let flags = FeatureFlags::default();
+        let mut on = Snapshot::decode(recorded()).unwrap();
+        on.flags.insert(
+            "insights_skills".into(),
+            serde_json::from_value(serde_json::json!({"enabled":true,"pending":false,"capability_blocked":false,"timing":"live"})).unwrap(),
+        );
+        let first = flags.begin_read();
+        assert!(flags.finish_read(first, Some(on.clone())));
+        assert!(flags.is_enabled("insights_skills"));
+        let in_flight = flags.begin_read();
+        flags.forget();
+        assert!(
+            !flags.is_enabled("insights_skills"),
+            "the old daemon's snapshot is still held"
+        );
+        assert!(
+            !flags.finish_read(in_flight, Some(on)),
+            "a read to the old daemon was applied"
+        );
+        assert!(flags.snapshot().is_none());
     }
 
     #[test]

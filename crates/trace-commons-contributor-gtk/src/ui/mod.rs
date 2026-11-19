@@ -1009,6 +1009,8 @@ impl App {
                     // Whatever happened, the daemon may have changed: the
                     // same "look again" as `resync_required`.
                     app.refresh();
+                    app.feature_flags.forget();
+                    app.refresh_feature_flags();
                     app.poll_outstanding_previews();
                     callback(app);
                 }
