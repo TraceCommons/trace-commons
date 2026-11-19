@@ -261,8 +261,10 @@ public sealed class LaunchTests
         Assert.Equal(LaunchArtStep.None, life.Unloaded(stillLoaded: true));
         Assert.False(life.Resting);
         Assert.True(life.Watching);
-        // A real Unloaded, once the art has left the tree, rests and releases it.
-        Assert.Equal(LaunchArtStep.Rest, life.Unloaded(stillLoaded: false));
+        // A real Unloaded, once the art has left the tree, releases it and
+        // draws nothing: its visual is gone (box, 2026-11-19: stopping its
+        // animation then threw and crashed the app).
+        Assert.Equal(LaunchArtStep.None, life.Unloaded(stillLoaded: false));
         Assert.True(life.Resting);
         Assert.False(life.Watching);
     }
@@ -298,7 +300,8 @@ public sealed class LaunchTests
         if (!life.Watching) watched.Remove(art);
         Assert.Equal(1, watched.Count);
 
-        Assert.Equal(LaunchArtStep.Rest, life.Closed());
+        // The close touches no visual: the art has left the tree.
+        Assert.Equal(LaunchArtStep.None, life.Closed());
         Assert.False(life.Watching);
         if (!life.Watching) watched.Remove(art);
         Assert.Equal(0, watched.Count);

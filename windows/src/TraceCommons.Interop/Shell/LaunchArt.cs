@@ -196,6 +196,10 @@ public enum LaunchArtStep
 /// longer loaded, or by its dialog closing, whichever comes first. A dialog
 /// that never raises the second Unloaded still releases its art when
 /// <c>ShowAsync</c> returns, so no art outlives its dialog in the watch list.
+/// A release draws nothing: the art has left the tree, and touching its
+/// composition visual then throws (box, 2026-11-19: <c>StopAnimation</c> on
+/// <c>Translation.X</c> of an unloaded art raised "The specified property
+/// was not found", which crashed the app the moment the dialog closed).
 /// </remarks>
 public sealed class LaunchArtLife
 {
@@ -228,7 +232,7 @@ public sealed class LaunchArtLife
     /// An Unloaded event. WinUI raises one late, after the element has moved
     /// into a dialog's popup and while it is still shown (box, 2026-11-19:
     /// 340 ms after Loaded, with no second Loaded); only an art that is no
-    /// longer loaded is released and rests.
+    /// longer loaded is released.
     /// </summary>
     public LaunchArtStep Unloaded(bool stillLoaded) => stillLoaded ? LaunchArtStep.None : Release();
 
@@ -248,7 +252,8 @@ public sealed class LaunchArtLife
     private LaunchArtStep Release()
     {
         Watching = false;
-        return RestNow();
+        Resting = true;
+        return LaunchArtStep.None;
     }
 
     private LaunchArtStep RestNow()
