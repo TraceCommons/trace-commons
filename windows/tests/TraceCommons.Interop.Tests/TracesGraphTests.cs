@@ -156,6 +156,25 @@ public class TracesGraphTests
     }
 
     [Fact]
+    public void TheColumnsShareTheRowEqually()
+    {
+        // Indicators.swift:410-413: an HStack of columns `spacing:
+        // gaps.between` apart, each as wide as the others (its label frame
+        // takes maxWidth .infinity). 11 columns 6 apart over 400: (400 - 60) / 11.
+        IReadOnlyList<(double X, double Width)> days = BarGraph.ColumnFrames(400, 11);
+        Assert.Equal(11, days.Count);
+        Assert.Equal(340.0 / 11, days[0].Width, 9);
+        Assert.Equal(0, days[0].X);
+        Assert.Equal(340.0 / 11 + 6, days[1].X, 9);
+        Assert.Equal(400, days[10].X + days[10].Width, 9);
+        // 42 thin columns 2 apart: (400 - 82) / 42.
+        Assert.Equal(318.0 / 42, BarGraph.ColumnFrames(400, 42)[0].Width, 9);
+        Assert.Equal(0, BarGraph.ColumnAt(1, 400, 11));
+        Assert.Equal(-1, BarGraph.ColumnAt(340.0 / 11 + 3, 400, 11));
+        Assert.Equal(10, BarGraph.ColumnAt(399, 400, 11));
+    }
+
+    [Fact]
     public void TheRangePillAndBarsSayTheCoresWords()
     {
         // MonitorGraphMapCopy.swift:41-58 over the core's own table.

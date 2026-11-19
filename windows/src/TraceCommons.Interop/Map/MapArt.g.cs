@@ -53,6 +53,11 @@ public static partial class MapArt
         ["toolTheia"] = new MapRgba(97, 82, 224, 1.0),
         ["ink"] = new MapRgba(0, 0, 0, 1.0),
         ["tileFolder"] = new MapRgba(230, 230, 234, 1.0),
+        ["dataShared"] = new MapRgba(122, 44, 245, 1.0),
+        ["dataKept"] = new MapRgba(47, 107, 196, 1.0),
+        ["graphFocusOn"] = new MapRgba(31, 111, 209, 1.0),
+        ["graphFocusIdle"] = new MapRgba(60, 60, 66, 1.0),
+        ["graphFocusOff"] = new MapRgba(161, 161, 166, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };
@@ -90,6 +95,11 @@ public static partial class MapArt
         ["toolTheia"] = new MapRgba(157, 147, 255, 1.0),
         ["ink"] = new MapRgba(255, 255, 255, 1.0),
         ["tileFolder"] = new MapRgba(42, 42, 44, 1.0),
+        ["dataShared"] = new MapRgba(138, 61, 255, 1.0),
+        ["dataKept"] = new MapRgba(58, 123, 213, 1.0),
+        ["graphFocusOn"] = new MapRgba(77, 163, 255, 1.0),
+        ["graphFocusIdle"] = new MapRgba(214, 214, 220, 1.0),
+        ["graphFocusOff"] = new MapRgba(107, 107, 112, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };

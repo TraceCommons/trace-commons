@@ -1638,7 +1638,11 @@ def render_windows(tokens: dict) -> str:
 
 # The map inks, as MAP_COLOURS, plus the ink the Mac's GlassColor.ink(alpha)
 # draws quiet lines and coin faces in.
-WINDOWS_MAP_COLOURS = MAP_COLOURS + ["ink", "tileFolder"]
+# The Traces graph footer (W3) draws its dots, axis and focus glyph in the
+# same table: shared over kept (`GlassBarGraph`) and the binoculars' three
+# inks (`TracesGraphFooter.focusInk`).
+WINDOWS_MAP_COLOURS = MAP_COLOURS + ["ink", "tileFolder", "dataShared", "dataKept",
+                                     "graphFocusOn", "graphFocusIdle", "graphFocusOff"]
 
 
 def cs_float(value) -> str:

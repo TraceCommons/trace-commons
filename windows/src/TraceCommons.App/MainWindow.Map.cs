@@ -29,6 +29,7 @@ public sealed partial class MainWindow
         _map.MapStyle = TracesMapStyleSetting.Load();
         TracesMapStyleSetting.Changed += style => _map.MapStyle = style;
         InitializeTransfers(_map);
+        InitializeGraph(_map);
         _map.FolderSelected += projectId =>
         {
             ViewModel.OpenFolder(projectId);

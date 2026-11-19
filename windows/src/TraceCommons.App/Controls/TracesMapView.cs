@@ -295,6 +295,7 @@ public sealed partial class TracesMapView : UserControl
                 _snapshot = snapshot;
                 _readOnce = true;
                 Rebuild();
+                SnapshotRead?.Invoke(snapshot);
             }
             while (_readAgain);
         }
@@ -303,6 +304,13 @@ public sealed partial class TracesMapView : UserControl
             _reading = false;
         }
     }
+
+    /// <summary>
+    /// Each read as it lands: the Traces graph draws from the same History
+    /// page and queue (MonitorWindowView.swift:403-406 reads HomeStore's
+    /// history and the tree the map draws).
+    /// </summary>
+    public event Action<MapSnapshot>? SnapshotRead;
 
     /// <summary>The map's style (Settings, General; TracesMapStyle.swift): it changes at once.</summary>
     public TracesMapStyle MapStyle

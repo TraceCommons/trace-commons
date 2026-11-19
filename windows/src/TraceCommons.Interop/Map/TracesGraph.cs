@@ -261,6 +261,44 @@ public static class BarGraph
     public static (double Between, double Inset) Gaps(bool thin, bool compact = false) =>
         thin ? (2, 1) : compact ? (2, 2) : (6, 5);
 
+    /// <summary>
+    /// Each column's left edge and width across <paramref name="width"/>:
+    /// equal shares of the row, the gap between them (:410-413, each
+    /// column's label frame taking <c>maxWidth: .infinity</c>).
+    /// </summary>
+    public static IReadOnlyList<(double X, double Width)> ColumnFrames(double width, int count)
+    {
+        var frames = new List<(double X, double Width)>(count);
+        if (count <= 0)
+        {
+            return frames;
+        }
+
+        double between = Gaps(Thin(count)).Between;
+        double each = Math.Max(0, (width - between * (count - 1)) / count);
+        for (int i = 0; i < count; i++)
+        {
+            frames.Add((i * (each + between), each));
+        }
+
+        return frames;
+    }
+
+    /// <summary>The column under <paramref name="x"/>, or -1 between and outside columns' reach.</summary>
+    public static int ColumnAt(double x, double width, int count)
+    {
+        IReadOnlyList<(double X, double Width)> frames = ColumnFrames(width, count);
+        for (int i = 0; i < frames.Count; i++)
+        {
+            if (x >= frames[i].X && x < frames[i].X + frames[i].Width)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     /// <summary>Values scale to the largest bucket, never below the floor (:407).</summary>
     public static double Maximum(IEnumerable<(double Up, double Down)> buckets, double scaleFloor) =>
         Math.Max(scaleFloor, buckets.Select(b => Math.Max(b.Up, b.Down)).DefaultIfEmpty(0).Max());

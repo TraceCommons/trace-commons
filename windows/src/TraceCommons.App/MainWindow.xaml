@@ -198,7 +198,7 @@
                 <ColumnDefinition x:Name="InspectorColumn" Width="0" />
             </Grid.ColumnDefinitions>
 
-            <Grid x:Name="MainPane" Grid.Column="0" RowDefinitions="Auto,Auto,*">
+            <Grid x:Name="MainPane" Grid.Column="0" RowDefinitions="Auto,Auto,*,Auto">
 
                 <!--
                     The tabs (GlassRuleTabs, MonitorWindowView.swift:972-995),
@@ -1507,6 +1507,9 @@
 
 
                 </Grid>
+
+                <!-- The Traces graph, full bleed under the tab (W3; MainWindow.Graph.cs). -->
+                <Grid x:Name="GraphFooterHost" Grid.Row="3" Height="0" Visibility="Collapsed" />
             </Grid>
 
             <!-- The map's place (W3 draws it). -->

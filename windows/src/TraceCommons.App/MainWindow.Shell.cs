@@ -479,6 +479,7 @@ public sealed partial class MainWindow
         InspectorToggle.IsEnabled = available;
         var wanted = new PaneVisibility(_wantsMap, _wantsInspector && available);
         ApplyMapToggle(wanted.Map);
+        ApplyGraph();
         InspectorToggle.IsChecked = wanted.Inspector;
         string toggleName = MonitorWords.Toggle(PaneToggle.Inspector, wanted.Inspector);
         AutomationProperties.SetName(InspectorToggle, toggleName);
