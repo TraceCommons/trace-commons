@@ -104,8 +104,8 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     let exe = std::env::current_exe().map_err(|_| ManagedError::ToolUnavailable)?;
     let fetch = rts::setup::HttpsFetch::new().map_err(|_| ManagedError::ToolUnavailable)?;
     let host = rts::session::RealHost;
-    let (_tmp, empty_git) =
-        rts::launch::private_git_config("rts-setup-").map_err(|_| ManagedError::StorageUnavailable)?;
+    let (_tmp, empty_git) = rts::launch::private_git_config("rts-setup-")
+        .map_err(|_| ManagedError::StorageUnavailable)?;
     let env: Vec<(String, String)> = std::env::vars().collect();
     let mvm_plain = rts::mvm::SpawnRunner {
         mvmctl: defaults.mvmctl.clone(),
@@ -266,9 +266,7 @@ pub(crate) fn spec_for(
     let simple_hex = context.session.id.simple().to_string();
     let session_id = Some(simple_hex[..12].to_owned());
 
-    let exe = std::env::current_exe()?
-        .to_string_lossy()
-        .into_owned();
+    let exe = std::env::current_exe()?.to_string_lossy().into_owned();
     let tool_command = Some(vec![exe, "red-team".to_owned(), "tool".to_owned()]);
 
     let bodies = crate::daemon::settings::DaemonSettings::load(store)

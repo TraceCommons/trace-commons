@@ -76,7 +76,7 @@ fn red_team_launch_request(
         cli_options: None,
         resume_of: None,
         sandbox: None,
-            initial_prompt: None,
+        initial_prompt: None,
     })
 }
 
@@ -165,49 +165,38 @@ fn launch_prepare_refuses_red_team_on_a_subscription_or_api_key_account() {
 }
 
 #[cfg(target_os = "macos")]
-#[test]
-fn turning_the_flag_off_leaves_a_running_red_team_session_alone() {
+#[tokio::test]
+async fn turning_the_flag_off_leaves_a_running_red_team_session_alone() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     set_red_team_flag(&shared, true);
+    let cred = crate::daemon::settings::NearAiInferenceCredential {
+        key: "sk-near-red-team-test-key".into(),
+        key_id: "rt-key-id".into(),
+        key_prefix: "sk-ne".into(),
+        organization_id: "org".into(),
+        workspace_id: "ws".into(),
+        minted_at: chrono::Utc::now(),
+    };
+    shared.settings.lock().unwrap().near_ai_inference = Some(cred.clone());
+    let account_id = signin::account_id(ToolId::RedTeam).unwrap();
 
-    let added = handle(
-        &shared,
-        &req(
-            "managed_account_add",
-            json!({
-                "tool": "red_team",
-                "connection": "near_ai",
-                "label": "NEAR AI Key"
-            }),
-        ),
-    );
-    assert!(added.error.is_none(), "{added:?}");
-    let account: AccountView = serde_json::from_value(added.result.unwrap()).unwrap();
-
-    let keyed = handle(
-        &shared,
-        &req(
-            "managed_account_set_key",
-            json!({
-                "account_id": account.id,
-                "key": "sk-near-red-team-test-key"
-            }),
-        ),
-    );
-    assert!(keyed.error.is_none(), "{keyed:?}");
-
-    let prepared_resp = handle(
+    let prepared_resp = handle_async_with(
         &shared,
         &req(
             "managed_launch_prepare",
-            red_team_launch_request(ConnectionKind::NearAi, account.id, dir.path()),
+            red_team_launch_request(ConnectionKind::NearAiSignIn, account_id, dir.path()),
         ),
-    );
+        |_| async { BalanceReport::Unavailable },
+    )
+    .await;
     assert!(prepared_resp.error.is_none(), "{prepared_resp:?}");
     let prepared: PreparedLaunch = serde_json::from_value(prepared_resp.result.unwrap()).unwrap();
+    // `remember_prepared` reloads `DaemonSettings` from disk after saving folder
+    // settings; re-install the in-memory fixture credential before redeem.
+    shared.settings.lock().unwrap().near_ai_inference = Some(cred);
 
-    let redeemed = handle(
+    let redeemed = handle_async_with(
         &shared,
         &req(
             "managed_launch_redeem",
@@ -216,7 +205,9 @@ fn turning_the_flag_off_leaves_a_running_red_team_session_alone() {
                 "ticket": prepared.ticket,
             }),
         ),
-    );
+        |_| async { BalanceReport::Unavailable },
+    )
+    .await;
     assert!(redeemed.error.is_none(), "{redeemed:?}");
     let context: LaunchContext = serde_json::from_value(redeemed.result.unwrap()).unwrap();
 
@@ -231,7 +222,7 @@ fn turning_the_flag_off_leaves_a_running_red_team_session_alone() {
                 proof: context.proof,
                 state: SessionState::Running,
                 process_id: Some(4242),
-                process_identity: None,
+                process_identity: Some("4242:test".into()),
                 exit_code: None,
             }),
         ),
@@ -257,7 +248,7 @@ fn turning_the_flag_off_leaves_a_running_red_team_session_alone() {
         &shared,
         &req(
             "managed_launch_prepare",
-            red_team_launch_request(ConnectionKind::NearAi, account.id, dir.path()),
+            red_team_launch_request(ConnectionKind::NearAiSignIn, account_id, dir.path()),
         ),
     );
     assert_eq!(second.error.unwrap().code, RED_TEAM_UNAVAILABLE_LABEL);

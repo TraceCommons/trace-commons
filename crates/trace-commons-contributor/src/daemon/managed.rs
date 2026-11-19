@@ -310,7 +310,7 @@ impl ManagedService {
         match self.resolve_launch(request, sign_in, red_team, true)? {
             Resolved::Replayed(existing) => Ok(json!(existing)),
             Resolved::Launch(launch, account, again_of) => Ok(json!(
-                self.sessions.prepare_again(launch, &account, again_of)?
+                self.sessions.prepare_again(*launch, &account, again_of)?
             )),
         }
     }
@@ -376,7 +376,7 @@ impl ManagedService {
                 if verify {
                     verify_visible_version(&self.profiles, &account)?;
                 }
-                Ok(Resolved::Launch(p, account, None))
+                Ok(Resolved::Launch(Box::new(p), account, None))
             }
             "managed_session_start_again" | "managed_session_resume" => {
                 #[derive(Deserialize)]
@@ -418,7 +418,11 @@ impl ManagedService {
                     return Err(ManagedError::InvalidRequest);
                 }
                 again.expected_generation = self.accounts.generation(again.tool);
-                Ok(Resolved::Launch(again, account, Some(p.session_id)))
+                Ok(Resolved::Launch(
+                    Box::new(again),
+                    account,
+                    Some(p.session_id),
+                ))
             }
             _ => Err(ManagedError::InvalidRequest),
         }
@@ -432,7 +436,7 @@ impl ManagedService {
         match self.resolve_launch(request, sign_in, red_team, false) {
             Ok(Resolved::Launch(launch, account, _)) => {
                 launch.connection == ConnectionKind::NearAiSignIn
-                    && self.sessions.would_prepare_new(launch, &account)
+                    && self.sessions.would_prepare_new(*launch, &account)
             }
             _ => false,
         }
@@ -465,7 +469,7 @@ impl ManagedService {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
-            initial_prompt: None,
+                        initial_prompt: None,
                     },
                     sign_in,
                 )
@@ -626,9 +630,18 @@ impl ManagedService {
                     self.accounts.generation(tool)
                 });
                 let mut generations = serde_json::Map::new();
-                generations.insert("claude".into(), json!(self.accounts.generation(ToolId::Claude)));
-                generations.insert("codex".into(), json!(self.accounts.generation(ToolId::Codex)));
-                generations.insert("opencode".into(), json!(self.accounts.generation(ToolId::Opencode)));
+                generations.insert(
+                    "claude".into(),
+                    json!(self.accounts.generation(ToolId::Claude)),
+                );
+                generations.insert(
+                    "codex".into(),
+                    json!(self.accounts.generation(ToolId::Codex)),
+                );
+                generations.insert(
+                    "opencode".into(),
+                    json!(self.accounts.generation(ToolId::Opencode)),
+                );
                 if red_team {
                     generations.insert(
                         "red_team".into(),
@@ -838,7 +851,7 @@ impl ManagedService {
                     resume_of: None,
                     background_model: None,
                     sandbox: None,
-            initial_prompt: None,
+                    initial_prompt: None,
                 };
                 Ok(json!(self.sessions.prepare(request, &account)?))
             }
@@ -1021,7 +1034,7 @@ fn remember_prepared(
 enum Resolved {
     /// A new launch, checked and ready to prepare, with the ended row Start
     /// again or Resume prepares it from.
-    Launch(LaunchRequest, AccountView, Option<Uuid>),
+    Launch(Box<LaunchRequest>, AccountView, Option<Uuid>),
     /// The session this request id already prepared.
     Replayed(crate::managed::sessions::PreparedLaunch),
 }
@@ -2603,7 +2616,7 @@ mod tests {
                     model: None,
                     collect_traces: false,
                     sandbox: None,
-            initial_prompt: None,
+                    initial_prompt: None,
                 }),
                 false,
             )
@@ -4785,7 +4798,7 @@ mod tests {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
-            initial_prompt: None,
+                        initial_prompt: None,
                     },
                     &f.account,
                 )
@@ -4993,7 +5006,7 @@ mod tests {
                         resume_of: None,
                         background_model: None,
                         sandbox: None,
-            initial_prompt: None,
+                        initial_prompt: None,
                     },
                     &f.account,
                 )

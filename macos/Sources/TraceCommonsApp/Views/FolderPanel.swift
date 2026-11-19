@@ -7,15 +7,27 @@ import TCShellCore
 /// directory, never a file, and no folder created from it.
 @MainActor
 enum FolderPanel {
-    /// The chosen folder's path, or nil when the panel is dismissed.
-    static func choose() -> String? {
+    private static func makePanel(canChooseFiles: Bool, allowsMultipleSelection: Bool) -> NSOpenPanel {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = canChooseFiles
+        panel.allowsMultipleSelection = allowsMultipleSelection
         panel.canCreateDirectories = false
+        return panel
+    }
+
+    /// The chosen folder's path, or nil when the panel is dismissed.
+    static func choose() -> String? {
+        let panel = makePanel(canChooseFiles: false, allowsMultipleSelection: false)
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
+    }
+
+    /// Chosen file and/or folder paths for Red Team inputs.
+    static func chooseFilesAndFolders() -> [String] {
+        let panel = makePanel(canChooseFiles: true, allowsMultipleSelection: true)
+        guard panel.runModal() == .OK else { return [] }
+        return panel.urls.map(\.path)
     }
 }
 

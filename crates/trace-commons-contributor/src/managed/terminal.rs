@@ -2739,7 +2739,9 @@ mod tests {
                 (TerminalSetting::Wezterm, TerminalApp::Wezterm),
             ] {
                 assert_eq!(
-                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, |_| Err(error.clone())),
+                    launch_macos(choice, &[app], "'/x/near-ai'", argv(), cwd, |_| Err(
+                        error.clone()
+                    )),
                     Err(ManagedError::LaunchUnknown),
                     "{error:?}"
                 );

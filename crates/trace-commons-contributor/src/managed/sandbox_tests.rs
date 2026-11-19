@@ -67,8 +67,8 @@ fn the_home_folder_is_refused_as_an_input() {
         inputs: vec![fake_home.path().to_path_buf()],
         ..Default::default()
     };
-    let err = validate_with_home(ToolId::RedTeam, Some(&settings), Some(fake_home.path()))
-        .unwrap_err();
+    let err =
+        validate_with_home(ToolId::RedTeam, Some(&settings), Some(fake_home.path())).unwrap_err();
     match err {
         ManagedError::SandboxInputRefused(msg) => {
             assert!(

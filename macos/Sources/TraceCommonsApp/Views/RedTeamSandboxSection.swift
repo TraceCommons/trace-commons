@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// Files and Network settings shown inside `ManagedLaunchSheet` only for Red Team.
@@ -85,16 +86,9 @@ struct RedTeamSandboxSection: View {
     }
 
     private func pickInputs() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK {
-            for url in panel.urls {
-                let path = url.path
-                if !draft.inputs.contains(path) {
-                    draft.inputs.append(path)
-                }
+        for path in FolderPanel.chooseFilesAndFolders() {
+            if !draft.inputs.contains(path) {
+                draft.inputs.append(path)
             }
         }
     }

@@ -1773,8 +1773,8 @@ mod tests {
                 LaunchRequest {
                     keep_saved_model: false,
                     background_model: None,
-            sandbox: None,
-            initial_prompt: None,
+                    sandbox: None,
+                    initial_prompt: None,
                     ..again
                 },
                 &sign_in,
@@ -1918,8 +1918,8 @@ mod tests {
             .prepare(
                 LaunchRequest {
                     background_model: None,
-            sandbox: None,
-            initial_prompt: None,
+                    sandbox: None,
+                    initial_prompt: None,
                     ..again.clone()
                 },
                 &sign_in,

@@ -33,7 +33,8 @@ fn red_team_flags_on_claude_are_refused() {
         let args = parse_launch(&flag_set).expect("clap parses args");
         let err = validate_launch_args(&args).expect_err("red-team flags on claude must fail");
         assert!(
-            err.to_string().contains("these options apply only to red-team"),
+            err.to_string()
+                .contains("these options apply only to red-team"),
             "unexpected error for {flag_set:?}: {err}"
         );
     }
@@ -66,7 +67,10 @@ fn a_prompt_file_over_64_kib_is_refused() {
     let ok = dir.path().join("ok.txt");
     std::fs::write(&ok, vec![b'a'; MAX_INITIAL_PROMPT_BYTES]).unwrap();
     assert_eq!(
-        resolve_initial_prompt(None, Some(&ok)).unwrap().unwrap().len(),
+        resolve_initial_prompt(None, Some(&ok))
+            .unwrap()
+            .unwrap()
+            .len(),
         MAX_INITIAL_PROMPT_BYTES
     );
 }
@@ -86,7 +90,7 @@ async fn non_interactive_launch_without_new_terminal_names_the_flag() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn new_terminal_prints_the_session_id_as_json() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -148,15 +152,20 @@ async fn new_terminal_prints_the_session_id_as_json() {
         }
     });
 
-    let args = parse_launch(&["claude", "--new-terminal", "--cwd", dir.path().to_str().unwrap()])
-        .unwrap();
+    let args = parse_launch(&[
+        "claude",
+        "--new-terminal",
+        "--cwd",
+        dir.path().to_str().unwrap(),
+    ])
+    .unwrap();
     let code = launch_with_tty(&store, args, true, false).await.unwrap();
     assert_eq!(code, 0);
     server.abort();
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn new_terminal_without_a_terminal_is_refused_with_terminal_unavailable() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
@@ -232,8 +241,13 @@ async fn new_terminal_without_a_terminal_is_refused_with_terminal_unavailable() 
         }
     });
 
-    let args = parse_launch(&["claude", "--new-terminal", "--cwd", dir.path().to_str().unwrap()])
-        .unwrap();
+    let args = parse_launch(&[
+        "claude",
+        "--new-terminal",
+        "--cwd",
+        dir.path().to_str().unwrap(),
+    ])
+    .unwrap();
     let err = launch_with_tty(&store, args, false, false)
         .await
         .expect_err("missing terminal must fail cleanly");

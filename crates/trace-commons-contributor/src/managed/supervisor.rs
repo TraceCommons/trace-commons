@@ -160,7 +160,7 @@ async fn run_native(
             proof: context.proof.clone(),
             state: SessionState::Running,
             process_id: Some(std::process::id()),
-            process_identity: None,
+            process_identity: Some(format!("{}:red-team", std::process::id())),
             exit_code: None,
         };
         let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(running));
@@ -283,9 +283,7 @@ async fn run_native(
     if opencode.is_some() && !login {
         command.args(&context.cli_options);
     }
-    if !login
-        && let Some(prompt) = context.initial_prompt.as_deref()
-    {
+    if !login && let Some(prompt) = context.initial_prompt.as_deref() {
         command.args(initial_prompt_args(row.tool, prompt));
     }
     if opencode.is_none() {

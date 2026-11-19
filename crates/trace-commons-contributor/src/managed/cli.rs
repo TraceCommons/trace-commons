@@ -226,9 +226,8 @@ pub fn resolve_initial_prompt(
                 MAX_INITIAL_PROMPT_BYTES / 1024
             );
         }
-        let text = String::from_utf8(bytes).map_err(|_| {
-            anyhow::anyhow!("--prompt-file {} must be valid UTF-8", path.display())
-        })?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("--prompt-file {} must be valid UTF-8", path.display()))?;
         return Ok(Some(text));
     }
     Ok(None)
@@ -248,11 +247,7 @@ pub fn validate_launch_args(
     }
     let initial_prompt = resolve_initial_prompt(args.prompt.clone(), args.prompt_file.as_deref())?;
     let sandbox = if args.tool == ToolId::RedTeam && has_red_team_opts {
-        let memory_mib = args
-            .memory
-            .as_deref()
-            .map(parse_memory_mib)
-            .transpose()?;
+        let memory_mib = args.memory.as_deref().map(parse_memory_mib).transpose()?;
         Some(super::sandbox::SandboxSettings {
             inputs: args.inputs.clone(),
             allow_hosts: args.allow_hosts.clone(),
@@ -405,9 +400,7 @@ pub async fn launch_with_tty(
         );
     }
     let mut snapshot: Snapshot = call(store, "managed_snapshot", json!({}))?;
-    if args.tool == ToolId::RedTeam
-        && !snapshot.tools.iter().any(|t| t["tool"] == "red_team")
-    {
+    if args.tool == ToolId::RedTeam && !snapshot.tools.iter().any(|t| t["tool"] == "red_team") {
         return Err(ManagedError::RedTeamUnavailable.into());
     }
     let resolved = |snapshot: &Snapshot| {

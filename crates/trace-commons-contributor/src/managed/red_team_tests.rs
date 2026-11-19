@@ -59,8 +59,12 @@ fn test_context(cwd: &Path, inputs: Vec<PathBuf>, key: &str) -> LaunchContext {
 }
 
 #[cfg(target_os = "macos")]
-#[test]
-fn redeem_returns_the_key_only_for_red_team() {
+#[tokio::test]
+async fn redeem_returns_the_key_only_for_red_team() {
+    use crate::daemon::managed::handle_async_with;
+    use crate::daemon::nearai_credential::balance::BalanceReport;
+    use crate::managed::signin;
+
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
     let mut shared = DaemonShared::load(store).unwrap();
@@ -87,29 +91,30 @@ fn redeem_returns_the_key_only_for_red_team() {
             now,
         )
         .unwrap();
+    let cred = crate::daemon::settings::NearAiInferenceCredential {
+        key: "sk-red-team-secret".into(),
+        key_id: "rt-key".into(),
+        key_prefix: "sk-re".into(),
+        organization_id: "org".into(),
+        workspace_id: "ws".into(),
+        minted_at: chrono::Utc::now(),
+    };
+    shared.settings.lock().unwrap().near_ai_inference = Some(cred.clone());
 
-    // Claude saved NEAR AI account -> redeem must NOT return red_team_key.
+    // Claude subscription account -> redeem must NOT return red_team_key.
     let claude_acct: AccountView = serde_json::from_value(
         handle(
             &shared,
             &Request {
                 id: 1,
                 method: "managed_account_add".into(),
-                params: json!({"tool": "claude", "connection": "near_ai", "label": "Claude Key"}),
+                params: json!({"tool": "claude", "connection": "subscription", "label": "Claude Sub"}),
             },
         )
         .result
         .unwrap(),
     )
     .unwrap();
-    let _ = handle(
-        &shared,
-        &Request {
-            id: 2,
-            method: "managed_account_set_key".into(),
-            params: json!({"account_id": claude_acct.id, "key": "sk-claude-secret"}),
-        },
-    );
     let claude_prep: PreparedLaunch = serde_json::from_value(
         handle(
             &shared,
@@ -119,7 +124,7 @@ fn redeem_returns_the_key_only_for_red_team() {
                 params: json!(LaunchRequest {
                     request_id: Uuid::new_v4(),
                     tool: ToolId::Claude,
-                    connection: ConnectionKind::NearAi,
+                    connection: ConnectionKind::Subscription,
                     account_id: claude_acct.id,
                     cwd: dir.path().to_path_buf(),
                     expected_generation: Generation(0),
@@ -132,7 +137,7 @@ fn redeem_returns_the_key_only_for_red_team() {
                     cli_options: None,
                     resume_of: None,
                     sandbox: None,
-            initial_prompt: None,
+                    initial_prompt: None,
                 }),
             },
         )
@@ -158,30 +163,11 @@ fn redeem_returns_the_key_only_for_red_team() {
         "Claude redeem must never carry red_team_key"
     );
 
-    // Red Team saved NEAR AI account -> redeem MUST return red_team_key.
-    let rt_acct: AccountView = serde_json::from_value(
-        handle(
-            &shared,
-            &Request {
-                id: 5,
-                method: "managed_account_add".into(),
-                params: json!({"tool": "red_team", "connection": "near_ai", "label": "RT Key"}),
-            },
-        )
-        .result
-        .unwrap(),
-    )
-    .unwrap();
-    let _ = handle(
-        &shared,
-        &Request {
-            id: 6,
-            method: "managed_account_set_key".into(),
-            params: json!({"account_id": rt_acct.id, "key": "sk-red-team-secret"}),
-        },
-    );
+    // Red Team on NEAR AI sign-in -> redeem MUST return red_team_key.
+    shared.settings.lock().unwrap().near_ai_inference = Some(cred.clone());
+    let rt_account_id = signin::account_id(ToolId::RedTeam).unwrap();
     let rt_prep: PreparedLaunch = serde_json::from_value(
-        handle(
+        handle_async_with(
             &shared,
             &Request {
                 id: 7,
@@ -189,8 +175,8 @@ fn redeem_returns_the_key_only_for_red_team() {
                 params: json!(LaunchRequest {
                     request_id: Uuid::new_v4(),
                     tool: ToolId::RedTeam,
-                    connection: ConnectionKind::NearAi,
-                    account_id: rt_acct.id,
+                    connection: ConnectionKind::NearAiSignIn,
+                    account_id: rt_account_id,
                     cwd: dir.path().to_path_buf(),
                     expected_generation: Generation(0),
                     save_default: false,
@@ -202,23 +188,28 @@ fn redeem_returns_the_key_only_for_red_team() {
                     cli_options: None,
                     resume_of: None,
                     sandbox: None,
-            initial_prompt: None,
+                    initial_prompt: None,
                 }),
             },
+            |_| async { BalanceReport::Unavailable },
         )
+        .await
         .result
         .unwrap(),
     )
     .unwrap();
+    shared.settings.lock().unwrap().near_ai_inference = Some(cred);
     let rt_ctx: LaunchContext = serde_json::from_value(
-        handle(
+        handle_async_with(
             &shared,
             &Request {
                 id: 8,
                 method: "managed_launch_redeem".into(),
                 params: json!({"session_id": rt_prep.session_id, "ticket": rt_prep.ticket}),
             },
+            |_| async { BalanceReport::Unavailable },
         )
+        .await
         .result
         .unwrap(),
     )
