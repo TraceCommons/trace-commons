@@ -293,18 +293,24 @@ pub fn draw(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
 /// [`draw`], `burst` seconds into a credit arrival's celebration
 /// (`GlassMenuBarStrip.creditBurst`), or at rest for `None`.
 pub fn draw_at(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64, burst: Option<f64>) {
-    let unit = px / HEIGHT;
-    // The figure's cell: one point, snapped to whole pixels so the face is
-    // crisp at every size the host asks for.
-    let cell_px = unit.round().max(1.0);
-    let cell = cell_px / unit;
-    let slot = slot(strip, cell);
-    let ink = mark::ink(scheme);
+    draw_mark(cr, scheme, px, burst);
+    draw_slot(cr, strip, scheme, px);
+}
 
+/// `t` when it falls inside a celebration, the only time the mark moves.
+fn celebrating(burst: Option<f64>) -> Option<f64> {
+    burst.filter(|t| (0.0..credit::DURATION_SECONDS).contains(t))
+}
+
+/// The mark alone, at rest or `burst` seconds into a celebration: the one
+/// part of the strip that moves.
+fn draw_mark(cr: &cairo::Context, scheme: Scheme, px: f64, burst: Option<f64>) {
+    let unit = px / HEIGHT;
+    let ink = mark::ink(scheme);
     let _ = cr.save();
     cr.scale(unit, unit);
     let inset = (HEIGHT - MARK_SIZE) / 2.0;
-    match burst.filter(|t| (0.0..credit::DURATION_SECONDS).contains(t)) {
+    match celebrating(burst) {
         // The Mac's strip without its graph is the mark's own 14-point
         // canvas; here that is the mark's column of the square.
         Some(t) => {
@@ -318,9 +324,28 @@ pub fn draw_at(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64, burs
             mark::fill_n(cr, (inset, inset), MARK_SIZE);
         }
     }
+    let _ = cr.restore();
+}
 
-    // Clear the mark under the slot, with the gap to spare.
+/// The slot over the mark: the mark cleared under it with the gap to
+/// spare, then the badge or ring. It does not move with the mark.
+fn draw_slot(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
     cr.set_operator(cairo::Operator::DestOut);
+    cut_slot(cr, strip, px);
+    cr.set_operator(cairo::Operator::Over);
+    draw_slot_figure(cr, strip, scheme, px);
+}
+
+/// Fills where the mark is cleared under the slot, in whatever operator
+/// `cr` holds.
+fn cut_slot(cr: &cairo::Context, strip: &Strip, px: f64) {
+    let unit = px / HEIGHT;
+    let cell_px = unit.round().max(1.0);
+    let cell = cell_px / unit;
+    let slot = slot(strip, cell);
+    let _ = cr.save();
+    cr.scale(unit, unit);
+    cr.set_source_rgb(0.0, 0.0, 0.0);
     if let Some((x, y, w, h)) = slot.badge {
         // The gap past the badge, and past the halo's outer edge while one
         // rings it: the Mac's `markOnlyGap + haloReach`.
@@ -342,8 +367,21 @@ pub fn draw_at(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64, burs
         );
         let _ = cr.fill();
     }
-    cr.set_operator(cairo::Operator::Over);
+    let _ = cr.restore();
+}
 
+/// The badge with its figure cut out, its halo, or the ring: what the
+/// slot draws on the cleared ground.
+fn draw_slot_figure(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: f64) {
+    let unit = px / HEIGHT;
+    // The figure's cell: one point, snapped to whole pixels so the face is
+    // crisp at every size the host asks for.
+    let cell_px = unit.round().max(1.0);
+    let cell = cell_px / unit;
+    let slot = slot(strip, cell);
+    let ink = mark::ink(scheme);
+    let _ = cr.save();
+    cr.scale(unit, unit);
     if let Some((x, y, w, h)) = slot.badge {
         mark::set_source(cr, ink);
         capsule(cr, x, y, w, h);
@@ -408,7 +446,15 @@ pub fn pixmap_at(
     let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
     {
         let cr = cairo::Context::new(&surface).ok()?;
-        draw_at(&cr, strip, scheme, f64::from(px), burst);
+        match celebrating(burst) {
+            // A celebration's frame: only the mark is drawn anew; the slot
+            // over it comes from the layers drawn once for this strip.
+            Some(_) => {
+                draw_mark(&cr, scheme, f64::from(px), burst);
+                base::compose(&cr, strip, scheme, px)?;
+            }
+            None => draw_at(&cr, strip, scheme, f64::from(px), None),
+        }
     }
     surface.flush();
     let stride = surface.stride() as usize;
@@ -422,6 +468,75 @@ pub fn pixmap_at(
         }
     }
     Some((px, px, out))
+}
+
+/// The strip's parts a celebration does not move, drawn once per strip,
+/// scheme and size and kept on this thread: the 41 frames of a burst then
+/// draw only the mark.
+mod base {
+    use std::cell::RefCell;
+
+    use gtk::cairo;
+
+    use super::{Scheme, Strip};
+
+    /// Where the mark is cleared (alpha is how much), and what the slot
+    /// draws on the cleared ground.
+    struct Layers {
+        px: i32,
+        cut: cairo::ImageSurface,
+        figure: cairo::ImageSurface,
+    }
+
+    thread_local! {
+        static KEPT: RefCell<Option<(Strip, Scheme, Vec<Layers>)>> = const { RefCell::new(None) };
+        static DRAWN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// How many times the layers have been drawn on this thread.
+    #[cfg(test)]
+    pub fn drawn() -> usize {
+        DRAWN.with(std::cell::Cell::get)
+    }
+
+    fn layers(strip: &Strip, scheme: Scheme, px: i32) -> Option<Layers> {
+        let size = f64::from(px);
+        let cut = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+        {
+            let cr = cairo::Context::new(&cut).ok()?;
+            super::cut_slot(&cr, strip, size);
+        }
+        let figure = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).ok()?;
+        {
+            let cr = cairo::Context::new(&figure).ok()?;
+            super::draw_slot_figure(&cr, strip, scheme, size);
+        }
+        DRAWN.with(|n| n.set(n.get() + 1));
+        Some(Layers { px, cut, figure })
+    }
+
+    /// Lays the slot over the mark `cr` has drawn: clears the mark under
+    /// it, then draws the badge or ring.
+    pub fn compose(cr: &cairo::Context, strip: &Strip, scheme: Scheme, px: i32) -> Option<()> {
+        KEPT.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            if !matches!(&*kept, Some((s, sc, _)) if s == strip && *sc == scheme) {
+                *kept = Some((*strip, scheme, Vec::new()));
+            }
+            let (_, _, all) = kept.as_mut()?;
+            if !all.iter().any(|layers| layers.px == px) {
+                all.push(layers(strip, scheme, px)?);
+            }
+            let layers = all.iter().find(|layers| layers.px == px)?;
+            cr.set_operator(cairo::Operator::DestOut);
+            cr.set_source_surface(&layers.cut, 0.0, 0.0).ok()?;
+            cr.paint().ok()?;
+            cr.set_operator(cairo::Operator::Over);
+            cr.set_source_surface(&layers.figure, 0.0, 0.0).ok()?;
+            cr.paint().ok()?;
+            Some(())
+        })
+    }
 }
 
 /// Cairo's premultiplied ARGB word as a straight-alpha one.

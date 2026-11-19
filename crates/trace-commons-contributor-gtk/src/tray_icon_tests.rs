@@ -522,3 +522,70 @@ fn render_the_burst_for_review() {
         }
     }
 }
+
+/// The premultiplied bytes of a 0..`px` square: the strip drawn whole, or
+/// a celebration's frame from the mark and the kept slot layers.
+fn frame_bytes(strip: &Strip, scheme: Scheme, px: i32, t: f64, kept: bool) -> Vec<u8> {
+    let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, px, px).expect("surface");
+    {
+        let cr = cairo::Context::new(&surface).expect("context");
+        if kept {
+            draw_mark(&cr, scheme, f64::from(px), Some(t));
+            base::compose(&cr, strip, scheme, px).expect("layers");
+        } else {
+            draw_at(&cr, strip, scheme, f64::from(px), Some(t));
+        }
+    }
+    surface.flush();
+    surface.data().expect("surface data").to_vec()
+}
+
+/// A celebration's frame drawn from the kept layers is the strip drawn
+/// whole, at every size, for a plain mark, a badge, a halo and a ring.
+#[test]
+fn a_celebrations_frames_are_the_strip_drawn_whole() {
+    for strip in [
+        strip(Condition::Live, None, Mark::None),
+        strip(Condition::Live, Some(3), Mark::None),
+        strip(Condition::Live, Some(12), Mark::Ready),
+        strip(Condition::Live, None, Mark::News),
+    ] {
+        for scheme in [Scheme::Light, Scheme::Dark] {
+            for px in PIXMAP_SIZES {
+                for t in [0.0, 0.1, 0.45, 1.0, 1.6] {
+                    let whole = frame_bytes(&strip, scheme, px, t, false);
+                    let kept = frame_bytes(&strip, scheme, px, t, true);
+                    let worst = whole
+                        .iter()
+                        .zip(&kept)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        worst <= 1,
+                        "{strip:?} {scheme:?} {px}px at {t}: off by {worst}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The 41 frames of one celebration draw the slot's layers once per
+/// size, not once per frame.
+#[test]
+fn a_celebration_draws_the_slot_once_per_size() {
+    let strip = strip(Condition::Live, Some(97), Mark::Ready);
+    let before = base::drawn();
+    for frame in 0..41 {
+        let t = frame as f64 / 24.0;
+        assert_eq!(
+            pixmaps_at(&strip, Scheme::Light, Some(t)).len(),
+            PIXMAP_SIZES.len()
+        );
+    }
+    assert_eq!(base::drawn() - before, PIXMAP_SIZES.len());
+    // At rest nothing is kept or drawn from them.
+    let _ = pixmaps_at(&strip, Scheme::Light, None);
+    assert_eq!(base::drawn() - before, PIXMAP_SIZES.len());
+}
