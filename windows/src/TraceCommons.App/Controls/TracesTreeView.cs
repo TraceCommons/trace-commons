@@ -382,9 +382,9 @@ internal sealed class TracesTreeView : UserControl
     /// <summary>The leading inset: 8, and 18 for each level below the folders (ListRow.swift:279-281).</summary>
     private static double Inset(bool session) => 8 + (session ? 18 : 0);
 
-    private Grid RowFrame(bool session, bool selected, string title, string? sub, TreeFlag? flag, bool off, ToolTileKind tile)
+    private TreeRowGrid RowFrame(bool session, bool selected, string title, string? sub, TreeFlag? flag, bool off, ToolTileKind tile)
     {
-        var row = new Grid
+        var row = new TreeRowGrid(session)
         {
             MinHeight = 40,
             Padding = new Thickness(Inset(session), 0, 6, 0),
@@ -457,7 +457,7 @@ internal sealed class TracesTreeView : UserControl
         bool open = _state.Expanded.Contains(folder.Id);
         ViewModels.QueueGroupViewModel? group = _host.Group(folder.Id);
         string sub = TracesTreeRows.FolderSub(folder, _words, WatchCopy.ModeLabel);
-        Grid row = RowFrame(false, selected, folder.Label, sub, null, off, ToolTileKind.Folder);
+        TreeRowGrid row = RowFrame(false, selected, folder.Label, sub, null, off, ToolTileKind.Folder);
 
         // The chevron, when the folder has traces (ListRow.swift:143-167).
         if (folder.Sessions.Count > 0)
@@ -590,7 +590,7 @@ internal sealed class TracesTreeView : UserControl
             live?.AttestationText, _words, CultureInfo.CurrentCulture);
         TreeFlag? flag = TracesTreeRows.Flag(held, ineligible is not null, tone);
         string title = TracesTreeRows.When(entry, TimeZoneInfo.Local, CultureInfo.CurrentCulture);
-        Grid row = RowFrame(true, selected, title, sub, flag, off, ToolTile.ForSession(entry.Source, entry.DeclaredSource));
+        TreeRowGrid row = RowFrame(true, selected, title, sub, flag, off, ToolTile.ForSession(entry.Source, entry.DeclaredSource));
         AutomationProperties.SetHelpText(row, string.Join(" ", new[] { sub, MapTools.Known(entry.DeclaredSource ?? entry.Source) ? MapTools.DisplayName(entry.DeclaredSource ?? entry.Source) : null }.Where(s => !string.IsNullOrEmpty(s))));
 
         // Submit sends it at once, as a folder's does; turned off while it cannot be sent (TracesViews.swift:785-805).
@@ -917,6 +917,44 @@ internal sealed class TracesTreeView : UserControl
         if (!moving)
         {
             StopTicking();
+        }
+    }
+
+    protected override AutomationPeer OnCreateAutomationPeer() => new TreePeer(this);
+
+    /// <summary>The tree as assistive tech reads it: one tree, named by the core (TracesViews.swift:337).</summary>
+    private sealed class TreePeer : FrameworkElementAutomationPeer
+    {
+        public TreePeer(TracesTreeView owner)
+            : base(owner)
+        {
+        }
+
+        protected override AutomationControlType GetAutomationControlTypeCore() => AutomationControlType.Tree;
+
+        protected override string GetClassNameCore() => nameof(TracesTreeView);
+    }
+
+    /// <summary>A row, read by its title with its sub line (ListRow.swift:262-273); not a tab stop.</summary>
+    private sealed class TreeRowGrid : Grid
+    {
+        private readonly bool _session;
+
+        public TreeRowGrid(bool session) => _session = session;
+
+        protected override AutomationPeer OnCreateAutomationPeer() => new RowPeer(this, _session);
+
+        private sealed class RowPeer : FrameworkElementAutomationPeer
+        {
+            private readonly bool _session;
+
+            public RowPeer(TreeRowGrid owner, bool session)
+                : base(owner) => _session = session;
+
+            // Both levels are tree items; a folder carries heading level 2 as well.
+            protected override AutomationControlType GetAutomationControlTypeCore() => AutomationControlType.TreeItem;
+
+            protected override string GetClassNameCore() => _session ? "TracesTraceRow" : "TracesFolderRow";
         }
     }
 
