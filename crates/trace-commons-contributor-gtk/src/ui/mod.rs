@@ -79,6 +79,21 @@ use crate::worker::{Outcome, Worker};
 
 pub const APP_ID: &str = "ai.tracecommons.Contributor";
 
+/// Names the process by the app id, before any window exists. A window GTK
+/// does not hold as one of the application's (the first run, the Look
+/// inside sheet, every dialog) takes its Wayland app id and its X11
+/// `WM_CLASS` from the program name, which is otherwise the binary's
+/// (`trace-commons-shell`), so the desktop could not match it to
+/// `ai.tracecommons.Contributor.desktop`.
+///
+/// The application name is the brand's: a window with no title of its own
+/// is listed by it (GDK titles an untitled X11 window with it, and GLib
+/// answers the program name, the raw id, when it is unset).
+pub fn name_the_process() {
+    glib::set_prgname(Some(APP_ID));
+    glib::set_application_name(copy::APP_NAME);
+}
+
 /// The reading column, shared by every screen in this window so the header's
 /// switcher, the health banner and the queue's cards all sit on the same two
 /// vertical lines.
@@ -1084,6 +1099,7 @@ impl App {
             let entries: Vec<QueueEntry> =
                 serde_json::from_value(value.get("pending").cloned().unwrap_or_default())
                     .unwrap_or_default();
+            app.home.render_uncontributed(&entries);
             *app.entries.borrow_mut() = entries;
             queue::render(app);
             app.reconcile_card_previews();
@@ -1124,6 +1140,10 @@ impl App {
                 serde_json::from_value::<crate::home::Rollup>(value.clone()).ok()
             });
             app.home.render_rollup(home_rollup.as_ref());
+            app.home.render_credit(
+                home_rollup.as_ref(),
+                app.credit_condition.borrow().as_deref(),
+            );
             *app.summary_rollup.borrow_mut() = home_rollup;
             app.shell.inspector.render_summary(app);
             let result = result.map(serde_json::from_value::<HistoryRollup>);
@@ -1140,9 +1160,14 @@ impl App {
             "commons_credit_summary",
             serde_json::json!({}),
             |app, result| {
+                app.home.render_credit_summary(result.as_ref().ok());
                 *app.credit_condition.borrow_mut() = result
                     .ok()
                     .and_then(|value| monitor::summary::pending_condition(&value));
+                app.home.render_credit(
+                    app.summary_rollup.borrow().as_ref(),
+                    app.credit_condition.borrow().as_deref(),
+                );
                 app.shell.inspector.render_summary(app);
             },
         );

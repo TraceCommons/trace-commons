@@ -185,6 +185,9 @@ else
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
+    ui::home::tests::mounted_home_draws_the_macs_tiles \
+    ui::home::tests::mounted_the_account_sign_in_calls_what_is_missing \
+    ui::home::tests::mounted_the_tile_captions_are_the_macs_size_on_a_larger_desktop_font \
     ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
     ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \
@@ -197,6 +200,9 @@ else
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
     ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
+    ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
+    ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
+    ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
@@ -209,6 +215,7 @@ else
     ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
     ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
     ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
+    ui::monitor::shell::tests::mounted_settings_and_a_sheet_take_the_monitors_palette \
     ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
@@ -233,6 +240,7 @@ else
     ui::insights::tests::mounted_overview_fits_the_main_pane_with_equal_insets \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_list_is_the_macs \
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
+    ui::monitor::traces_list::mounted_tests::mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection \
     ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
@@ -263,6 +271,8 @@ else
     ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend \
     ui::edge_surfaces::tests::mounted_the_popovers_private_ai_card_follows_the_mac \
     ui::edge_surfaces::tests::mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys \
+    ui::edge_surfaces::tests::mounted_the_folder_list_draws_every_row_whole \
+    ui::edge_surfaces::tests::mounted_a_rail_tile_names_itself_beside_it_after_the_hover_delay \
     edge::gnome::tests::mounted_the_placed_windows_carry_their_marker_and_the_brand_name \
     ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \
@@ -446,6 +456,41 @@ else
     else
       fail "tesseract not available -- OCR text-presence check could not run"
     fi
+  fi
+fi
+
+# --- every window carries the app id -----------------------------------------
+#
+# A window GTK does not hold as one of the application's (the first run, the
+# Look inside sheet, every dialog) takes its Wayland app id from the program
+# name, which was the binary's (`trace-commons-shell`), so the desktop could
+# not match it to ai.tracecommons.Contributor.desktop. The client's own
+# protocol log names every toplevel's app id; each must be the app's.
+if [ -n "${WAYLAND_SOCKET:-}" ]; then
+  PROTOCOL_LOG=$(
+    cd "$WORKDIR" &&
+      WAYLAND_DEBUG=1 WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+        GSK_RENDERER=cairo timeout 60 "$SHELL_BIN" --state-dir "$TC_DIR" --exit-after-realize --realize-seconds 8 2>&1
+  )
+  APP_IDS=$(grep -o 'set_app_id("[^"]*")' <<< "$PROTOCOL_LOG" | sort | uniq -c)
+  echo "toplevel app ids: ${APP_IDS:-none}"
+  if [ -z "$APP_IDS" ]; then
+    fail "no toplevel set an app id -- the app-id check read nothing"
+  elif grep -v 'set_app_id("ai.tracecommons.Contributor")' <<< "$APP_IDS" | grep -q .; then
+    fail "a window's app id is not ai.tracecommons.Contributor"
+  else
+    echo "every toplevel's app id is ai.tracecommons.Contributor"
+  fi
+  # The title each toplevel is listed by: never the raw app id, which a
+  # window with no title of its own was listed by before.
+  TITLES=$(grep -o 'set_title("[^"]*")' <<< "$PROTOCOL_LOG" | sort | uniq -c)
+  echo "toplevel titles: ${TITLES:-none}"
+  if [ -z "$TITLES" ]; then
+    fail "no toplevel set a title -- the title check read nothing"
+  elif grep -qi 'tracecommons' <<< "$TITLES"; then
+    fail "a window is titled by the raw app id"
+  else
+    echo "no toplevel is titled by the raw app id"
   fi
 fi
 
