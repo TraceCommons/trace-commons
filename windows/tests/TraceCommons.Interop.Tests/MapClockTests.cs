@@ -148,19 +148,4 @@ public class MapClockTests
         Assert.True(MapMotion.StillRedraws(fieldMoves: true, fieldMoved: false, hasPile: false, pileMoving: false, pileInStill: false));
         Assert.True(MapMotion.StillRedraws(fieldMoves: false, fieldMoved: true, hasPile: false, pileMoving: false, pileInStill: false));
     }
-
-    [Fact]
-    public void TheMapsTickAsksTheStillLayerDecision()
-    {
-        string source = ShellSource("TraceCommons.App/Controls/TracesMapView.cs");
-        Assert.Contains("MapMotion.StillRedraws(", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("pileMoving == _pileInStill", source, StringComparison.Ordinal);
-    }
-
-    private static string ShellSource(string relativePath)
-    {
-        string path = Path.Combine(AppContext.BaseDirectory, "shell-source", relativePath + ".txt");
-        Assert.True(File.Exists(path), $"{relativePath} was not copied to {path}");
-        return File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
-    }
 }

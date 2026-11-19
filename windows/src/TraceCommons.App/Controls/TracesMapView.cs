@@ -878,21 +878,17 @@ public sealed partial class TracesMapView : UserControl
             bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
             // The pile moves between the layers as it starts and stops.
-            bool pileMoving = PileMoves(now);
-            if (MapMotion.StillRedraws(fieldMoves, _fieldMoved, _scene.DrawsMap && _scene.Stack is not null, pileMoving, _pileInStill))
+            if (_stillLayer.Tick(_scene, fieldMoves, PileMoves(now)))
             {
                 _still.Invalidate();
             }
 
-            _fieldMoved = fieldMoves;
             Kick();
         };
         return timer;
     }
 
     private void StopTimer() => _timer?.Stop();
-
-    private bool _fieldMoved;
 
     private void Redraw()
     {
@@ -1051,7 +1047,7 @@ public sealed partial class TracesMapView : UserControl
         DrawField(ds, sender, size, Now, Motion && WindowClocks.Running);
         if (!_scene.DrawsMap)
         {
-            _pileInStill = false;
+            _stillLayer.Drawn(_scene, pileMoving: false);
             return;
         }
 
@@ -1068,18 +1064,17 @@ public sealed partial class TracesMapView : UserControl
 
         // A pile at rest is drawn here, once, not on every tick.
         double now = Now;
-        if (_scene.Stack is { } stack && !PileMoves(now))
+        bool pileMoving = PileMoves(now);
+        if (_scene.Stack is { } stack && !pileMoving)
         {
-            _pileInStill = true;
             DrawPile(ds, sender, stack, fit, null, 0, now, Motion && WindowClocks.Running);
         }
-        else
-        {
-            _pileInStill = false;
-        }
+
+        _stillLayer.Drawn(_scene, pileMoving);
     }
 
-    private bool _pileInStill;
+    /// <summary>When the still layer is drawn again (MapMotion.cs <see cref="StillLayer"/>).</summary>
+    private readonly StillLayer _stillLayer = new();
 
     private void DrawField(CanvasDrawingSession ds, ICanvasResourceCreator device, Size size, double now, bool motion)
     {

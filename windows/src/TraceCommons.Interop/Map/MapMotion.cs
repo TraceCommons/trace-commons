@@ -255,3 +255,35 @@ public readonly record struct MapClockInputs(
     bool LightFading,
     double SecondsShown,
     double? NextDeadlineIn);
+
+/// <summary>
+/// The map's still layer (field, nodes, a resting pile) and when it must be
+/// drawn again. The window's tick and its still-layer draw both report here
+/// with the scene they drew, so whether a scene has a pile is read from the
+/// scene, never passed in by the caller (review W1 of #2215: a caller's
+/// boolean was the one input no test could see).
+/// </summary>
+public sealed class StillLayer
+{
+    private bool _pileInStill;
+    private bool _fieldMoved;
+
+    /// <summary>
+    /// One tick of the map's clock. True when the still layer must be drawn
+    /// again: the field's shimmer or pointer light moves, or stopped on the
+    /// last tick, or the pile crosses between the layers.
+    /// </summary>
+    public bool Tick(FlowMapScene scene, bool fieldMoves, bool pileMoving)
+    {
+        bool redraws = MapMotion.StillRedraws(fieldMoves, _fieldMoved, scene.DrawsMap && scene.Stack is not null, pileMoving, _pileInStill);
+        _fieldMoved = fieldMoves;
+        return redraws;
+    }
+
+    /// <summary>
+    /// The still layer was drawn with <paramref name="scene"/>: a resting pile
+    /// went into it, or none did.
+    /// </summary>
+    public void Drawn(FlowMapScene scene, bool pileMoving) =>
+        _pileInStill = scene.DrawsMap && scene.Stack is not null && !pileMoving;
+}
