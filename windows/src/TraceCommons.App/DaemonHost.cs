@@ -365,24 +365,25 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
-    /// The Missions page's catalogue, and whether the core was unreachable.
-    /// The Mac's live client has no source for the page's shape and answers
-    /// <c>notAvailableYet</c> without asking the daemon
-    /// (LiveDaemonClient.swift:439-441), so a live launch gets no catalogue
-    /// and the request-failed line; a sample launch gets the Mac's
-    /// hand-written provisional catalogue, or unreachable in <c>coreDown</c>
-    /// (SampleDaemonClient.swift:576-581).
+    /// How the Missions page's catalogue read ends, and the catalogue when it
+    /// came back. The Mac's live client has no source for the page's shape
+    /// and answers <c>notAvailableYet</c> without asking the daemon
+    /// (LiveDaemonClient.swift:439-440), which counts as not served
+    /// (DaemonDataModels.swift:153-158), so a live launch draws a dash named
+    /// with the core's word for unknown (HomeStore.swift:215-217,
+    /// MissionsViews.swift:58-64), never a failure line. A sample launch gets
+    /// the Mac's hand-written provisional catalogue, or unreachable in
+    /// <c>coreDown</c> (SampleDaemonClient.swift:576-581).
     /// </summary>
-    public (string? Json, bool Unreachable) MissionCatalogue()
+    public (MissionRead Read, string? Json) MissionCatalogue()
     {
 #if DEBUG
         if (_sample is SampleDaemon sample)
         {
-            string? json = MissionSamples.For(sample.Set);
-            return (json, json is null);
+            return MissionSamples.Read(sample.Set);
         }
 #endif
-        return (null, false);
+        return (MissionRead.NotServed, null);
     }
 
     /// <summary>

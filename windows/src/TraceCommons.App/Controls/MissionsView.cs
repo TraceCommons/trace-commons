@@ -21,8 +21,9 @@ namespace TraceCommons.App.Controls;
 /// projected, labelled with the core's word and note, beside the commons'
 /// own statement of what it waits on, and a dash without that statement.</para>
 /// <para>The catalogue is the Mac's PROVISIONAL shape, which only sample data
-/// reaches (<see cref="DaemonHost.MissionCatalogue"/>). Not read is a dash,
-/// a failed read is the core's line: never a 0 that reads as "none".</para>
+/// reaches (<see cref="DaemonHost.MissionCatalogue"/>). Not served, as on
+/// every live launch, is a dash named with the core's word for unknown; a
+/// failed read is the core's line: never a 0 that reads as "none".</para>
 /// <para>Every word is the core's monitor table. Built in code, on the
 /// skinned brushes; rebuilt on a theme change.</para>
 /// </remarks>
@@ -62,18 +63,26 @@ public sealed class MissionsView : UserControl
     public void Render()
     {
         _root.Children.Clear();
-        (string? json, bool unreachable) = _host.MissionCatalogue();
-        MissionCatalogue? catalogue = MissionCatalogue.Parse(json);
-        if (catalogue is null)
+        (MissionRead read, string? json) = _host.MissionCatalogue();
+        MissionPage page = MissionPage.Settle(read, json, Word);
+        if (page.Catalogue is not { } catalogue)
         {
-            // A failed read: the core's line in an outside-toned notice
-            // (MissionsViews.swift:33-35). No figure at all, never 0.
-            string line = MissionFormat.FailureLine(unreachable, Word);
-            if (line.Length > 0)
+            if (page.FailureLine is { Length: > 0 } line)
             {
+                // A failed read: the core's line in an outside-toned notice
+                // (MissionsViews.swift:33-35). No figure at all, never 0.
                 var notice = Card();
                 notice.Child = Text(line, "TcBodyTextStyle", "TcStatusOutsideTextBrush");
                 _root.Children.Add(notice);
+            }
+            else if (page.UnknownName is { } unknown)
+            {
+                // Not loaded, or a daemon with no catalogue yet: a dash,
+                // never an empty list that reads as "none"
+                // (MissionsViews.swift:58-64).
+                TextBlock dash = Text(MissionFormat.Dash, "TcMetricValueTextStyle", "TcInkTertiaryBrush");
+                AutomationProperties.SetName(dash, unknown);
+                _root.Children.Add(dash);
             }
 
             return;

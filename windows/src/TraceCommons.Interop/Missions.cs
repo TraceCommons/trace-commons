@@ -82,6 +82,55 @@ public sealed record MissionCatalogue(string? Explanation, IReadOnlyList<Mission
 }
 
 /// <summary>
+/// How the Missions page's read of the catalogue ended, as the Mac's
+/// <c>HomeStore.read</c> settles it (HomeStore.swift:205-220).
+/// </summary>
+public enum MissionRead
+{
+    /// <summary>
+    /// The daemon has no catalogue to give: the Mac's live client answers
+    /// <c>notAvailableYet</c>, which is <c>isNotServed</c>
+    /// (LiveDaemonClient.swift:439-440, DaemonDataModels.swift:153-158), so
+    /// the store keeps no failure and the page draws a dash.
+    /// </summary>
+    NotServed,
+
+    /// <summary>The catalogue's JSON came back (sample launches only, today).</summary>
+    Served,
+
+    /// <summary>The core was not there (<c>coreDown</c>: <c>DaemonDataError.unreachable</c>).</summary>
+    Unreachable,
+}
+
+/// <summary>
+/// What the Missions page draws: the catalogue, or the core's failure line,
+/// or the dash named with the core's word for unknown. At most one is set.
+/// </summary>
+public sealed record MissionPage(MissionCatalogue? Catalogue, string? FailureLine, string? UnknownName)
+{
+    /// <summary>
+    /// Settles a read as the Mac's <c>MissionsPage</c> draws it
+    /// (MissionsViews.swift:33-64): a failure is the core's line; a catalogue
+    /// that came back but will not decode is a failed request; not served is
+    /// a dash, never a failure and never a 0 that reads as "none".
+    /// </summary>
+    public static MissionPage Settle(MissionRead read, string? json, Func<string, string> word)
+    {
+        if (read == MissionRead.Served && MissionCatalogue.Parse(json) is { } catalogue)
+        {
+            return new MissionPage(catalogue, null, null);
+        }
+
+        if (read == MissionRead.NotServed)
+        {
+            return new MissionPage(null, null, word("unknown"));
+        }
+
+        return new MissionPage(null, MissionFormat.FailureLine(read == MissionRead.Unreachable, word), null);
+    }
+}
+
+/// <summary>
 /// Formatting for Missions, under #1174's rules: the Mac's <c>MissionFormat</c>
 /// (MissionsViews.swift:105-147). Every word is the core's monitor table.
 /// </summary>

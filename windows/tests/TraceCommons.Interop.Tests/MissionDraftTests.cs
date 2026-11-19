@@ -314,7 +314,7 @@ public sealed class MissionDraftTests
     {
         string root = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App");
         string window = File.ReadAllText(Path.Combine(root, "MainWindow.xaml.cs.txt"));
-        int start = window.IndexOf("void OnShowMissionDrafts", StringComparison.Ordinal);
+        int start = window.IndexOf("private async void OnShowMissionDrafts", StringComparison.Ordinal);
         int end = window.IndexOf("private async void ShowInsightsPane", start, StringComparison.Ordinal);
         string handler = window[start..end];
         Assert.DoesNotContain("StartContributionsAsync", handler);

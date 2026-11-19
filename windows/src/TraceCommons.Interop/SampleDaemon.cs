@@ -230,7 +230,12 @@ public static class MissionSamples
     public const string ProvisionalCatalogue =
         "{\"_sample\":\"no source yet\",\"fetched_at\":\"2026-09-30T06:00:00Z\",\"posture\":{\"settlement\":\"disabled\",\"graded\":false,\"explanation\":\"Sample settlement explanation, supplied by the commons\"},\"missions\":[{\"id\":\"mission-sample-1\",\"title\":\"Debug a failing test\",\"summary\":\"Failing test found, then fixed\",\"credit_range\":{\"min\":5,\"max\":20,\"unit\":\"points\"}},{\"id\":\"mission-sample-2\",\"title\":\"Review a pull request\",\"summary\":null,\"credit_range\":null}]}";
 
-    /// <summary>The catalogue a set's Missions page reads: none in <c>coreDown</c>, whose every read fails.</summary>
-    public static string? For(string set) => set == SampleDaemon.CoreDown ? null : ProvisionalCatalogue;
+    /// <summary>
+    /// How a set's Missions read ends: unreachable in <c>coreDown</c>, whose
+    /// every read fails, and the catalogue in every other set
+    /// (<c>serveProvisional</c>, SampleDaemonClient.swift:576-581).
+    /// </summary>
+    public static (MissionRead Read, string? Json) Read(string set) =>
+        set == SampleDaemon.CoreDown ? (MissionRead.Unreachable, null) : (MissionRead.Served, ProvisionalCatalogue);
 }
 #endif
