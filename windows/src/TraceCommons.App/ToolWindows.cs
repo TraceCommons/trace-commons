@@ -28,22 +28,46 @@ internal static class ToolWindows
         app.SetPresenter(presenter);
         app.IsShownInSwitchers = false;
 
-        // The presenter leaves a 3 px classic frame; with it the rail's 4 px
-        // zone had no client area at all (ToolWindowStyle).
         IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
-        long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
-        SetWindowLongPtr(hwnd, GWL_STYLE, new IntPtr(Interop.Shell.ToolWindowStyle.Frameless(style)));
-        long exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(Interop.Shell.ToolWindowStyle.Extended(exStyle)));
-        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        // The presenter keeps a dialog frame on the window whatever its style
+        // is set to, so the whole window is made client area instead: no
+        // frame is laid out or drawn, and the rail's 4 px zone is all XAML.
+        SetWindowSubclass(hwnd, NoFrameProc, NoFrameSubclassId, IntPtr.Zero);
+        Frameless(hwnd, keepActivation: false);
         return hwnd;
     }
 
     /// <summary>Moves and sizes in physical pixels, then shows without activating.</summary>
     public static void PlaceAndShow(Window window, (int X, int Y, int Width, int Height) frame)
     {
+        IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
         window.AppWindow.MoveAndResize(new RectInt32(frame.X, frame.Y, frame.Width, frame.Height));
         window.AppWindow.Show(false);
+
+        // The presenter puts its frame back as it shows the window, so the
+        // frame comes off again here, keeping whether it may activate.
+        Frameless(hwnd, keepActivation: true);
+    }
+
+    /// <summary>
+    /// Takes every frame off: the presenter leaves a 3 px classic one, and
+    /// with it the rail's 4 px zone had no client area at all
+    /// (<see cref="Interop.Shell.ToolWindowStyle"/>).
+    /// </summary>
+    private static void Frameless(IntPtr hwnd, bool keepActivation)
+    {
+        long style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_STYLE, new IntPtr(Interop.Shell.ToolWindowStyle.Frameless(style)));
+        long exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        long next = Interop.Shell.ToolWindowStyle.Extended(exStyle);
+        if (keepActivation && (exStyle & WS_EX_NOACTIVATE) == 0)
+        {
+            next &= ~WS_EX_NOACTIVATE;
+        }
+
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(next));
+        SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 
     /// <summary>The DPI scale of the monitor that holds the point (physical pixels), and its bounds and work area.</summary>
@@ -103,6 +127,24 @@ internal static class ToolWindows
         long style = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
         SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style | WS_EX_NOACTIVATE));
     }
+
+    private const uint WM_NCCALCSIZE = 0x0083;
+    private static readonly UIntPtr NoFrameSubclassId = new(0x7463);
+
+    /// <summary>Rooted for the life of the process: native code holds a raw pointer to it.</summary>
+    private static readonly SubclassProc NoFrameProc = (hwnd, message, wParam, lParam, id, data) =>
+        message == WM_NCCALCSIZE && wParam != IntPtr.Zero
+            ? IntPtr.Zero
+            : DefSubclassProc(hwnd, message, wParam, lParam);
+
+    private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, UIntPtr id, IntPtr data);
+
+    [DllImport("comctl32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc proc, UIntPtr id, IntPtr data);
+
+    [DllImport("comctl32.dll")]
+    private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
     private const int GWL_STYLE = -16;
     private const int GWL_EXSTYLE = -20;

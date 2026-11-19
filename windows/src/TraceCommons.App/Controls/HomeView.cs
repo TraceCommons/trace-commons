@@ -54,13 +54,14 @@ public sealed class HomeView : UserControl
     {
         DispatcherQueue queue = DispatcherQueue.GetForCurrentThread();
         _glyphTimer = queue.CreateTimer();
-        _glyphTimer.Interval = TimeSpan.FromSeconds(1 / PixelField.FramesPerSecond);
+        _glyphTimer.Interval = GlyphClock.Frame;
         _glyphTimer.Tick += (_, _) =>
         {
-            // Each tick re-reads the system's animation setting, so turning
-            // it off stops the glyphs within a frame (the 19041 projection
-            // has no AnimationsEnabledChanged event to listen to).
-            if (MayTick)
+            // Each tick re-reads the system's animation setting (the 19041
+            // projection has no AnimationsEnabledChanged event): turning it
+            // off stops the glyphs within a frame, and while it is off a slow
+            // probe notices it coming back on (GlyphClock).
+            if (MayTick && _glyphTimer.Interval == GlyphClock.Frame)
             {
                 DrawGlyphs();
             }
@@ -464,8 +465,13 @@ public sealed class HomeView : UserControl
 
     private void UpdateClocks()
     {
-        if (MayTick && _glyphs.Count > 0)
+        if (GlyphClock.Interval(_loaded && _showing && WindowClocks.Running, _glyphs.Count > 0, AnimationsOn) is TimeSpan every)
         {
+            if (_glyphTimer.Interval != every)
+            {
+                _glyphTimer.Interval = every;
+            }
+
             if (!_glyphTimer.IsRunning)
             {
                 _glyphTimer.Start();

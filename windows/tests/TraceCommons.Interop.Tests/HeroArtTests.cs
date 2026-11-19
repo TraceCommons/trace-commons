@@ -252,3 +252,38 @@ public class HeroArtTests
     };
 
 }
+
+/// <summary>
+/// Home's glyph clock follows the system's animation setting live, both
+/// ways. On tc-win-az5, 2026-11-19, turning animations back on left the
+/// glyphs still until the window was next activated: the clock had stopped
+/// when they went off, and nothing woke it to read the setting again (the
+/// 19041 projection has no AnimationsEnabledChanged event).
+/// </summary>
+public class GlyphClockTests
+{
+    [Fact]
+    public void OnScreenWithAnimationsTheGlyphsTickAtTenFramesASecond()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(100), GlyphClock.Interval(onScreen: true, hasGlyphs: true, animations: true));
+    }
+
+    [Fact]
+    public void OnScreenWithAnimationsOffASlowProbeKeepsReadingTheSetting()
+    {
+        TimeSpan? probe = GlyphClock.Interval(onScreen: true, hasGlyphs: true, animations: false);
+
+        Assert.NotNull(probe);
+        Assert.True(probe > GlyphClock.Frame, "the still glyph must not be redrawn at the frame rate");
+        Assert.True(probe <= TimeSpan.FromSeconds(1), "animations coming back on must show within a second");
+    }
+
+    [Fact]
+    public void NothingTicksOffScreenOrWithoutAGlyph()
+    {
+        Assert.Null(GlyphClock.Interval(onScreen: false, hasGlyphs: true, animations: true));
+        Assert.Null(GlyphClock.Interval(onScreen: false, hasGlyphs: true, animations: false));
+        Assert.Null(GlyphClock.Interval(onScreen: true, hasGlyphs: false, animations: true));
+        Assert.Null(GlyphClock.Interval(onScreen: true, hasGlyphs: false, animations: false));
+    }
+}

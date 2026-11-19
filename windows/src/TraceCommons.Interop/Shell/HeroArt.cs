@@ -418,3 +418,20 @@ public static class HeroCard
     /// <summary>The Insights hero's symbol without a readable glance (HomeInsightsVisual.swift:59).</summary>
     public const string InsightsSymbol = "chart.bar.xaxis";
 }
+
+/// <summary>
+/// When Home's glyph clock wakes. On screen with animations on, at the
+/// field's 10 fps; on screen with animations off, a slow probe that only
+/// reads the setting again, so turning animations back on shows within half
+/// a second (the 19041 projection has no AnimationsEnabledChanged event);
+/// off screen, or with no glyph to draw, not at all.
+/// </summary>
+public static class GlyphClock
+{
+    public static readonly TimeSpan Frame = TimeSpan.FromSeconds(1 / PixelField.FramesPerSecond);
+
+    public static readonly TimeSpan Probe = TimeSpan.FromMilliseconds(500);
+
+    public static TimeSpan? Interval(bool onScreen, bool hasGlyphs, bool animations) =>
+        !onScreen || !hasGlyphs ? null : animations ? Frame : Probe;
+}
