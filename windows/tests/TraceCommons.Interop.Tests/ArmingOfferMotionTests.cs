@@ -8,7 +8,7 @@ namespace TraceCommons.Interop.Tests;
 /// <summary>
 /// The arming offer's motion, pinned to the Mac
 /// (macos/Sources/TraceCommonsApp/Views/Monitor/ArmingOfferMotion.swift at
-/// origin/main 409066936). Expected curve values were printed by a throwaway
+/// origin/main 83016f544). Expected curve values were printed by a throwaway
 /// probe compiled against SwiftUI on this Mac:
 /// <c>Spring(response:dampingRatio:).value(target: 1, time:)</c>,
 /// <c>.settlingDuration</c> and <c>UnitCurve.easeOut.value(at:)</c>.
@@ -62,7 +62,7 @@ public class ArmingOfferMotionTests
     }
 
     /// <summary>
-    /// ArmedPulse (ArmingOfferMotion.swift:57-73): the ring spreads OUT from
+    /// ArmedPulse (ArmingOfferMotion.swift:57-75): the ring spreads OUT from
     /// the mark, 1 to 1.9, while it fades from 0.8 to 0 over 0.7 s. A port
     /// that shrinks the ring or fades it in reads the wrong sign here.
     /// </summary>
@@ -105,15 +105,16 @@ public class ArmingOfferMotionTests
     [Fact]
     public void TheMarkIsTheMacsNoticeCoin()
     {
-        // PopoverNotice.swift:146 side 30, :155 glyph 12, :151 stroke 2;
-        // ArmingOfferMotion.swift:62 ring lineWidth 2.
+        // PopoverNotice.swift:143 side 30, :150 glyph 12, :148 stroke 2;
+        // ArmingOfferMotion.swift:65 ring lineWidth 2. MainWindow.Arming.cs
+        // sizes the mark from these, so they are the only copy.
         Assert.Equal(30, ArmingOfferMotion.MarkSide);
         Assert.Equal(12, ArmingOfferMotion.GlyphSize);
         Assert.Equal(2, ArmingOfferMotion.MarkStroke);
         Assert.Equal(2, ArmingOfferMotion.PulseStroke);
     }
 
-    // AppModel.swift:2252 removes the armed offer inside
+    // AppModel.swift:2255 removes the armed offer inside
     // withAnimation(ArmingOfferMotion.exit), and the stack's own
     // .transition(.opacity) (MonitorNotices.swift:76) runs inside it: when the
     // armed offer is the last card, the whole stack fades on the exit spring.
@@ -129,5 +130,59 @@ public class ArmingOfferMotionTests
         Assert.False(ArmingOfferMotion.StackFadesOut(offer, "update", leftArmed: true, animationsEnabled: true));
         Assert.False(ArmingOfferMotion.StackFadesOut("update", null, leftArmed: true, animationsEnabled: true));
         Assert.False(ArmingOfferMotion.StackFadesOut(null, null, leftArmed: true, animationsEnabled: true));
+    }
+
+    /// <summary>
+    /// What the window does with each change of step (AppModel.swift:2222-2259,
+    /// ArmedPulse :57-75): nothing while no card is up or the step did not
+    /// change; the mark animates and pulses only on the step to Armed with
+    /// motion allowed; any other change, or no motion, sets the end state.
+    /// </summary>
+    [Fact]
+    public void EachStepChangeIsPlannedAsTheMacDrawsIt()
+    {
+        ArmingMarkPlan armed = ArmingOfferMotion.PlanMark(ArmingOfferStep.Arming, ArmingOfferStep.Armed, offerShown: true, motionAllowed: true);
+        Assert.Equal(new ArmingMarkPlan(Apply: true, Animate: true, Pulse: true), armed);
+
+        Assert.Equal(new ArmingMarkPlan(Apply: true, Animate: false, Pulse: false),
+            ArmingOfferMotion.PlanMark(ArmingOfferStep.Arming, ArmingOfferStep.Armed, offerShown: true, motionAllowed: false));
+        Assert.Equal(new ArmingMarkPlan(Apply: true, Animate: false, Pulse: false),
+            ArmingOfferMotion.PlanMark(null, ArmingOfferStep.Arming, offerShown: true, motionAllowed: true));
+        Assert.Equal(new ArmingMarkPlan(Apply: true, Animate: false, Pulse: false),
+            ArmingOfferMotion.PlanMark(ArmingOfferStep.Arming, null, offerShown: true, motionAllowed: true));
+        Assert.Equal(new ArmingMarkPlan(Apply: false, Animate: false, Pulse: false),
+            ArmingOfferMotion.PlanMark(ArmingOfferStep.Armed, ArmingOfferStep.Armed, offerShown: true, motionAllowed: true));
+        // The card leaves showing what it last showed: no change is applied.
+        Assert.Equal(new ArmingMarkPlan(Apply: false, Animate: false, Pulse: false),
+            ArmingOfferMotion.PlanMark(ArmingOfferStep.Armed, null, offerShown: false, motionAllowed: true));
+    }
+
+    /// <summary>
+    /// Motion runs only with animations on and the window's clocks running
+    /// (checklist P1): a minimised or hidden window draws end states.
+    /// </summary>
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    public void MotionNeedsAnimationsOnAndTheClocksRunning(bool animations, bool clocks, bool allowed)
+    {
+        Assert.Equal(allowed, ArmingOfferMotion.MotionAllowed(animations, clocks));
+    }
+
+    /// <summary>
+    /// The check grows in from half size on the mark spring, overshooting
+    /// past whole and settling at whole: the stand-in for SwiftUI's
+    /// <c>.symbolEffect(.replace)</c> (PopoverNotice.swift:154), which has no
+    /// WinUI equivalent. It grows, never shrinks in.
+    /// </summary>
+    [Fact]
+    public void TheCheckGrowsInOvershootsAndSettlesWhole()
+    {
+        Assert.Equal(0.5, ArmingOfferMotion.GlyphScale(0), 9);
+        Assert.True(ArmingOfferMotion.GlyphScale(0.2) > 1, "no overshoot");
+        Assert.Equal(1, ArmingOfferMotion.GlyphScale(ArmingOfferMotion.MarkSettling), 2);
+        Assert.True(ArmingOfferMotion.GlyphScale(0.05) > ArmingOfferMotion.GlyphScale(0));
     }
 }
