@@ -282,7 +282,8 @@ public sealed class FirstRunControllerTests
         Assert.True(controller.BackWhileCommitting);
         Assert.True(controller.BackEnabled);
         await controller.Back();
-        await signIn;
+        // A Back that did not end the wait would leave the sign-in running.
+        Assert.Same(signIn, await Task.WhenAny(signIn, Task.Delay(5000)));
         Assert.Equal(1, daemon.Cancels);
         Assert.Equal(FirstRunStep.Terms, controller.Runner.State.Step);
     }
