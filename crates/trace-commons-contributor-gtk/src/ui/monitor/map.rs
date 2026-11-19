@@ -3152,12 +3152,19 @@ impl Transfers {
                         }
                     });
                     let slide = crate::ui::popover_stack::Slide::new(&card);
+                    // In place before it moves, so a window that is hidden
+                    // lands it at once, as the Mac's does.
+                    slide.set_valign(gtk::Align::End);
+                    self.place.append(&slide);
                     if crate::ui::glass_motion::animations_enabled() {
                         // The card it covers fades where it is beneath it,
-                        // on the stack's spring, as drawn last; it takes no
-                        // pointer or focus, being only a picture.
-                        let beneath = old.and_then(|(_, slide)| slide.last_drawn());
-                        slide.arrive_over(!before.contains(&transfer.id), true, beneath);
+                        // on the stack's spring, drawn or not yet; it takes
+                        // no pointer or focus.
+                        slide.arrive_replacing(
+                            !before.contains(&transfer.id),
+                            true,
+                            old.as_ref().map(|(_, slide)| slide),
+                        );
                     }
                     slide
                 }

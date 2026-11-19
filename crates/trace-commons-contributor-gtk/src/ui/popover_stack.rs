@@ -268,6 +268,9 @@ mod slide {
         /// still shows beneath this one; hung from the foot it sits on the
         /// slide's foot.
         pub covered: std::cell::RefCell<Option<(gtk::gsk::RenderNode, f64)>>,
+        /// The card this one replaced when it was never drawn, so has no
+        /// frame to fade: held beneath this one, inert, while it fades.
+        pub covered_card: std::cell::RefCell<Option<gtk::Widget>>,
         /// The card as this slide last drew it, and the slide's height then.
         pub last: std::cell::RefCell<Option<(gtk::gsk::RenderNode, f64)>>,
         pub covered_opacity: Cell<f64>,
@@ -327,6 +330,14 @@ mod slide {
                 snapshot.restore();
                 self.drew_covered.set(true);
             }
+            if let Some(card) = self.covered_card.borrow().as_ref()
+                && opacity > 0.0
+            {
+                snapshot.push_opacity(opacity);
+                widget.snapshot_child(card, snapshot);
+                snapshot.pop();
+                self.drew_covered.set(true);
+            }
             if let Some(child) = widget.first_child() {
                 // Kept, so the card can fade where it is when the next
                 // front replaces it; the node is the one drawn, not a copy.
@@ -346,6 +357,17 @@ mod slide {
                     gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(0.0, offset))
                 });
                 child.allocate(width, height, baseline, transform);
+            }
+            // Where its frame would be drawn: its own height, on the
+            // slide's foot when hung from the foot.
+            if let Some(card) = self.covered_card.borrow().as_ref() {
+                let (min, natural, _, _) = card.measure(gtk::Orientation::Vertical, width);
+                let h = natural.max(min);
+                let y = if self.from_foot.get() { height - h } else { 0 };
+                let transform = (y != 0).then(|| {
+                    gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(0.0, y as f32))
+                });
+                card.allocate(width, h, -1, transform);
             }
         }
     }
@@ -385,14 +407,55 @@ impl Slide {
         from_foot: bool,
         beneath: Option<(gtk::gsk::RenderNode, f64)>,
     ) {
+        self.arrive_beneath(fresh, from_foot, beneath, None);
+    }
+
+    /// [`Self::arrive`] in place of `old`, whose card fades where it is
+    /// beneath this one on the same spring, whether or not it was ever
+    /// drawn: as `old` last drew it, or, with no frame of it yet, as the
+    /// card itself, taken from `old` and held beneath this one, taking no
+    /// pointer, focus or place in the accessibility tree, until it has
+    /// faded. Parented first, so a slide in a hidden window lands at once.
+    pub fn arrive_replacing(&self, fresh: bool, from_foot: bool, old: Option<&Slide>) {
+        let frame = old.and_then(Slide::last_drawn);
+        let card = match (&frame, old) {
+            (None, Some(old)) => old.first_child(),
+            _ => None,
+        };
+        if let Some(card) = &card {
+            card.unparent();
+            card.set_opacity(1.0);
+            card.set_can_target(false);
+            card.set_can_focus(false);
+            card.update_state(&[gtk::accessible::State::Hidden(true)]);
+        }
+        self.arrive_beneath(fresh, from_foot, frame, card);
+    }
+
+    fn arrive_beneath(
+        &self,
+        fresh: bool,
+        from_foot: bool,
+        beneath: Option<(gtk::gsk::RenderNode, f64)>,
+        card: Option<gtk::Widget>,
+    ) {
         let imp = self.imp();
         // A movement still running ends first: its last frame clears the
         // card it was fading, and must not clear this one's.
         imp.driver.finish();
         imp.from_foot.set(from_foot);
         imp.covered_opacity
-            .set(if beneath.is_some() { 1.0 } else { 0.0 });
+            .set(if beneath.is_some() || card.is_some() {
+                1.0
+            } else {
+                0.0
+            });
         *imp.covered.borrow_mut() = beneath;
+        if let Some(card) = card {
+            // After the slide's own card, which stays its first child.
+            card.set_parent(self);
+            *imp.covered_card.borrow_mut() = Some(card);
+        }
         // Not laid out yet when it has just been shown: its height for the
         // width it will have.
         let height = match self.height() {
@@ -437,7 +500,7 @@ impl Slide {
                     .covered_opacity
                     .set(if t >= length { 0.0 } else { covered(t) });
                 if t >= length {
-                    slide.imp().covered.borrow_mut().take();
+                    slide.drop_covered();
                 }
                 slide.queue_allocate();
                 slide.queue_draw();
@@ -454,7 +517,7 @@ impl Slide {
         if let Some(child) = self.first_child() {
             child.set_opacity(1.0);
         }
-        self.imp().covered.borrow_mut().take();
+        self.drop_covered();
         self.imp().covered_opacity.set(0.0);
         self.queue_allocate();
         self.queue_draw();
@@ -465,9 +528,19 @@ impl Slide {
         self.imp().last.borrow().clone()
     }
 
+    /// Lets the card this one replaced go, frame or card.
+    fn drop_covered(&self) {
+        self.imp().covered.borrow_mut().take();
+        let card = self.imp().covered_card.borrow_mut().take();
+        if let Some(card) = card {
+            card.unparent();
+        }
+    }
+
     /// How much of the card this one replaced still shows beneath it.
     pub fn covered_opacity(&self) -> f64 {
-        if self.imp().covered.borrow().is_some() {
+        let imp = self.imp();
+        if imp.covered.borrow().is_some() || imp.covered_card.borrow().is_some() {
             self.imp().covered_opacity.get()
         } else {
             0.0
