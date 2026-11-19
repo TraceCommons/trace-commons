@@ -65,6 +65,9 @@ pub struct Palette {
     pub text_tertiary: Rgba,
     pub tint_accent: Rgba,
     pub toggle_on: Rgba,
+    pub toggle_off: Rgba,
+    pub toggle_knob_off: Rgba,
+    pub text_on_accent: Rgba,
     pub tool_claude: Rgba,
     pub tool_codex: Rgba,
     pub tool_antigravity: Rgba,
@@ -104,6 +107,9 @@ impl Palette {
             text_tertiary: pick!(TEXT_TERTIARY),
             tint_accent: pick!(TINT_ACCENT),
             toggle_on: pick!(TOGGLE_ON),
+            toggle_off: pick!(TOGGLE_OFF),
+            toggle_knob_off: pick!(TOGGLE_KNOB_OFF),
+            text_on_accent: pick!(TEXT_ON_ACCENT),
             tool_claude: pick!(TOOL_CLAUDE),
             tool_codex: pick!(TOOL_CODEX),
             tool_antigravity: pick!(TOOL_ANTIGRAVITY),
@@ -429,6 +435,44 @@ pub fn brand_mark(
 /// primary ink under the pointer), and the stroke `trim` drawn, in the
 /// switch's on colour. A disabled check is drawn at
 /// [`stage::marker_check::DISABLED`].
+/// The small switch (`FirstRunSwitch`) with its top-left at `origin`, `on`
+/// of the way on (0 to 1, as it slides): the track crossing from off to on,
+/// the knob from the leading inset to the trailing one.
+pub fn small_switch(cr: &cairo::Context, origin: Point, on: f64, enabled: bool, p: &Palette) {
+    use stage::motion::{SWITCH_DISABLED, SWITCH_KNOB, SWITCH_SIZE};
+    let mix = |a: Rgba, b: Rgba| {
+        Rgba(
+            a.0 + (b.0 - a.0) * on,
+            a.1 + (b.1 - a.1) * on,
+            a.2 + (b.2 - a.2) * on,
+            a.3 + (b.3 - a.3) * on,
+        )
+    };
+    let _ = cr.save();
+    if !enabled {
+        cr.push_group();
+    }
+    let (w, h) = SWITCH_SIZE;
+    rounded(cr, origin.0, origin.1, w, h, h / 2.0);
+    source(cr, mix(p.toggle_off, p.toggle_on));
+    let _ = cr.fill();
+    let inset = (h - SWITCH_KNOB) / 2.0;
+    let x = origin.0 + inset + (w - SWITCH_KNOB - 2.0 * inset) * on;
+    cr.arc(
+        x + SWITCH_KNOB / 2.0,
+        origin.1 + h / 2.0,
+        SWITCH_KNOB / 2.0,
+        0.0,
+        TAU,
+    );
+    source(cr, mix(p.toggle_knob_off, p.text_on_accent));
+    let _ = cr.fill();
+    if !enabled && cr.pop_group_to_source().is_ok() {
+        let _ = cr.paint_with_alpha(SWITCH_DISABLED);
+    }
+    let _ = cr.restore();
+}
+
 pub fn marker_check(
     cr: &cairo::Context,
     origin: Point,
@@ -683,6 +727,12 @@ pub struct Scene {
     /// The breathing clock, in seconds.
     pub time: f64,
     pub reduce_motion: bool,
+    /// Each found tool's beam opacity while it fades (the 0.5 s fade as it
+    /// is watched or not); a tool not here is drawn at its watch.
+    pub beams: std::collections::BTreeMap<String, f64>,
+    /// Seconds since the scan ended and the dashed ring began tightening;
+    /// None once it has long been tight.
+    pub ring_since: Option<f64>,
 }
 
 /// The Tools ring's art behind the actors: the dashed ring turning slowly,
@@ -691,11 +741,13 @@ pub fn tools_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
     let center = (stage::CANVAS.0 / 2.0, stage::ring::CENTER_Y);
     let settled = scene.scan.is_none_or(stage::scan_done);
     let opacity = ((scene.scan.unwrap_or(10.0) - 0.3) / 0.7).clamp(0.0, 1.0);
-    let radius = if settled {
-        stage::ring::TIGHT_RADIUS
-    } else {
-        stage::ring::LOOSE_RADIUS
+    // Loose while the scan runs, tightening on the spatial spring after.
+    let since = match (scene.scan, scene.ring_since) {
+        (_, Some(since)) => since,
+        (Some(elapsed), None) => elapsed - (stage::SCAN_LEAD + stage::SCAN_TURN + 0.25),
+        (None, None) => f64::INFINITY,
     };
+    let radius = stage::ring::LOOSE_RADIUS * stage::motion::ring_scale(since, scene.reduce_motion);
     dashed_circle(
         cr,
         center,
@@ -714,7 +766,16 @@ pub fn tools_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
     if settled {
         let exists: Vec<bool> = scene.tools.rows.iter().map(|(_, e)| *e).collect();
         for (index, (kind, found)) in scene.tools.rows.iter().enumerate() {
-            if !found || !scene.tools.watched.iter().any(|w| w == kind) {
+            if !found {
+                continue;
+            }
+            let watched = scene.tools.watched.iter().any(|w| w == kind);
+            let opacity = scene
+                .beams
+                .get(kind)
+                .copied()
+                .unwrap_or(if watched { 1.0 } else { 0.0 });
+            if opacity <= 0.0 {
                 continue;
             }
             let angle = stage::ring::placement(index, &exists, None).angle;
@@ -724,6 +785,7 @@ pub fn tools_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
                 stage::point(center, 16.0, angle),
                 scene.time,
                 scene.reduce_motion,
+                opacity,
                 p,
             );
         }
@@ -859,8 +921,22 @@ fn sweep_mask() -> Vec<(f64, f64)> {
 }
 
 /// One watched tile's beam into the N (`ToolsBeam`): a wide halo, a body, a
-/// core and soft pulses flowing in, each fading toward the N.
-fn beam(cr: &cairo::Context, from: Point, to: Point, time: f64, reduce_motion: bool, p: &Palette) {
+/// core and soft pulses flowing in, each fading toward the N, the whole of
+/// it at `opacity` (the Mac's 0.5 s fade as the tile is watched or not).
+fn beam(
+    cr: &cairo::Context,
+    from: Point,
+    to: Point,
+    time: f64,
+    reduce_motion: bool,
+    opacity: f64,
+    p: &Palette,
+) {
+    if opacity <= 0.0 {
+        return;
+    }
+    // SwiftUI's `.opacity` on the whole beam: the layers composite first.
+    cr.push_group();
     let breath = if reduce_motion {
         0.0
     } else {
@@ -901,10 +977,14 @@ fn beam(cr: &cairo::Context, from: Point, to: Point, time: f64, reduce_motion: b
     stop(&pulses, 0.0, p.beam_core.with(0.95));
     stop(&pulses, 0.6, p.beam_core.with(0.45 * 0.95));
     stop(&pulses, 1.0, p.beam_core.with(0.0));
-    cr.set_dash(&[0.1, 26.0], flow);
+    // `dashPhase: -flow`: the pulses run from the tile into the N.
+    cr.set_dash(&[0.1, 26.0], -flow);
     line(8.0, &pulses);
     cr.set_dash(&[], 0.0);
     glow_disc(cr, from, 13.0 + 7.0, p.beam.with(0.4 * 0.6));
+    if cr.pop_group_to_source().is_ok() {
+        let _ = cr.paint_with_alpha(opacity.min(1.0));
+    }
 }
 
 /// The flash round tile `frame` as the sweep reaches it.
@@ -1086,14 +1166,19 @@ pub fn uses_back(cr: &cairo::Context, scene: &Scene, p: &Palette) {
         (scene.sharing_since / 40.0).rem_euclid(1.0) * 360.0
     };
     dashed_circle(cr, commons, 45.5, 1.0, [3.0, 4.0], turn, p.rule);
-    let filled = if scene.reduce_motion {
-        0
-    } else {
-        us::satellites(scene.sharing, scene.sharing_since)
-    };
-    for place in 0..filled.min(5) {
+    // Each place pops in as its orb arrives and out as the ring clears, on
+    // the expressive spring (`scaleEffect` and `opacity` keyed on `filled`).
+    for place in 0..5 {
+        let scale = if scene.reduce_motion {
+            0.0
+        } else {
+            stage::motion::satellite(scene.sharing, scene.sharing_since, place, false)
+        };
+        if scale <= 0.0 {
+            continue;
+        }
         let at = stage::point(commons, 46.0, stage::ring_angle(place, 5) + turn);
-        orb(cr, at, 14.0, 1.0, p);
+        orb(cr, at, 14.0 * scale, scale.min(1.0), p);
     }
     if let Some(t) = t {
         let (along, opacity) = us::orb(scene.sharing, t);
@@ -1254,6 +1339,100 @@ mod tests {
         let data = s.data().unwrap();
         let i = y as usize * stride + x as usize * 4;
         (data[i + 2], data[i + 1], data[i], data[i + 3])
+    }
+
+    /// The beam's pulses, sampled along a beam drawn alone, at time `t`:
+    /// where each pulse peaks along x, the beam running from x 300 (the
+    /// tile) to x 40 (the N) on y 50. The core ink is pure green and the
+    /// body pure red, so the green channel is the pulses alone.
+    fn beam_pulses(t: f64) -> Vec<f64> {
+        let mut p = Palette::scheme(true);
+        p.beam = Rgba(1.0, 0.0, 0.0, 1.0);
+        p.beam_core = Rgba(0.0, 1.0, 0.0, 1.0);
+        let mut s = surface(340, 100);
+        {
+            let cr = cairo::Context::new(&s).unwrap();
+            beam(&cr, (300.0, 50.0), (40.0, 50.0), t, false, 1.0, &p);
+        }
+        let green: Vec<f64> = (0..340)
+            .map(|x| f64::from(pixel(&mut s, x, 50).1))
+            .collect();
+        // Away from the ends, where a pulse is born or ends.
+        (50..290)
+            .filter(|&x| green[x] > 20.0 && green[x] >= green[x - 1] && green[x] > green[x + 1])
+            .map(|x| x as f64)
+            .collect()
+    }
+
+    /// The pulses flow from the tile into the N (`dashPhase: -flow`,
+    /// `ToolsScreen.swift`): sampled 0.2 s apart (under half a pulse's
+    /// spacing of 26.1 points at 26.1 points per 1.1 s), every pulse has
+    /// moved 4.75 points toward the N.
+    #[test]
+    fn the_beams_pulses_flow_into_the_n() {
+        let swift = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift"
+        );
+        assert!(swift.contains("dash: [0.1, 26], dashPhase: -flow"));
+        assert!(swift.contains("(time / 1.1).truncatingRemainder(dividingBy: 1) * 26.1"));
+        for t0 in [100.0, 100.5, 101.3] {
+            let before = beam_pulses(t0);
+            let after = beam_pulses(t0 + 0.2);
+            assert!(before.len() >= 6, "{t0}: {before:?}");
+            let want = 0.2 / 1.1 * 26.1;
+            let mut moved = 0;
+            for x in &before {
+                // The pulse it became: the nearest one after, within half
+                // a spacing.
+                let Some(next) = after
+                    .iter()
+                    .copied()
+                    .filter(|a| (a - x).abs() < 13.0)
+                    .min_by(|a, b| (a - x).abs().total_cmp(&(b - x).abs()))
+                else {
+                    continue;
+                };
+                // Toward the N is toward smaller x.
+                let toward_n = x - next;
+                assert!(
+                    (toward_n - want).abs() < 1.5,
+                    "{t0}: pulse at {x} went to {next}, {toward_n} toward the N, want {want}"
+                );
+                moved += 1;
+            }
+            assert!(moved >= 5, "{t0}: {before:?} -> {after:?}");
+        }
+    }
+
+    /// The small switch draws its knob at the leading inset off and the
+    /// trailing one on: a 14-point knob 2 in from each end of a 30 by 18
+    /// track.
+    #[test]
+    fn the_small_switch_draws_its_knob_where_it_slides() {
+        let p = Palette::scheme(true);
+        let knob_x = |on: f64| {
+            let mut s = surface(30, 18);
+            {
+                let cr = cairo::Context::new(&s).unwrap();
+                small_switch(&cr, (0.0, 0.0), on, true, &p);
+            }
+            // The knob's ink against the track's, along the middle row.
+            let row: Vec<(u8, u8, u8, u8)> = (0..30).map(|x| pixel(&mut s, x, 9)).collect();
+            let knob = if on > 0.5 {
+                p.text_on_accent
+            } else {
+                p.toggle_knob_off
+            };
+            let close = |c: (u8, u8, u8, u8)| {
+                (f64::from(c.0) - knob.0 * 255.0).abs() < 8.0
+                    && (f64::from(c.1) - knob.1 * 255.0).abs() < 8.0
+                    && (f64::from(c.2) - knob.2 * 255.0).abs() < 8.0
+            };
+            let xs: Vec<usize> = (0..30).filter(|x| close(row[*x])).collect();
+            (xs[0] + xs[xs.len() - 1]) as f64 / 2.0
+        };
+        assert!((knob_x(0.0) - 8.5).abs() < 1.0, "{}", knob_x(0.0));
+        assert!((knob_x(1.0) - 20.5).abs() < 1.0, "{}", knob_x(1.0));
     }
 
     #[test]
@@ -1591,6 +1770,86 @@ mod tests {
             last = Some(alpha);
         }
         assert!(worst <= 2, "a step of {worst} levels along the band");
+    }
+
+    /// Frames of the first run's new motion at several times, as raw
+    /// premultiplied BGRA into `TC_MOTION_RENDER_DIR`: the Tools ring
+    /// tightening with a watched tile's beam fading in, the beam's pulses
+    /// moving in, the Uses satellites popping, and the small switch.
+    #[test]
+    #[ignore = "writes motion renders; set TC_MOTION_RENDER_DIR"]
+    fn render_the_first_run_motion_frames() {
+        let Ok(dir) = std::env::var("TC_MOTION_RENDER_DIR") else {
+            return;
+        };
+        let p = Palette::scheme(true);
+        let write = |name: &str, w: i32, h: i32, draw: &dyn Fn(&cairo::Context)| {
+            let mut s = surface(w * 2, h * 2);
+            {
+                let cr = cairo::Context::new(&s).unwrap();
+                cr.scale(2.0, 2.0);
+                source(&cr, p.scene_base);
+                let _ = cr.paint();
+                draw(&cr);
+            }
+            s.flush();
+            std::fs::write(
+                format!("{dir}/{name}-{}x{}.bgra", w * 2, h * 2),
+                &*s.data().unwrap(),
+            )
+            .unwrap();
+        };
+        let rows: Vec<(String, bool)> = [("claude-code", true), ("codex", true), ("cline", true)]
+            .iter()
+            .map(|(k, e)| ((*k).to_owned(), *e))
+            .collect();
+        let done = stage::SCAN_LEAD + stage::SCAN_TURN + 0.25;
+        for since in [0.0, 0.1, 0.25, 0.5, 1.4] {
+            let mut beams = std::collections::BTreeMap::new();
+            beams.insert(
+                "codex".to_owned(),
+                stage::motion::beam_opacity(0.0, 1.0, since, false),
+            );
+            let scene = Scene {
+                tools: stage::ToolsSeen {
+                    rows: rows.clone(),
+                    watched: vec!["codex".to_owned()],
+                    connectable: Vec::new(),
+                },
+                scan: Some(done + since),
+                ring_since: Some(since),
+                beams,
+                time: 1000.0 + since,
+                ..Scene::default()
+            };
+            write(&format!("tools-tighten-{since:.2}"), 860, 300, &|cr| {
+                step_graphic(cr, Step::Tools, &scene, 10.0, &p)
+            });
+        }
+        for t in [0.0, 0.1, 0.2] {
+            write(&format!("beam-{t:.1}"), 340, 100, &|cr| {
+                beam(cr, (300.0, 50.0), (40.0, 50.0), 100.0 + t, false, 1.0, &p)
+            });
+        }
+        let first = stage::uses::delay(Sharing::Ask)
+            + stage::uses::period(Sharing::Ask) * stage::uses::arrival(Sharing::Ask);
+        for t in [0.0, 0.05, 0.1, 0.2, 0.3, 0.5] {
+            let scene = Scene {
+                sharing: Sharing::Ask,
+                sharing_since: first + t,
+                time: 1000.0,
+                ..Scene::default()
+            };
+            write(&format!("uses-satellite-{t:.2}"), 860, 112, &|cr| {
+                uses_back(cr, &scene, &p)
+            });
+        }
+        for t in [0.0, 0.02, 0.05, 0.1, 0.2] {
+            let on = stage::motion::switch_on(true, Some(t), false);
+            write(&format!("switch-{t:.2}"), 40, 24, &|cr| {
+                small_switch(cr, (5.0, 3.0), on, true, &p)
+            });
+        }
     }
 
     /// Renders the stage's pieces as the Mac probe renders them (the same

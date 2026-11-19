@@ -145,10 +145,13 @@ mod tests {
             |c: char| c.is_whitespace() || c == ',' || c == '{' || c == ':' || c == '.' || c == '>';
         // Home's hero cards: generated from the hero tokens at load time.
         let hero = super::super::hero_art::css();
+        // The control motion rules: generated from the motion tokens.
+        let motion = super::super::motion_css::css(false);
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,
             hero.as_str(),
+            motion.as_str(),
             super::super::style::brand_tokens::INSIGHTS_LIGHT_CSS,
             super::super::style::brand_tokens::INSIGHTS_DARK_CSS,
             super::super::style::brand_tokens::GLASS_LIGHT_CSS,

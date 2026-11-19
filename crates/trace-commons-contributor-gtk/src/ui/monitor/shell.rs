@@ -53,9 +53,11 @@ use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
 use super::tabs::{self, Back, Location, MapView, Route, Tab, TracesPage};
 use super::three_pane::ThreePane;
-use super::{demand, glass_paint, glyph, graph_model};
+use super::{demand, glass_paint, glyph, graph_model, tab_motion};
+use crate::ui::glass_motion;
 use crate::ui::style::brand_tokens;
 use crate::ui::{App, style};
+use gtk::glib;
 
 /// The existing screens the window hosts, and the notices laid over them.
 pub struct Pages<'a> {
@@ -79,7 +81,7 @@ struct State {
     at: Cell<Location>,
     /// `None` until the core has said.
     requires_onboarding: Cell<Option<bool>>,
-    prefs: RefCell<PanePrefs>,
+    prefs: Rc<RefCell<PanePrefs>>,
     map_view: Cell<MapView>,
     /// The focus button: the map shows only the selection's tool.
     map_focus: Cell<bool>,
@@ -129,6 +131,309 @@ const HIGH_CONTRAST_CLASS: &str = "tc-high-contrast";
 fn glowing_tab(tabs: &[gtk::ToggleButton]) -> Option<&gtk::ToggleButton> {
     tabs.iter()
         .find(|button| button.is_active() && button.is_visible())
+}
+
+/// The ember's glide between tabs (`GlassRuleTabs`' matched ember on
+/// `spring(0.35, 0.85)`): from the frame last drawn to the chosen tab's,
+/// ticked on the strip's frame clock at display rate, so it stops while the
+/// window is hidden, and ends at the new tab at once under reduced motion,
+/// read at every frame.
+#[derive(Default)]
+struct EmberGlide {
+    /// The frame drawn last, `(left, width)`.
+    drawn: Option<(f64, f64)>,
+    /// Where a glide began and when, once its first frame is drawn.
+    from: Option<(f64, f64)>,
+    began: Option<f64>,
+    tick: Option<gtk::TickCallbackId>,
+}
+
+impl EmberGlide {
+    /// A new tab was chosen: glide from wherever the ember is drawn.
+    fn start(glide: &Rc<RefCell<Self>>, ember: &gtk::DrawingArea) {
+        let mut state = glide.borrow_mut();
+        if let Some(tick) = state.tick.take() {
+            tick.remove();
+        }
+        state.began = None;
+        state.from = state
+            .drawn
+            .filter(|_| glass_motion::animations_enabled() && !glass_motion::window_hidden(ember));
+        if state.from.is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(glide);
+        state.tick = Some(ember.add_tick_callback(move |area, _| {
+            area.queue_draw();
+            let Some(glide) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if glide.borrow().from.is_some() {
+                glib::ControlFlow::Continue
+            } else {
+                glide.borrow_mut().tick = None;
+                glib::ControlFlow::Break
+            }
+        }));
+    }
+
+    /// Ends any glide where it is going.
+    fn snap(&mut self) {
+        self.from = None;
+        self.began = None;
+    }
+
+    /// The frame to draw for a tab at `target`, at the frame clock's time.
+    fn frame(&mut self, target: (f64, f64), now: Option<f64>) -> (f64, f64) {
+        let drawn = match (self.from, now) {
+            (Some(from), Some(now)) if glass_motion::animations_enabled() => {
+                let began = *self.began.get_or_insert(now);
+                let t = now - began;
+                if t >= tab_motion::ember_settles() {
+                    self.snap();
+                    target
+                } else {
+                    tab_motion::glide(from, target, t)
+                }
+            }
+            _ => {
+                self.snap();
+                target
+            }
+        };
+        self.drawn = Some(drawn);
+        drawn
+    }
+}
+
+/// A drag under way on the strip (`GlassRuleTabs`' `dragging`,
+/// `dragOrigin`, `moved`).
+#[derive(Default)]
+struct TabDrag {
+    tab: Option<Tab>,
+    origin: usize,
+    moved: bool,
+    /// The tab's left in the strip when the drag began: the gesture's
+    /// translation is the tab's own, and the tab moves as the strip
+    /// reorders, so this turns it into the pointer's travel on the strip
+    /// (the Mac's `.global` coordinate space).
+    start_x: f64,
+}
+
+/// The strip's tab order and the drag that changes it: every tab but Home
+/// lifts under the pointer and while pressed, follows a drag and trades
+/// places past a neighbour's middle, and drops into its slot. The order is
+/// kept with the panes' choices and read by the accelerators and the tray
+/// (`tabs::current_order`).
+struct TabOrdering {
+    strip: glib::WeakRef<gtk::Box>,
+    tabs: Vec<(Tab, gtk::ToggleButton)>,
+    drag: RefCell<TabDrag>,
+    /// The shell's kept choices, which the order is saved with.
+    prefs: Rc<RefCell<PanePrefs>>,
+}
+
+impl TabOrdering {
+    fn lift(button: &gtk::ToggleButton) -> Option<tab_motion::TabLift> {
+        button.parent().and_downcast::<tab_motion::TabLift>()
+    }
+
+    /// Whether `tab` may be dragged now: a movable tab, with every tab
+    /// shown (before onboarding the strip is not the person's order).
+    fn movable(&self, tab: Tab) -> bool {
+        tab.movable() && self.tabs.iter().all(|(_, button)| button.get_visible())
+    }
+
+    /// Puts the strip's tabs in the person's order, and each tab's chord
+    /// tooltip with its place.
+    fn arrange(&self) {
+        let Some(strip) = self.strip.upgrade() else {
+            return;
+        };
+        let mut previous: Option<gtk::Widget> = None;
+        for (index, tab) in tabs::current_order().into_iter().enumerate() {
+            let Some((_, button)) = self.tabs.iter().find(|(t, _)| *t == tab) else {
+                continue;
+            };
+            button.set_tooltip_text(crate::ui::shortcuts::screen_accel_label(index).as_deref());
+            if let Some(lift) = Self::lift(button) {
+                strip.reorder_child_after(&lift, previous.as_ref());
+                previous = Some(lift.upcast());
+            }
+        }
+    }
+
+    /// `onMove`: `tab` takes `target`'s place; kept, and the chords follow.
+    fn move_to(&self, tab: Tab, target: Tab) {
+        let order = tabs::moving(tab, target, &tabs::current_order());
+        let stored = tabs::stored(&order);
+        tabs::set_current_order(&stored);
+        let prefs = {
+            let mut prefs = self.prefs.borrow_mut();
+            prefs.tab_order = super::prefs::TabOrder::from_stored(&stored);
+            *prefs
+        };
+        prefs.save();
+        self.arrange();
+        if let Some(application) = self
+            .strip
+            .upgrade()
+            .and_then(|strip| strip.root())
+            .and_downcast::<gtk::Window>()
+            .and_then(|window| window.application())
+        {
+            crate::ui::shortcuts::bind_screen_accels(&application);
+        }
+    }
+
+    fn up(&self, tab: Tab, button: &gtk::ToggleButton, hovered: bool, pressed: bool) {
+        let dragging = self.drag.borrow().tab == Some(tab);
+        if let Some(lift) = Self::lift(button) {
+            lift.set_lifted(self.movable(tab) && (hovered || pressed || dragging));
+        }
+    }
+
+    fn wire(this: &Rc<Self>, tab: Tab, button: &gtk::ToggleButton) {
+        let Some(lift) = Self::lift(button) else {
+            return;
+        };
+        let hovered = Rc::new(Cell::new(false));
+        let pressed = Rc::new(Cell::new(false));
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            motion.connect_enter(move |_, _, _| {
+                hovered.set(true);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, true, pressed.get());
+                }
+            });
+        }
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            motion.connect_leave(move |_| {
+                hovered.set(false);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, false, pressed.get());
+                }
+            });
+        }
+        lift.add_controller(motion);
+
+        // A press lifts the tab; a drag past six points moves it and the
+        // release then opens nothing (the gesture claims the press from
+        // the button); a press let go in place opens it as a click does.
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+        drag.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            drag.connect_drag_begin(move |_, _, _| {
+                pressed.set(true);
+                if let Some(this) = this.upgrade() {
+                    this.up(tab, &button, hovered.get(), true);
+                }
+            });
+        }
+        {
+            let (this, button) = (Rc::downgrade(this), button.clone());
+            drag.connect_drag_update(move |gesture, translation, _| {
+                let Some(this) = this.upgrade() else { return };
+                if !this.movable(tab) {
+                    return;
+                }
+                if this.follow(tab, &button, translation) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+            });
+        }
+        {
+            let (this, button, hovered, pressed) = (
+                Rc::downgrade(this),
+                button.clone(),
+                Rc::clone(&hovered),
+                Rc::clone(&pressed),
+            );
+            let end = move || {
+                pressed.set(false);
+                let Some(this) = this.upgrade() else { return };
+                *this.drag.borrow_mut() = TabDrag::default();
+                if let Some(lift) = Self::lift(&button) {
+                    lift.drop_into_slot();
+                }
+                this.up(tab, &button, hovered.get(), false);
+            };
+            let end = Rc::new(end);
+            let ended = Rc::clone(&end);
+            drag.connect_drag_end(move |_, _, _| ended());
+            drag.connect_cancel(move |_, _| end());
+        }
+        lift.add_controller(drag);
+    }
+
+    /// `follow(_:translation:)`: the dragged tab keeps its place under the
+    /// pointer as the strip reorders. True once it has moved far enough
+    /// that letting go no longer opens it.
+    fn follow(&self, tab: Tab, button: &gtk::ToggleButton, translation: f64) -> bool {
+        let order = tabs::current_order();
+        let Some(from) = order.iter().position(|t| *t == tab) else {
+            return false;
+        };
+        let movable: Vec<usize> = (0..order.len()).filter(|i| order[*i].movable()).collect();
+        let (Some(&first), Some(&last)) = (movable.first(), movable.last()) else {
+            return false;
+        };
+        // The tabs share the strip equally (`stripWidth / count`): one
+        // tab's own width, without the strip's side padding.
+        let Some(lift) = Self::lift(button) else {
+            return false;
+        };
+        let tab_width = f64::from(lift.width());
+        let x = self
+            .strip
+            .upgrade()
+            .and_then(|strip| lift.compute_point(&strip, &gtk::graphene::Point::new(0.0, 0.0)))
+            .map_or(0.0, |point| f64::from(point.x()));
+        let (moved, translation) = {
+            let mut drag = self.drag.borrow_mut();
+            if drag.tab != Some(tab) {
+                *drag = TabDrag {
+                    tab: Some(tab),
+                    origin: from,
+                    moved: false,
+                    start_x: x,
+                };
+            }
+            let travel = translation + (x - drag.start_x);
+            if tabs::has_moved(travel) {
+                drag.moved = true;
+            }
+            (drag.moved, travel)
+        };
+        let origin = self.drag.borrow().origin;
+        let offset = translation - (from as f64 - origin as f64) * tab_width;
+        let to = tabs::landing(from, offset, tab_width, (first, last));
+        if to != from {
+            self.move_to(tab, order[to]);
+        }
+        lift.set_drag(offset - (to as f64 - from as f64) * tab_width);
+        moved
+    }
 }
 
 /// Keep the window's high-contrast class in step with the desktop
@@ -305,6 +610,12 @@ pub struct Shell {
     window: adw::ApplicationWindow,
     app: RefCell<Weak<App>>,
     tabs: Vec<(Tab, gtk::ToggleButton)>,
+    /// The ember's glide, read by the mounted tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ember_glide: Rc<RefCell<EmberGlide>>,
+    /// The strip's order and drag, read by the mounted tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    tab_order: Rc<TabOrdering>,
     /// The Private AI tab's dot, and the tone it is drawn in.
     inference_dot: gtk::DrawingArea,
     inference_tone: Rc<Cell<style::Tone>>,
@@ -478,14 +789,33 @@ impl Shell {
             if let Some((_, first)) = tab_buttons.first() {
                 button.set_group(Some(first));
             }
-            strip.append(&button);
+            // Lifted and moved as `GlassRuleTabs` moves a movable tab
+            // (`tab_motion::TabLift`); shown and hidden with its tab.
+            let lift = tab_motion::TabLift::new(&button);
+            button
+                .bind_property("visible", &lift, "visible")
+                .sync_create()
+                .build();
+            strip.append(&lift);
             tab_buttons.push((tab, button));
+        }
+        // The panes' kept choices, the tab order among them; read in below.
+        let kept = Rc::new(RefCell::new(PanePrefs::default()));
+        let tab_order = Rc::new(TabOrdering {
+            strip: strip.downgrade(),
+            tabs: tab_buttons.clone(),
+            drag: RefCell::default(),
+            prefs: Rc::clone(&kept),
+        });
+        for (tab, button) in &tab_buttons {
+            TabOrdering::wire(&tab_order, *tab, button);
         }
 
         // The selected tab's ember line and halo (`GlassRuleTabs.emberGlow`)
         // are drawn once over the whole strip: the line reaches 0.3 of a
         // tab's width into each neighbour, which a tab's own background
         // could not.
+        let ember_glide = Rc::new(RefCell::new(EmberGlide::default()));
         let ember = gtk::DrawingArea::builder()
             .can_target(false)
             .can_focus(false)
@@ -496,33 +826,52 @@ impl Shell {
                 .iter()
                 .map(|(_, button)| button.clone())
                 .collect();
-            ember.set_draw_func(move |area, context, _, height| {
-                let Some(selected) = glowing_tab(&tabs) else {
-                    return;
-                };
-                let Some(bounds) = selected.compute_bounds(area) else {
-                    return;
-                };
-                glass_paint::paint_ember(
-                    context,
-                    f64::from(height),
-                    f64::from(bounds.x()),
-                    f64::from(bounds.width()),
-                    adw::StyleManager::default().is_dark(),
-                );
-            });
+            // The ember glides to a newly chosen tab on the strip's spring
+            // (`tab_motion`); a tab shown or hidden moves it at once.
+            let glide = Rc::clone(&ember_glide);
+            {
+                let glide = Rc::clone(&glide);
+                ember.set_draw_func(move |area, context, _, height| {
+                    let Some(selected) = glowing_tab(&tabs) else {
+                        glide.borrow_mut().drawn = None;
+                        return;
+                    };
+                    let Some(bounds) = selected.compute_bounds(area) else {
+                        return;
+                    };
+                    let target = (f64::from(bounds.x()), f64::from(bounds.width()));
+                    let frame_time = area
+                        .frame_clock()
+                        .map(|clock| clock.frame_time() as f64 / 1e6);
+                    let (left, width) = glide.borrow_mut().frame(target, frame_time);
+                    glass_paint::paint_ember(
+                        context,
+                        f64::from(height),
+                        left,
+                        width,
+                        adw::StyleManager::default().is_dark(),
+                    );
+                });
+            }
             for (_, button) in &tab_buttons {
                 let weak = ember.downgrade();
-                button.connect_toggled(move |_| {
-                    if let Some(ember) = weak.upgrade() {
-                        ember.queue_draw();
+                let chosen = Rc::clone(&glide);
+                button.connect_toggled(move |button| {
+                    let Some(ember) = weak.upgrade() else {
+                        return;
+                    };
+                    if button.is_active() {
+                        EmberGlide::start(&chosen, &ember);
                     }
+                    ember.queue_draw();
                 });
                 // A tab shown or hidden moves the others (onboarding hides
-                // two), and the glow with them.
+                // two), and the glow with them, at once.
                 let weak = ember.downgrade();
+                let moved = Rc::clone(&glide);
                 button.connect_visible_notify(move |_| {
                     if let Some(ember) = weak.upgrade() {
+                        moved.borrow_mut().snap();
                         ember.queue_draw();
                     }
                 });
@@ -709,6 +1058,24 @@ impl Shell {
                     parts.push(Some((*notice, frame, card, close, shown)));
                 }
                 let stack = notices::stack(&open);
+                // The front card a new one replaces fades where it is, under
+                // it (`GlassPopoverStack.arrival`'s opacity removal), as its
+                // slide last drew it, closed or gone with its cause.
+                let replaced = (stack.front != last_front.get()
+                    && started.get()
+                    && crate::ui::glass_motion::animations_enabled())
+                .then(|| last_front.get())
+                .flatten()
+                .and_then(|index| cards.get(index))
+                .and_then(|(_, _, _, card, _)| card.upgrade())
+                // A card that faded itself out (the arming offer's exit)
+                // has nothing left to fade.
+                .filter(|card| card.opacity() >= 1.0)
+                .and_then(|card| {
+                    card.ancestor(crate::ui::popover_stack::Slide::static_type())
+                        .and_downcast::<crate::ui::popover_stack::Slide>()
+                })
+                .and_then(|slide| slide.last_drawn());
                 let mut front = None;
                 for (index, part) in parts.into_iter().enumerate() {
                     let Some((notice, frame, card, close, shown)) = part else {
@@ -745,7 +1112,7 @@ impl Shell {
                         let notice = *notice;
                         let fresh = !seen.borrow().contains(&(notice, card_text(&card)));
                         if started.get() && crate::ui::glass_motion::animations_enabled() {
-                            slide.arrive(fresh, false);
+                            slide.arrive_over(fresh, false, replaced.clone());
                         } else {
                             slide.settle();
                         }
@@ -887,6 +1254,10 @@ impl Shell {
         root.set_kept_widths(prefs.main_width, prefs.map_width);
         // The Traces map's style, as the person last chose it.
         map.set_style(prefs.map_style());
+        // The tabs in the person's order.
+        tabs::set_current_order(&prefs.tab_order.stored());
+        *kept.borrow_mut() = prefs;
+        tab_order.arrange();
 
         let shell = Self {
             root,
@@ -897,7 +1268,7 @@ impl Shell {
             state: State {
                 at: Cell::new(Location::default()),
                 requires_onboarding: Cell::new(None),
-                prefs: RefCell::new(prefs),
+                prefs: kept,
                 map_view: Cell::new(MapView::default()),
                 map_focus: Cell::new(false),
                 last_demand: RefCell::new(BTreeSet::new()),
@@ -909,6 +1280,8 @@ impl Shell {
             window: window.clone(),
             app: RefCell::new(Weak::new()),
             tabs: tab_buttons,
+            ember_glide,
+            tab_order,
             inference_dot,
             inference_tone,
             breadcrumb,
@@ -2058,6 +2431,147 @@ mod tests {
         mounted.window.close();
     }
 
+    /// `GlassRuleTabs`' lift and drag: a movable tab under the pointer
+    /// rises on the lift spring (overshooting, as SwiftUI's does); dragged
+    /// past its neighbour's middle it takes that place, the order is kept
+    /// and the chords follow it; let go it drops into its slot on the drop
+    /// spring. Home never lifts.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_tab_lifts_drags_into_place_and_drops() {
+        gtk::init().expect("GTK display");
+        let mounted = mounted(false);
+        mounted.window.present();
+        let shell = &mounted.shell;
+        let settings = gtk::Settings::default().expect("settings");
+        settings.set_gtk_enable_animations(true);
+        pump();
+        let button = |tab: Tab| {
+            shell
+                .tabs
+                .iter()
+                .find(|(t, _)| *t == tab)
+                .unwrap()
+                .1
+                .clone()
+        };
+        let lift = |tab: Tab| TabOrdering::lift(&button(tab)).expect("lift");
+        let ordering = &shell.tab_order;
+
+        ordering.up(Tab::Home, &button(Tab::Home), true, false);
+        assert!(!lift(Tab::Home).is_lifted(), "Home lifted");
+
+        ordering.up(Tab::Traces, &button(Tab::Traces), true, false);
+        let over = Cell::new(false);
+        pump_until(|| {
+            let amount = lift(Tab::Traces).amount();
+            over.set(over.get() || amount > 1.0);
+            !lift(Tab::Traces).imp_running() && amount == 1.0
+        });
+        assert!(over.get(), "the lift did not overshoot on its spring");
+
+        // Dragged right past Insights' middle: Traces takes its place.
+        let width = f64::from(lift(Tab::Traces).width());
+        assert!(
+            !ordering.follow(Tab::Traces, &button(Tab::Traces), 3.0),
+            "moved at 3 points"
+        );
+        assert!(ordering.follow(Tab::Traces, &button(Tab::Traces), width * 0.6));
+        let diagnosis = (
+            width,
+            f64::from(button(Tab::Traces).width()),
+            lift(Tab::Traces).drag(),
+            ordering.drag.borrow().origin,
+            ordering.drag.borrow().start_x,
+        );
+        assert_eq!(
+            tabs::current_order(),
+            vec![Tab::Home, Tab::Inference, Tab::Insights, Tab::Traces],
+            "{diagnosis:?}"
+        );
+        assert_eq!(
+            shell.state.prefs.borrow().tab_order.stored(),
+            "Inference,Insights,Traces"
+        );
+        assert_eq!(
+            button(Tab::Traces).tooltip_text().map(|t| t.to_string()),
+            crate::ui::shortcuts::screen_accel_label(3)
+        );
+        let left = lift(Tab::Traces).drag();
+        assert!((left - (width * 0.6 - width)).abs() < 1.0, "{left}");
+        // Let go: it drops into its slot on the spring.
+        *ordering.drag.borrow_mut() = TabDrag::default();
+        lift(Tab::Traces).drop_into_slot();
+        assert!(lift(Tab::Traces).dropping());
+        pump_until(|| !lift(Tab::Traces).dropping());
+        assert_eq!(lift(Tab::Traces).drag(), 0.0);
+        ordering.up(Tab::Traces, &button(Tab::Traces), false, false);
+        pump_until(|| lift(Tab::Traces).amount() == 0.0);
+
+        // Under reduced motion the lift is there at once.
+        settings.set_gtk_enable_animations(false);
+        ordering.up(Tab::Insights, &button(Tab::Insights), true, false);
+        assert_eq!(lift(Tab::Insights).amount(), 1.0);
+        settings.set_gtk_enable_animations(true);
+        tabs::set_current_order("");
+    }
+
+    /// A tab chosen draws the ember on its way there, on the strip's
+    /// spring, and it comes to rest on the tab; with GTK's animations off
+    /// it is there at once.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_ember_glides_to_the_chosen_tab() {
+        gtk::init().expect("GTK display");
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        let settings = gtk::Settings::default().expect("settings");
+        settings.set_gtk_enable_animations(true);
+        pump_until(|| shell.ember_glide.borrow().drawn.is_some());
+        let home = shell.ember_glide.borrow().drawn.expect("drawn");
+        shell.pick_tab(Tab::Traces);
+        let target = {
+            let traces = &shell.tabs[2].1;
+            let strip = traces
+                .parent()
+                .and_then(|lift| lift.parent())
+                .expect("strip");
+            let bounds = traces.compute_bounds(&strip).expect("bounds");
+            f64::from(bounds.x())
+        };
+        assert!(shell.ember_glide.borrow().from.is_some(), "a glide began");
+        let between = std::cell::Cell::new(false);
+        pump_until(|| {
+            let state = shell.ember_glide.borrow();
+            if let Some((left, _)) = state.drawn {
+                if left > home.0 + 1.0 && left < target - 1.0 {
+                    between.set(true);
+                }
+            }
+            state.from.is_none()
+        });
+        assert!(between.get(), "the ember was drawn between the tabs");
+        let rest = shell.ember_glide.borrow().drawn.expect("drawn");
+        assert!((rest.0 - target).abs() < 0.5, "{rest:?} vs {target}");
+
+        settings.set_gtk_enable_animations(false);
+        shell.pick_tab(Tab::Home);
+        assert!(shell.ember_glide.borrow().from.is_none(), "no glide");
+        // The next frame draws it on Home, with nothing between.
+        let drawn_between = Cell::new(false);
+        pump_until(|| {
+            let at = shell.ember_glide.borrow().drawn.expect("drawn");
+            if at.0 > home.0 + 1.0 && at.0 < rest.0 - 1.0 {
+                drawn_between.set(true);
+            }
+            (at.0 - home.0).abs() < 0.5
+        });
+        let at = shell.ember_glide.borrow().drawn.expect("drawn");
+        assert!((at.0 - home.0).abs() < 0.5, "{at:?}");
+        assert!(!drawn_between.get(), "{at:?}");
+        settings.set_gtk_enable_animations(true);
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_pages_sit_behind_the_tabs_and_the_breadcrumb() {
@@ -2215,6 +2729,16 @@ mod tests {
             .sum()
     }
 
+    /// The notice stack's plates widget.
+    fn plates_widget(shell: &Shell) -> crate::ui::popover_stack::Plates {
+        let mut found = Vec::new();
+        descendants(notice_scroller(shell).upcast_ref(), &mut found);
+        found
+            .into_iter()
+            .find_map(|widget| widget.downcast::<crate::ui::popover_stack::Plates>().ok())
+            .expect("plates")
+    }
+
     /// The card a slot's frame moves in.
     fn slide(shell: &Shell, notice: Notice) -> crate::ui::popover_stack::Slide {
         slot(shell, notice)
@@ -2260,25 +2784,60 @@ mod tests {
         let slid = Cell::new(false);
         pump_until(|| {
             slid.set(slid.get() || health.offset() < -1.0);
-            slid.get() && health.offset() == 0.0 && health.opacity() == 1.0
+            slid.get() && health.offset() == 0.0 && health.card_opacity() == 1.0
         });
         assert!(slid.get(), "a new card did not slide in");
-        assert_eq!((health.offset(), health.opacity()), (0.0, 1.0));
+        assert_eq!((health.offset(), health.card_opacity()), (0.0, 1.0));
 
-        // A newer card in front of it slides in too; closing that one
-        // reveals the Health card, which fades where it is.
+        // A newer card in front of it slides in too, over the Health card,
+        // which fades where it is beneath it rather than going at once.
+        // Something to draw: an empty card leaves no frame to fade.
+        card(Notice::Undo).append(&gtk::Label::new(Some("2")));
         card(Notice::Undo).set_visible(true);
-        pump_until(|| slide(shell, Notice::Undo).offset() == 0.0);
+        let undo = slide(shell, Notice::Undo);
+        // The plate the Health card now makes peeks out on the spring.
+        assert!(plates_widget(shell).moving(), "the plate came at once");
+        let covered = Cell::new(1.0f64);
+        let seen_covered = Cell::new(false);
+        pump_until(|| {
+            let now = undo.covered_opacity();
+            if now > 0.0 && now < 1.0 {
+                seen_covered.set(true);
+                assert!(
+                    now <= covered.get() + 1e-9,
+                    "the covered card faded back in"
+                );
+                covered.set(now);
+            }
+            undo.offset() == 0.0 && undo.covered_opacity() == 0.0
+        });
+        assert!(seen_covered.get(), "the covered card was not drawn fading");
+        pump_until(|| !plates_widget(shell).moving());
+        assert_eq!(plates(shell), 1);
+        // Closing that one reveals the Health card, which fades in where
+        // it is, over the closed card fading out.
         card(Notice::Undo).set_visible(false);
         let faded = Cell::new(false);
         let moved = Cell::new(false);
         pump_until(|| {
-            faded.set(faded.get() || health.opacity() < 1.0);
+            faded.set(faded.get() || health.card_opacity() < 1.0);
             moved.set(moved.get() || health.offset() != 0.0);
-            faded.get() && health.opacity() == 1.0
+            faded.get() && health.card_opacity() == 1.0
         });
         assert!(faded.get(), "a revealed card did not fade in");
         assert!(!moved.get(), "a revealed card slid");
+        assert_eq!(health.covered_opacity(), 0.0);
+        // That close faded the Undo card out beneath it too.
+        card(Notice::Undo).set_visible(true);
+        pump_until(|| slide(shell, Notice::Undo).offset() == 0.0 && undo.covered_opacity() == 0.0);
+        assert!(undo.last_drawn().is_some(), "the Undo card was never drawn");
+        card(Notice::Undo).set_visible(false);
+        // The stack follows at once; the fade then runs on the clock.
+        assert!(
+            health.covered_opacity() > 0.0,
+            "the closed card went at once"
+        );
+        pump_until(|| health.covered_opacity() == 0.0);
 
         // Under reduced motion a new card is there at once.
         settings.set_gtk_enable_animations(false);
@@ -2286,7 +2845,9 @@ mod tests {
         card(Notice::Consent).set_visible(true);
         pump();
         let consent = slide(shell, Notice::Consent);
-        assert_eq!((consent.offset(), consent.opacity()), (0.0, 1.0));
+        assert_eq!((consent.offset(), consent.card_opacity()), (0.0, 1.0));
+        assert_eq!(consent.covered_opacity(), 0.0);
+        settings.set_gtk_enable_animations(true);
     }
 
     /// The Mac's placement (owner decision 1, chosen again 2026-11-17):
@@ -3220,6 +3781,294 @@ mod tests {
                 drawn[1]
             );
         }
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        sheet.destroy();
+        settings.destroy();
+        mounted.window.close();
+    }
+
+    const MAC_TOKENS: &str =
+        include_str!("../../../../../macos/Sources/TCDesign/Generated/GlassTokens.swift");
+    const MAC_CONTROLS: &str =
+        include_str!("../../../../../macos/Sources/TCDesign/Components/Controls.swift");
+
+    /// The flat theme's value of the Swift colour `name` in one scheme, as
+    /// R, G, B and alpha: `GlassTheme.pick(classic, flat: GlassRGBA(dark,
+    /// alpha:, light: GlassRGBA(light, alpha:)))`. The Mac ships flat
+    /// (`GlassTheme.resolve` defaults to it).
+    fn mac_flat(name: &str, dark: bool) -> ([u8; 3], f64) {
+        let line = MAC_TOKENS
+            .lines()
+            .find(|line| line.contains(&format!("static var {name}: GlassRGBA {{")))
+            .unwrap_or_else(|| panic!("the Swift no longer has {name}"));
+        let flat = &line[line.find("flat: GlassRGBA(").expect("a flat value") + 16..];
+        let parse = |text: &str| -> ([u8; 3], f64) {
+            let hex = &text[2..8];
+            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+            let alpha = &text[text.find("alpha: ").unwrap() + 7..];
+            let alpha: String = alpha
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            ([byte(0), byte(2), byte(4)], alpha.parse().unwrap())
+        };
+        match (dark, flat.find("light: GlassRGBA(")) {
+            (false, Some(at)) => parse(&flat[at + 17..]),
+            _ => parse(flat),
+        }
+    }
+
+    /// A Swift number found after `needle` in `source`.
+    fn swift_number(source: &str, needle: &str) -> i32 {
+        let at = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("the Swift no longer says {needle}"));
+        source[at + needle.len()..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap()
+    }
+
+    fn over(colour: ([u8; 3], f64), ground: [u8; 3]) -> [u8; 3] {
+        let (c, a) = colour;
+        let mix = |i: usize| (f64::from(c[i]) * a + f64::from(ground[i]) * (1.0 - a)).round() as u8;
+        [mix(0), mix(1), mix(2)]
+    }
+
+    /// Every switch is the Mac's flat `GlassToggleStyle`: a Settings
+    /// switch 40 by 24 (`toggleWidth`, `toggleHeight`), the tree's watch
+    /// switch 38 by 22, each with an 18-point round knob `inset` in from
+    /// the track's end (3, and 2 on the watch switch). On, the track is
+    /// `toggleOnSettings` (#0558B6 Light, #7EBCFF Dark) and the knob
+    /// `textOnAccent`; off, the track is `toggleOff` over its ground and
+    /// the knob `toggleKnobOff`. Read from the Swift and measured on the
+    /// drawn pixels, focused and unfocused: the knob clears 3:1 on its
+    /// track and the track 3:1 on its ground in every state. Light's off
+    /// track is the one deviation: the Mac's 24% black is 1.8:1 on its
+    /// ground, so the generator lifts it, as little as the floor allows.
+    /// On the branch before this fix the switches drew libadwaita's purple
+    /// (#6D14F3, #8A3DFF) at 46 by 26 with a white, shadowed knob.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_every_switch_is_the_macs_flat_switch() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        let manager = adw::StyleManager::default();
+        // Two Settings switches on a Settings card, one on and one off.
+        let card = style::card(gtk::Orientation::Horizontal, 12);
+        card.set_halign(gtk::Align::Start);
+        card.set_valign(gtk::Align::Start);
+        card.set_margin_top(24);
+        card.set_margin_start(24);
+        // The app's own switch (`GlassSwitch`), as Settings builds it.
+        let settings_on = crate::ui::glass_switch::GlassSwitch::with_active(true);
+        let settings_off = crate::ui::glass_switch::GlassSwitch::with_active(false);
+        for switch in [&settings_on, &settings_off] {
+            switch.set_valign(gtk::Align::Center);
+            card.append(switch);
+        }
+        mounted.shell.settings_root.append(&card);
+        let settings = mounted.shell.settings_window_for(&mounted.window);
+        // Two watch switches straight on a sheet's pane, as on a tree row.
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        row.set_halign(gtk::Align::Center);
+        row.set_valign(gtk::Align::Center);
+        let watch_on = crate::ui::glass_switch::GlassSwitch::watch(true);
+        let watch_off = crate::ui::glass_switch::GlassSwitch::watch(false);
+        for switch in [&watch_on, &watch_off] {
+            switch.set_valign(gtk::Align::Center);
+            row.append(switch);
+        }
+        let sheet = adw::Window::builder()
+            .default_width(300)
+            .default_height(200)
+            .content(&row)
+            .build();
+        settings.present();
+        sheet.present();
+
+        // The Swift's knob, inset and track sizes.
+        let style_source = &MAC_CONTROLS[MAC_CONTROLS
+            .find("public struct GlassToggleStyle")
+            .expect("the Swift has GlassToggleStyle")..];
+        let knob = swift_number(
+            &style_source[style_source.find("Circle()").expect("a knob")..],
+            ".frame(width:",
+        );
+        let inset_line = style_source
+            .lines()
+            .find(|line| line.contains("let inset: CGFloat = watch ?"))
+            .expect("the Swift states the knob's inset");
+        let watch_inset = swift_number(inset_line, "watch ?");
+        let toggle_inset = swift_number(&inset_line[inset_line.find("watch ?").unwrap()..], " : ");
+        let kinds = [
+            (
+                settings.clone().upcast::<gtk::Window>(),
+                &settings_on,
+                &settings_off,
+                swift_number(MAC_TOKENS, "static let toggleWidth: CGFloat ="),
+                swift_number(MAC_TOKENS, "static let toggleHeight: CGFloat ="),
+                toggle_inset,
+                "settings",
+            ),
+            (
+                sheet.clone().upcast::<gtk::Window>(),
+                &watch_on,
+                &watch_off,
+                swift_number(MAC_TOKENS, "static let watchSwitchWidth: CGFloat ="),
+                swift_number(MAC_TOKENS, "static let watchSwitchHeight: CGFloat ="),
+                watch_inset,
+                "watch",
+            ),
+        ];
+        let off_by =
+            |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).map(|(x, y)| x.abs_diff(y)).max().unwrap();
+        let mut report = Vec::new();
+        for dark in [false, true] {
+            manager.set_color_scheme(if dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            pump_until(|| std::time::Instant::now() >= end);
+            let track_on = mac_flat("toggleOnSettings", dark).0;
+            let knob_on = mac_flat("textOnAccent", dark).0;
+            let knob_off = mac_flat("toggleKnobOff", dark).0;
+            let mac_off = mac_flat("toggleOff", dark);
+            for (window, on, off, width, height, inset, kind) in &kinds {
+                let (width, height, inset) = (*width, *height, *inset);
+                // Alone on screen, so the compositor gives it frames: a
+                // window under another gets none, and keeps the style it
+                // had before the scheme changed (a light knob in dark).
+                for (other, ..) in &kinds {
+                    if other != window {
+                        other.set_visible(false);
+                    }
+                }
+                window.present();
+                for unfocused in [false, true] {
+                    if unfocused {
+                        window.set_state_flags(gtk::StateFlags::BACKDROP, false);
+                    } else {
+                        window.unset_state_flags(gtk::StateFlags::BACKDROP);
+                    }
+                    let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                    pump_until(|| std::time::Instant::now() >= end);
+                    assert_eq!(
+                        on.state_flags().contains(gtk::StateFlags::BACKDROP),
+                        unfocused,
+                        "the window's focus state reached its switch"
+                    );
+                    let state = format!("dark={dark} unfocused={unfocused} {kind}");
+                    // Sizes are border boxes (`compute_bounds`): a
+                    // widget's `width()` is its content box, without the
+                    // padding that stands the knob in from the track's end.
+                    let size = |widget: &gtk::Widget| {
+                        let bounds = widget.compute_bounds(widget).expect("laid out");
+                        (
+                            bounds.width().round() as i32,
+                            bounds.height().round() as i32,
+                        )
+                    };
+                    for (switch, active) in [(*on, true), (*off, false)] {
+                        assert_eq!(
+                            size(switch.upcast_ref()),
+                            (width, height),
+                            "{state}: the switch is the Mac's size"
+                        );
+                        let mut slider = switch.first_child();
+                        while let Some(child) = slider.clone() {
+                            if child.css_name() == "slider" {
+                                break;
+                            }
+                            slider = child.next_sibling();
+                        }
+                        let slider = slider.expect("a slider");
+                        assert_eq!(
+                            size(&slider),
+                            (knob, knob),
+                            "{state}: the knob is the Mac's"
+                        );
+                        let at = switch.compute_bounds(window).expect("laid out");
+                        let (x, y) = (at.x().round() as i32, at.y().round() as i32);
+                        let mid = y + height / 2;
+                        // The knob's centre, the track beside it, the
+                        // ground just outside the track's end, then the
+                        // pixels just inside and outside the knob's edge
+                        // at the Mac's inset.
+                        let points = if active {
+                            [
+                                (x + width - inset - knob / 2, mid),
+                                (x + inset / 2 + 4, mid),
+                                (x - 3, mid),
+                                (x + width - inset - 1, mid),
+                                (x + width - inset, mid),
+                            ]
+                        } else {
+                            [
+                                (x + inset + knob / 2, mid),
+                                (x + width - inset / 2 - 4, mid),
+                                (x + width + 3, mid),
+                                (x + inset, mid),
+                                (x + inset - 1, mid),
+                            ]
+                        };
+                        let drawn = any_window_pixels(window, &points);
+                        let (knob_px, track_px, ground_px) = (drawn[0], drawn[1], drawn[2]);
+                        let (want_knob, want_track) = if active {
+                            (knob_on, track_on)
+                        } else {
+                            (knob_off, over(mac_off, ground_px))
+                        };
+                        assert!(
+                            off_by(knob_px, want_knob) <= 3,
+                            "{state} active={active}: the knob draws {knob_px:?}, not the Mac's {want_knob:?}"
+                        );
+                        if active || dark {
+                            assert!(
+                                off_by(track_px, want_track) <= 3,
+                                "{state} active={active}: the track draws {track_px:?}, not the Mac's {want_track:?}"
+                            );
+                        } else {
+                            // Light's off track: the Mac's black, at
+                            // least as dense as the Mac's alpha.
+                            let alpha = 1.0 - f64::from(track_px[1]) / f64::from(ground_px[1]);
+                            assert!(
+                                track_px[0].abs_diff(track_px[1]) <= 3 && alpha >= mac_off.1 - 0.01,
+                                "{state}: the off track draws {track_px:?} on {ground_px:?}"
+                            );
+                        }
+                        assert!(
+                            off_by(drawn[3], knob_px) <= 24,
+                            "{state} active={active}: the knob does not reach its inset ({:?})",
+                            drawn[3]
+                        );
+                        assert!(
+                            off_by(drawn[4], track_px) <= 24,
+                            "{state} active={active}: the knob runs past its inset ({:?})",
+                            drawn[4]
+                        );
+                        let on_track = drawn_contrast(knob_px, track_px);
+                        let on_ground = drawn_contrast(track_px, ground_px);
+                        report.push(format!(
+                            "{state} active={active}: knob {knob_px:?} track {track_px:?} \
+                             ground {ground_px:?}: knob/track {on_track:.2}, track/ground {on_ground:.2}"
+                        ));
+                        assert!(
+                            on_track >= 3.0 && on_ground >= 3.0,
+                            "{state} active={active}: knob {knob_px:?} on track {track_px:?} is \
+                             {on_track:.2}:1, the track on ground {ground_px:?} {on_ground:.2}:1"
+                        );
+                    }
+                }
+                window.unset_state_flags(gtk::StateFlags::BACKDROP);
+            }
+        }
+        println!("{}", report.join("\n"));
         manager.set_color_scheme(adw::ColorScheme::Default);
         sheet.destroy();
         settings.destroy();

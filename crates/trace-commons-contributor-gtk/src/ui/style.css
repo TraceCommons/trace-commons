@@ -648,6 +648,15 @@ window.tc-glass-window:backdrop .tc-glass-tabs {
   font-weight: 600;
 }
 
+/* A lifted tab stands on a control's surface (`GlassRuleTabs`, owner
+   2026-11-05): `glassSurface(.control, radius: control)` with
+   `.shadow(color: .black.opacity(0.18), radius: 8, y: 3)`, a CSS blur of
+   twice SwiftUI's radius. `tab_motion::TabLift` fades it in with the lift. */
+.tc-glass-tabs .tc-tab-lift {
+  border-radius: 11px;
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.18);
+}
+
 /* The toolbar's capsule holds the Graph, Map and Inspector toggles
    (`GlassToolbarGroup`): a glass control, 2px around and between its
    buttons. Each toggle is `GlassToolbarButton`'s 28 by 24 capsule, its glyph
@@ -1122,20 +1131,50 @@ window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-split-menu > butt
   background-color: @tc_glass_control_on_selection_hover;
 }
 
-/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
-   `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
-   slider, so a 17-wide slider in 2 of padding is 38 wide. */
-switch.tc-tree-switch {
+/* Every switch is the Mac's flat `GlassToggleStyle(.settings)`: 40 by 24
+   (`toggleWidth`, `toggleHeight`), an 18-point round knob 3 in from the
+   track's end with no ring and no shadow. On, the track is
+   `toggleOnSettings` under a `textOnAccent` knob; off, `toggleOff` over
+   whatever it sits on under a `toggleKnobOff` knob (Light's off track is
+   lifted to hold 3:1, see `switch_off_track` in the generator). GTK sizes
+   a switch at twice its slider, so an 18-wide knob takes 2 of side padding
+   for a 40-wide track, and moves 1 inward to stand 3 in, as the Mac's. */
+switch {
   min-width: 0;
   min-height: 0;
-  padding: 2px;
+  padding: 3px 2px;
   border-radius: 999px;
+  background-color: @tc_glass_toggle_off;
+  background-image: none;
 }
 
-switch.tc-tree-switch > slider {
-  min-width: 17px;
+switch:checked {
+  background-color: @tc_glass_toggle_on;
+  background-image: none;
+}
+
+switch > slider {
+  min-width: 18px;
   min-height: 18px;
   margin: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: @tc_glass_toggle_knob_off;
+  background-image: none;
+  box-shadow: none;
+  transform: translateX(1px);
+}
+
+switch:checked > slider {
+  background-color: @tc_glass_toggle_knob_on;
+  transform: translateX(-1px);
+}
+
+/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
+   `watchSwitchHeight`), its knob 2 in: 1 of side padding, then the same
+   1 inward. */
+switch.tc-tree-switch {
+  padding: 2px 1px;
 }
 
 /* The switch on a selected row: its knob in the selection's ink (the
@@ -1338,4 +1377,91 @@ window.tc-edge-surface {
 
 .tc-edge-row:hover {
   background-color: @tc_glass_row_hover;
+}
+
+/* ---- First-run motion (the Mac's curves and durations) ----------------
+   Each transition below is the Mac's own: the token curve
+   cubic-bezier(0.2, 0.8, 0.2, 1) at the Mac's duration and delay, pinned
+   by `first_run_stage::tests::the_first_runs_css_motion_is_the_macs`. GTK
+   runs no CSS transition with `gtk-enable-animations` off (no frame clock
+   for the style), as the Mac's Reduce Motion gives the last frame. Kept
+   apart for the motion-core stream to fold into its shared transition
+   variables. */
+
+/* The thread's current title lights 0.42 s after the step changes, over
+   0.3 s (`FirstRunStepThread.title`); the base glow is the lit one at no
+   alpha, so the shadow interpolates. */
+.tc-thread-title {
+  text-shadow: 0 0 14px alpha(@tc_first_run_glow, 0);
+  transition: color 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    text-shadow 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    font-weight 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms;
+}
+
+/* The segmented pill (`FirstRunSegmented`): Ask, Automatic and Never side
+   by side in a well, the chosen one's pill filling over 0.15 s. Real radio
+   buttons, their own circles cleared. */
+.tc-first-run-segmented {
+  padding: 2px;
+  border-radius: 999px;
+  background-color: @tc_first_run_well;
+}
+checkbutton.tc-first-run-segment {
+  padding: 0 10px;
+  min-height: 22px;
+  border-radius: 999px;
+  background-color: alpha(@tc_first_run_toggle_on, 0);
+  font-size: 0.85em;
+  font-weight: 500;
+  transition: background-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    color 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+checkbutton.tc-first-run-segment:hover {
+  background-color: @tc_first_run_control_hover;
+}
+checkbutton.tc-first-run-segment:checked {
+  background-color: @tc_first_run_toggle_on;
+  color: @tc_first_run_text_on_accent;
+}
+checkbutton.tc-first-run-segment > radio,
+checkbutton.tc-first-run-segment > check {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  -gtk-icon-source: none;
+  opacity: 0;
+}
+
+/* The small switch (`FirstRunSwitch`, 30 by 18): the check button's own
+   box is cleared and keeps the room the drawn track takes. */
+checkbutton.tc-first-run-switch {
+  padding: 0;
+  border-spacing: 10px;
+}
+checkbutton.tc-first-run-switch > check {
+  min-width: 30px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: transparent;
+  -gtk-icon-source: none;
+}
+
+/* Join's account card, outlined in the accent once chosen, over the
+   standard 0.22 s (`JoinScreen.accountCard`). An inset ring, as the Mac's
+   `strokeBorder` takes no room. */
+.tc-card.tc-join-card {
+  box-shadow: inset 0 0 0 1.5px alpha(@tc_first_run_toggle_on, 0);
+  transition: box-shadow 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tc-card.tc-join-card.tc-join-chosen {
+  box-shadow: inset 0 0 0 1.5px @tc_first_run_toggle_on;
 }

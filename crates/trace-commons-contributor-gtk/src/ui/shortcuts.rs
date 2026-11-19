@@ -154,11 +154,18 @@ pub(crate) fn wire(app: &Rc<App>, application: &adw::Application) {
     });
     app.window.add_action(&toggle);
 
+    bind_screen_accels(application);
+    application.set_accels_for_action(&format!("win.{SETTINGS_ACTION}"), &[SETTINGS_ACCEL]);
+    application.set_accels_for_action(&format!("win.{TOGGLE_ACTION}"), &[TOGGLE_ACCEL]);
+}
+
+/// Binds each tab's chord to its place in the person's order, as the Mac's
+/// `shortcut(_:order:)` does: Home is always Ctrl+1. Run again when the
+/// order changes.
+pub(crate) fn bind_screen_accels(application: &impl IsA<gtk::Application>) {
     for (name, accel) in screen_accels() {
         application.set_accels_for_action(&screen_action(name), &[&accel]);
     }
-    application.set_accels_for_action(&format!("win.{SETTINGS_ACTION}"), &[SETTINGS_ACCEL]);
-    application.set_accels_for_action(&format!("win.{TOGGLE_ACTION}"), &[TOGGLE_ACCEL]);
 }
 
 #[cfg(test)]
