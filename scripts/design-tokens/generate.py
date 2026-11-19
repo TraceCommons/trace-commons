@@ -1640,9 +1640,11 @@ def render_windows(tokens: dict) -> str:
 # draws quiet lines and coin faces in.
 # The Traces graph footer (W3) draws its dots, axis and focus glyph in the
 # same table: shared over kept (`GlassBarGraph`) and the binoculars' three
-# inks (`TracesGraphFooter.focusInk`).
+# inks (`TracesGraphFooter.focusInk`). The tree's tool tiles (W3) add the
+# folder-initial ink (`GlassToolTile`, tileFolderInk).
 WINDOWS_MAP_COLOURS = MAP_COLOURS + ["ink", "tileFolder", "dataShared", "dataKept",
-                                     "graphFocusOn", "graphFocusIdle", "graphFocusOff"]
+                                     "graphFocusOn", "graphFocusIdle", "graphFocusOff",
+                                     "tileFolderInk"]
 
 
 def cs_float(value) -> str:
