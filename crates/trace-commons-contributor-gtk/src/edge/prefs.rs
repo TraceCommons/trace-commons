@@ -46,9 +46,7 @@ fn file() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("trace-commons").join("edge-rail.json"))
+    crate::shell_state_file("edge-rail.json")
 }
 
 #[cfg(test)]
