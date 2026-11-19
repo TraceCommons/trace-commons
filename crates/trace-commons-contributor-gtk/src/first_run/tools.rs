@@ -463,14 +463,29 @@ impl Tools {
             .filter(|f| ROUTABLE.contains(&f.source.as_str()))
             .collect()
     }
-    /// How many tools discovery found here.
+    /// How many tools there are here: those discovery found, and those the
+    /// attached daemon watches that it did not (a held row in [`listed`]).
+    /// The total of "N of M tools can connect", so it holds every tool
+    /// [`connectable`] can count, as the Mac's total holds every tool its
+    /// Tools step lists.
+    ///
+    /// [`listed`]: Self::listed
+    /// [`connectable`]: Self::connectable
     pub fn found_count(&self) -> usize {
-        self.discovered
+        let found: BTreeSet<&str> = self
+            .discovered
             .as_deref()
             .unwrap_or_default()
             .iter()
             .filter(|f| f.exists)
-            .count()
+            .map(|f| f.source.as_str())
+            .collect();
+        found
+            .iter()
+            .copied()
+            .chain(self.held.iter().map(String::as_str))
+            .collect::<BTreeSet<&str>>()
+            .len()
     }
 }
 
@@ -855,5 +870,27 @@ mod tests {
         let tools = discovered();
         assert_eq!(tools.connectable().len(), 2);
         assert_eq!(tools.found_count(), 2);
+    }
+
+    /// The KDE run's "2 of 1 tool can connect": the attached daemon
+    /// watches Codex, which discovery here did not find. Tools lists it
+    /// (a held row) and the stage routes it, so the total counts it too,
+    /// as the Mac's total is every tool its Tools step lists.
+    #[test]
+    fn a_held_tool_discovery_missed_counts_in_both_figures() {
+        let mut tools = discovered();
+        tools.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!(tools.listed().len(), 3);
+        assert_eq!(tools.connectable().len(), 3);
+        assert_eq!(tools.found_count(), 3);
+        // One found and one held: two of two, never two of one.
+        let mut one = Tools::default();
+        one.record_discovery(vec![found(SOURCE_CLAUDE_CODE, true, 1)]);
+        one.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!((one.connectable().len(), one.found_count()), (2, 2));
+        // A held tool discovery also found is one tool.
+        let mut both = discovered();
+        both.record_held(held(&[SOURCE_CLAUDE_CODE]));
+        assert_eq!(both.found_count(), 2);
     }
 }
