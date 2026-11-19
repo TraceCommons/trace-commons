@@ -154,23 +154,27 @@ public class InsightsSkillsHomeRankingTests
     [Fact]
     public void TheRepetitionPenaltyFadesOneSixtyThirtyOverTheLastThreeCards()
     {
-        // [1.0, 0.6, 0.3] (InsightsSkillsHomeRanking.swift:175). Scores, at noon:
-        //   three usage changes 2 -> 26 on one topic, none used or installed:
-        //     72 + magnitude 8 + relative 4 + fresh 7.5 = 91.5 each;
-        //   creator "first", followed, at 11:30: 46 + 14 + 25.96 = 85.96;
-        //   creator "second", followed, 45 hours old: 46 + 14 + 22.52 = 82.52.
-        // a leads, then "first" (b and c pay 24 + 36 after a). For the third
-        // card, b pays 0.6 of a's 60 = 36 (55.5) and "second" pays 24 after
-        // "first" (58.52), so "second" comes before b. At 0.5, b would pay
-        // 30 (61.5) and come first.
-        var trends = new[] { Trend("a", 2, 26), Trend("b", 2, 26), Trend("c", 2, 26) };
-        var context = new Home.RankingContext { FollowedPublisherIds = { "first", "second" } };
-        foreach (Home.Trend trend in trends) context.CatalogIdsByUsageId[trend.Id] = new HashSet<string>(StringComparer.Ordinal) { "topic" };
-        string[] ids = Ids(Feed(trends: trends, creators: new[]
+        // [1.0, 0.6, 0.3] of (same source 24 + shared publisher 20 + shared
+        // topic 36) (InsightsSkillsHomeRanking.swift:175). Scores at noon:
+        //   usage a, 2 -> 26, topics {T, used}, used: 72 + 18 + 8 + 4 + 7.5 = 109.5
+        //   usage b, 2 -> 26, topic {T}:              72 + 8 + 4 + 7.5      = 91.5
+        //   usage x, 8 -> 10, its own topic:          72 + 3.17 + 1 + 7.5   = 83.67
+        //   creator first, installed and followed, 11:30:   46 + 12 + 14 + 25.96 = 97.96
+        //   creator second, installed and followed, 45 h old: 46 + 12 + 14 + 22.52 = 94.52
+        // Card 3, after [a, first]: second pays 24 (70.52); x pays 0.6 x 24
+        //   (69.27); at 0.5, x would pay 12 (71.67) and come first.
+        // Card 4, after [a, first, second]: x pays 0.3 x 24 (76.47); b pays
+        //   0.3 x 60 (73.5); at 0.2, x would pay 4.8 (78.87) and b 12 (79.5),
+        //   so b would come first.
+        Home.Trend a = Trend("a", 2, 26), b = Trend("b", 2, 26), x = Trend("x", 8, 10);
+        var context = new Home.RankingContext { UsedSkillIds = { "used" }, InstalledSkillIds = { "first", "second" }, FollowedPublisherIds = { "first", "second" } };
+        context.CatalogIdsByUsageId[a.Id] = new HashSet<string>(StringComparer.Ordinal) { "T", "used" };
+        context.CatalogIdsByUsageId[b.Id] = new HashSet<string>(StringComparer.Ordinal) { "T" };
+        string[] ids = Ids(Feed(trends: new[] { a, b, x }, creators: new[]
         {
             Change("first", publisher: "first"), Change("second", publisher: "second", observed: "2026-11-15T15:00:00Z"),
         }, context: context));
-        Assert.Equal(new[] { "trend:claude_code\0a", "creator:first", "creator:second", "trend:claude_code\0b", "trend:claude_code\0c" }, ids);
+        Assert.Equal(new[] { "trend:claude_code\0a", "creator:first", "creator:second", "trend:claude_code\0x", "trend:claude_code\0b" }, ids);
     }
 
     [Fact]

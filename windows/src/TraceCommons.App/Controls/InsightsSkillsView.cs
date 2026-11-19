@@ -1048,7 +1048,9 @@ public sealed class InsightsSkillsView : UserControl
                 return;
             }
 
-            _block.Text = _format((int)Math.Round(_from + (_to - _from) * SkillsHomeMotion.Snappy(seconds)));
+            // The spring overshoots by about 0.6%; a count never passes its
+            // new value on the way there.
+            _block.Text = _format((int)Math.Round(_from + (_to - _from) * Math.Min(1, SkillsHomeMotion.Snappy(seconds))));
         }
     }
 
