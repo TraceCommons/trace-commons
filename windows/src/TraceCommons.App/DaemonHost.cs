@@ -344,6 +344,48 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     /// <summary>
+    /// The turn index over the body an open preview showed
+    /// (<c>tc_preview_turns_json</c>), off the UI thread: the JSON, or null
+    /// when it could not be made (no daemon, a sample launch, or a refusal
+    /// such as <c>preview-body-changed</c>). The sheet says the core's
+    /// request-failed line for null, as the Mac does (PreviewSheet.swift:506-508).
+    /// </summary>
+    public async Task<string?> PreviewTurnsAsync(string entryId, string bodyDigest)
+    {
+        ArgumentNullException.ThrowIfNull(entryId);
+        ArgumentNullException.ThrowIfNull(bodyDigest);
+
+        if (_daemon is not TcDaemon daemon)
+        {
+            return null;
+        }
+
+        (string? json, _) = await Task.Run(() => daemon.PreviewTurns(entryId, bodyDigest)).ConfigureAwait(true);
+        return json;
+    }
+
+    /// <summary>
+    /// The Missions page's catalogue, and whether the core was unreachable.
+    /// The Mac's live client has no source for the page's shape and answers
+    /// <c>notAvailableYet</c> without asking the daemon
+    /// (LiveDaemonClient.swift:439-441), so a live launch gets no catalogue
+    /// and the request-failed line; a sample launch gets the Mac's
+    /// hand-written provisional catalogue, or unreachable in <c>coreDown</c>
+    /// (SampleDaemonClient.swift:576-581).
+    /// </summary>
+    public (string? Json, bool Unreachable) MissionCatalogue()
+    {
+#if DEBUG
+        if (_sample is SampleDaemon sample)
+        {
+            string? json = MissionSamples.For(sample.Set);
+            return (json, json is null);
+        }
+#endif
+        return (null, false);
+    }
+
+    /// <summary>
     /// The subscription callback. Runs on a RUST BACKGROUND THREAD, so it does
     /// the minimum possible work and hops to the UI thread for everything
     /// else. Nothing here may touch observable state directly.

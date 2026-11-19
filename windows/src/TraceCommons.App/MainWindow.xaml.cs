@@ -783,7 +783,7 @@ public sealed partial class MainWindow : Window
     private async void OnShowHistory(object sender, RoutedEventArgs e)
     {
         if (!await StartContributionsAsync()) return;
-        HistoryPane.Content ??= new HistoryView(_host);
+        HistoryPane.Content ??= NewHistoryView();
         ViewModel.ShowHistory();
     }
 
@@ -1089,19 +1089,13 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
 
-    private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
+    private void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
         if (!ViewModel.MissionsShown)
             return;
-#if DEBUG
-        // Mission drafts read the local store too; recorded samples never do.
-        if (_host.IsSample)
-            return;
-#endif
-        if (MissionDraftsPane.Content is not MissionDraftsView)
-            MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
-        ViewModel.ShowMissionDrafts();
-        await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
+        // W23-D1 (a): the Mac's Missions page replaces Mission drafts here
+        // (MainWindow.Missions.cs).
+        ShowMissionsPage();
     }
 
     private async void ShowInsightsPane()
