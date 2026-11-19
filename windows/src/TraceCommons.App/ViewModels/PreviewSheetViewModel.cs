@@ -391,6 +391,13 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
     /// why only this screen prints it.
     /// </remarks>
     public string ProbabilitySummary => _summary?.ProbabilitySummary ?? string.Empty;
+
+    /// <summary>
+    /// Whether the header has a probability line to draw. An empty line took
+    /// a row of its own and pushed "Would send"'s figure below its
+    /// neighbours' (box, 2026-11-19).
+    /// </summary>
+    public bool HasProbabilitySummary => ProbabilitySummary.Length > 0;
     public string WouldSendText =>
         _summary is null ? "—" : QueueEntryViewModel.FormatBytes(_summary.WouldSendBytes);
 
@@ -1246,6 +1253,7 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
 
         Raise(nameof(WouldSendText));
         Raise(nameof(ProbabilitySummary));
+        Raise(nameof(HasProbabilitySummary));
         Raise(nameof(RawSessionText));
         Raise(nameof(ScrubbingFoundText));
         Raise(nameof(NothingMatched));

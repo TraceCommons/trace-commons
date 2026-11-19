@@ -287,6 +287,7 @@
                                     Margin="0,0,0,12"
                                     Tag="{x:Bind}"
                                     AutomationProperties.AutomationId="HistoryFolderRow"
+                                    AutomationProperties.Name="{x:Bind ProjectLabel}"
                                     Click="OnOpenHistoryFolder">
                                 <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
                                     <StackPanel Grid.Column="0" Spacing="2">
