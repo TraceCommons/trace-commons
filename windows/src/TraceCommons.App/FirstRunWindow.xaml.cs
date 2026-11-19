@@ -87,6 +87,7 @@ public sealed partial class FirstRunWindow : Window
                 try
                 {
                     await _host.StartAsync(json).ConfigureAwait(true);
+                    DaemonStarted?.Invoke();
                     return true;
                 }
                 catch (TcException)
@@ -127,6 +128,9 @@ public sealed partial class FirstRunWindow : Window
         _model.SetReduceMotion(_reduceMotion);
         Render();
     }
+
+    /// <summary>The Tools step started the daemon with the person's declaration.</summary>
+    public event Action? DaemonStarted;
 
     /// <summary>Set by the caller after the window closes.</summary>
     internal Task CloseCompletion { get; private set; } = Task.CompletedTask;

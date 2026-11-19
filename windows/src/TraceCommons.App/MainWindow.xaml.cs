@@ -395,15 +395,15 @@ public sealed partial class MainWindow : Window
     /// UI thread. Same reasoning as the daemon start above.
     /// </para>
     /// </remarks>
-    private async Task ShowSessionRootsAsync()
+    /// <summary>
+    /// No session roots yet: the first run asks, on its Tools step, and
+    /// starts the daemon there, as the Mac's does (W7). The startup this
+    /// window could not finish resumes once it has.
+    /// </summary>
+    private Task ShowSessionRootsAsync()
     {
-        IReadOnlyList<SourceCandidate> candidates = await Task
-            .Run(SourceDiscovery.ProbeThisMachine)
-            .ConfigureAwait(true);
-
-        var roots = new SessionRootsWindow(_host, candidates);
-        roots.Declared += OnSessionRootsDeclared;
-        roots.Activate();
+        OpenOnboarding(OnboardingState.Default(), automatic: true).Activate();
+        return Task.CompletedTask;
     }
 
     private async void OnSessionRootsDeclared()
@@ -647,6 +647,7 @@ public sealed partial class MainWindow : Window
             return _onboarding;
         }
         var onboarding = new FirstRunWindow(_host, state);
+        onboarding.DaemonStarted += OnSessionRootsDeclared;
         _onboarding = onboarding;
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
