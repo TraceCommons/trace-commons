@@ -71,4 +71,15 @@ public sealed class AboutLinesTests
     {
         Assert.Equal(expected, AboutLines.ShortVersionFrom(informational));
     }
+
+    // A packaged build reads the package's version; make-msix.ps1 stamps
+    // "<version>.0", which is the version alone.
+    [Theory]
+    [InlineData(1, 0, 10, 0, "1.0.10")]
+    [InlineData(1, 0, 10, 3, "1.0.10 (1.0.10.3)")]
+    public void APackageVersionIsTheVersionAndItsBuild(int major, int minor, int build, int revision, string expected)
+    {
+        (string version, string? number) = AboutLines.FromPackageVersion((ushort)major, (ushort)minor, (ushort)build, (ushort)revision);
+        Assert.Equal(expected, AboutLines.Line(version, number));
+    }
 }

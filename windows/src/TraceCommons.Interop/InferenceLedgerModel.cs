@@ -41,6 +41,18 @@ public sealed class InferenceLedgerModel : INotifyPropertyChanged
         "inference_calls", "inference_summary", "tool_destinations",
     };
 
+    /// <summary>
+    /// The fixed labels that mean the core is not there to answer: the Mac's
+    /// (<c>DaemonFrame.unreachableMessages</c>, LiveDaemonClient.swift:603-606),
+    /// plus this shell's own for no daemon started (<c>DaemonHost</c>) and the
+    /// sample client's core-down set.
+    /// </summary>
+    public static readonly IReadOnlySet<string> UnreachableMessages = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "daemon-stopped", "daemon-disconnected", "attached-transport-failed", "handle-freed",
+        "null-handle", "invalid-handle-pointer", "daemon-not-started", "daemon-not-running",
+    };
+
     private readonly Func<string, string, Task<DaemonResponse>> _call;
     private readonly Func<string, string> _monitorWord;
     private readonly Func<string, string> _insightsWord;
@@ -87,10 +99,10 @@ public sealed class InferenceLedgerModel : INotifyPropertyChanged
             JsonElement? result = response is { IsError: false, Result: { } r } ? r : null;
             if (result is null)
             {
-                // No daemon to ask is the core down; any other refusal, or a
+                // No core to ask is the core down; any other refusal, or a
                 // reply that did not parse, is a failed request
-                // (MonitorScreensCopy.swift:371-374).
-                _failures[method] = response?.Error is { Code: "unavailable", Message: not "malformed-response" }
+                // (MonitorScreensCopy.swift:371-374, LiveDaemonClient.swift:603-616).
+                _failures[method] = response?.Error is { } error && UnreachableMessages.Contains(error.Message)
                     ? "core_unreachable" : "request_failed";
             }
             else

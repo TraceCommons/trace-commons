@@ -29,10 +29,15 @@ public sealed class AboutWindow : Window
     {
         Title = AboutLines.Title;
         Assembly assembly = typeof(AboutWindow).Assembly;
-        string version = AboutLines.ShortVersionFrom(
-            assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
+        // Packaged, the package's version is the release's (make-msix.ps1
+        // -Version); unpackaged, the assembly's, which is the contributor
+        // crate's unless the build passed -p:Version.
+        (string version, string? build) = PackageIdentity.IsPackaged()
+            ? PackagedVersion()
+            : (AboutLines.ShortVersionFrom(
+                assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion), null);
         string? copyright = assembly.GetCustomAttribute<AssemblyCopyrightAttribute>()?.Copyright;
-        var model = new AboutModel(version, build: null, copyright, CopyToClipboard);
+        var model = new AboutModel(version, build, copyright, CopyToClipboard);
 
         // The icon. Decorative, as on the Mac (accessibilityHidden): no name,
         // no tab stop. The Mac shows the app icon; the N is that icon's mark
@@ -104,6 +109,12 @@ public sealed class AboutWindow : Window
             Background = (Brush)Application.Current.Resources["TcWindowBackgroundBrush"],
             Children = { column },
         };
+    }
+
+    private static (string, string?) PackagedVersion()
+    {
+        Windows.ApplicationModel.PackageVersion v = Windows.ApplicationModel.Package.Current.Id.Version;
+        return AboutLines.FromPackageVersion(v.Major, v.Minor, v.Build, v.Revision);
     }
 
     private static void CopyToClipboard(string line)

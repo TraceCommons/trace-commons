@@ -32,6 +32,17 @@ public static class AboutLines
         return version.Length == 0 ? build : $"{version} ({build})";
     }
 
+    /// <summary>
+    /// A package's four-part version as the version and its build: the
+    /// release stamps the version with a zero revision (make-msix.ps1), so the
+    /// build is drawn only when a revision is set.
+    /// </summary>
+    public static (string Short, string? Build) FromPackageVersion(ushort major, ushort minor, ushort build, ushort revision)
+    {
+        string version = $"{major}.{minor}.{build}";
+        return (version, revision == 0 ? null : $"{version}.{revision}");
+    }
+
     /// <summary>The version part of an assembly's informational version, without a "+revision".</summary>
     public static string ShortVersionFrom(string? informational)
     {

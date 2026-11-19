@@ -49,28 +49,39 @@ public sealed partial class PrivateInferenceView
             CultureInfo.CurrentCulture);
     }
 
-    /// <summary>Hooks the ledger's reads to the page's life: on show, on a new call, on a status change.</summary>
-    private void WireMacSections()
+    private bool _ledgerActive;
+
+    /// <summary>
+    /// The pane is only collapsed when another tab is chosen, so Loaded fires
+    /// once; the window calls this and its pair as the tab shows and hides.
+    /// The tab came into view: read everything again and follow new calls and
+    /// status changes, as the Mac's <c>.task</c> does while the tab is shown
+    /// (InferenceViews.swift:48-56).
+    /// </summary>
+    public async void ActivateMacSections()
     {
-        Loaded += async (_, _) =>
+        if (_ledgerActive) return;
+        _ledgerActive = true;
+        _host.InferenceCallAdded += OnLedgerWorthyChange;
+        _host.StatusChanged += OnLedgerWorthyChange;
+        try
         {
             await Ledger.LoadAsync();
             // Lazily, with the tab and never on the sign-in (InferenceViews.swift:54-56).
             await SpendPrompt.RefreshAsync();
-        };
-        // Nothing reads while the page is off screen (one-pass 13).
-        Unloaded += (_, _) =>
+        }
+        catch (Exception)
         {
-            _host.InferenceCallAdded -= OnLedgerWorthyChange;
-            _host.StatusChanged -= OnLedgerWorthyChange;
-        };
-        Loaded += (_, _) =>
-        {
-            _host.InferenceCallAdded -= OnLedgerWorthyChange;
-            _host.StatusChanged -= OnLedgerWorthyChange;
-            _host.InferenceCallAdded += OnLedgerWorthyChange;
-            _host.StatusChanged += OnLedgerWorthyChange;
-        };
+            System.Diagnostics.Trace.TraceWarning(nameof(ActivateMacSections));
+        }
+    }
+
+    /// <summary>The tab left view: nothing reads while it is hidden (one-pass 13).</summary>
+    public void DeactivateMacSections()
+    {
+        _ledgerActive = false;
+        _host.InferenceCallAdded -= OnLedgerWorthyChange;
+        _host.StatusChanged -= OnLedgerWorthyChange;
     }
 
     private async void OnLedgerWorthyChange()

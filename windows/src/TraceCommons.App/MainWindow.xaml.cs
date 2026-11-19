@@ -131,6 +131,13 @@ public sealed partial class MainWindow : Window
                 (InsightsPane.Content as InsightsView)?.Deactivate();
             if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
                 (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
+            // The Private AI tab reads and follows the ledger only while shown (W19).
+            if (change.PropertyName is null or "" or nameof(MainViewModel.ShowingPrivateInference)
+                && PrivateInferencePane.Content is PrivateInferenceView privateAI)
+            {
+                if (ViewModel.ShowingPrivateInference) privateAI.ActivateMacSections();
+                else privateAI.DeactivateMacSections();
+            }
         };
 
         // Found once the template is realized, not here: the ScrollViewer
@@ -1169,6 +1176,7 @@ public sealed partial class MainWindow : Window
         }
 
         ViewModel.ShowPrivateInference();
+        (PrivateInferencePane.Content as PrivateInferenceView)?.ActivateMacSections();
     }
 
     /// <summary>

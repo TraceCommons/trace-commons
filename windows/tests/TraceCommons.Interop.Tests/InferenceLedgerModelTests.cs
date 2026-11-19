@@ -129,4 +129,18 @@ public sealed class InferenceLedgerModelTests
         await older;
         Assert.False(model.ShowsCalls);
     }
+
+    // A daemon's refusal is a failed request, not the core down, whatever its
+    // code (LiveDaemonClient.swift:613-616).
+    [Fact]
+    public async Task ARefusalIsAFailedRequestNotTheCoreDown()
+    {
+        var model = new InferenceLedgerModel(
+            (method, parameters) => Task.FromResult(DaemonResponse.Parse(
+                "{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"ledger-unreadable\"}}")),
+            MonitorShellCopy.Top, _ => string.Empty, _ => null, TimeZoneInfo.Utc, CultureInfo.InvariantCulture);
+        await model.LoadAsync();
+        Assert.Equal(MonitorShellCopy.Top("request_failed"), model.FailureLine);
+        Assert.NotEqual(MonitorShellCopy.Top("core_unreachable"), model.FailureLine);
+    }
 }
