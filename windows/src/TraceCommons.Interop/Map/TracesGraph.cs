@@ -257,6 +257,14 @@ public static class BarGraph
     /// <summary>The label's ink token: primary under the pointer, else statusOff (:402-404).</summary>
     public static string LabelInk(bool hovered) => hovered ? "textPrimary" : "statusOff";
 
+    /// <summary>
+    /// The label's ink as this shell draws it. The Mac's statusOff measured
+    /// 2.88:1 under the light footer's columns on the box (round 2), under
+    /// the 4.5:1 every drawn word must hold (checklist D1); textTertiary is
+    /// the quiet text ink that holds it. Under the pointer, the Mac's.
+    /// </summary>
+    public static string LabelTextInk(bool hovered) => hovered ? LabelInk(true) : "textTertiary";
+
     /// <summary>The gap between columns and the matrix's inset inside each (:396-399).</summary>
     public static (double Between, double Inset) Gaps(bool thin, bool compact = false) =>
         thin ? (2, 1) : compact ? (2, 2) : (6, 5);

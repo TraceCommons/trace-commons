@@ -68,6 +68,19 @@ public class TracesGraphTests
     }
 
     [Fact]
+    public void TheBarLabelsAreTheMacsInkUnderThePointerAndATextInkOtherwise()
+    {
+        // Indicators.swift (GlassBarGraph.labelInk): statusOff, textPrimary
+        // under the pointer. This shell draws the resting label in
+        // textTertiary: statusOff measured 2.88:1 on the light footer (box,
+        // round 2), and textTertiary is the quiet text ink, at least 4.5:1.
+        Assert.Equal("statusOff", BarGraph.LabelInk(false));
+        Assert.Equal("textPrimary", BarGraph.LabelInk(true));
+        Assert.Equal("textTertiary", BarGraph.LabelTextInk(false));
+        Assert.Equal("textPrimary", BarGraph.LabelTextInk(true));
+    }
+
+    [Fact]
     public void TheRangesAreTheMacs()
     {
         // MonitorShell.swift:80-111.

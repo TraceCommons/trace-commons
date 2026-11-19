@@ -371,7 +371,7 @@ internal sealed class TracesGraphFooter : UserControl
                 Rect box = align < 0 ? new Rect(x, top, 200, LabelLine)
                     : align > 0 ? new Rect(x + w - 200, top, 200, LabelLine)
                     : new Rect(x + w / 2 - 100, top, 200, LabelLine);
-                ds.DrawText(bar.Label, box, Ink(BarGraph.LabelInk(isHovered), alpha), format);
+                ds.DrawText(bar.Label, box, Ink(BarGraph.LabelTextInk(isHovered), alpha), format);
             }
 
             void Dot((double X, double Y) at, double lit, Color ink)
