@@ -27,6 +27,17 @@ public sealed partial class InsightsView : UserControl, IDisposable
     public async Task ActivateAsync()
     {
         await ViewModel.LoadAsync();
+        if (!_activated)
+        {
+            // The words this view binds by key ({Binding [key]}, the view
+            // model's indexer) were read when DataContext was set in the
+            // constructor, before the core's copy had arrived, so each read
+            // its key. A PropertyChanged with no name does not re-read an
+            // indexer binding, so the keys stayed on screen. Binding the view
+            // model again, once the copy is in, reads every word anew.
+            DataContext = null;
+            DataContext = ViewModel;
+        }
         _activated = true;
         await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
     }
