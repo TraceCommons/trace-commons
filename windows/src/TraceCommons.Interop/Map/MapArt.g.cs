@@ -62,6 +62,7 @@ public static partial class MapArt
         ["selection"] = new MapRgba(5, 88, 182, 1.0),
         ["rowHover"] = new MapRgba(0, 0, 0, 0.04),
         ["textOnAccent"] = new MapRgba(255, 255, 255, 1.0),
+        ["statusAskText"] = new MapRgba(87, 52, 3, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };
@@ -108,6 +109,7 @@ public static partial class MapArt
         ["selection"] = new MapRgba(126, 188, 255, 1.0),
         ["rowHover"] = new MapRgba(255, 255, 255, 0.05),
         ["textOnAccent"] = new MapRgba(7, 26, 46, 1.0),
+        ["statusAskText"] = new MapRgba(255, 213, 133, 1.0),
         ["heroCampaignDeep"] = new MapRgba(0, 87, 176, 1.0),
         ["heroCampaignBright"] = new MapRgba(0, 145, 253, 1.0),
     };

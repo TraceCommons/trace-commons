@@ -438,8 +438,11 @@ internal sealed class TracesTreeView : UserControl
                 LineHeight = 16,
                 TextWrapping = TextWrapping.Wrap,
                 Foreground = selected ? Brush("textOnAccent")
-                    : flag == TreeFlag.Ask ? Brush("statusAsk")
-                    : flag == TreeFlag.On ? Brush("statusOn")
+                    // The status inks as text, which hold 4.5:1 on the row's
+                    // ground; the Mac draws statusAsk, 4.16:1 measured on the
+                    // light row (box, round 2).
+                    : flag == TreeFlag.Ask ? Brush("statusAskText")
+                    : flag == TreeFlag.On ? Brush("statusOnText")
                     : Brush("textTertiary"),
             });
         }

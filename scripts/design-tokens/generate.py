@@ -2145,7 +2145,7 @@ def render_windows_glyphs_cs(glyphs: list[dict]) -> str:
 # folder-initial ink (`GlassToolTile`, tileFolderInk).
 WINDOWS_MAP_COLOURS = MAP_COLOURS + ["ink", "tileFolder", "dataShared", "dataKept",
                                      "graphFocusOn", "graphFocusIdle", "graphFocusOff",
-                                     "tileFolderInk", "selection", "rowHover", "textOnAccent"]
+                                     "tileFolderInk", "selection", "rowHover", "textOnAccent", "statusAskText"]
 
 
 def cs_float(value) -> str:
