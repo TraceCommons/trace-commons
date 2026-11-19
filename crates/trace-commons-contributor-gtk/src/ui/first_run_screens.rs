@@ -210,9 +210,12 @@ fn route_diagram(names: &[&'static str], destination: &str) -> gtk::Box {
 /// The first run's one column: every step at the same width, at most the
 /// Mac frame's 560 points (`FirstRunFrame`), centred in a wider window.
 pub(super) fn column(child: &impl IsA<gtk::Widget>) -> adw::Clamp {
+    // In pixels, as the Mac's points: libadwaita's default counts the
+    // width in text-scaled units, which drew it about 490 wide on KDE.
     adw::Clamp::builder()
         .maximum_size(560)
         .tightening_threshold(560)
+        .unit(adw::LengthUnit::Px)
         .child(child)
         .build()
 }

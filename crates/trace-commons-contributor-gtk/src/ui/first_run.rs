@@ -154,6 +154,11 @@ pub(super) const WINDOW: (i32, i32) = (860, 760);
 pub(super) const WINDOW_LEAST: (i32, i32) = (760, 640);
 
 pub(super) fn present(app: &Rc<App>) -> adw::Window {
+    present_with(app).0
+}
+
+/// The first-run window and the coordinator that drives it.
+fn present_with(app: &Rc<App>) -> (adw::Window, Rc<Coordinator>) {
     super::style::install();
     super::community_brand::install();
     let copy = first_run_copy();
@@ -176,6 +181,10 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let stack = gtk::Stack::builder()
         .vexpand(true)
         .vhomogeneous(false)
+        // Each step as wide as its own page needs: homogeneous, the stack
+        // measured every hidden page's width for its own height, where a
+        // wrapped line needs the most width, and asked for 729 to 848.
+        .hhomogeneous(false)
         // Steps fade into each other, as the Mac's do, so the stage's N and
         // tiles carry the move between them.
         .transition_type(gtk::StackTransitionType::Crossfade)
@@ -305,7 +314,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     });
     c.show();
     window.present();
-    window
+    (window, c)
 }
 
 impl Coordinator {
@@ -2456,8 +2465,13 @@ mod window_tests {
     /// The window as drawn: 860 wide on every step, at most 760 needed by
     /// any (so the Mac's least size holds every step too), and Welcome's
     /// title, body and both buttons centred in it, as the Mac draws them.
-    /// On main it opened 729 wide and grew to 848 between steps, Welcome
-    /// set at the left.
+    /// Each step is driven as a person reaches it (`show`), on this
+    /// computer's own discovery with real-length paths and counts added,
+    /// and its column is drawn the Mac's 560 wide (`frame(maxWidth: 560)`)
+    /// and centred. Before this fix the column was drawn 729 wide on
+    /// Tools and 848 on Traces on GNOME 46 (the stack measured its hidden
+    /// pages' widths for its own height) and about 490 on KDE (the clamp
+    /// counted 560 in text-scaled units).
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
@@ -2477,7 +2491,7 @@ mod window_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let (worker, _jobs, _results) = crate::worker::Worker::fixture(dir.clone());
         let app = App::build(&application, worker);
-        let window = present(&app);
+        let (window, c) = present_with(&app);
         settle(&context);
         let mut all = Vec::new();
         descendants(window.upcast_ref(), &mut all);
@@ -2514,35 +2528,70 @@ mod window_tests {
             );
         }
 
-        let mut names = Vec::new();
-        let pages = stack.pages();
-        for i in 0..pages.n_items() {
-            let page = pages.item(i).and_downcast::<gtk::StackPage>().unwrap();
-            if let Some(name) = page.name() {
-                names.push(name.to_string());
+        let middle = WINDOW.0 as f32 / 2.0;
+        for step in [
+            Step::Tools,
+            Step::PrivateAi,
+            Step::Traces,
+            Step::Uses,
+            Step::Terms,
+            Step::Join,
+        ] {
+            c.state.borrow_mut().step = step;
+            c.show();
+            // Tools reads this computer's folders off the main loop.
+            for _ in 0..4 {
+                settle(&context);
             }
-        }
-        assert!(names.len() >= 7, "every step's page: {names:?}");
-        // The column every step is given (`first_run_screens::column`).
-        let column = stack
-            .ancestor(adw::Clamp::static_type())
-            .and_downcast::<adw::Clamp>()
-            .expect("the steps' column")
-            .maximum_size();
-        for name in &names {
-            stack.set_visible_child_name(name);
-            settle(&context);
+            if step == Step::Tools {
+                // Real-length rows beside what discovery found here: a
+                // long home, a nested store, four-figure counts.
+                let home = "/home/a-contributor-with-a-long-name/.local/share";
+                let mut tools = c.tools.borrow_mut();
+                let mut found: Vec<crate::first_run::tools::Found> =
+                    tools.discovered.clone().unwrap_or_default();
+                for (source, folder) in [
+                    (
+                        trace_commons_contributor::source::SOURCE_CLAUDE_CODE,
+                        ".claude/projects",
+                    ),
+                    (
+                        trace_commons_contributor::source::SOURCE_CODEX,
+                        ".codex/sessions/2026/11",
+                    ),
+                    (
+                        trace_commons_contributor::source::SOURCE_OPENCODE,
+                        "opencode/storage/session/message",
+                    ),
+                ] {
+                    if !found.iter().any(|f| f.source == source && f.exists) {
+                        found.push(crate::first_run::tools::Found {
+                            source: source.to_owned(),
+                            path: format!("{home}/{folder}"),
+                            exists: true,
+                            session_count: 12_345,
+                            total_bytes: Some(9_876_543_210),
+                        });
+                    }
+                }
+                tools.record_discovery(found);
+            }
+            let name = name(step);
             assert_eq!(window.width(), WINDOW.0, "{name}: the window grew");
-            // No step needs more than its column, so none is cut off at
-            // the window's edge now that a step cannot widen the window.
-            let page = stack.child_by_name(name).expect("the page");
-            let (least, _, _, _) = page.measure(gtk::Orientation::Horizontal, -1);
-            assert!(
-                least <= column,
-                "{name} needs {least}, its column is {column}"
-            );
             let (least, _, _, _) = window.measure(gtk::Orientation::Horizontal, -1);
             assert!(least <= WINDOW_LEAST.0, "{name}: the window needs {least}");
+            let at = stack.compute_bounds(&window).expect("the column laid out");
+            assert_eq!(
+                at.width(),
+                560.0,
+                "{name}: the column is drawn {} wide",
+                at.width()
+            );
+            let centre = at.x() + at.width() / 2.0;
+            assert!(
+                (centre - middle).abs() <= 2.0,
+                "{name}: the column's centre is at {centre}, the window's at {middle}"
+            );
         }
         window.close();
         let _ = std::fs::remove_dir_all(&dir);
