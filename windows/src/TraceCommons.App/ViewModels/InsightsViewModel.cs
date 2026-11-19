@@ -138,6 +138,13 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private void ResetAssessment() { CategoryIndex = 5; OutcomeIndex = 3; }
     public bool HasSavedSelection => CurrentId != null && Idle;
     public string this[string key] => _copy.TryGetValue(key, out var text) ? text : key;
+    /// <summary>
+    /// Raised once the core's words are in, before anything else loads. A
+    /// view that binds words by key binds then: an indexer binding read
+    /// before the words arrive keeps showing its key, because a nameless
+    /// PropertyChanged does not re-read it.
+    /// </summary>
+    public event EventHandler? CopyLoaded;
     public string Title => this["title"];
     public string Intro => this["intro"];
     public string SnapshotNotice => this["snapshot_notice"];
@@ -158,6 +165,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
             token.ThrowIfCancellationRequested();
             foreach (var pair in result.GetProperty("copy").EnumerateObject())
                 _copy[pair.Name] = pair.Value.GetString() ?? pair.Name;
+            CopyLoaded?.Invoke(this, EventArgs.Empty);
             await RefreshCoreAsync(token);
         });
     }
