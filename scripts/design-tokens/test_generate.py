@@ -364,6 +364,49 @@ class GlassTokensTests(unittest.TestCase):
         self.assertEqual(first, generate.render_gtk(self.tokens))
 
 
+class WindowsGlassTokensTests(unittest.TestCase):
+    """The WinUI app's glass look (spec W5)."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_windows_roles_are_the_flat_blue_not_the_purple(self):
+        roles = {s: dict((r, h) for r, _, h in rows) for s, rows in generate.windows_role_values(self.tokens).items()}
+        # GlassTokens.swift:415 ctaFill flat, :178 tabEmber flat.
+        self.assertEqual(roles["dark"]["accent"], "#7EBCFF")
+        self.assertEqual(roles["light"]["accent"], "#0558B6")
+        self.assertEqual(roles["dark"]["accentLine"], "#0091FD")
+        xaml = generate.render_windows(self.tokens)
+        self.assertNotIn("8A3DFF", xaml)
+        self.assertNotIn("6D14F3", xaml)
+
+    def test_gtk_keeps_its_own_roles(self):
+        # The Windows change leaves the shared SHELL_ROLES, and so GTK, alone.
+        self.assertEqual(generate.SHELL_ROLES[0], ("accent", "purple", "purpleSoft"))
+
+    def test_every_tier_and_its_inactive_twin_reach_the_xaml(self):
+        xaml = generate.render_windows_glass(self.tokens)
+        for tier, *_ in generate.GLASS_TIERS:
+            key = "TcGlass" + generate.pascal(tier)
+            self.assertIn(f'x:Key="{key}Brush"', xaml)
+            self.assertIn(f'x:Key="{key}InactiveBrush"', xaml)
+
+    def test_motion_reaches_xaml_and_cs(self):
+        xaml = generate.render_windows_glass(self.tokens)
+        cs = generate.render_windows_glass_cs(self.tokens)
+        self.assertIn('<x:Double x:Key="TcGlassMotionFast">0.15</x:Double>', xaml)
+        self.assertIn("public const double Spin = 0.8;", cs)
+
+    def test_unreadable_status_text_is_refused(self):
+        self.tokens["themes"]["flatDark"]["color"]["statusAskText"] = {"hex": "#3a3a3a"}
+        with self.assertRaisesRegex(generate.TokenError, "statusAskText"):
+            generate.windows_glass_palette(self.tokens, "dark")
+
+    def test_veil_over_material_is_translucent(self):
+        palette = generate.windows_glass_palette(self.tokens, "dark")
+        self.assertNotEqual(palette["TcGlassPaneOverMaterialBrush"][1:3], "FF")
+
+
 def rgba(text):
     """`rgba(r, g, b, a)` as four floats."""
     inner = text.strip()
