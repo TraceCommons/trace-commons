@@ -287,8 +287,12 @@ public class ArmingOfferFlowTests
     [Theory]
     [InlineData("policy-write-failed")]
     [InlineData("queue-write-failed")]
-    public async Task AWriteFailureAfterTheFolderWasArmedReReadsAndTheDaemonDecidesTheCard(string label)
+    public async Task AWriteFailureIsARefusalLikeAnyOtherAndNothingIsReRead(string label)
     {
+        // The Mac shows its refusal for every failure and does not re-read
+        // (acceptArmingOffer's onFailure, AppModel.swift:2222-2238): the card
+        // and its line stay, even though the daemon armed the folder in
+        // memory and its next answer would no longer offer it.
         var rig = new Rig { RefreshAnswers = true, RefreshAnswer = null };
         rig.Flow.OnRefreshed(Api);
         Task pressed = rig.Flow.AcceptAsync();
@@ -296,25 +300,10 @@ public class ArmingOfferFlowTests
         rig.Answer(Refused(label));
         await pressed;
 
-        Assert.Equal(1, rig.Refreshes);
-        // Armed in memory: the daemon no longer offers it, so the card and
-        // the line about it both go.
-        Assert.Null(rig.Flow.Offer);
-        Assert.Equal(string.Empty, rig.Flow.Refusal);
-    }
-
-    [Fact]
-    public async Task AWriteFailureTheDaemonStillOffersKeepsTheCardAndItsLine()
-    {
-        var rig = new Rig { RefreshAnswers = true, RefreshAnswer = Api };
-        rig.Flow.OnRefreshed(Api);
-        Task pressed = rig.Flow.AcceptAsync();
-
-        rig.Answer(Refused("policy-write-failed"));
-        await pressed;
-
+        Assert.Equal(0, rig.Refreshes);
         Assert.Equal(Api, rig.Flow.Offer);
-        Assert.NotEmpty(rig.Flow.Refusal);
+        Assert.Null(rig.Flow.Step);
+        Assert.Equal("Couldn't change this folder's setting.", rig.Flow.Refusal);
     }
 
     [Fact]

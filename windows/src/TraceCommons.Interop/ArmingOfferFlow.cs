@@ -90,19 +90,16 @@ public enum ArmingOfferStep
 /// (<see cref="AccountBoundary"/>), changes nothing.
 /// </para>
 /// <para>
-/// <c>policy-write-failed</c> and <c>queue-write-failed</c> come back after
-/// the daemon has already armed the folder in memory
-/// (<c>handle_set_project_mode</c>, crates/trace-commons-contributor/src/daemon/ipc.rs).
-/// The Mac shows its refusal line for every failure and does not re-read; here
-/// those two also re-read, so the daemon's next <c>arming_suggestion</c>
-/// decides whether the card stays, and the line clears with it.
+/// Every refusal is handled alike, as on the Mac: the card and its line stay
+/// and nothing is re-read. That includes <c>policy-write-failed</c> and
+/// <c>queue-write-failed</c>, which come back after the daemon armed the
+/// folder in memory (<c>handle_set_project_mode</c>,
+/// crates/trace-commons-contributor/src/daemon/ipc.rs): the line saying the
+/// setting was not saved stays up until the offer it is about goes.
 /// </para>
 /// </remarks>
 public sealed class ArmingOfferFlow
 {
-    /// <summary>The two refusals that follow a change the daemon already made in memory.</summary>
-    public static readonly string[] WrittenInMemory = { "policy-write-failed", "queue-write-failed" };
-
     /// <summary>How long the armed card stays before it leaves (<c>ArmingOfferMotion.hold</c>, ArmingOfferMotion.swift:18).</summary>
     public static readonly TimeSpan Hold = TimeSpan.FromMilliseconds(900);
 
@@ -236,11 +233,6 @@ public sealed class ArmingOfferFlow
             Step = null;
             Refuse(pressed.ProjectId);
             Changed?.Invoke();
-            if (Array.IndexOf(WrittenInMemory, error.Message) >= 0)
-            {
-                await RefreshQuietlyAsync().ConfigureAwait(true);
-            }
-
             return;
         }
 
