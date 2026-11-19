@@ -208,12 +208,12 @@
                                                    ShowsDismiss="False"
                                                    Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
 
-                <ContentControl x:Name="DevicesHost" HorizontalContentAlignment="Stretch" />
+                <ContentControl IsTabStop="False" x:Name="DevicesHost" HorizontalContentAlignment="Stretch" />
                 <!-- Payouts: drawn, with its row, only while something in it applies (D2). -->
                 </StackPanel>
                 <TextBlock x:Name="RulePayouts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyPayouts" Spacing="12">
-                <ContentControl x:Name="PayoutsHost" HorizontalContentAlignment="Stretch" />
+                <ContentControl IsTabStop="False" x:Name="PayoutsHost" HorizontalContentAlignment="Stretch" />
                 <!--
                     F10, entry point 3: a wallet-origin account's payouts need
                     a NEAR AI login. This shell has no payouts section, so the
@@ -244,7 +244,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleReferrals" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyReferrals" Spacing="12">
-                <ContentControl x:Name="ReferralsHost" HorizontalContentAlignment="Stretch" />
+                <ContentControl IsTabStop="False" x:Name="ReferralsHost" HorizontalContentAlignment="Stretch" />
                 <!-- Watching: how the watcher behaves. -->
                 </StackPanel>
                 <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
@@ -792,7 +792,7 @@
                     terminal names from the daemon and collapses itself when
                     the daemon offers none. No string is typed here.
                 -->
-                <ContentControl x:Name="ManagedTerminalHost"
+                <ContentControl IsTabStop="False" x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
                 </StackPanel>
@@ -801,7 +801,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleGeneral" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyGeneral" Spacing="12">
-                <ContentControl x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
+                <ContentControl IsTabStop="False" x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
                 <TextBlock x:Name="RuleStartup" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyStartup" Spacing="12">
@@ -1094,7 +1094,7 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleCompute" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyCompute" Spacing="12">
-                <ContentControl x:Name="ComputeHost" HorizontalContentAlignment="Stretch" />
+                <ContentControl IsTabStop="False" x:Name="ComputeHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
             </StackPanel>
             </ScrollViewer>

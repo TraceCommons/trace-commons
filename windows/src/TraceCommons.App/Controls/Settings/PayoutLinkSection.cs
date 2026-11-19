@@ -22,6 +22,8 @@ public sealed class PayoutLinkSection : UserControl
 
     public PayoutLinkSection(DaemonHost host)
     {
+        // A container, not a stop: Tab goes to the controls inside it.
+        IsTabStop = false;
         PayoutLinkCopy? copy = PayoutLinkCopy.Live;
         _flow = new PayoutLinkFlow(
             new PayoutLinkClient((method, json) => host.CallAsync(method, json)),

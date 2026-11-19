@@ -23,6 +23,8 @@ public sealed class AccountDevicesSection : UserControl
 
     public AccountDevicesSection(DaemonHost host)
     {
+        // A container, not a stop: Tab goes to the controls inside it.
+        IsTabStop = false;
         AccountDevicesCopy? copy = AccountDevicesCopy.Live;
         _flow = new AccountDevicesFlow(
             new AccountDevicesClient((method, json) => host.CallAsync(method, json)),

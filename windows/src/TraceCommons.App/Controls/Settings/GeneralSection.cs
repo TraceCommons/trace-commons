@@ -19,6 +19,8 @@ public sealed class GeneralSection : UserControl
 {
     public GeneralSection()
     {
+        // A container, not a stop: Tab goes to the controls inside it.
+        IsTabStop = false;
         if (SettingsGeneralCopy.Live is not { } words)
         {
             return;

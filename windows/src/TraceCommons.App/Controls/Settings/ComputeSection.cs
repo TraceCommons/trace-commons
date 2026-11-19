@@ -29,6 +29,8 @@ public sealed class ComputeSection : UserControl
 
     public ComputeSection(DaemonHost host, ComputeModel model)
     {
+        // A container, not a stop: Tab goes to the controls inside it.
+        IsTabStop = false;
         _model = model;
         _configDir = host.ConfigDir;
         _sample = Program.IsSampleLaunch;

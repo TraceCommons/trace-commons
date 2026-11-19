@@ -28,6 +28,8 @@ public sealed class ReferralsSection : UserControl
 
     public ReferralsSection(DaemonHost host)
     {
+        // A container, not a stop: Tab goes to the controls inside it.
+        IsTabStop = false;
         ReferralCopy? copy = ReferralCopy.Live;
         _flow = new ReferralFlow(
             new ReferralClient((method, json) => host.CallAsync(method, json)),

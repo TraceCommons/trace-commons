@@ -91,7 +91,7 @@ public sealed partial class SettingsView
         // its rule (SettingsModal.swift:186-215).
         foreach ((SettingsSection section, TextBlock rule) in _rules)
         {
-            var notice = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+            var notice = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false };
             SectionBody.Children.Insert(SectionBody.Children.IndexOf(rule) + 1, notice);
             _notices[section] = notice;
         }
