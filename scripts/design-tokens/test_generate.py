@@ -402,6 +402,19 @@ class WindowsGlassTokensTests(unittest.TestCase):
         with self.assertRaisesRegex(generate.TokenError, "statusAskText"):
             generate.windows_glass_palette(self.tokens, "dark")
 
+    def test_high_contrast_still_marks_the_tab_shown(self):
+        # The Mac draws the ember under the tab shown in every appearance
+        # (Navigation.swift:288). Under High Contrast the box showed no mark
+        # at all: the ember's colours were Transparent. The line takes the
+        # system's highlight there, solid end to end; the halo stays off.
+        xaml = generate.render_windows_glass(self.tokens)
+        hc = xaml[xaml.index('<ResourceDictionary x:Key="HighContrast">'):]
+        hc = hc[:hc.index("</ResourceDictionary>")]
+        for key in ("TcGlassTabEmberColor", "TcGlassTabEmberClearColor"):
+            self.assertIn(f'<StaticResource x:Key="{key}" ResourceKey="SystemColorHighlightColor" />', hc)
+        for key in ("TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
+            self.assertIn(f'<Color x:Key="{key}">Transparent</Color>', hc)
+
     def test_veil_over_material_is_translucent(self):
         palette = generate.windows_glass_palette(self.tokens, "dark")
         self.assertNotEqual(palette["TcGlassPaneOverMaterialBrush"][1:3], "FF")

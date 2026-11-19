@@ -221,8 +221,8 @@
             <StaticResource x:Key="TcInkTertiaryBrush" ResourceKey="TextFillColorTertiaryBrush" />
             <StaticResource x:Key="TcSurfaceScrimBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcSurfaceSelectedBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <Color x:Key="TcGlassTabEmberColor">Transparent</Color>
-            <Color x:Key="TcGlassTabEmberClearColor">Transparent</Color>
+            <StaticResource x:Key="TcGlassTabEmberColor" ResourceKey="SystemColorHighlightColor" />
+            <StaticResource x:Key="TcGlassTabEmberClearColor" ResourceKey="SystemColorHighlightColor" />
             <Color x:Key="TcGlassTabEmberHaloColor">Transparent</Color>
             <Color x:Key="TcGlassTabEmberHaloClearColor">Transparent</Color>
             <Color x:Key="TcGlassShadowPaneEdgeColor">Transparent</Color>

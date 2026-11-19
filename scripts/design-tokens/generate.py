@@ -1778,7 +1778,11 @@ def render_windows_glass(tokens: dict) -> str:
         if job is None:
             raise TokenError(f"windows high contrast: no system colour for {key}")
         out.append(f'            <StaticResource x:Key="{key}" ResourceKey="{WINDOWS_HC[job]}" />')
-    for key in ("TcGlassTabEmberColor", "TcGlassTabEmberClearColor", "TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
+    # The ember still marks the tab shown: a solid line in the system's
+    # highlight colour, end to end. The halo, a glow, is off.
+    for key in ("TcGlassTabEmberColor", "TcGlassTabEmberClearColor"):
+        out.append(f'            <StaticResource x:Key="{key}" ResourceKey="SystemColorHighlightColor" />')
+    for key in ("TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
         out.append(f'            <Color x:Key="{key}">Transparent</Color>')
     out.append('            <Color x:Key="TcGlassShadowPaneEdgeColor">Transparent</Color>')
     out.append('            <Color x:Key="TcGlassShadowModalColor">Transparent</Color>')
