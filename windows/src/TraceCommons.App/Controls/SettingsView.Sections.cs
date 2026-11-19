@@ -201,7 +201,6 @@ public sealed partial class SettingsView
 
     private async System.Threading.Tasks.Task ReadGateAsync(DaemonHost host)
     {
-
         bool requires;
         if (Program.IsSampleLaunch)
         {
