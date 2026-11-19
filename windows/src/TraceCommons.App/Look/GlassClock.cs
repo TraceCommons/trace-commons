@@ -29,8 +29,16 @@ internal sealed class GlassClock
         _core = new GlassClockCore<XamlRoot>(
             WindowClocks.Windows,
             interval,
-            () => CompositionTarget.Rendering += OnFrame,
-            () => CompositionTarget.Rendering -= OnFrame,
+            () =>
+            {
+                CompositionTarget.Rendering += OnFrame;
+                LookTrace.Write($"clock: start {owner.GetType().Name}");
+            },
+            () =>
+            {
+                CompositionTarget.Rendering -= OnFrame;
+                LookTrace.Write($"clock: stop {owner.GetType().Name} shown={_core.Shown} window={WindowClocks.Windows.MayTick(owner.XamlRoot)} paused={_core.Paused}");
+            },
             draw,
             () => Now);
         _shown = new AncestorVisibility(owner, shown => _core.Shown = shown);

@@ -1,6 +1,4 @@
 using System;
-using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Numerics;
 using Microsoft.UI.Composition.SystemBackdrops;
@@ -112,38 +110,8 @@ public sealed partial class MainWindow
         }
     }
 
-    /// <summary>
-    /// Writes a line about the look to Debug output and, when
-    /// TRACE_COMMONS_LOOK_LOG names a file, to that file, so the test box can
-    /// read which material a run chose. Never a secret or a path of the
-    /// person's.
-    /// </summary>
-    private static void LookLog(string line)
-    {
-        Debug.WriteLine("monitor: " + line);
-        // "1" writes to tc-look.log in the temporary folder, so the test
-        // box can turn it on through win-capture.ps1, whose values carry no
-        // path characters.
-        string? path = Environment.GetEnvironmentVariable("TRACE_COMMONS_LOOK_LOG");
-        if (path == "1")
-        {
-            path = Path.Combine(Path.GetTempPath(), "tc-look.log");
-        }
-
-        if (!string.IsNullOrEmpty(path))
-        {
-            try
-            {
-                File.AppendAllText(path, $"{DateTime.UtcNow:o} {line}{Environment.NewLine}");
-            }
-            catch (IOException)
-            {
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
-        }
-    }
+    /// <summary>A line about the look for the test box (<see cref="LookTrace"/>).</summary>
+    private static void LookLog(string line) => LookTrace.Write(line);
 
     // ---- The tab ember (Navigation.swift:266-339) --------------------------
 
