@@ -118,7 +118,15 @@ public sealed partial class MainWindow
     private static void LookLog(string line)
     {
         Debug.WriteLine("monitor: " + line);
+        // "1" writes to tc-look.log in the temporary folder, so the test
+        // box can turn it on through win-capture.ps1, whose values carry no
+        // path characters.
         string? path = Environment.GetEnvironmentVariable("TRACE_COMMONS_LOOK_LOG");
+        if (path == "1")
+        {
+            path = Path.Combine(Path.GetTempPath(), "tc-look.log");
+        }
+
         if (!string.IsNullOrEmpty(path))
         {
             try
