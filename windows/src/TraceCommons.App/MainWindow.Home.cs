@@ -32,6 +32,8 @@ public sealed partial class MainWindow
     private CommonsCredit? _homeCredit;
     private NearAiBalance? _homeBalance;
     private JsonElement? _homeGlance;
+    private ManagedSnapshot? _homeManaged;
+    private NetworkInferenceSummary? _homeNetwork;
     private DaemonStatus? _homeStatus;
     private HistoryRollup? _homeRollup;
     private IReadOnlyList<QueueEntry>? _homePending;
@@ -101,6 +103,16 @@ public sealed partial class MainWindow
         ApplyEdgeRail();
     }
 
+    private async Task SignInFromHomeAsync()
+    {
+        ShowPrivateInferencePane();
+        OpenTab(MonitorTab.Inference);
+        if (PrivateInferencePane.Content is PrivateInferenceView page)
+        {
+            await page.ViewModel.ContinueCredentialAsync(await page.ViewModel.StartCredentialAsync());
+        }
+    }
+
     /// <summary>Whether the commons' catalogue was read and decodes, as main's way in on Home asks (<see cref="ApplyMissionCatalogueEntry"/>).</summary>
     private bool MissionCatalogueRead()
     {
@@ -126,6 +138,12 @@ public sealed partial class MainWindow
                 break;
             case HomeLink.MissionDrafts:
                 OnShowMissionDrafts(this, new RoutedEventArgs());
+                break;
+            case HomeLink.PrivateAISignIn:
+                // The Private AI tab's own NEAR AI sign-in, as its managed
+                // card begins it (HomeViews.swift:484-487 begins the same
+                // sign-in as the tab's notice).
+                _ = SignInFromHomeAsync();
                 break;
             case HomeLink.MissionCatalogue:
                 OnShowMissions(this, new RoutedEventArgs());
@@ -175,7 +193,19 @@ public sealed partial class MainWindow
             Task<DaemonResponse> status = _host.CallAsync(DaemonProtocol.Methods.Status);
             Task<DaemonResponse> rollup = _host.CallAsync(DaemonProtocol.Methods.HistoryRollup);
             Task<DaemonResponse> pending = _host.CallAsync(DaemonProtocol.Methods.ListPending);
-            await Task.WhenAll(credit, balance, glance, status, rollup, pending).ConfigureAwait(true);
+
+            // The Private AI section's reads (HomeViews.swift:466-490): the
+            // managed snapshot says whether NEAR AI is signed in, the network
+            // summary the calls and how many are verified.
+            Task<DaemonResponse> managed = _host.CallAsync("managed_snapshot");
+            Task<DaemonResponse> network = _host.CallAsync("inference_summary");
+            await Task.WhenAll(credit, balance, glance, status, rollup, pending, managed, network).ConfigureAwait(true);
+            _homeManaged = managed.Result.IsError || managed.Result.Result is not JsonElement snapshot
+                ? null
+                : ManagedSnapshot.Parse(snapshot.GetRawText());
+            _homeNetwork = network.Result.IsError || network.Result.Result is not JsonElement summary
+                ? null
+                : InferenceLedger.ParseNetworkSummary(summary) is NetworkInferenceSummary { Readable: true } readable ? readable : null;
             _homeStatus = status.Result.ResultAs<DaemonStatus>();
             _homeRollup = rollup.Result.ResultAs<HistoryRollup>();
             _homePending = pending.Result.ResultAs<PendingList>()?.Pending;
@@ -246,7 +276,9 @@ public sealed partial class MainWindow
             null,
             _insightsHeading,
             _insightsIntro,
-            ViewModel.MissionsShown && MissionCatalogueRead());
+            ViewModel.MissionsShown && MissionCatalogueRead(),
+            _homeManaged,
+            _homeNetwork);
         PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
         _homeModel = HomeOverviewModel.From(
             reads,

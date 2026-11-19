@@ -19,6 +19,7 @@ public enum HomeLink
     Campaign,
     MissionCatalogue,
     Settings,
+    PrivateAISignIn,
 }
 
 /// <summary>A hero card as Home draws it.</summary>
@@ -29,6 +30,20 @@ public sealed record HomeNotice(string Line, string Action);
 
 /// <summary>A Home card that is a way into a screen (<c>hostedCard</c>, HomeViews.swift:313-321): its title and the core's subtitle.</summary>
 public sealed record HomeCard(string Title, string? Subtitle, HomeLink Link);
+
+/// <summary>
+/// Home's Private AI section (HomeViews.swift:466-490): signed in, one slim
+/// row of figures that opens the Private AI tab; signed out, the core's line
+/// and Sign in (<see cref="SignInName"/> its accessible name).
+/// </summary>
+public sealed record HomePrivateAI(string Heading, IReadOnlyList<HomeTile>? Figures, HomeNotice? SignIn, string? SignInName)
+{
+    public bool Equals(HomePrivateAI? other) =>
+        other is not null && Heading == other.Heading && SignIn == other.SignIn && SignInName == other.SignInName
+        && (Figures is null ? other.Figures is null : other.Figures is not null && Figures.SequenceEqual(other.Figures));
+
+    public override int GetHashCode() => HashCode.Combine(Heading, SignIn, SignInName);
+}
 
 /// <summary>Which hero ground, mirrored from <see cref="HeroGround"/> so the record stays a plain value.</summary>
 public enum HomeGround
@@ -49,8 +64,9 @@ public enum HomeGround
 /// the account total under it, Credit pending, the NEAR AI balance), then the
 /// three hero cards on the Mac's solid navy grounds (the compiled campaign,
 /// Missions while missions are on, Insights once its heading has loaded).
-/// Also the no-credit line under the Traces heading and the mission
-/// catalogue's card, ported with the Mac's conditions (cards new to Windows,
+/// Also the Private AI section first on Home, the no-credit line under the
+/// Traces heading and the mission catalogue's card, ported with the Mac's
+/// conditions (cards new to Windows,
 /// approved as a class 2026-11-19). The walkthrough card is left out
 /// (W11-D2 (a)).
 /// </remarks>
@@ -63,7 +79,8 @@ public sealed record HomeOverviewModel(
     IReadOnlyList<GlanceBar> InsightsBars,
     string? InsightsLine,
     HomeNotice? NoCredit = null,
-    HomeCard? Catalogue = null)
+    HomeCard? Catalogue = null,
+    HomePrivateAI? PrivateAI = null)
 {
     /// <summary>The figure rules, the core's (<c>tc_count_figure</c>, <c>tc_credit_figure</c>), handed in so tests need no library.</summary>
     public sealed record Figures(Func<ulong, string?> Count, Func<double, string?> Credit, Func<long?, byte?, string> Amount);
@@ -82,7 +99,9 @@ public sealed record HomeOverviewModel(
         int? MissionDrafts,
         string? InsightsHeading,
         string? InsightsIntro,
-        bool CatalogueRead = false);
+        bool CatalogueRead = false,
+        ManagedSnapshot? Managed = null,
+        NetworkInferenceSummary? Network = null);
 
     /// <summary>The data use that earns credit (<c>SentTracesTrainingState.scope</c>).</summary>
     public const string ModelTrainingScope = "model_training";
@@ -163,6 +182,31 @@ public sealed record HomeOverviewModel(
             ? new HomeCard(title, NonEmpty(home("catalogue_subtitle")), HomeLink.MissionCatalogue)
             : null;
 
+        // First on Home, once the daemon runs (its status was read) and the
+        // managed snapshot was read (HomeViews.swift:466-490).
+        HomePrivateAI? privateAI = null;
+        if (reads.Status is not null && reads.Managed is ManagedSnapshot managed
+            && HomeFacts.CardHeading(home("section_private_ai")) is string privateHeading)
+        {
+            if (managed.NearAiSignedIn)
+            {
+                LedgerTotals totals = InferenceLedger.NetworkHeaderTotals(reads.Network);
+                privateAI = new HomePrivateAI(
+                    privateHeading,
+                    new[]
+                    {
+                        new HomeTile(top("calls"), HomeFacts.Count(AsCount(totals.Calls), figures.Count)),
+                        new HomeTile(top("proof_verified"), HomeFacts.Count(AsCount(totals.Verified), figures.Count)),
+                    },
+                    null,
+                    null);
+            }
+            else if (NonEmpty(home("private_ai_sign_in")) is string signInLine && NonEmpty(managed.Text("sign_in_near_ai")) is string signIn)
+            {
+                privateAI = new HomePrivateAI(privateHeading, null, new HomeNotice(signInLine, signIn), NonEmpty(managed.Text("sign_in_near_ai_accessibility")));
+            }
+        }
+
         return new HomeOverviewModel(
             home("section_traces"),
             home("section_account"),
@@ -172,7 +216,8 @@ public sealed record HomeOverviewModel(
             bars,
             insightsLine,
             noCredit,
-            catalogue);
+            catalogue,
+            privateAI);
     }
 
     /// <summary>
@@ -188,10 +233,14 @@ public sealed record HomeOverviewModel(
         && InsightsLine == other.InsightsLine
         && NoCredit == other.NoCredit
         && Catalogue == other.Catalogue
+        && Equals(PrivateAI, other.PrivateAI)
         && TraceTiles.SequenceEqual(other.TraceTiles)
         && AccountTiles.SequenceEqual(other.AccountTiles)
         && Heroes.SequenceEqual(other.Heroes)
         && InsightsBars.SequenceEqual(other.InsightsBars);
+
+    /// <summary>A total as Home's count: the Mac's figures are <c>Int</c>; one past it is unknown, never wrapped.</summary>
+    private static int? AsCount(long? total) => total is long n && n >= 0 && n <= int.MaxValue ? (int)n : null;
 
     private static string? NonEmpty(string? word) => string.IsNullOrEmpty(word) ? null : word;
 

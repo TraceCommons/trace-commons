@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Text;
@@ -151,6 +152,11 @@ public sealed class HomeView : UserControl
         _balanceValue = null;
         _balanceTile = null;
 
+        if (model.PrivateAI is HomePrivateAI privateAI)
+        {
+            AddPrivateAI(privateAI);
+        }
+
         AddSection(model.TracesHeading, model.TraceTiles, HomeLink.Traces, balanceIndex: -1, model.NoCredit is HomeNotice notice ? BuildNotice(notice) : null);
         AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2);
 
@@ -207,6 +213,81 @@ public sealed class HomeView : UserControl
         }
 
         _column.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// Home's Private AI section (HomeViews.swift:466-490), smaller than
+    /// Traces: signed in, one slim row of the calls and how many are verified
+    /// that opens the Private AI tab (<c>HomePrivateAIRow</c>); signed out,
+    /// the core's line and Sign in (<c>HomePrivateAISignInCard</c>).
+    /// </summary>
+    private void AddPrivateAI(HomePrivateAI section)
+    {
+        _column.Children.Add(new TextBlock
+        {
+            Text = section.Heading,
+            Style = (Style)Application.Current.Resources["TcTitleSectionTextStyle"],
+            Margin = new Thickness(0, HomeTrayInks.Measures.S4, 0, 0),
+        });
+        if (section.Figures is IReadOnlyList<HomeTile> figures)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S5 * 2 };
+            foreach (HomeTile figure in figures)
+            {
+                var pair = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S3 };
+                pair.Children.Add(new TextBlock { Text = figure.Value, Style = (Style)Application.Current.Resources["TcTitleCardTextStyle"], VerticalAlignment = VerticalAlignment.Center });
+                pair.Children.Add(new TextBlock { Text = figure.Label, Style = (Style)Application.Current.Resources["TcCaptionTextStyle"], VerticalAlignment = VerticalAlignment.Center });
+                row.Children.Add(pair);
+            }
+
+            var button = new Button
+            {
+                Content = row,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Padding = new Thickness(12, 10, 12, 10),
+                CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
+                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            };
+            AutomationProperties.SetName(button, section.Heading);
+            AutomationProperties.SetHelpText(button, string.Join(", ", figures.Select(f => f.Value + " " + f.Label)));
+            button.Click += (_, _) => LinkRequested?.Invoke(HomeLink.PrivateAI);
+            _column.Children.Add(button);
+        }
+        else if (section.SignIn is HomeNotice signIn)
+        {
+            var card = new Grid
+            {
+                ColumnSpacing = HomeTrayInks.Measures.S4,
+                Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 10, HomeTrayInks.Measures.CardPaddingHorizontal, 10),
+                CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
+                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            };
+            card.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            card.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            card.Children.Add(new TextBlock
+            {
+                Text = signIn.Line,
+                Style = (Style)Application.Current.Resources["TcBodyTextStyle"],
+                TextWrapping = TextWrapping.WrapWholeWords,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            var button = new Button
+            {
+                Content = signIn.Action,
+                Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            if (section.SignInName is string name)
+            {
+                AutomationProperties.SetName(button, name);
+            }
+
+            button.Click += (_, _) => LinkRequested?.Invoke(HomeLink.PrivateAISignIn);
+            Grid.SetColumn(button, 1);
+            card.Children.Add(button);
+            _column.Children.Add(card);
+        }
     }
 
     /// <summary>
