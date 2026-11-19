@@ -1495,6 +1495,12 @@ WINDOWS_LEGACY_KEYS = [
 # statusOff, as on the Mac (PrivateInferenceView.swift:38).
 WINDOWS_TOKEN_KEYS = [
     ("TcStatusOffBrush", "statusOff"),
+    # The Skills tab's usage bars (chartSeries1, as the Mac's Insights
+    # charts) and the tool marks beside its stories (GlassTool.tint).
+    ("TcChartSeries1Brush", "chartSeries1"),
+    ("TcToolClaudeBrush", "toolClaude"),
+    ("TcToolCodexBrush", "toolCodex"),
+    ("TcToolOpenCodeBrush", "toolOpenCode"),
 ]
 # Under a high contrast theme every brand colour gives way to the system's:
 # a fill or ink aliases the primary text brush and a label on a fill the

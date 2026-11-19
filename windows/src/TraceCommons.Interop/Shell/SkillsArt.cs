@@ -187,7 +187,7 @@ public sealed record SkillsHomeMotion(bool Reduce)
     /// <summary>Bars rise from 2% of their height, easing out over 0.5 s, once (:75, :472, :491).</summary>
     public const double GrowFrom = 0.02, GrowSeconds = 0.5;
 
-    /// <summary>A story opening in place, and a count rolling: <c>.snappy(duration: 0.25)</c> (:73).</summary>
+    /// <summary>A story opening in place, and a count rolling: <c>.snappy(duration: 0.25)</c> (:73); see <see cref="Snappy"/>.</summary>
     public const double ExpandSeconds = 0.25;
 
     /// <summary>The Home column's widest, and the hero band's height (:91-92).</summary>
@@ -202,19 +202,22 @@ public sealed record SkillsHomeMotion(bool Reduce)
     public bool RollsNumbers => !Reduce;
 
     /// <summary>
-    /// SwiftUI's <c>.snappy</c> curve at <paramref name="t"/> in [0, 1]: a
-    /// critically damped spring settling inside the duration. Used for the
-    /// expand and the number roll.
+    /// <c>.snappy(duration: 0.25)</c> is <c>Spring(response: 0.25,
+    /// dampingRatio: 0.85)</c>; a throwaway SwiftUI probe on macOS printed
+    /// both numbers (2026-11-19).
     /// </summary>
-    public static double Snappy(double t)
-    {
-        if (t <= 0) return 0;
-        if (t >= 1) return 1;
-        // Critically damped, so it never overshoots; SwiftUI's snappy has a
-        // small bounce, which a roll of figures does not show.
-        double omega = 2 * Math.PI / 0.85;
-        return 1 - (1 + omega * t) * Math.Exp(-omega * t);
-    }
+    public const double SnappyResponse = 0.25, SnappyDamping = 0.85;
+
+    /// <summary>That spring's <c>settlingDuration</c>, printed by the same probe: how long an expand or a roll runs.</summary>
+    public const double SnappySettling = 0.4688122063285237;
+
+    /// <summary>
+    /// The snappy spring's value <paramref name="seconds"/> after it starts,
+    /// with SwiftUI's slight overshoot; exactly 1 once it has settled. Used
+    /// for the expand and the number roll.
+    /// </summary>
+    public static double Snappy(double seconds) =>
+        seconds >= SnappySettling ? 1 : MonitorMotion.Spring(SnappyResponse, SnappyDamping, seconds);
 
     /// <summary><c>.easeOut</c>: CoreAnimation's ease-out curve, (0, 0, 0.58, 1).</summary>
     public static double EaseOut(double t) => MonitorMotion.CubicBezier(0, 0, 0.58, 1, t);

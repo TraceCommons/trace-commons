@@ -38,7 +38,7 @@ namespace TraceCommons.App.Controls;
 /// </summary>
 public sealed class InsightsSkillsView : UserControl
 {
-    public static readonly string[] Sections = { "home", "inventory", "usage", "catalog", "following" };
+    public static IReadOnlyList<string> Sections => InsightsSkillsModel.Sections;
 
     private readonly InsightsSkillsModel _model;
     private readonly Action? _reviewSettings;
@@ -376,7 +376,7 @@ public sealed class InsightsSkillsView : UserControl
         AutomationProperties.SetName(tabs, T("skills_title"));
         foreach (string section in Sections)
         {
-            var tab = new ToggleButton { Content = T("skills_tab_" + section), IsChecked = section == _section };
+            var tab = new ToggleButton { Content = T(InsightsSkillsModel.SectionCopyKey(section)), IsChecked = section == _section };
             AutomationProperties.SetAutomationId(tab, "skills-tab-" + section);
             // Checked, not Click: UI Automation's Toggle and the keyboard
             // reach a ToggleButton through Checked as a click does.
@@ -678,12 +678,30 @@ public sealed class InsightsSkillsView : UserControl
         }, words);
     }
 
-    /// <summary>A story opening in place: the new line fades in over the Mac's 0.25 s.</summary>
+    /// <summary>
+    /// A story opening in place: the new line's default opacity transition
+    /// runs on the Mac's snappy spring (<c>withAnimation(moves.expand)</c>),
+    /// so it fades in along that spring until it settles.
+    /// </summary>
     private void Reveal(UIElement element)
     {
         if (!Motion.RollsNumbers) return;
         element.Opacity = 0;
-        Animate(element, "Opacity", 1, SkillsHomeMotion.ExpandSeconds, 0);
+        var frames = new DoubleAnimationUsingKeyFrames();
+        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(SkillsHomeMotion.Snappy, SkillsHomeMotion.SnappySettling))
+        {
+            frames.KeyFrames.Add(new LinearDoubleKeyFrame
+            {
+                KeyTime = KeyTime.FromTimeSpan(TimeSpan.FromSeconds(fraction * SkillsHomeMotion.SnappySettling)),
+                Value = Math.Clamp(value, 0, 1),
+            });
+        }
+
+        Storyboard.SetTarget(frames, element);
+        Storyboard.SetTargetProperty(frames, "Opacity");
+        var board = new Storyboard();
+        board.Children.Add(frames);
+        board.Begin();
     }
 
     private static Grid Beside(FrameworkElement mark, UIElement words)
@@ -1023,14 +1041,14 @@ public sealed class InsightsSkillsView : UserControl
 
         private void OnFrame(object? sender, object e)
         {
-            double t = (DateTime.UtcNow - _start).TotalSeconds / SkillsHomeMotion.ExpandSeconds;
-            if (t >= 1 || !WindowClocks.Running)
+            double seconds = (DateTime.UtcNow - _start).TotalSeconds;
+            if (seconds >= SkillsHomeMotion.SnappySettling || !WindowClocks.Running)
             {
                 Finish();
                 return;
             }
 
-            _block.Text = _format((int)Math.Round(_from + (_to - _from) * SkillsHomeMotion.Snappy(t)));
+            _block.Text = _format((int)Math.Round(_from + (_to - _from) * SkillsHomeMotion.Snappy(seconds)));
         }
     }
 
@@ -1044,12 +1062,10 @@ public sealed class InsightsSkillsView : UserControl
 
     // MARK: Agents
 
-    private Color Tint(string agent)
-    {
-        bool dark = ActualTheme == ElementTheme.Dark;
-        uint rgb = ToolLogos.For(agent) is { } logo ? (dark ? logo.DarkTint : logo.LightTint) : (dark ? 0xF2F2F7u : 0x1C1C1Eu);
-        return Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
-    }
+    /// <summary>A tool's tint (<c>GlassTool.tint</c>): its token, or the primary ink for a tool without a logo.</summary>
+    private static Color Tint(string agent) => R(ToolLogos.For(agent)?.TintKey ?? "TcInkPrimaryBrush") is SolidColorBrush brush
+        ? brush.Color
+        : Colors.Gray;
 
     private FrameworkElement AgentLogo(string agent, double size)
     {
@@ -1468,7 +1484,8 @@ public sealed class InsightsSkillsView : UserControl
         return panel;
     }
 
-    private Color ChartSeries() => ActualTheme == ElementTheme.Dark ? Color.FromArgb(255, 0x00, 0x91, 0xFD) : Color.FromArgb(255, 0x2A, 0x78, 0xD6);
+    /// <summary>The usage bars' colour: the glass token <c>chartSeries1</c>, the system text colour under high contrast.</summary>
+    private static Color ChartSeries() => R("TcChartSeries1Brush") is SolidColorBrush brush ? brush.Color : Colors.Gray;
 
     /// <summary>One bar per local day across the whole window, so days with no evidence stay as gaps.</summary>
     private UIElement UsageChart(InsightsSkillsUsage.Skill skill)

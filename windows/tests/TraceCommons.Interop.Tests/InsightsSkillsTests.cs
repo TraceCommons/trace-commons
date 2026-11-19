@@ -348,7 +348,8 @@ public class InsightsSkillsTests
     };
 
     private static SkillsSnapshot HomeSnapshot(IEnumerable<JsonObject>? rows = null, bool partial = false, string[]? followed = null,
-        JsonArray? feed = null, JsonArray? updates = null, string status = "current", bool enabled = true, bool analysis = true)
+        JsonArray? feed = null, JsonArray? updates = null, string status = "current", bool enabled = true, bool analysis = true,
+        string checkedAt = "2026-11-15T11:00:00Z")
     {
         var root = new JsonObject
         {
@@ -376,7 +377,7 @@ public class InsightsSkillsTests
                     ["source_url"] = "https://example.com/source", ["instructions_url"] = "https://example.com",
                 }),
                 ["checked_at"] = "2026-11-15T11:00:00Z",
-                ["publisher_states"] = new JsonArray(new JsonObject { ["publisher_id"] = "maker", ["status"] = status, ["checked_at"] = "2026-11-15T11:00:00Z" }),
+                ["publisher_states"] = new JsonArray(new JsonObject { ["publisher_id"] = "maker", ["status"] = status, ["checked_at"] = checkedAt }),
             },
             ["followed_publishers"] = new JsonArray((followed ?? new[] { "maker" }).Select(p => (JsonNode)JsonValue.Create(p)!).ToArray()),
             ["updates"] = updates ?? new JsonArray(),
@@ -447,6 +448,16 @@ public class InsightsSkillsTests
         Assert.Empty(Project(HomeSnapshot(updates: Update("update_available"))).Updates);
         Assert.Empty(Project(HomeSnapshot(new[] { RowJson() }, updates: Update("update_available"), status: "unknown")).Updates);
         Assert.Empty(Project(HomeSnapshot(new[] { RowJson() }, updates: Update("locally_modified"))).Updates);
+    }
+
+    [Fact]
+    public void AnUpdateComesFromACheckLessThanSixHoursOld()
+    {
+        // now - checkedAt < 6 h (InsightsSkillsHome.swift:321), and never ahead of now.
+        JsonArray Update() => new(new JsonObject { ["installed_id"] = "local", ["status"] = "update_available", ["catalog_skill_id"] = "upstream" });
+        Assert.Single(Project(HomeSnapshot(new[] { RowJson() }, updates: Update(), checkedAt: "2026-11-15T06:00:01Z")).Updates);
+        Assert.Empty(Project(HomeSnapshot(new[] { RowJson() }, updates: Update(), checkedAt: "2026-11-15T06:00:00Z")).Updates);
+        Assert.Empty(Project(HomeSnapshot(new[] { RowJson() }, updates: Update(), checkedAt: "2026-11-15T12:00:01Z")).Updates);
     }
 
     [Fact]
@@ -688,8 +699,26 @@ public class InsightsSkillsTests
         var moving = new SkillsHomeMotion(false);
         Assert.True(moving.GrowsBars && moving.Lifts && moving.Scrolls && moving.RollsNumbers);
         Assert.Equal(0, SkillsHomeMotion.Snappy(0));
-        Assert.Equal(1, SkillsHomeMotion.Snappy(1));
-        Assert.InRange(SkillsHomeMotion.Snappy(0.5), 0.85, 0.95);
+        Assert.Equal(1, SkillsHomeMotion.Snappy(SkillsHomeMotion.SnappySettling));
         Assert.True(SkillsHomeMotion.EaseOut(0.5) > 0.5);
+    }
+
+    [Theory]
+    // Printed by SwiftUI itself on macOS (a throwaway probe, 2026-11-19):
+    // Spring.snappy(duration: 0.25).value(target: 1, time: t); the same
+    // probe printed response 0.25, dampingRatio 0.85 and a settlingDuration
+    // of 0.4688122063285237.
+    [InlineData(0.025, 0.138210353)]
+    [InlineData(0.05, 0.388102446)]
+    [InlineData(0.1, 0.786369170)]
+    [InlineData(0.15, 0.956446594)]
+    [InlineData(0.2, 1.001616993)]
+    [InlineData(0.25, 1.006019961)]
+    [InlineData(0.3, 1.003072604)]
+    [InlineData(0.4, 1.000154774)]
+    public void TheExpandAndRollFollowSwiftUIsSnappySpring(double seconds, double want)
+    {
+        Assert.Equal(want, SkillsHomeMotion.Snappy(seconds), 6);
+        Assert.Equal((0.25, 0.85, 0.4688122063285237), (SkillsHomeMotion.SnappyResponse, SkillsHomeMotion.SnappyDamping, SkillsHomeMotion.SnappySettling));
     }
 }

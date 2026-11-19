@@ -22,6 +22,12 @@ public sealed class InsightsSkillsModel : INotifyPropertyChanged
     public const string Method = "insights_skills";
     public const string FollowMethod = "insights_skills_follow";
 
+    /// <summary>The Skills sections in the Mac's order (<c>SkillsSection.allCases</c>).</summary>
+    public static readonly IReadOnlyList<string> Sections = new[] { "home", "inventory", "usage", "catalog", "following" };
+
+    /// <summary>A section's shared copy key (<c>SkillsSection.copyKey</c>).</summary>
+    public static string SectionCopyKey(string section) => "skills_tab_" + section;
+
     /// <summary>The idle poll: five minutes (InsightsSkillsModel.swift:39).</summary>
     public static readonly TimeSpan IdlePollInterval = TimeSpan.FromMinutes(5);
 
