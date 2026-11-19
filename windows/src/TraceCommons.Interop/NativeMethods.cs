@@ -155,6 +155,27 @@ internal static class NativeMethods
     internal static extern ulong tc_subscribe(IntPtr handle, TcEventCallback cb, IntPtr ctx);
 
     /// <summary>
+    /// tc_subscribe, declaring the opt-in events this subscriber can draw
+    /// (<c>subscribe</c>'s <c>accepts</c>) as a borrowed JSON array of names;
+    /// the window declares <c>feature_flags_changed</c>, as the Mac does
+    /// (AppModel.swift:1859). Lifetime rules are tc_subscribe's.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ulong tc_subscribe_with_accepts(
+        IntPtr handle,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? acceptsJson,
+        TcEventCallback cb,
+        IntPtr ctx);
+
+    /// <summary>
+    /// This build's immutable feature identity (schema, environment and
+    /// profile digest) as an owned JSON object. A daemon snapshot of another
+    /// build is not used (<c>FeatureFlagGate</c>). NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_feature_profile_json();
+
+    /// <summary>
     /// The ABI's only real barrier: blocks until the callback is guaranteed
     /// not to fire again. Returns void and REFUSES SILENTLY when called from a
     /// thread inside any tokio runtime context, so callers must compare
@@ -462,6 +483,16 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_certificate_detail_copy();
+
+    /// <summary>
+    /// The arming offer's words for one project
+    /// (<c>project_copy::arming_offer_copy</c>), as an owned JSON object.
+    /// NULL for a NULL label, and on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_arming_offer_copy_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string projectLabel,
+        uint count);
 
     /// <summary>
     /// The notice for one element of <c>status.arming_rewordings</c> (K5),

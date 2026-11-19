@@ -96,6 +96,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     internal FirstRunWindow(DaemonHost host, OnboardingState onboarding, FirstRunStep? previewAt)
     {
         InitializeComponent();
+        WindowClocks.Watch(this);
         _host = host;
         _onboarding = onboarding;
         Title = MonitorWords.AppName;

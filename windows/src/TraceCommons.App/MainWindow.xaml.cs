@@ -150,6 +150,18 @@ public sealed partial class MainWindow : Window
         _host.QueueChanged += OnTrayWorthyChange;
         _host.StatusChanged += OnTrayWorthyChange;
         _host.DigestDue += OnDigestDue;
+
+        // The daemon's feature flags, read as the Mac reads them: at start,
+        // on its change event (and after a lag or resync), and after a wake.
+        // Nothing on this window is gated yet: the Mac gates the Insights
+        // Skills tab and the Claude Desktop setup, and neither exists here.
+        _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
+        _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
+        _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
+        WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
+#if DEBUG
+        _flags.Changed += TraceFeatureFlags;
+#endif
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
@@ -178,6 +190,48 @@ public sealed partial class MainWindow : Window
         // The Monitor window's shell: toolbar row, tabs, panes, notices,
         // keyboard map and clocks (MainWindow.Shell.cs).
         InitializeShell();
+    }
+
+    /// <summary>
+    /// The daemon's feature flags (<see cref="FeatureFlagGate"/>). Every flag
+    /// reads off until a snapshot of this build arrives.
+    /// </summary>
+    private readonly FeatureFlagGate _flags;
+
+#if DEBUG
+    /// <summary>
+    /// Debug builds only, and only when <c>TC_DEBUG_FEATURE_FLAGS_LOG</c>
+    /// names a file: one line per snapshot the window holds, for checking the
+    /// reader against a real daemon on a Windows box. Nothing on screen.
+    /// </summary>
+    private void TraceFeatureFlags()
+    {
+        string? path = Environment.GetEnvironmentVariable("TC_DEBUG_FEATURE_FLAGS_LOG");
+        if (string.IsNullOrEmpty(path)) return;
+        FeatureFlagSnapshot? s = _flags.Current;
+        string line = s is null
+            ? "none"
+            : $"instance={s.InstanceId} generation={s.Generation} source={s.Source} "
+              + $"{FeatureFlagGate.InsightsSkills}={_flags.IsEnabled(FeatureFlagGate.InsightsSkills)} "
+              + $"unknown_flag={_flags.IsEnabled("no_such_flag")} flags=[{string.Join(",", System.Linq.Enumerable.Select(s.Flags, f => f.Key + ":" + f.Value.Enabled))}]";
+        try
+        {
+            System.IO.File.AppendAllText(path, $"{DateTime.UtcNow:O} host_generation={_host.ConnectionGeneration} {line}\n");
+        }
+        catch (Exception)
+        {
+        }
+    }
+#endif
+
+    /// <summary>A sample window asks no daemon for flags: every flag is off, as on the Mac.</summary>
+    private bool ReadsNoFlags()
+    {
+#if DEBUG
+        return _host.IsSample;
+#else
+        return false;
+#endif
     }
 
     /// <summary>Hide to a reachable tray; otherwise confirm before stopping the daemon.</summary>
@@ -919,48 +973,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnDeclineArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.DeclineArming,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}}}""")
-            .ConfigureAwait(true);
-    }
+    /// <summary>
+    /// "Not now" against the arming offer. The daemon silences the offer for
+    /// thirty days; the card leaves on its yes only (<see cref="ArmingOfferFlow"/>).
+    /// </summary>
+    private async void OnDeclineArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.DeclineAsync();
 
     /// <summary>
-    /// Arms the offered project.
+    /// Arms the offered project. No confirmation sheet: this card IS the
+    /// confirmation (owner, 2026-11-11). Locked from the press, a check on the
+    /// daemon's yes, and the card leaves after the hold; a refusal keeps it
+    /// with the core's line (<see cref="ArmingOfferFlow"/>).
     /// </summary>
-    /// <remarks>
-    /// No confirmation sheet: this card IS the confirmation. It names the
-    /// project, states the evidence, and asks the question outright, so a
-    /// second dialog saying the same thing would be a step rather than a
-    /// safeguard. Settings, where arming is picked from a list rather than
-    /// offered, does confirm.
-    /// </remarks>
-    private async void OnAcceptArming(object sender, RoutedEventArgs e)
-    {
-        string projectId = ViewModel.ArmingOfferProjectId;
-        if (projectId.Length == 0)
-        {
-            return;
-        }
-
-        ViewModel.SetArmingOffer(null);
-        await _host
-            .CallAsync(
-                DaemonProtocol.Methods.SetProjectMode,
-                $$"""{"project_id":{{JsonSerializer.Serialize(projectId)}},"mode":"auto_upload"}""")
-            .ConfigureAwait(true);
-        await ViewModel.RefreshAsync().ConfigureAwait(true);
-    }
+    private async void OnAcceptArming(object sender, RoutedEventArgs e) =>
+        await ViewModel.Arming.AcceptAsync();
 
     /// <summary>
     /// The button on the legacy invite migration notice.

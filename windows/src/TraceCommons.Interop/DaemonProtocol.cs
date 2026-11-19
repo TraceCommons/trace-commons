@@ -341,6 +341,12 @@ public static class DaemonProtocol
         public const string ResyncRequired = "resync_required";
 
         /// <summary>
+        /// The daemon's feature flags changed. Opt-in: sent only to a
+        /// subscriber that declares it (<c>OPT_IN_EVENTS</c>, ipc.rs:745).
+        /// </summary>
+        public const string FeatureFlagsChanged = "feature_flags_changed";
+
+        /// <summary>
         /// A scheduled preview finished and was delivered. Carries the same
         /// object <c>preview_request</c>'s result would -- see
         /// <see cref="PreviewCardOutcome"/> -- and is published only for a
@@ -702,9 +708,10 @@ public sealed class DaemonStatus
     public string? TenantId { get; set; }
 
     /// <summary>
-    /// The account the daemon's account-scoped answers belong to; null until
-    /// one is settled. Compared, never shown (AppModel.swift
-    /// <c>settleAutomaticGrantOwner</c>).
+    /// The account the daemon's account-scoped answers belong to: an opaque
+    /// hash (<c>status.account_scope</c>), null until one is settled. Compared,
+    /// never shown (AppModel.swift <c>settleAutomaticGrantOwner</c>); a change
+    /// is an account boundary (<see cref="AccountGeneration"/>).
     /// </summary>
     [JsonPropertyName("account_scope")]
     public string? AccountScope { get; set; }

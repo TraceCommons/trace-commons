@@ -92,7 +92,7 @@ public static class StartupRegistration
             new StartupRegistrationState(
                 true,
                 false,
-                "Startup was disabled in Windows. Turn Near.ai on in Settings > Apps > Startup."),
+                $"Startup was disabled in Windows. Turn {TraceCommons.Interop.Shell.MonitorWords.AppName} on in Settings > Apps > Startup."),
         StartupTaskState.DisabledByPolicy =>
             new StartupRegistrationState(
                 true,

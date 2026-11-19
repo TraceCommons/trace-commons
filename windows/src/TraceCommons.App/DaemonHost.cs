@@ -63,8 +63,26 @@ public sealed class DaemonHost : IAsyncDisposable
     /// </summary>
     public event Action? QueueChanged;
 
+    /// <summary>
+    /// The account consent writes are settled against, shared by every
+    /// window this host serves (checklist L2): a status read naming another
+    /// account, or an unenroll in Settings, voids presses made before it in
+    /// the main window too.
+    /// </summary>
+    public AccountGeneration Account { get; } = new();
+
     /// <summary>Raised on the UI thread when daemon status may have changed.</summary>
     public event Action? StatusChanged;
+
+    /// <summary>
+    /// <c>feature_flags_changed</c>: the window reads the snapshot again
+    /// (<see cref="FeatureFlagGate"/>). Declared on the subscription, since
+    /// the daemon sends it only to a subscriber that accepts it.
+    /// </summary>
+    public event Action? FeatureFlagsChanged;
+
+    /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
+    public event Action? Started;
 
     /// <summary>
     /// A model call was recorded (<c>inference_call_added</c>). The Private AI
@@ -248,7 +266,8 @@ public sealed class DaemonHost : IAsyncDisposable
 
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent);
+        _subscription = daemon.Subscribe(OnDaemonEvent, new[] { DaemonProtocol.Events.FeatureFlagsChanged });
+        Started?.Invoke();
     }
 
     /// <summary>
@@ -441,6 +460,10 @@ public sealed class DaemonHost : IAsyncDisposable
                     StatusChanged?.Invoke();
                     break;
 
+                case DaemonProtocol.Events.FeatureFlagsChanged:
+                    FeatureFlagsChanged?.Invoke();
+                    break;
+
                 case "inference_call_added":
                     InferenceCallAdded?.Invoke();
                     break;
@@ -462,11 +485,13 @@ public sealed class DaemonHost : IAsyncDisposable
                     Lagged?.Invoke(evt.SkippedCount);
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.ResyncRequired:
                     QueueChanged?.Invoke();
                     StatusChanged?.Invoke();
+                    FeatureFlagsChanged?.Invoke();
                     break;
 
                 case DaemonProtocol.Events.PreviewReady:
