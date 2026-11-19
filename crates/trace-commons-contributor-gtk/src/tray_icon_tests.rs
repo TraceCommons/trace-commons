@@ -561,10 +561,7 @@ fn a_celebrations_frames_are_the_strip_drawn_whole() {
                         .map(|(a, b)| a.abs_diff(*b))
                         .max()
                         .unwrap_or(0);
-                    assert!(
-                        worst <= 1,
-                        "{strip:?} {scheme:?} {px}px at {t}: off by {worst}"
-                    );
+                    assert!(worst <= 1, "{:?}", (strip, scheme, px, t, worst));
                 }
             }
         }
