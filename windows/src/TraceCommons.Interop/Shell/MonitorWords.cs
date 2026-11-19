@@ -106,7 +106,7 @@ public static class MonitorWords
 
     /// <summary>
     /// A folder's mode change the daemon refused (<c>settings.project_mode_failed</c>,
-    /// AppModel.swift:4749-4754): the line the arming offer shows after a refusal.
+    /// AppModel.swift:4752-4756): the line the arming offer shows after a refusal.
     /// </summary>
     public static string ProjectModeFailed => WordAt(ShellWordsJson.Value, "settings", "project_mode_failed");
 

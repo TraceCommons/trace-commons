@@ -73,13 +73,13 @@ public enum ArmingOfferStep
 /// The arming offer's card and its two answers, settled against the action
 /// pressed (checklist L1), as the Mac runs them
 /// (<c>acceptArmingOffer</c>, <c>declineArmingOffer</c>, <c>clearArmingOffer</c>,
-/// AppModel.swift:2219-2258 at origin/main 409066936).
+/// AppModel.swift:2222-2259 at origin/main 83016f544).
 /// </summary>
 /// <remarks>
 /// <para>
 /// The card leaves only on a confirmed reply. Enable locks from the press
 /// until the card goes; a refusal unlocks it and keeps the card, with the
-/// core's <c>project_mode_failed</c> line (AppModel.swift:4749-4754). A thrown
+/// core's <c>project_mode_failed</c> line (AppModel.swift:4752-4756). A thrown
 /// transport failure is a refusal, never an escape from an <c>async void</c>
 /// click handler.
 /// </para>
@@ -143,7 +143,7 @@ public sealed class ArmingOfferFlow
     /// <summary>The core's line after a refusal; empty otherwise.</summary>
     public string Refusal { get; private set; } = string.Empty;
 
-    /// <summary>Enable is pressed once: locked from the press until the card goes (ArmingOfferMotion.swift:31-34).</summary>
+    /// <summary>Enable is pressed once: locked from the press until the card goes (ArmingOfferMotion.swift:30-33).</summary>
     public bool EnableLocked => Step is not null;
 
     /// <summary>
@@ -168,7 +168,7 @@ public sealed class ArmingOfferFlow
 
     /// <summary>
     /// A fresh <c>arming_suggestion</c> answer: the card the person pressed
-    /// stays until its own exit (<c>offerAfterRefresh</c>, ArmingOfferMotion.swift:47-54).
+    /// stays until its own exit (<c>offerAfterRefresh</c>, ArmingOfferMotion.swift:45-52).
     /// A refusal line leaves once the offer it was about is gone.
     /// </summary>
     public void OnRefreshed(ArmingOffer? answered)
@@ -239,7 +239,7 @@ public sealed class ArmingOfferFlow
         Step = ArmingOfferStep.Armed;
         Changed?.Invoke();
         // The hold starts at the reply and the re-read runs beside it, as the
-        // Mac's do (AppModel.swift:2228-2235): a slow or failed re-read never
+        // Mac's do (AppModel.swift:2231-2236): a slow or failed re-read never
         // keeps the checked card up longer, and never strands it.
         Task reread = RefreshQuietlyAsync();
         try
@@ -280,7 +280,7 @@ public sealed class ArmingOfferFlow
 
     /// <summary>
     /// Not now: the daemon silences the offer for thirty days
-    /// (<c>declineArmingOffer</c>, AppModel.swift:2241-2246). The card leaves
+    /// (<c>declineArmingOffer</c>, AppModel.swift:2244-2249). The card leaves
     /// on the daemon's yes only; a refusal keeps it.
     /// </summary>
     public async Task DeclineAsync()

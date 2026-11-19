@@ -5,7 +5,7 @@ namespace TraceCommons.Interop;
 /// <summary>
 /// The account a consent write belongs to, as the Mac tracks it
 /// (<c>settleAutomaticGrantOwner</c> and <c>accountReadGeneration</c>,
-/// AppModel.swift:4698 at origin/main 409066936; the Linux port is
+/// AppModel.swift:1514 and :4701 at origin/main 83016f544; the Linux port is
 /// <c>GrantOwner</c>, crates/trace-commons-contributor-gtk/src/ui/consent_settings.rs:113).
 /// </summary>
 /// <remarks>

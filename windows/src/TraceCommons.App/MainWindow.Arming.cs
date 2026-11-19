@@ -10,9 +10,10 @@ namespace TraceCommons.App;
 
 /// <summary>
 /// The arming offer's mark: the bolt that turns to a check with a pulse once
-/// the daemon has armed the project (ArmingOfferMotion.swift, MonitorNotices.swift:880-884,
-/// PopoverNotice.swift:146-158 at origin/main 409066936). Every number is
-/// <see cref="ArmingOfferMotion"/>'s; the compositor draws the key frames at
+/// the daemon has armed the project (ArmingOfferMotion.swift, MonitorNotices.swift:349-356,
+/// PopoverNotice.swift:116-159 at origin/main 83016f544). Every number and
+/// every decision is <see cref="ArmingOfferMotion"/>'s, tested there; this
+/// file only applies them. The compositor draws the key frames at
 /// the display's rate, as SwiftUI does. Nothing runs with animations off
 /// (<c>UISettings.AnimationsEnabled</c>, read at each change, so a change in
 /// Settings applies at once) or while the window's clocks are stopped; the
@@ -32,11 +33,21 @@ public sealed partial class MainWindow
                 FinishArmingMotion();
             }
         };
+        SizeArmingMark();
         ApplyArmingMark(animate: false);
         ElementCompositionPreview.GetElementVisual(ArmingPulse).Opacity = 0;
     }
 
-    private bool ArmingMotionAllowed => _uiSettings.AnimationsEnabled && _clockGate.MayTick;
+    /// <summary>The Mac's notice coin: side, ring and glyph from <see cref="ArmingOfferMotion"/>, the only copy.</summary>
+    private void SizeArmingMark()
+    {
+        ArmingMark.Width = ArmingMark.Height = ArmingOfferMotion.MarkSide;
+        ArmingMarkRing.StrokeThickness = ArmingMarkRingOn.StrokeThickness = ArmingOfferMotion.MarkStroke;
+        ArmingPulse.StrokeThickness = ArmingOfferMotion.PulseStroke;
+        ArmingMarkBolt.FontSize = ArmingMarkCheck.FontSize = ArmingOfferMotion.GlyphSize;
+    }
+
+    private bool ArmingMotionAllowed => ArmingOfferMotion.MotionAllowed(_uiSettings.AnimationsEnabled, _clockGate.MayTick);
 
     /// <summary>
     /// Whether the card now leaving was armed, so it leaves on the arming
@@ -47,24 +58,19 @@ public sealed partial class MainWindow
 
     private void OnArmingChanged()
     {
-        ArmingOfferStep? before = _armingStepShown;
         ArmingOfferStep? after = ViewModel.Arming.Step;
-        if (ViewModel.Arming.Offer is null)
-        {
-            // The card leaves showing what it last showed (a SwiftUI removal
-            // draws the view's last state); the mark is reset for the next
-            // offer when one arrives.
-            return;
-        }
-
-        if (before == after)
+        // A leaving card keeps what it last showed (a SwiftUI removal draws
+        // the view's last state); the mark is reset for the next offer.
+        ArmingMarkPlan plan = ArmingOfferMotion.PlanMark(
+            _armingStepShown, after, ViewModel.Arming.Offer is not null, ArmingMotionAllowed);
+        if (!plan.Apply)
         {
             return;
         }
 
         _armingStepShown = after;
-        ApplyArmingMark(animate: ArmingMotionAllowed && after == ArmingOfferStep.Armed);
-        if (ArmingOfferMotion.Pulses(before, after, ArmingMotionAllowed))
+        ApplyArmingMark(plan.Animate);
+        if (plan.Pulse)
         {
             Pulse();
         }
@@ -94,7 +100,7 @@ public sealed partial class MainWindow
         Fade(ArmingMarkRing, !on);
         Visual glyph = ElementCompositionPreview.GetElementVisual(shown);
         CenterPoint(glyph, shown);
-        RunScale(glyph, ArmingOfferMotion.MarkProgress, ArmingOfferMotion.MarkSettling, from: 0.5);
+        RunScale(glyph, ArmingOfferMotion.GlyphScale, ArmingOfferMotion.MarkSettling);
     }
 
     private static void Fade(UIElement element, bool toShown)
@@ -181,7 +187,7 @@ public sealed partial class MainWindow
     /// <summary>
     /// When the armed offer was the last card, the whole stack fades on the
     /// exit spring rather than going at once (<see cref="ArmingOfferMotion.StackFadesOut"/>;
-    /// AppModel.swift:2252, MonitorNotices.swift:76). The card stays drawn
+    /// AppModel.swift:2255, MonitorNotices.swift:76). The card stays drawn
     /// under the fading stack and takes no input; returns false, changing
     /// nothing, for every other way the stack empties.
     /// </summary>
@@ -243,12 +249,12 @@ public sealed partial class MainWindow
         }
     }
 
-    private static void RunScale(Visual visual, Func<double, double> progress, double settling, double from)
+    private static void RunScale(Visual visual, Func<double, double> scaleAt, double settling)
     {
         Compositor compositor = visual.Compositor;
         CompositionEasingFunction linear = compositor.CreateLinearEasingFunction();
         Vector3KeyFrameAnimation animation = compositor.CreateVector3KeyFrameAnimation();
-        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(t => from + (1 - from) * progress(t), settling))
+        foreach ((double fraction, double value) in MonitorMotion.KeyFrames(scaleAt, settling))
         {
             animation.InsertKeyFrame((float)fraction, new Vector3((float)value, (float)value, 1), linear);
         }

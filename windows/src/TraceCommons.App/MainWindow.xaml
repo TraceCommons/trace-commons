@@ -707,15 +707,14 @@
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource TcCardCornerRadius}">
                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
-                                <!-- The notice coin (GlassNoticeMark, PopoverNotice.swift:146-158):
+                                <!-- The notice coin (GlassNoticeMark, PopoverNotice.swift:116-159):
                                      a bolt in the accent, turning to a check in the "on" colour once
                                      the daemon has armed the project, with a ring spreading from it
                                      (ArmingOfferMotion.swift). Decorative: hidden from automation,
                                      as the Mac's is (.accessibilityHidden). Driven from
-                                     MainWindow.Arming.cs. -->
+                                     MainWindow.Arming.cs, which also sizes it from ArmingOfferMotion. -->
                                 <Grid x:Name="ArmingMark"
                                       Grid.Column="0"
-                                      Width="30" Height="30"
                                       VerticalAlignment="Top"
                                       IsHitTestVisible="False"
                                       AutomationProperties.AccessibilityView="Raw">
@@ -723,16 +722,13 @@
                                     <!-- Two inks, crossfaded: the accent bolt, and the "on" check
                                          (ArmingOfferMotion.tint), so each keeps its theme's brush. -->
                                     <Ellipse x:Name="ArmingMarkRing"
-                                             Stroke="{ThemeResource TcAccentTextBrush}"
-                                             StrokeThickness="2" />
+                                             Stroke="{ThemeResource TcAccentTextBrush}" />
                                     <Ellipse x:Name="ArmingMarkRingOn"
                                              Stroke="{ThemeResource TcStatusOnBrush}"
-                                             StrokeThickness="2"
                                              Opacity="0" />
                                     <FontIcon x:Name="ArmingMarkBolt"
                                               FontFamily="{ThemeResource SymbolThemeFontFamily}"
                                               Glyph="&#xE945;"
-                                              FontSize="12"
                                               FontWeight="SemiBold"
                                               Foreground="{ThemeResource TcAccentTextBrush}"
                                               HorizontalAlignment="Center"
@@ -740,7 +736,6 @@
                                     <FontIcon x:Name="ArmingMarkCheck"
                                               FontFamily="{ThemeResource SymbolThemeFontFamily}"
                                               Glyph="&#xE73E;"
-                                              FontSize="12"
                                               FontWeight="SemiBold"
                                               Foreground="{ThemeResource TcStatusOnBrush}"
                                               HorizontalAlignment="Center"
@@ -751,8 +746,7 @@
                                          showed (box frames, 2026-11-19), while the check and
                                          ring, whose visuals SetMarkAtRest writes first, did. -->
                                     <Ellipse x:Name="ArmingPulse"
-                                             Stroke="{ThemeResource TcStatusOnBrush}"
-                                             StrokeThickness="2" />
+                                             Stroke="{ThemeResource TcStatusOnBrush}" />
                                 </Grid>
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <!-- Evidence first, question second: someone who reads
@@ -778,7 +772,7 @@
                                                 Click="OnAcceptArming" />
                                     </StackPanel>
                                     <!-- A refused Enable: the core's project_mode_failed
-                                         (AppModel.swift:4749-4754). Leaves with the offer it was
+                                         (AppModel.swift:4752-4756). Leaves with the offer it was
                                          about, or on the next confirmed Enable. -->
                                     <TextBlock Text="{x:Bind ViewModel.ArmingOfferRefusal, Mode=OneWay}"
                                                Visibility="{x:Bind ViewModel.HasArmingOfferRefusal, Mode=OneWay}"

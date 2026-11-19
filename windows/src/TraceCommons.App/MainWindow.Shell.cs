@@ -1079,7 +1079,7 @@ public sealed partial class MainWindow
         card.IsHitTestVisible = false;
         Canvas.SetZIndex(card, 0);
         // An armed offer leaves on its own spring (ArmingOfferMotion.exit,
-        // ArmingOfferMotion.swift:37-39); every other card on the stack's.
+        // ArmingOfferMotion.swift:35-38); every other card on the stack's.
         bool armedExit = card == ArmingOfferCard && ArmingExitPending();
         Animate(card, "Opacity", armedExit ? ArmingOfferMotion.ExitOpacity : NoticeMotion.FadeOut, () =>
         {

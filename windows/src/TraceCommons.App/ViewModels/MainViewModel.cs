@@ -632,7 +632,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public string ArmingOfferDecline => ArmingCopy?.Decline ?? string.Empty;
 
-    /// <summary>Enable is pressed once (ArmingOfferMotion.swift:31-34).</summary>
+    /// <summary>Enable is pressed once (ArmingOfferMotion.swift:30-33).</summary>
     public bool ArmingOfferEnableEnabled => !Arming.EnableLocked && !Arming.Leaving;
 
     public bool ArmingOfferDeclineEnabled => !Arming.DeclineLocked && !Arming.Leaving;

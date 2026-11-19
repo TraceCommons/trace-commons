@@ -9,8 +9,8 @@ namespace TraceCommons.Interop.Tests;
 
 /// <summary>
 /// The arming offer's answers, settled against the press that sent them
-/// (checklist L1, L3), as the Mac runs them: AppModel.swift:2219-2258 at
-/// origin/main 409066936 and ArmingOfferMotion.swift:16-54.
+/// (checklist L1, L3), as the Mac runs them: AppModel.swift:2222-2259 at
+/// origin/main 83016f544 and ArmingOfferMotion.swift:16-52.
 /// </summary>
 /// <remarks>
 /// Reply frames are the daemon's own shapes: <c>handle_set_project_mode</c>'s
@@ -420,7 +420,7 @@ public class ArmingOfferFlowTests
 
     /// <summary>
     /// The line is the core's, as the Mac shows it
-    /// (AppModel.swift:4749-4754; shell_words_copy.rs <c>project_mode_failed</c>).
+    /// (AppModel.swift:4752-4756; shell_words_copy.rs <c>project_mode_failed</c>).
     /// </summary>
     [Fact]
     public void TheRefusalLineIsTheCoresProjectModeFailed()
