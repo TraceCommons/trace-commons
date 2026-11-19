@@ -805,6 +805,24 @@ impl Shell {
                     parts.push(Some((*notice, frame, card, close, shown)));
                 }
                 let stack = notices::stack(&open);
+                // The front card a new one replaces fades where it is, under
+                // it (`GlassPopoverStack.arrival`'s opacity removal), as its
+                // slide last drew it, closed or gone with its cause.
+                let replaced = (stack.front != last_front.get()
+                    && started.get()
+                    && crate::ui::glass_motion::animations_enabled())
+                .then(|| last_front.get())
+                .flatten()
+                .and_then(|index| cards.get(index))
+                .and_then(|(_, _, _, card, _)| card.upgrade())
+                // A card that faded itself out (the arming offer's exit)
+                // has nothing left to fade.
+                .filter(|card| card.opacity() >= 1.0)
+                .and_then(|card| {
+                    card.ancestor(crate::ui::popover_stack::Slide::static_type())
+                        .and_downcast::<crate::ui::popover_stack::Slide>()
+                })
+                .and_then(|slide| slide.last_drawn());
                 let mut front = None;
                 for (index, part) in parts.into_iter().enumerate() {
                     let Some((notice, frame, card, close, shown)) = part else {
@@ -841,7 +859,7 @@ impl Shell {
                         let notice = *notice;
                         let fresh = !seen.borrow().contains(&(notice, card_text(&card)));
                         if started.get() && crate::ui::glass_motion::animations_enabled() {
-                            slide.arrive(fresh, false);
+                            slide.arrive_over(fresh, false, replaced.clone());
                         } else {
                             slide.settle();
                         }
@@ -2348,6 +2366,16 @@ mod tests {
             .sum()
     }
 
+    /// The notice stack's plates widget.
+    fn plates_widget(shell: &Shell) -> crate::ui::popover_stack::Plates {
+        let mut found = Vec::new();
+        descendants(notice_scroller(shell).upcast_ref(), &mut found);
+        found
+            .into_iter()
+            .find_map(|widget| widget.downcast::<crate::ui::popover_stack::Plates>().ok())
+            .expect("plates")
+    }
+
     /// The card a slot's frame moves in.
     fn slide(shell: &Shell, notice: Notice) -> crate::ui::popover_stack::Slide {
         slot(shell, notice)
@@ -2393,25 +2421,57 @@ mod tests {
         let slid = Cell::new(false);
         pump_until(|| {
             slid.set(slid.get() || health.offset() < -1.0);
-            slid.get() && health.offset() == 0.0 && health.opacity() == 1.0
+            slid.get() && health.offset() == 0.0 && health.card_opacity() == 1.0
         });
         assert!(slid.get(), "a new card did not slide in");
-        assert_eq!((health.offset(), health.opacity()), (0.0, 1.0));
+        assert_eq!((health.offset(), health.card_opacity()), (0.0, 1.0));
 
-        // A newer card in front of it slides in too; closing that one
-        // reveals the Health card, which fades where it is.
+        // A newer card in front of it slides in too, over the Health card,
+        // which fades where it is beneath it rather than going at once.
         card(Notice::Undo).set_visible(true);
-        pump_until(|| slide(shell, Notice::Undo).offset() == 0.0);
+        let undo = slide(shell, Notice::Undo);
+        // The plate the Health card now makes peeks out on the spring.
+        assert!(plates_widget(shell).moving(), "the plate came at once");
+        let covered = Cell::new(1.0f64);
+        let seen_covered = Cell::new(false);
+        pump_until(|| {
+            let now = undo.covered_opacity();
+            if now > 0.0 && now < 1.0 {
+                seen_covered.set(true);
+                assert!(
+                    now <= covered.get() + 1e-9,
+                    "the covered card faded back in"
+                );
+                covered.set(now);
+            }
+            undo.offset() == 0.0 && undo.covered_opacity() == 0.0
+        });
+        assert!(seen_covered.get(), "the covered card was not drawn fading");
+        pump_until(|| !plates_widget(shell).moving());
+        assert_eq!(plates(shell), 1);
+        // Closing that one reveals the Health card, which fades in where
+        // it is, over the closed card fading out.
         card(Notice::Undo).set_visible(false);
         let faded = Cell::new(false);
         let moved = Cell::new(false);
         pump_until(|| {
-            faded.set(faded.get() || health.opacity() < 1.0);
+            faded.set(faded.get() || health.card_opacity() < 1.0);
             moved.set(moved.get() || health.offset() != 0.0);
-            faded.get() && health.opacity() == 1.0
+            faded.get() && health.card_opacity() == 1.0
         });
         assert!(faded.get(), "a revealed card did not fade in");
         assert!(!moved.get(), "a revealed card slid");
+        assert_eq!(health.covered_opacity(), 0.0);
+        // That close faded the Undo card out beneath it too.
+        card(Notice::Undo).set_visible(true);
+        pump_until(|| slide(shell, Notice::Undo).offset() == 0.0 && undo.covered_opacity() == 0.0);
+        card(Notice::Undo).set_visible(false);
+        pump();
+        assert!(
+            health.covered_opacity() > 0.0,
+            "the closed card went at once"
+        );
+        pump_until(|| health.covered_opacity() == 0.0);
 
         // Under reduced motion a new card is there at once.
         settings.set_gtk_enable_animations(false);
@@ -2419,7 +2479,9 @@ mod tests {
         card(Notice::Consent).set_visible(true);
         pump();
         let consent = slide(shell, Notice::Consent);
-        assert_eq!((consent.offset(), consent.opacity()), (0.0, 1.0));
+        assert_eq!((consent.offset(), consent.card_opacity()), (0.0, 1.0));
+        assert_eq!(consent.covered_opacity(), 0.0);
+        settings.set_gtk_enable_animations(true);
     }
 
     /// The Mac's placement (owner decision 1, chosen again 2026-11-17):
