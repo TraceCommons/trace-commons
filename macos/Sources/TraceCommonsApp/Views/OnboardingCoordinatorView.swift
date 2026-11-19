@@ -140,7 +140,7 @@ private struct FirstRunSteps: View {
         .task(id: model.status.loggedIn ? [model.status.tenantID, model.status.accountScope] : []) {
             recordEnrolment()
             guard model.status.loggedIn, !runner.isCommitting, runner.state.enrolledInvite == "",
-                  let session = await model.firstRunAccountSession(),
+                  let session = await model.resumedFirstRunAccountSession(),
                   !Task.isCancelled, !runner.isCommitting else { return }
             runner.restoreConnectedNearAI(session)
         }

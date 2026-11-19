@@ -4861,6 +4861,22 @@ extension AppModel: FirstRunDaemon {
         return nil
     }
 
+    /// The daemon can return before its background renewal finishes.
+    func resumedFirstRunAccountSession() async -> NativeAccountSession? {
+        let enrollment = completionAccountScope
+        let deadline = ContinuousClock.now + .seconds(30)
+        while !Task.isCancelled, completionAccountScope == enrollment {
+            guard let session = await firstRunAccountSession(),
+                  !Task.isCancelled, completionAccountScope == enrollment else { return nil }
+            if !session.signsInWithNearAI || session.signedIn == true || session.renewal != "renewing" {
+                return session
+            }
+            guard ContinuousClock.now < deadline else { return nil }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return nil
+    }
+
     func signInNearAI() async -> Bool {
         guard let account = await firstRunAccountSession() else { return false }
         if account.signsInWithNearAI {

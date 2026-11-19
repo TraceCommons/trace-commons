@@ -8,12 +8,19 @@ import XCTest
 /// Answers each method with a scripted reply, or a transport-shaped error.
 private final class ScriptedDaemon: DaemonCalling, @unchecked Sendable {
     private let lock = NSLock()
-    private var answers: [String: String]
-    init(_ answers: [String: String]) { self.answers = answers }
+    private var answers: [String: [String]]
+    init(_ answers: [String: String], sequences: [String: [String]] = [:]) {
+        self.answers = answers.mapValues { [$0] }
+        self.answers.merge(sequences, uniquingKeysWith: { _, sequence in sequence })
+    }
     func call(_ method: String, params paramsJSON: String) -> String {
         lock.lock()
         defer { lock.unlock() }
-        return answers[method] ?? #"{"error":{"code":"unknown_method","message":"unscripted"}}"#
+        guard let answer = answers[method]?.first else {
+            return #"{"error":{"code":"unknown_method","message":"unscripted"}}"#
+        }
+        if let count = answers[method]?.count, count > 1 { answers[method]?.removeFirst() }
+        return answer
     }
     func searchOriginal(entryID: String, needle: String) -> Int? { nil }
     func openPreview(entryID: String) throws -> TCPreview { throw TCDaemon.TCError.daemonGone }
@@ -27,6 +34,21 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         let model = AppModel()
         model.setClientForTesting(DaemonClient(daemon: ScriptedDaemon(answers)))
         return model
+    }
+
+    func test_resumedSetupWaitsForBackgroundAccountRenewal() async {
+        let model = AppModel()
+        let daemon = ScriptedDaemon(
+            ["hello": #"{"result":{"methods":["account_session_status"]}}"#],
+            sequences: ["account_session_status": [
+                #"{"result":{"signed_in":false,"sign_in":"near_ai","renewal":"renewing"}}"#,
+                #"{"result":{"signed_in":true,"sign_in":"near_ai"}}"#,
+            ]])
+        model.setClientForTesting(DaemonClient(daemon: daemon))
+
+        let session = await model.resumedFirstRunAccountSession()
+
+        XCTAssertEqual(session?.signedIn, true)
     }
 
     func test_signInReusesTheConnectedNearAIAccount() async {
