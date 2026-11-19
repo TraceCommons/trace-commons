@@ -50,6 +50,25 @@ public sealed class TrayIcon : IDisposable
     /// <summary>Raised when the contributor asks for the window.</summary>
     public event Action? OpenRequested;
 
+    /// <summary>
+    /// A click on the icon itself: the flyout opens (W13; the Mac's menu-bar
+    /// item opens its panel). Without a listener, the click opens the window
+    /// as it always did.
+    /// </summary>
+    public event Action<(int X, int Y)>? FlyoutRequested;
+
+    /// <summary>The menu's header line, the tray's own sentence of what is owed.</summary>
+    public string HeaderLine => _model.MenuHeader;
+
+    /// <summary>The menu's week line.</summary>
+    public string WeekLine => _menu.WeekText;
+
+    /// <summary>The Private AI state line, when the menu shows one.</summary>
+    public string? PrivateAILine => _privateInference.Available ? _privateInference.StateText : null;
+
+    /// <summary>The drawn mark's tooltip clause from the core, while a mark is drawn.</summary>
+    public string? MarkTooltip => _markWords?.Tooltip;
+
     public event Action? ReviewRequested;
 
     public event Action? SettingsRequested;
@@ -120,6 +139,15 @@ public sealed class TrayIcon : IDisposable
     private ushort _classAtom;
     private bool _added;
     private TrayModel _model = TrayModel.Compute(null, isPaused: false, isHealthy: true);
+
+    /// <summary>What the icon draws: the Mac's menu-bar strip without its bars (W12).</summary>
+    private Strip _strip = Strip.Loading;
+
+    /// <summary>The core's words for the drawn mark, while one is drawn.</summary>
+    private StripMarkWords? _markWords;
+
+    /// <summary>Seconds into a credit arrival's celebration, or null at rest.</summary>
+    private double? _burst;
     private TrayMenuModel _menu = TrayMenuModel.Compute(
         new DaemonStatus(),
         Array.Empty<QueueEntry>(),
@@ -184,26 +212,81 @@ public sealed class TrayIcon : IDisposable
     /// The menu model has already reduced entries to daemon-derived project
     /// labels, counts and sizes. It has no path or trace-content field.
     /// </remarks>
-    public void Update(TrayMenuModel menu, bool isHealthy)
+    public void Update(TrayMenuModel menu, bool isHealthy, Strip strip, StripMarkWords? markWords)
     {
         ArgumentNullException.ThrowIfNull(menu);
 
         TrayModel model = TrayModel.Compute(menu.DecisionsOwed, menu.IsPaused, isHealthy);
         _model = model;
         _menu = menu;
+        _strip = strip;
+        _markWords = markWords;
 
         if (!_added)
         {
             return;
         }
 
+        Redraw(withTip: true);
+    }
+
+    /// <summary>The strip alone, as when the status could not be read: the menu keeps its last model.</summary>
+    public void ShowStrip(Strip strip, StripMarkWords? markWords)
+    {
+        _strip = strip;
+        _markWords = markWords;
+        if (_added)
+        {
+            Redraw(withTip: true);
+        }
+    }
+
+    /// <summary>
+    /// Draws the icon <paramref name="elapsed"/> seconds into a credit
+    /// arrival, or at rest for null (<c>GlassMenuBarStrip.creditBurst</c>).
+    /// The tooltip does not change: a credit arrival adds no words.
+    /// </summary>
+    public void ShowCreditFrame(double? elapsed)
+    {
+        if (_burst == elapsed)
+        {
+            return;
+        }
+
+        _burst = elapsed;
+        if (_added)
+        {
+            Redraw(withTip: false);
+        }
+    }
+
+    /// <summary>
+    /// The tooltip: the shell's sentence, then the drawn mark's sentence
+    /// from the core, whole (<c>MenuPanelStatus.markAccessibility</c>,
+    /// MenuBarGlassPanel.swift:874-877). The tooltip is also what a screen
+    /// reader reads for a tray icon.
+    /// </summary>
+    private string Tooltip =>
+        Clamp(TrayStrip.MarkAccessibility(_model.Tooltip, _markWords), TrayModel.MaxTooltipLength);
+
+    /// <summary>A system setting changed (<see cref="SystemSettingWatch"/>): the mark is drawn again in the taskbar's ink.</summary>
+    public void RedrawForSettings()
+    {
+        if (_added)
+        {
+            Redraw(withTip: false);
+        }
+    }
+
+    private void Redraw(bool withTip)
+    {
         IntPtr previous = _hIcon;
-        _hIcon = CreateMarkIcon(model.State);
+        _hIcon = CreateMarkIcon();
 
         var data = NewData();
-        data.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        data.uFlags = withTip ? NIF_ICON | NIF_TIP | NIF_SHOWTIP : NIF_ICON;
         data.hIcon = _hIcon;
-        data.szTip = model.Tooltip;
+        data.szTip = withTip ? Tooltip : string.Empty;
         Shell_NotifyIcon(NIM_MODIFY, ref data);
 
         // Destroyed only after the shell has been handed the replacement, so
@@ -340,13 +423,13 @@ public sealed class TrayIcon : IDisposable
 
     private bool AddIcon()
     {
-        _hIcon = CreateMarkIcon(_model.State);
+        _hIcon = CreateMarkIcon();
 
         var data = NewData();
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
         data.uCallbackMessage = CallbackMessage;
         data.hIcon = _hIcon;
-        data.szTip = _model.Tooltip;
+        data.szTip = Tooltip;
 
         if (!Shell_NotifyIcon(NIM_ADD, ref data))
         {
@@ -386,18 +469,32 @@ public sealed class TrayIcon : IDisposable
             {
                 case NIN_SELECT:
                 case NIN_KEYSELECT:
+                    // A click on the icon opens the flyout, which only
+                    // re-houses what the tray says and leads into the app.
+                    // The icon's anchor, from wParam: after a keyboard select
+                    // the cursor can be anywhere (checklist M3).
+                    if (FlyoutRequested is { } flyout)
+                    {
+                        flyout(TrayAnchor.From(wParam.ToInt64(), ToolWindows.Cursor()));
+                    }
+                    else
+                    {
+                        OpenRequested?.Invoke();
+                    }
+
+                    return IntPtr.Zero;
+
                 case NIN_BALLOONUSERCLICK:
-                    // A click on the icon or on the digest balloon. The only
-                    // thing either does is raise the window.
+                    // A click on the digest balloon. The only thing it does
+                    // is raise the window.
                     OpenRequested?.Invoke();
                     return IntPtr.Zero;
 
                 case WM_CONTEXTMENU:
                     // Cursor position is in wParam under version 4, in screen
                     // coordinates already.
-                    ShowMenu(
-                        (short)(wParam.ToInt64() & 0xFFFF),
-                        (short)(wParam.ToInt64() >> 16 & 0xFFFF));
+                    (int x, int y) = TrayAnchor.From(wParam.ToInt64(), ToolWindows.Cursor());
+                    ShowMenu(x, y);
                     return IntPtr.Zero;
             }
         }
@@ -611,11 +708,11 @@ public sealed class TrayIcon : IDisposable
     /// an HICON.
     /// </summary>
     /// <remarks>
-    /// The pixels come from <see cref="MarkRaster"/>, which is in the
+    /// The pixels come from <see cref="TrayStrip"/>, which is in the
     /// platform-neutral assembly and is unit-tested; everything here is the
     /// GDI ceremony of getting a byte array into an icon handle.
     /// </remarks>
-    private IntPtr CreateMarkIcon(TrayIconState state)
+    private IntPtr CreateMarkIcon()
     {
         int dpi = _hwnd != IntPtr.Zero ? (int)GetDpiForWindow(_hwnd) : 96;
         int size = GetSystemMetricsForDpi(SM_CXSMICON, (uint)Math.Max(96, dpi));
@@ -624,40 +721,14 @@ public sealed class TrayIcon : IDisposable
             size = 16;
         }
 
-        bool lightTaskbar = IsTaskbarLight();
-
-        // Single ink, following the taskbar rather than the app window.
-        // Windows does not recolour a tray icon the way macOS recolours a
-        // template image, so the app has to pick, and the surface it sits on
-        // is the taskbar. tc_ink for that scheme, from the same palette
-        // DesignSystem.xaml holds.
-        uint ink = lightTaskbar ? 0xFF20241FU : 0xFFE8EAE3U;
-
-        uint? dot = state switch
-        {
-            // The brand accent (TcAccentBrush in BrandTokens.xaml, generated
-            // from design-tokens/glass.tokens.json; BrandTokensTests holds
-            // these literals to it): something is waiting for you. The spec
-            // asks for a numeric badge here; a 16px tray icon cannot carry
-            // two legible digits, so the count lives in the tooltip and in
-            // the menu header, both of which a screen reader can also read,
-            // and the icon carries only "there is something".
-            TrayIconState.Attention => lightTaskbar ? 0xFF0558B6U : 0xFF7EBCFFU,
-
-            // The spec says an amber dot. This design system has no amber;
-            // statusOutside (TcStatusOutsideBrush, which the coral keys now
-            // carry) is its "something went wrong" ink, and inventing a
-            // token for one 3px dot would put a colour in the product that
-            // no other surface uses.
-            TrayIconState.Unhealthy => lightTaskbar ? 0xFFD0342CU : 0xFFFF6B6BU,
-
-            // Paused and idle carry no dot. Paused is "struck through" in the
-            // spec; a strike at 16px is a smear, and the tooltip says
-            // "Paused." in words.
-            _ => null,
-        };
-
-        byte[] pixels = MarkRaster.Render(size, ink, dot);
+        // The Mac's strip in the logo kit's single ink for the bar it sits
+        // on: white on a dark taskbar, black on a light one (menuItemMark),
+        // its badge cut from that ink and never red, the news ring and halo
+        // in purpleText, the attention capsule in menuModeNever. Every
+        // colour is a generated token (HomeTrayInks); the taskbar, not the
+        // app window, decides which appearance, as Windows does not recolour
+        // a tray icon.
+        byte[] pixels = TrayStrip.Render(_strip, darkTaskbar: !IsTaskbarLight(), size, _burst).ToBgra();
         return IconFromPixels(pixels, size);
     }
 
@@ -670,7 +741,10 @@ public sealed class TrayIcon : IDisposable
     /// follows the system one. Absent or unreadable means the Windows
     /// default, which is a dark taskbar.
     /// </remarks>
-    private static bool IsTaskbarLight()
+    internal static bool IsTaskbarLight() => SystemSettingWatch.TaskbarLight;
+
+    /// <summary>The registry read behind <see cref="IsTaskbarLight"/>, made once and on each setting change (<see cref="SystemSettingWatch"/>).</summary>
+    internal static bool ReadTaskbarLight()
     {
         try
         {
@@ -694,14 +768,14 @@ public sealed class TrayIcon : IDisposable
     /// <c>CreateIconIndirect</c> still demands an <c>hbmMask</c>, and a
     /// non-zero one would punch holes through the anti-aliasing.
     /// </remarks>
-    private static IntPtr IconFromPixels(byte[] pixels, int size)
+    internal static IntPtr IconFromPixels(byte[] pixels, int size)
     {
         var header = new BITMAPINFOHEADER
         {
             biSize = Marshal.SizeOf<BITMAPINFOHEADER>(),
             biWidth = size,
 
-            // Negative: top-down, matching the order MarkRaster writes rows
+            // Negative: top-down, matching the order PixelCanvas writes rows
             // in. A positive height would render the mark upside down, which
             // on a symmetric-looking mark is the kind of bug that ships.
             biHeight = -size,
