@@ -20,6 +20,7 @@ use gtk::prelude::*;
 use trace_commons_contributor::preview_copy::{monitor_screens_copy, monitor_traces_copy};
 
 use super::App;
+use super::glass_switch::GlassSwitch;
 use super::monitor::glyph;
 use super::monitor::graph_footer::GraphFooter;
 use super::monitor::traces_tree::{FolderNode, ProjectMode, TracesTree};
@@ -50,7 +51,7 @@ pub struct Surfaces {
 /// session is known to support a rail, and kept hidden where it does not.
 pub struct RailSwitch {
     pub card: gtk::Box,
-    pub switch: gtk::Switch,
+    pub switch: GlassSwitch,
 }
 
 pub fn rail_switch() -> RailSwitch {
@@ -71,7 +72,10 @@ pub fn rail_switch() -> RailSwitch {
         .hexpand(true)
         .build();
     label.add_css_class("tc-body");
-    let switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+    // A glass switch, so its knob slides on the Mac's easeOut 0.22 s.
+    let switch = GlassSwitch::new();
+    switch.set_halign(gtk::Align::End);
+    switch.set_valign(gtk::Align::Center);
     switch.update_property(&[gtk::accessible::Property::Label(rail.setting_toggle)]);
     row.append(&label);
     row.append(&switch);

@@ -441,6 +441,7 @@ mod tests {
                 "monitor/traces_list.rs",
                 include_str!("monitor/traces_list.rs"),
             ),
+            ("edge_surfaces.rs", include_str!("edge_surfaces.rs")),
         ] {
             assert!(
                 !source.contains("gtk::Switch"),

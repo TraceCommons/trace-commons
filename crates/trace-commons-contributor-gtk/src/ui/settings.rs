@@ -128,7 +128,7 @@ pub struct SettingsView {
     /// campaign card never shows.
     pub promotions_switch: GlassSwitch,
     /// The credit-arrival switch (`GeneralSection.creditIconAnimationCard`).
-    pub credit_icon_switch: gtk::Switch,
+    pub credit_icon_switch: GlassSwitch,
     /// The edge rail's switch (`ui::edge_surfaces`).
     pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
     /// Scrolls Settings to a section, for the edge rail's and the
@@ -837,7 +837,7 @@ impl SettingsView {
 /// Settings' credit-arrival card: the core's heading, the switch and the
 /// line under it (`GeneralSection.creditIconAnimationCard`), on unless the
 /// person turned it off.
-pub(crate) fn credit_icon_card() -> (gtk::Box, gtk::Switch) {
+pub(crate) fn credit_icon_card() -> (gtk::Box, GlassSwitch) {
     let words = &monitor_screens_copy().home_history;
     let card = style::card(gtk::Orientation::Vertical, space::S);
     let heading = gtk::Label::builder()
@@ -854,11 +854,11 @@ pub(crate) fn credit_icon_card() -> (gtk::Box, gtk::Switch) {
         .wrap(true)
         .build();
     label.add_css_class("tc-body");
-    let switch = gtk::Switch::builder()
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Center)
-        .active(crate::home_cards::HomePrefs::load().animates_credit_icon)
-        .build();
+    // A glass switch, so its knob slides on the Mac's easeOut 0.22 s.
+    let switch =
+        GlassSwitch::with_active(crate::home_cards::HomePrefs::load().animates_credit_icon);
+    switch.set_halign(gtk::Align::End);
+    switch.set_valign(gtk::Align::Center);
     switch.update_property(&[gtk::accessible::Property::Label(
         words.credit_icon_animation_toggle,
     )]);
