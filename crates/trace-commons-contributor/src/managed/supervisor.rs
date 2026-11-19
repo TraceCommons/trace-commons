@@ -255,7 +255,9 @@ async fn run_native(
             ConnectionKind::ApiKey => {
                 let key = SecretStore::new(store).get(account.id)?;
                 match row.tool {
-                    super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
+                    super::ToolId::Opencode | super::ToolId::RedTeam => {
+                        return Err(ManagedError::InvalidRequest.into());
+                    }
                     super::ToolId::Claude => {
                         command.env("ANTHROPIC_API_KEY", key.expose());
                     }
@@ -766,7 +768,9 @@ fn near_ai_route(
         .filter(|id| models.iter().any(|m| m.id == *id))
         .unwrap_or(default);
     match tool {
-        super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        super::ToolId::Opencode | super::ToolId::RedTeam => {
+            return Err(ManagedError::InvalidRequest);
+        }
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))

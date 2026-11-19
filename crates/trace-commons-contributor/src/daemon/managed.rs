@@ -301,8 +301,13 @@ impl ManagedService {
     /// Prepare the session a `managed_launch_prepare`,
     /// `managed_session_start_again` or `managed_session_resume` request
     /// resolves to.
-    fn prepare_launch(&mut self, request: &Request, sign_in: bool) -> Result<Value, ManagedError> {
-        match self.resolve_launch(request, sign_in, true)? {
+    fn prepare_launch(
+        &mut self,
+        request: &Request,
+        sign_in: bool,
+        red_team: bool,
+    ) -> Result<Value, ManagedError> {
+        match self.resolve_launch(request, sign_in, red_team, true)? {
             Resolved::Replayed(existing) => Ok(json!(existing)),
             Resolved::Launch(launch, account, again_of) => Ok(json!(
                 self.sessions.prepare_again(launch, &account, again_of)?
@@ -318,6 +323,7 @@ impl ManagedService {
         &self,
         request: &Request,
         sign_in: bool,
+        red_team: bool,
         verify: bool,
     ) -> Result<Resolved, ManagedError> {
         match request.method.as_str() {
@@ -334,7 +340,26 @@ impl ManagedService {
                 if p.resume_of.is_some() {
                     return Err(ManagedError::InvalidRequest);
                 }
+                if p.tool == ToolId::RedTeam {
+                    if !red_team {
+                        return Err(ManagedError::RedTeamUnavailable);
+                    }
+                    if !matches!(
+                        p.connection,
+                        ConnectionKind::NearAiSignIn | ConnectionKind::NearAi
+                    ) {
+                        return Err(ManagedError::RedTeamNeedsNearAi);
+                    }
+                }
                 let account = self.launch_account(&p, sign_in)?;
+                if p.tool == ToolId::RedTeam
+                    && !matches!(
+                        account.connection,
+                        ConnectionKind::NearAiSignIn | ConnectionKind::NearAi
+                    )
+                {
+                    return Err(ManagedError::RedTeamNeedsNearAi);
+                }
                 let generation = self.accounts.generation(p.tool);
                 if p.expected_generation != generation {
                     return Err(ManagedError::Conflict);
@@ -369,6 +394,17 @@ impl ManagedService {
                 if let Some(existing) = self.sessions.replayed(&again) {
                     return Ok(Resolved::Replayed(existing));
                 }
+                if again.tool == ToolId::RedTeam {
+                    if !red_team {
+                        return Err(ManagedError::RedTeamUnavailable);
+                    }
+                    if !matches!(
+                        again.connection,
+                        ConnectionKind::NearAiSignIn | ConnectionKind::NearAi
+                    ) {
+                        return Err(ManagedError::RedTeamNeedsNearAi);
+                    }
+                }
                 if again.resume_of.is_some_and(|root| {
                     !self.knows_conversation(again.tool, again.account_id, root)
                 }) {
@@ -389,8 +425,8 @@ impl ManagedService {
     /// sign-in: it passes every check [`Self::prepare_launch`] makes and is
     /// not a replay. Commits nothing; the request is resolved and checked
     /// again when it is handled.
-    fn prepares_on_sign_in(&self, request: &Request, sign_in: bool) -> bool {
-        match self.resolve_launch(request, sign_in, false) {
+    fn prepares_on_sign_in(&self, request: &Request, sign_in: bool, red_team: bool) -> bool {
+        match self.resolve_launch(request, sign_in, red_team, false) {
             Ok(Resolved::Launch(launch, account, _)) => {
                 launch.connection == ConnectionKind::NearAiSignIn
                     && self.sessions.would_prepare_new(launch, &account)
@@ -454,6 +490,7 @@ impl ManagedService {
                             .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
                     })
             }
+            ToolId::RedTeam => false,
         }
     }
 
@@ -532,11 +569,22 @@ impl ManagedService {
     /// `sign_in` says only whether the daemon holds a NEAR AI sign-in;
     /// `terminal` is the terminal the settings name, and whether the person
     /// chose it.
+    #[cfg(test)]
     fn handle(
         &mut self,
         request: &Request,
         sign_in: bool,
         terminal: TerminalChoice,
+    ) -> Result<Value, ManagedError> {
+        self.handle_with_red_team(request, sign_in, terminal, false)
+    }
+
+    fn handle_with_red_team(
+        &mut self,
+        request: &Request,
+        sign_in: bool,
+        terminal: TerminalChoice,
+        red_team: bool,
     ) -> Result<Value, ManagedError> {
         let choice = terminal.setting;
         match request.method.as_str() {
@@ -544,10 +592,11 @@ impl ManagedService {
                 let mut sessions = self.sessions.views()?;
                 let roots = self.sessions.resume_roots();
                 for view in &mut sessions {
-                    view.can_start_again = self.can_start_again(view, sign_in);
+                    view.can_start_again = self.can_start_again(view, sign_in)
+                        && (view.tool != ToolId::RedTeam || red_team);
                     view.can_resume = self.can_resume(view, &roots);
                 }
-                let saved = [
+                let mut saved = [
                     self.accounts.selection(ToolId::Claude),
                     self.accounts.selection(ToolId::Codex),
                     self.accounts.selection(ToolId::Opencode),
@@ -555,8 +604,24 @@ impl ManagedService {
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
-                let defaults =
-                    signin::defaults(saved, sign_in, |tool| self.accounts.generation(tool));
+                if red_team {
+                    if let Some(sel) = self.accounts.selection(ToolId::RedTeam) {
+                        saved.push(sel);
+                    }
+                }
+                let defaults = signin::defaults_for(saved, sign_in, red_team, |tool| {
+                    self.accounts.generation(tool)
+                });
+                let mut generations = serde_json::Map::new();
+                generations.insert("claude".into(), json!(self.accounts.generation(ToolId::Claude)));
+                generations.insert("codex".into(), json!(self.accounts.generation(ToolId::Codex)));
+                generations.insert("opencode".into(), json!(self.accounts.generation(ToolId::Opencode)));
+                if red_team {
+                    generations.insert(
+                        "red_team".into(),
+                        json!(self.accounts.generation(ToolId::RedTeam)),
+                    );
+                }
                 // The offered apps found here, for a shell's picker.
                 let installed = self.installed_terminals(None);
                 let choices: Vec<Value> = installed
@@ -582,7 +647,7 @@ impl ManagedService {
                 let destination = terminal::destination(choice);
                 let opens_in = launch_destination(terminal.herdr, destination);
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools(),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries(sign_in),"generations":{"claude":self.accounts.generation(ToolId::Claude),"codex":self.accounts.generation(ToolId::Codex),"opencode":self.accounts.generation(ToolId::Opencode)},"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, false),"cli_options":crate::managed::options::snapshot(&ConfigStore::open(self.config_dir.clone()).map_err(|_| ManagedError::StorageUnavailable)?)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
                 )
             }
             "managed_tool_setup" => {
@@ -626,7 +691,7 @@ impl ManagedService {
                 self.sessions.changed()?;
                 Ok(json!(selection))
             }
-            "managed_launch_prepare" => self.prepare_launch(request, sign_in),
+            "managed_launch_prepare" => self.prepare_launch(request, sign_in, red_team),
             // Only through [`terminal_launch`], which opens the terminal
             // with the service unlocked; `handle` and `handle_async` route
             // it there before reaching this.
@@ -659,7 +724,7 @@ impl ManagedService {
                 Ok(json!({"stopping":true}))
             }
             "managed_session_start_again" | "managed_session_resume" => {
-                self.prepare_launch(request, sign_in)
+                self.prepare_launch(request, sign_in, red_team)
             }
             "managed_session_dismiss" => {
                 #[derive(Deserialize)]
@@ -1027,6 +1092,16 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     }
 }
 
+/// Whether Red Team managed sessions are available on this build and enabled
+/// by the `red_team_sessions` feature flag.
+pub fn red_team_available(shared: &DaemonShared) -> bool {
+    cfg!(target_os = "macos")
+        && shared
+            .feature_flags
+            .snapshot()
+            .is_enabled(crate::managed::RED_TEAM_FLAG)
+}
+
 /// Synchronous entry. A proxy whose session ended is dropped, which
 /// requests its shutdown; the asynchronous entry also awaits it.
 pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
@@ -1041,9 +1116,10 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
+    let red_team = red_team_available(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in, choice);
+        let value = service.handle_with_red_team(request, sign_in, choice, red_team);
         ended = service.take_routes(false);
         value
     });
@@ -1099,7 +1175,8 @@ where
     // signed out, whatever the balance said.
     let key = sign_in_key_id(shared);
     let sign_in = key.is_some();
-    if prepares_on_sign_in(shared, request, sign_in) {
+    let red_team = red_team_available(shared);
+    if prepares_on_sign_in(shared, request, sign_in, red_team) {
         let funds = funds_for_first_calls(read).await;
         if sign_in_key_id(shared) != key {
             return respond(request, Err(ManagedError::NearAiSignInRequired.into()));
@@ -1111,7 +1188,7 @@ where
     let choice = terminal_choice(shared);
     let mut ended = vec![];
     let result = with_service(shared, |service| {
-        let value = service.handle(request, sign_in, choice);
+        let value = service.handle_with_red_team(request, sign_in, choice, red_team);
         ended = service.take_routes(false);
         value
     });
@@ -1167,7 +1244,12 @@ fn prepares_a_session(method: &str) -> bool {
 /// [`ManagedService::prepares_on_sign_in`] for a prepare or start-again
 /// request, with the service locked directly: a read that publishes
 /// nothing.
-fn prepares_on_sign_in(shared: &DaemonShared, request: &Request, sign_in: bool) -> bool {
+fn prepares_on_sign_in(
+    shared: &DaemonShared,
+    request: &Request,
+    sign_in: bool,
+    red_team: bool,
+) -> bool {
     // Every other request skips the lock; `resolve_launch` refuses them too.
     if !prepares_a_session(&request.method) {
         return false;
@@ -1176,7 +1258,7 @@ fn prepares_on_sign_in(shared: &DaemonShared, request: &Request, sign_in: bool) 
         return false;
     };
     held.as_ref()
-        .is_ok_and(|service| service.prepares_on_sign_in(request, sign_in))
+        .is_ok_and(|service| service.prepares_on_sign_in(request, sign_in, red_team))
 }
 
 #[cfg(test)]
@@ -1921,6 +2003,8 @@ fn label(error: ManagedError) -> &'static str {
         ManagedError::HerdrSocketUntrusted => "managed-herdr-socket-untrusted",
         ManagedError::RexNotReady => "managed-rex-not-ready",
         ManagedError::TerminalCallFailed => "managed-terminal-call-failed",
+        ManagedError::RedTeamUnavailable => crate::managed::RED_TEAM_UNAVAILABLE_LABEL,
+        ManagedError::RedTeamNeedsNearAi => crate::managed::RED_TEAM_NEEDS_NEAR_AI_LABEL,
     }
 }
 
@@ -3224,16 +3308,16 @@ mod tests {
             json!({"session_id":id,"request_id":Uuid::new_v4()}),
         );
         assert!(matches!(
-            service.resolve_launch(&again, true, false),
+            service.resolve_launch(&again, true, false, false),
             Ok(Resolved::Launch(..))
         ));
-        assert!(!service.prepares_on_sign_in(&again, true));
+        assert!(!service.prepares_on_sign_in(&again, true, false));
         let snapshot = request("managed_snapshot", json!({}));
         assert!(matches!(
-            service.resolve_launch(&snapshot, true, false),
+            service.resolve_launch(&snapshot, true, false, false),
             Err(ManagedError::InvalidRequest)
         ));
-        assert!(!service.prepares_on_sign_in(&snapshot, true));
+        assert!(!service.prepares_on_sign_in(&snapshot, true, false));
     }
 
     #[test]
@@ -4542,7 +4626,7 @@ mod tests {
             method: "managed_session_resume".into(),
             params: params.clone(),
         };
-        assert!(service.prepares_on_sign_in(&request, true));
+        assert!(service.prepares_on_sign_in(&request, true, false));
         assert!(
             call(&mut service, "managed_session_resume", params, true).unwrap()["ticket"]
                 .is_string()
@@ -5167,3 +5251,7 @@ mod desktop_withdrawal_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "managed_red_team_tests.rs"]
+mod red_team_tests;

@@ -168,6 +168,7 @@ impl NativeProfiles {
                     }
                 }
             }
+            ToolId::RedTeam => return Err(ManagedError::InvalidRequest),
         }
         if matches!(action, NativeAction::Login)
             && account.connection != ConnectionKind::Subscription
@@ -222,6 +223,9 @@ impl NativeProfiles {
     }
 
     pub fn verify_version(&self, account: &AccountView, native: &Path) -> Result<(), ManagedError> {
+        if account.tool == ToolId::RedTeam {
+            return Ok(());
+        }
         let numeric = self.native_version(account, native)?;
         let supported = match account.tool {
             ToolId::Claude => numeric.is_some_and(|v| v.0 == 2 && v >= (2, 1, 289)),
@@ -229,6 +233,7 @@ impl NativeProfiles {
             // Each major has its own CLI/configuration contract. Import/export
             // validation still checks the selected implementation before launch.
             ToolId::Opencode => numeric.is_some_and(|v| matches!(v.0, 1 | 2)),
+            ToolId::RedTeam => true,
         };
         if !supported {
             return Err(ManagedError::UnsupportedVersion);
@@ -244,7 +249,7 @@ impl NativeProfiles {
             return Ok(AuthState::SignInRequired);
         }
         let ready = match account.tool {
-            ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+            ToolId::Opencode | ToolId::RedTeam => return Err(ManagedError::InvalidRequest),
             ToolId::Claude => {
                 let value: serde_json::Value = serde_json::from_slice(&output.stdout)
                     .map_err(|_| ManagedError::UnsupportedVersion)?;
@@ -757,8 +762,8 @@ fn check_project_config_in(
         connection,
         ConnectionKind::NearAi | ConnectionKind::NearAiSignIn
     );
-    // OpenCode runs in pure mode with project config disabled.
-    if tool == ToolId::Opencode {
+    // OpenCode and Red Team run isolated with project config disabled.
+    if matches!(tool, ToolId::Opencode | ToolId::RedTeam) {
         return Ok(());
     }
     let project_root = cwd
@@ -769,7 +774,7 @@ fn check_project_config_in(
         let names: &[&str] = match tool {
             ToolId::Claude => &[".claude/settings.json", ".claude/settings.local.json"],
             ToolId::Codex => &[".codex/config.toml"],
-            ToolId::Opencode => &[],
+            ToolId::Opencode | ToolId::RedTeam => &[],
         };
         for name in names {
             let path = ancestor.join(name);
@@ -782,7 +787,7 @@ fn check_project_config_in(
                 return Err(ManagedError::Conflict);
             }
             match tool {
-                ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+                ToolId::Opencode | ToolId::RedTeam => return Err(ManagedError::InvalidRequest),
                 ToolId::Claude => {
                     let value: serde_json::Value =
                         serde_json::from_slice(&bytes).map_err(|_| ManagedError::Conflict)?;
@@ -1013,11 +1018,13 @@ fn codex_auth_override(value: &toml::Value) -> bool {
 }
 
 pub fn find_native(tool: ToolId) -> Result<PathBuf, ManagedError> {
-    find_native_named(match tool {
+    let name = match tool {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
         ToolId::Opencode => "opencode",
-    })
+        ToolId::RedTeam => return Err(ManagedError::ToolUnavailable),
+    };
+    find_native_named(name)
 }
 
 fn find_native_named(name: &str) -> Result<PathBuf, ManagedError> {
@@ -1123,12 +1130,26 @@ fn executable_file(path: &Path) -> bool {
 /// Discovery reads filesystem metadata only; it never runs a tool or scans traces.
 /// `install_url` is the tool's setup guide from `crate::install_guides`.
 pub fn tools() -> serde_json::Value {
+    tools_with_red_team(false, false)
+}
+
+/// Like [`tools`], optionally appending the `red_team` row when the flag is on
+/// and supported on this OS.
+pub fn tools_with_red_team(include_red_team: bool, red_team_installed: bool) -> serde_json::Value {
     use crate::install_guides::install_guide;
-    serde_json::json!([
-        {"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")},
-        {"tool": "codex", "installed": installed("codex"), "install_url": install_guide("codex")},
-        {"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}
-    ])
+    let mut rows = vec![
+        serde_json::json!({"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")}),
+        serde_json::json!({"tool": "codex", "installed": installed("codex"), "install_url": install_guide("codex")}),
+        serde_json::json!({"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}),
+    ];
+    if include_red_team {
+        rows.push(serde_json::json!({
+            "tool": "red_team",
+            "installed": red_team_installed,
+            "install_url": serde_json::Value::Null,
+        }));
+    }
+    serde_json::Value::Array(rows)
 }
 
 #[cfg(test)]

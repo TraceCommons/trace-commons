@@ -324,7 +324,7 @@ pub fn staged(store: &ConfigStore, plan: &CollectionPlan) -> bool {
         ToolId::Claude | ToolId::Codex => {
             super::native_collection::published(store, plan.tool, plan.session_id)
         }
-        ToolId::Opencode => super::opencode::exported(store, plan.session_id),
+        ToolId::Opencode | ToolId::RedTeam => super::opencode::exported(store, plan.session_id),
     }
 }
 

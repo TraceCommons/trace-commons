@@ -15,6 +15,7 @@ fn name(tool: ToolId) -> &'static str {
         ToolId::Claude => "claude",
         ToolId::Codex => "codex",
         ToolId::Opencode => "opencode",
+        ToolId::RedTeam => "red_team",
     }
 }
 
@@ -33,6 +34,7 @@ fn installer(tool: ToolId) -> String {
         // Fresh installs use the supported current major. Updates below use
         // the installed executable's updater and preserve its existing major.
         ToolId::Opencode => ("https://opencode.ai/v2/install", "bash"),
+        ToolId::RedTeam => unreachable!("Red Team setup runs in-process"),
     };
     // A plain curl | shell pipeline hides curl failures in POSIX shells.
     format!("installer=$(curl -fsSL '{url}') && printf '%s\\n' \"$installer\" | {interpreter}")
@@ -59,7 +61,7 @@ fn npm_owner(tool: ToolId, native: &Path) -> Option<PathBuf> {
     let package = match tool {
         ToolId::Claude => Path::new("@anthropic-ai/claude-code"),
         ToolId::Codex => Path::new("@openai/codex"),
-        ToolId::Opencode => return None,
+        ToolId::Opencode | ToolId::RedTeam => return None,
     };
     for root in native.ancestors() {
         if root.file_name()?.to_str()? == "node_modules"
@@ -100,6 +102,9 @@ pub fn command(
     action: ToolSetupAction,
     native: Option<&Path>,
 ) -> Result<String, ManagedError> {
+    if tool == ToolId::RedTeam {
+        return Err(ManagedError::InvalidRequest);
+    }
     let mut version = name(tool).to_owned();
     let setup = match action {
         ToolSetupAction::Install => installer(tool),
@@ -132,7 +137,7 @@ pub fn command(
                 let package = match tool {
                     ToolId::Claude => "@anthropic-ai/claude-code@latest",
                     ToolId::Codex => "@openai/codex@latest",
-                    ToolId::Opencode => unreachable!(),
+                    ToolId::Opencode | ToolId::RedTeam => unreachable!(),
                 };
                 version = quote(&prefix.join("bin").join(name(tool)))?;
                 // An explicit prefix updates the detected installation even
@@ -155,6 +160,7 @@ pub fn command(
                         version = quote(&native)?;
                         format!("{} upgrade", quote(&native)?)
                     }
+                    ToolId::RedTeam => unreachable!(),
                 }
             }
         }

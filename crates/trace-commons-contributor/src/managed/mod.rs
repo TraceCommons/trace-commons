@@ -23,6 +23,9 @@ pub mod tool_setup;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Feature flag gating Red Team managed sessions (macOS only).
+pub const RED_TEAM_FLAG: &str = "red_team_sessions";
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
 )]
@@ -31,6 +34,7 @@ pub enum ToolId {
     Claude,
     Codex,
     Opencode,
+    RedTeam,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -152,7 +156,19 @@ pub enum ManagedError {
     /// ticket was sent. Shells show the general failure line.
     #[error("the terminal app's command failed")]
     TerminalCallFailed,
+    /// Red Team sessions are disabled by feature flag or unsupported on this OS.
+    #[error("Red Team sessions are not available in this app build.")]
+    RedTeamUnavailable,
+    /// Red Team sessions require NEAR AI sign-in or a saved NEAR AI key.
+    #[error("Red Team sessions require a NEAR AI account.")]
+    RedTeamNeedsNearAi,
 }
+
+/// The daemon's label for [`ManagedError::RedTeamUnavailable`].
+pub const RED_TEAM_UNAVAILABLE_LABEL: &str = "red_team_unavailable";
+
+/// The daemon's label for [`ManagedError::RedTeamNeedsNearAi`].
+pub const RED_TEAM_NEEDS_NEAR_AI_LABEL: &str = "red_team_needs_near_ai";
 
 /// The daemon's label for [`ManagedError::ProjectChoosesModel`], which the
 /// CLI turns back into its sentence and the shells map to the shared

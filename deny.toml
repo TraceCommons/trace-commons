@@ -117,11 +117,12 @@ ignore = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# Only the three reviewed git repositories may appear in any workspace's
+# Only the four reviewed git repositories may appear in any workspace's
 # resolved graph. `required-git-spec = "rev"` cannot be enabled yet because
 # `nearai/ironwire` pulls `nearai/ironclaw` with `branch = "main"`.
 allow-git = [
     "https://github.com/nearai/ironwire",
     "https://github.com/nearai/ironclaw",
+    "https://github.com/nearai/nearai-red-sandbox",
     "https://github.com/EricLBuehler/mistral.rs.git",
 ]

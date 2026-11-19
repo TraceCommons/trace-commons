@@ -11,11 +11,19 @@ use uuid::Uuid;
 const CLAUDE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0001);
 const CODEX: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0002);
 const OPENCODE: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0003);
+const RED_TEAM: Uuid = Uuid::from_u128(0x6e65_6172_2d61_4900_8000_0000_0000_0004);
 
 /// OpenCode starts on its session proxy's default model, as Claude Code and
 /// Codex do; the daemon tells its launcher that model, and every model the
 /// proxy serves, with the port.
 pub const TOOLS: [ToolId; 3] = [ToolId::Claude, ToolId::Codex, ToolId::Opencode];
+
+const ALL_TOOLS: [ToolId; 4] = [
+    ToolId::Claude,
+    ToolId::Codex,
+    ToolId::Opencode,
+    ToolId::RedTeam,
+];
 
 /// The stable id of a tool's sign-in entry. Stable so the tool's isolated
 /// profile directory survives between launches. Optional so a tool added
@@ -25,12 +33,15 @@ pub fn account_id(tool: ToolId) -> Option<AccountId> {
         ToolId::Claude => CLAUDE,
         ToolId::Codex => CODEX,
         ToolId::Opencode => OPENCODE,
+        ToolId::RedTeam => RED_TEAM,
     }))
 }
 
 /// The tool whose sign-in entry this id is, if it is one.
 pub fn tool_for(id: AccountId) -> Option<ToolId> {
-    TOOLS.into_iter().find(|tool| account_id(*tool) == Some(id))
+    ALL_TOOLS
+        .into_iter()
+        .find(|tool| account_id(*tool) == Some(id))
 }
 
 pub fn entry(tool: ToolId) -> Option<AccountView> {
@@ -49,11 +60,16 @@ pub fn entry(tool: ToolId) -> Option<AccountView> {
 
 /// Every tool's entry while signed in; none otherwise.
 pub fn entries(signed_in: bool) -> Vec<AccountView> {
-    if signed_in {
-        TOOLS.into_iter().filter_map(entry).collect()
-    } else {
-        vec![]
+    entries_for(signed_in, false)
+}
+
+/// Like [`entries`], including Red Team when `include_red_team` is true.
+pub fn entries_for(signed_in: bool, include_red_team: bool) -> Vec<AccountView> {
+    if !signed_in {
+        return vec![];
     }
+    let tools: &[ToolId] = if include_red_team { &ALL_TOOLS } else { &TOOLS };
+    tools.iter().copied().filter_map(entry).collect()
 }
 
 /// The defaults a shell sees. A choice the person saved wins; a tool with
@@ -63,9 +79,20 @@ pub fn defaults(
     signed_in: bool,
     generation: impl Fn(ToolId) -> Generation,
 ) -> Vec<Selection> {
+    defaults_for(saved, signed_in, false, generation)
+}
+
+/// Like [`defaults`], including Red Team when `include_red_team` is true.
+pub fn defaults_for(
+    saved: Vec<Selection>,
+    signed_in: bool,
+    include_red_team: bool,
+    generation: impl Fn(ToolId) -> Generation,
+) -> Vec<Selection> {
     let mut out = saved;
     if signed_in {
-        for tool in TOOLS {
+        let tools: &[ToolId] = if include_red_team { &ALL_TOOLS } else { &TOOLS };
+        for &tool in tools {
             let Some(account_id) = account_id(tool) else {
                 continue;
             };
