@@ -1169,6 +1169,69 @@ mod mounted_tests {
         window.close();
     }
 
+    /// Minimised, the stage's clock holds: no tick and no frame drawn,
+    /// while the window stays mapped and its frame clock runs. Shown
+    /// again, the clock runs on.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn the_stage_holds_while_its_window_is_minimised() {
+        use super::super::glass_motion::minimise_for_test;
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let stage = Stage::new(Rc::new(RefCell::new(Tools::default())));
+        let window = adw::Window::builder()
+            .default_width(680)
+            .default_height(720)
+            .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.add_css_class("tc-first-run-stage");
+        content.append(stage.thread());
+        let tools = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        tools.append(&stage.slot(Step::Tools));
+        let scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .child(&tools)
+            .build();
+        stage.follow(&scroll);
+        content.append(&scroll);
+        window.set_content(Some(&stage.wrap(&content)));
+        let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
+        stage.set_step(Step::Tools, true, pick);
+        window.present();
+        settle(&context, 300);
+        assert!(stage.inner.borrow().tick.is_some(), "ticks while shown");
+
+        minimise_for_test(&window, true);
+        settle(&context, 100);
+        assert!(window.is_mapped(), "a minimised window stays mapped");
+        assert!(
+            stage.inner.borrow().tick.is_none(),
+            "the clock runs while minimised"
+        );
+        let draws = stage.inner.borrow().draws;
+        settle(&context, 300);
+        assert_eq!(
+            stage.inner.borrow().draws,
+            draws,
+            "frames drawn while minimised"
+        );
+
+        minimise_for_test(&window, false);
+        settle(&context, 100);
+        assert!(
+            stage.inner.borrow().tick.is_some(),
+            "the clock does not run once shown again"
+        );
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
     /// With animations off nothing ticks, so a change on Tools must ask
     /// for its own draw: ticking a tool on the real Tools screen lights its
     /// tile without the test drawing anything itself.

@@ -156,7 +156,9 @@ impl EmberGlide {
             tick.remove();
         }
         state.began = None;
-        state.from = state.drawn.filter(|_| glass_motion::animations_enabled());
+        state.from = state
+            .drawn
+            .filter(|_| glass_motion::animations_enabled() && !glass_motion::window_hidden(ember));
         if state.from.is_none() {
             return;
         }
