@@ -18,7 +18,9 @@ namespace TraceCommons.RenderTests;
 /// <c>GlassLibraryOrb.draw(in:size:angle: 0.4, lit: true)</c>, and
 /// mac-logo-*-48.png from <c>GlassToolLogoShape</c> filled black). The
 /// station's glow and the orb's are the caller's shadows and are not in
-/// either render. Text is not drawn.
+/// either render. Text is not drawn. Thresholds sit just outside what the
+/// box measured on 2026-11-19 (station iou 0.9892 mean 0.0016, orb 0.9933 /
+/// 0.0045, logos iou 0.9838 to 1.0, mean at most 0.0013).
 /// </summary>
 public static partial class RenderChecks
 {
@@ -33,7 +35,7 @@ public static partial class RenderChecks
             MapPainter.Station(ds, device, Vector2.Zero, W, H, 0.6);
         }
 
-        return Compare(device, target, "mac-station-150x130.png", outDir, "win-station-150x130.png", minIou: 0.95, maxMean: 0.05);
+        return Compare(device, target, "mac-station-150x130.png", outDir, "win-station-150x130.png", minIou: 0.98, maxMean: 0.005);
     }
 
     [RenderTest]
@@ -49,7 +51,7 @@ public static partial class RenderChecks
                 inks.Color("heroCampaignBright"), inks.Color("heroCampaignDeep"));
         }
 
-        return Compare(device, target, "mac-orb-104.png", outDir, "win-orb-104.png", minIou: 0.97, maxMean: 0.06);
+        return Compare(device, target, "mac-orb-104.png", outDir, "win-orb-104.png", minIou: 0.985, maxMean: 0.01);
     }
 
     [RenderTest]
@@ -67,7 +69,7 @@ public static partial class RenderChecks
                 ds.FillGeometry(logo.Transform(MapPainter.LogoFit(art, new Vector2(Side / 2f, Side / 2f), Side)), Color.FromArgb(255, 0, 0, 0));
             }
 
-            lines.Add(name + " " + Compare(device, target, $"mac-logo-{name}-48.png", outDir, $"win-logo-{name}-48.png", minIou: 0.95, maxMean: 0.04));
+            lines.Add(name + " " + Compare(device, target, $"mac-logo-{name}-48.png", outDir, $"win-logo-{name}-48.png", minIou: 0.975, maxMean: 0.004));
         }
 
         return string.Join("; ", lines);
