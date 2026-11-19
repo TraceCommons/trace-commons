@@ -163,4 +163,81 @@ public class AccountDevicesTests
         Assert.Equal(AccountDevicesRefusal.TooMany, AccountDevicesRefusals.From(e.Label));
         Assert.Equal("Too many codes. Try again in a few minutes.", Surface().RefusalLine(AccountDevicesRefusals.From(e.Label)));
     }
+    private sealed class Scripted
+    {
+        public readonly List<string> Sent = new();
+        public readonly Queue<string> Statuses = new();
+        public string Revoke = "{}";
+
+        public Task<DaemonResponse> Call(string method, string parameters)
+        {
+            _ = parameters;
+            Sent.Add(method);
+            string body = method switch
+            {
+                "account_devices_list" => """{"result":{"devices":[{"device_key_id":"a","this_device":true}]}}""",
+                "account_device_code_mint" => """{"result":{"code_id":"k1","code":"ABCD","expires_at":"2999-01-01T00:00:00Z"}}""",
+                "account_device_code_status" => Statuses.Count > 0 ? Statuses.Dequeue() : """{"error":{"code":"unavailable","message":"x"}}""",
+                "account_device_revoke" => Revoke,
+                _ => """{"error":{"code":"unavailable","message":"x"}}""",
+            };
+            return Task.FromResult(DaemonResponse.Parse(body));
+        }
+    }
+
+    [Fact]
+    public async Task ACodeIsFollowedUntilUsedThenTheListIsReadAgain()
+    {
+        var daemon = new Scripted();
+        daemon.Statuses.Enqueue("""{"result":{"state":"pending"}}""");
+        daemon.Statuses.Enqueue("""{"result":{"state":"redeemed","device_key_id":"d9"}}""");
+        var delays = new List<TimeSpan>();
+        var flow = new AccountDevicesFlow(new AccountDevicesClient(daemon.Call), Surface(), d =>
+        {
+            delays.Add(d);
+            return Task.CompletedTask;
+        });
+        await flow.LinkServerAsync();
+        Assert.Equal(new DeviceLinkPhase.Linked("d9"), flow.Link);
+        Assert.Equal(new[] { "account_device_code_mint", "account_device_code_status", "account_device_code_status", "account_devices_list" }, daemon.Sent);
+        // AccountDevicesModel.pollEvery: three seconds.
+        Assert.All(delays, d => Assert.Equal(TimeSpan.FromSeconds(3), d));
+        Assert.Equal("a", flow.Devices!.Single().DeviceKeyId);
+    }
+
+    [Fact]
+    public async Task FiveUnansweredAsksInARowStopTheFollowing()
+    {
+        var daemon = new Scripted();
+        var flow = new AccountDevicesFlow(new AccountDevicesClient(daemon.Call), Surface(), _ => Task.CompletedTask);
+        await flow.LinkServerAsync();
+        Assert.Equal(new DeviceLinkPhase.Refused(AccountDevicesRefusal.Failed), flow.Link);
+        Assert.Equal(5, daemon.Sent.Count(m => m == "account_device_code_status"));
+    }
+
+    [Fact]
+    public async Task ACodePastItsExpiryIsExpiredWithoutAsking()
+    {
+        var daemon = new Scripted();
+        var flow = new AccountDevicesFlow(
+            new AccountDevicesClient(daemon.Call), Surface(), _ => Task.CompletedTask,
+            () => new DateTimeOffset(3000, 1, 1, 0, 0, 0, TimeSpan.Zero));
+        await flow.LinkServerAsync();
+        Assert.Equal(new DeviceLinkPhase.Expired(), flow.Link);
+        Assert.DoesNotContain("account_device_code_status", daemon.Sent);
+    }
+
+    [Fact]
+    public async Task ARefusedUnlinkSaysWhyAndReadsTheListAgain()
+    {
+        var daemon = new Scripted { Revoke = """{"error":{"code":"unavailable","message":"account-session-required"}}""" };
+        var flow = new AccountDevicesFlow(new AccountDevicesClient(daemon.Call), Surface(), _ => Task.CompletedTask);
+        await flow.UnlinkAsync(new AccountDevice("b"));
+        Assert.Equal(AccountDevicesRefusal.SessionEnded, flow.Refusal);
+        Assert.Equal(new[] { "account_device_revoke", "account_devices_list" }, daemon.Sent);
+        // A later success clears the line (checklist L3).
+        daemon.Revoke = """{"result":{}}""";
+        await flow.UnlinkAsync(new AccountDevice("b"));
+        Assert.Null(flow.Refusal);
+    }
 }

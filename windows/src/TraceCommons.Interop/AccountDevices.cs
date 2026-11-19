@@ -421,3 +421,198 @@ internal static class DaemonCalls
             ? v.GetString()
             : null;
 }
+
+/// <summary>
+/// The Devices section's state over time (<c>AccountDevicesModel</c>,
+/// AccountDevicesModel.swift): a list read that supersedes earlier ones, a
+/// minted code followed every three seconds until it is used, expires or
+/// goes unanswered five times, and an unlink that re-reads the list.
+/// Continuations resume on the caller's context; drive it from the UI thread.
+/// </summary>
+public sealed class AccountDevicesFlow
+{
+    /// <summary>How often a code on screen is asked about (<c>pollEvery</c>).</summary>
+    public static readonly TimeSpan PollEvery = TimeSpan.FromSeconds(3);
+
+    private readonly AccountDevicesClient _client;
+    private readonly Func<TimeSpan, Task> _delay;
+    private readonly Func<DateTimeOffset> _now;
+    private ulong _generation;
+
+    public AccountDevicesFlow(
+        AccountDevicesClient client,
+        AccountDevicesSurface? surface,
+        Func<TimeSpan, Task>? delay = null,
+        Func<DateTimeOffset>? now = null)
+    {
+        _client = client;
+        Surface = surface;
+        _delay = delay ?? Task.Delay;
+        _now = now ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    public event Action? Changed;
+
+    public AccountDevicesSurface? Surface { get; }
+    public IReadOnlyList<AccountDevice>? Devices { get; private set; }
+    public AccountDevicesRefusal? ListRefusal { get; private set; }
+    public DeviceLinkPhase Link { get; private set; } = new DeviceLinkPhase.Idle();
+    public AccountDevicesRefusal? Refusal { get; private set; }
+    public bool Busy { get; private set; }
+    public AccountDevice? Confirming { get; private set; }
+    public string? CopiedCode { get; private set; }
+
+    public async Task RefreshAsync()
+    {
+        ulong current = ++_generation;
+        if (Surface is null)
+        {
+            Devices = null;
+            ListRefusal = null;
+            Changed?.Invoke();
+            return;
+        }
+
+        try
+        {
+            IReadOnlyList<AccountDevice> listed = await _client.ListAsync().ConfigureAwait(true);
+            if (current != _generation)
+            {
+                return;
+            }
+
+            Devices = AccountDevicesSurface.Ordered(listed);
+            ListRefusal = null;
+        }
+        catch (DaemonRefusedException e)
+        {
+            if (current != _generation)
+            {
+                return;
+            }
+
+            Devices = null;
+            ListRefusal = AccountDevicesRefusals.From(e.Label) == AccountDevicesRefusal.SessionEnded
+                ? AccountDevicesRefusal.SessionEnded
+                : null;
+        }
+
+        Changed?.Invoke();
+    }
+
+    public async Task LinkServerAsync()
+    {
+        if (Busy || Link.ShownCode is not null)
+        {
+            return;
+        }
+
+        Busy = true;
+        Refusal = null;
+        CopiedCode = null;
+        Link = new DeviceLinkPhase.Minting();
+        Changed?.Invoke();
+        DeviceCode code;
+        try
+        {
+            code = await _client.MintAsync(null).ConfigureAwait(true);
+        }
+        catch (DaemonRefusedException e)
+        {
+            Busy = false;
+            Link = new DeviceLinkPhase.Refused(AccountDevicesRefusals.From(e.Label));
+            Changed?.Invoke();
+            return;
+        }
+
+        Busy = false;
+        Link = new DeviceLinkPhase.Waiting(code);
+        Changed?.Invoke();
+        await FollowAsync(code).ConfigureAwait(true);
+    }
+
+    private async Task FollowAsync(DeviceCode code)
+    {
+        string codeId = code.CodeId;
+        int missed = 0;
+        while (Link.ShownCode?.CodeId == codeId)
+        {
+            await _delay(PollEvery).ConfigureAwait(true);
+
+            // Past its expiry the code is spent whatever the daemon says.
+            Link = Link.Checked(_now(), codeId);
+            if (Link.ShownCode?.CodeId != codeId)
+            {
+                Changed?.Invoke();
+                break;
+            }
+
+            DeviceCodeStatus status;
+            try
+            {
+                status = await _client.StatusAsync(codeId).ConfigureAwait(true);
+            }
+            catch (DaemonRefusedException)
+            {
+                missed++;
+                Link = Link.AfterMissed(missed, codeId);
+                Changed?.Invoke();
+                continue;
+            }
+
+            missed = 0;
+            Link = Link.After(status, codeId);
+            Changed?.Invoke();
+        }
+
+        if (Link is DeviceLinkPhase.Linked)
+        {
+            await RefreshAsync().ConfigureAwait(true);
+        }
+    }
+
+    public void DismissLink()
+    {
+        Link = new DeviceLinkPhase.Idle();
+        CopiedCode = null;
+        Changed?.Invoke();
+    }
+
+    /// <summary>Records that the command for the code on screen was copied.</summary>
+    public void Copied(DeviceCode code)
+    {
+        CopiedCode = code.CodeId;
+        Changed?.Invoke();
+    }
+
+    public void Confirm(AccountDevice? device)
+    {
+        Confirming = device;
+        Changed?.Invoke();
+    }
+
+    public async Task UnlinkAsync(AccountDevice device)
+    {
+        if (Busy)
+        {
+            return;
+        }
+
+        Confirming = null;
+        Busy = true;
+        Changed?.Invoke();
+        try
+        {
+            await _client.RevokeAsync(device.DeviceKeyId).ConfigureAwait(true);
+            Refusal = null;
+        }
+        catch (DaemonRefusedException e)
+        {
+            Refusal = AccountDevicesRefusals.From(e.Label);
+        }
+
+        Busy = false;
+        Changed?.Invoke();
+        await RefreshAsync().ConfigureAwait(true);
+    }
+}
