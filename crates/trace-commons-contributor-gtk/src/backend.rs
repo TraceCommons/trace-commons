@@ -728,6 +728,15 @@ impl EventStream for BroadcastEvents {
     }
 }
 
+/// The one subscription frame. `feature_flags_changed` is opt-in on a
+/// socket (`daemon::ipc::OPT_IN_EVENTS`), so it is named here, as the Mac
+/// names it; without it an attached window would never hear that a flag
+/// changed. `reengage_due`, the other opt-in, is not: naming it declares
+/// this window a renderer of notifications it does not draw. A daemon too
+/// old to know the name drops it.
+const SUBSCRIBE_FRAME: &str =
+    "{\"id\":1,\"method\":\"subscribe\",\"params\":{\"accepts\":[\"feature_flags_changed\"]}}\n";
+
 /// A persistent subscription over the control socket. One connection for the
 /// life of the window, separate from the one-shot request connections, so a
 /// slow `preview` cannot stall the event stream.
@@ -740,7 +749,7 @@ impl SocketEvents {
         use std::io::Write;
 
         let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
-        stream.write_all(b"{\"id\":1,\"method\":\"subscribe\",\"params\":{}}\n")?;
+        stream.write_all(SUBSCRIBE_FRAME.as_bytes())?;
         stream.flush().ok();
         Ok(Self {
             reader: std::io::BufReader::new(stream),
@@ -787,10 +796,10 @@ mod roots_tests {
     /// workspace with its own lockfile, so a dev-dependency here is a real
     /// new package edge, and the repo's dependency policy asks for an inline
     /// utility when one fits in a few lines.
-    struct Scratch(std::path::PathBuf);
+    pub(super) struct Scratch(std::path::PathBuf);
 
     impl Scratch {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -800,7 +809,7 @@ mod roots_tests {
             Scratch(path)
         }
 
-        fn path(&self) -> &std::path::Path {
+        pub(super) fn path(&self) -> &std::path::Path {
             &self.0
         }
     }
@@ -811,7 +820,7 @@ mod roots_tests {
         }
     }
 
-    fn declare(dir: &std::path::Path, claude: Option<&str>, codex: Option<&str>) {
+    pub(super) fn declare(dir: &std::path::Path, claude: Option<&str>, codex: Option<&str>) {
         let store = ConfigStore::open(dir.to_path_buf()).unwrap();
         let make = |name: &str| {
             let p = dir.join(name);
@@ -1440,6 +1449,105 @@ fn read_preview_body(
                     && next.as_u64() == Some(body.len() as u64) => {}
             _ => bail!("preview-body-incomplete"),
         }
+    }
+}
+
+/// The feature-flag snapshot over the daemon this shell hosts or attaches
+/// to: the read the window makes (`App::refresh_feature_flags`), and the
+/// change event an attached window has to ask for.
+#[cfg(test)]
+mod feature_flag_tests {
+    use super::roots_tests::{Scratch, declare};
+    use super::*;
+    use crate::feature_flags::{self, EVENT_FEATURE_FLAGS_CHANGED};
+    use trace_commons_contributor::config::DAEMON_SOCK_FILE;
+
+    fn snapshot_of(backend: &Backend) -> feature_flags::Snapshot {
+        let answer = backend
+            .call(feature_flags::METHOD_SNAPSHOT, serde_json::json!({}))
+            .map_err(|e| e.to_string());
+        feature_flags::read_answer(answer, feature_flags::build_identity().as_ref())
+            .expect("the daemon's snapshot is read and is this build's")
+    }
+
+    /// The frame is one line the daemon takes, naming exactly the change
+    /// event and never the notification renderer's.
+    #[test]
+    fn the_subscription_names_the_change_event_and_nothing_else() {
+        assert_eq!(SUBSCRIBE_FRAME.matches('\n').count(), 1);
+        let frame: serde_json::Value = serde_json::from_str(SUBSCRIBE_FRAME.trim_end()).unwrap();
+        assert_eq!(frame["method"], "subscribe");
+        let accepts = &frame["params"]["accepts"];
+        assert!(daemon::ipc::subscribe_accepts_valid(accepts));
+        assert_eq!(accepts, &serde_json::json!([EVENT_FEATURE_FLAGS_CHANGED]));
+    }
+
+    /// The daemon this shell hosts answers a snapshot this shell reads,
+    /// about this build's own profile.
+    #[test]
+    fn a_hosted_daemons_snapshot_is_read_and_is_this_builds() {
+        let dir = Scratch::new("ff-read");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        let backend = Backend::open(dir.path().to_path_buf()).expect("hosts");
+        let snapshot = snapshot_of(&backend);
+        assert!(snapshot.flags.contains_key("insights_skills"));
+        backend.stop();
+    }
+
+    /// `feature_flags_changed` is opt-in on a socket: a subscriber that
+    /// does not name it never receives it. An attached window's
+    /// subscription names it, and a changed flag reaches it.
+    #[test]
+    fn an_attached_subscription_receives_feature_flag_changes() {
+        let dir = Scratch::new("ff-event");
+        declare(dir.path(), Some("claude"), Some("codex"));
+        let backend = Backend::open(dir.path().to_path_buf()).expect("hosts");
+        let snapshot = snapshot_of(&backend);
+        let socket = ConfigStore::open(dir.path().to_path_buf())
+            .unwrap()
+            .daemon_path(DAEMON_SOCK_FILE);
+        let mut events = Backend::events_at(&socket).expect("subscribes");
+        let (names, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Some(event) = events.next() {
+                if names.send(event.name).is_err() {
+                    return;
+                }
+            }
+        });
+        // The subscription is registered when the daemon has read its
+        // frame, which this cannot observe; each toggle is a new generation
+        // and its own event, so toggle until one arrives.
+        let mut arrived = false;
+        for attempt in 0..40 {
+            backend
+                .call(
+                    "feature_flags_override_set",
+                    serde_json::json!({
+                        "id": "insights_skills",
+                        "value": attempt % 2 == 0,
+                        "environment": snapshot.environment.as_str(),
+                        "profile_digest": snapshot.profile_digest,
+                    }),
+                )
+                .expect("a product flag takes a local choice");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+            while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+                match received.recv_timeout(left) {
+                    Ok(name) if name == EVENT_FEATURE_FLAGS_CHANGED => {
+                        arrived = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            if arrived {
+                break;
+            }
+        }
+        assert!(arrived, "the attached subscription never saw the change");
+        backend.stop();
     }
 }
 
