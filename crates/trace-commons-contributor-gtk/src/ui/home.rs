@@ -621,6 +621,13 @@ impl HomeView {
         self.show_campaign();
     }
 
+    /// Settings' credit-arrival switch, kept with Home's other choices so
+    /// a later save of those never undoes it.
+    pub fn set_animates_credit_icon(&self, on: bool) {
+        self.prefs.borrow_mut().animates_credit_icon = on;
+        self.prefs.borrow().save();
+    }
+
     /// The campaign's X: closed as it is now.
     pub fn close_campaign(&self) {
         if let Some((campaign, _)) = &self.campaign {
@@ -1442,6 +1449,13 @@ mod tests {
         assert_eq!(fresh.campaign_shown(), Some(false));
         fresh.set_promotions(true);
         assert_eq!(fresh.campaign_shown(), Some(true));
+        // The credit-arrival switch is kept with Home's choices: a later
+        // save of those never turns it back on.
+        fresh.set_animates_credit_icon(false);
+        fresh.set_promotions(true);
+        assert!(!crate::home_cards::HomePrefs::load().animates_credit_icon);
+        fresh.set_animates_credit_icon(true);
+        assert!(crate::home_cards::HomePrefs::load().animates_credit_icon);
 
         // Missions: a dash until the inbox answers, then its line.
         let (missions, line) = fresh.missions.as_ref().unwrap();

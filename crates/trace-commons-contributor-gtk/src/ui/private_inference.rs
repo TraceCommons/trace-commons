@@ -74,6 +74,9 @@ pub struct PrivateInferenceView {
     /// The terminal the last managed snapshot named, for the line a launch
     /// refused as not found shows.
     pub(super) managed_destination: std::cell::RefCell<Option<String>>,
+    /// Managed sessions' refresh glyph, kept across the list's rebuilds so
+    /// the turn a press starts is not cut off when the answer redraws it.
+    pub(super) managed_refresh: std::cell::OnceCell<gtk::Button>,
     /// What today's calls cost, and what that figure leaves out. Emptied
     /// and refilled on every render for the same reason the list is: an
     /// amount a later read could not measure must go, not linger.
@@ -97,7 +100,7 @@ pub struct PrivateInferenceView {
     pub funding: crate::ui::funding::FundingSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
-    switch: gtk::Switch,
+    switch: super::glass_switch::GlassSwitch,
     /// What the listener is actually doing: one toned sentence, and the
     /// serving line under it when there is a port. Rebuilt on each render.
     status: gtk::Box,
@@ -180,7 +183,8 @@ impl PrivateInferenceView {
             .hexpand(true)
             .build();
         label.add_css_class("tc-body");
-        let switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        let switch = super::glass_switch::GlassSwitch::new();
+        switch.set_halign(gtk::Align::End);
         switch.set_sensitive(false);
         switch.set_valign(gtk::Align::Center);
         switch.update_property(&[gtk::accessible::Property::Label(
@@ -213,6 +217,7 @@ impl PrivateInferenceView {
             .label(copy::PRIVATE_INFERENCE_TITLE)
             .child(&card)
             .build();
+        super::glass_motion::expander(&expander);
         service.append(&expander);
         service.append(&status);
         content.append(&service);
@@ -237,6 +242,7 @@ impl PrivateInferenceView {
             managed_revision: std::cell::Cell::new(0),
             near_ai_signed_in: std::cell::Cell::new(None),
             managed_destination: std::cell::RefCell::new(None),
+            managed_refresh: std::cell::OnceCell::new(),
             spend,
             harnesses,
             credential,
@@ -523,6 +529,7 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         .label(copy::HARNESS_PREVIEW_TITLE)
         .expanded(false)
         .build();
+    super::glass_motion::expander(&details);
     let settings = gtk::Box::new(gtk::Orientation::Vertical, space::M);
     settings.set_margin_top(space::S);
     for text in row

@@ -629,6 +629,7 @@ fn held_group(quarantined: u32) -> gtk::Expander {
     label.append(&heading);
 
     let expander = gtk::Expander::builder().expanded(true).build();
+    super::glass_motion::expander(&expander);
     expander.set_label_widget(Some(&label));
 
     let inner = style::card(gtk::Orientation::Vertical, space::S);
