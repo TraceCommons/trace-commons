@@ -80,6 +80,9 @@ public sealed record NotificationSettingsState(
 /// <summary>One kind's switch: the core's label and help, the stored value, and whether it can be changed now.</summary>
 public sealed record NotifySwitchRow(string Kind, string Label, string? Help, bool IsOn, bool Enabled);
 
+/// <summary>The master switch: the core's label and hover tip, and the stored value.</summary>
+public sealed record NotifyMasterRow(string Label, string? Tooltip, bool IsOn);
+
 /// <summary>A one-time offer to turn a kind on, in the core's words.</summary>
 public sealed record NotifyOffer(string Kind, string Text, string Accept, string Decline);
 
@@ -272,6 +275,19 @@ public static class NotificationKinds
 
         return rows;
     }
+
+    /// <summary>
+    /// The master switch above the kinds (<c>.notifications</c>), drawn only
+    /// when the daemon reported it and the core worded it.
+    /// </summary>
+    public static NotifyMasterRow? Master(NotificationSettingsState? state, Func<string, string?> word) =>
+        state?.NotificationsEnabled is { } on && word("SETTING_NOTIFY_MASTER") is { } label
+            ? new NotifyMasterRow(label, word("SETTING_NOTIFY_MASTER_TOOLTIP"), on)
+            : null;
+
+    /// <summary>The master switch, written through <c>set_notifications_enabled</c>.</summary>
+    public static NudgeRequest SetMaster(bool on) =>
+        new("set_notifications_enabled", JsonSerializer.Serialize(new { on }));
 
     /// <summary>The line under the kinds: the caps and quiet hours, in the core's words; null without switches.</summary>
     public static string? Footnote(IReadOnlyList<NotifySwitchRow> rows, Func<string, string?> word) =>
@@ -466,6 +482,9 @@ public sealed class NotificationKindsStore
     public IReadOnlyList<NotifySwitchRow> Rows =>
         NotificationKinds.Rows(_state, Word, _state is null ? null : DigestHelp(_settingsJson));
 
+    /// <summary>The master switch, or null.</summary>
+    public NotifyMasterRow? Master => NotificationKinds.Master(_state, Word);
+
     /// <summary>The line under the switches, or null.</summary>
     public string? Footnote => NotificationKinds.Footnote(Rows, Word);
 
@@ -482,6 +501,10 @@ public sealed class NotificationKindsStore
         _state = state;
         _settingsJson = state is null ? null : json;
     }
+
+    /// <summary>The master switch, then a fresh read.</summary>
+    public System.Threading.Tasks.Task SetMasterAsync(bool on) =>
+        WriteAsync(NotificationKinds.SetMaster(on), offerKind: null);
 
     /// <summary>One kind's switch, then a fresh read.</summary>
     public System.Threading.Tasks.Task SetAsync(string kind, bool on) =>

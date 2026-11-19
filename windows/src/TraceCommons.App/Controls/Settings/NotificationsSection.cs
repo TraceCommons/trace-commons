@@ -9,7 +9,8 @@ namespace TraceCommons.App.Controls.Settings;
 /// Settings > Notifications (W17-D2, owner ruling 2026-11-19;
 /// <c>NotificationsSection</c> and <c>NudgeSettingsSection</c>,
 /// StartupSection.swift and NudgeSettingsSection.swift): under the core's
-/// notifications heading, one switch per kind the Mac shows (the digest,
+/// notifications heading, the master switch, then under it one switch per
+/// kind the Mac shows (the digest,
 /// verdicts, idle traces, NEAR AI credit), each from a value the daemon
 /// reported and in the core's words, then the core's line on the caps.
 /// The held kinds are never drawn. The Mac's system-permission rows have no
@@ -53,6 +54,37 @@ public sealed class NotificationsSection : UserControl
             }));
         }
 
+        if (_store.Master is { } master)
+        {
+            var masterToggle = new ToggleSwitch
+            {
+                Header = master.Label,
+                IsOn = master.IsOn,
+                IsEnabled = !_store.Busy,
+                OnContent = string.Empty,
+                OffContent = string.Empty,
+            };
+            AutomationProperties.SetName(masterToggle, master.Label);
+            if (master.Tooltip is { } tip)
+            {
+                // A hover tip, never drawn as a line (as on the Mac).
+                ToolTipService.SetToolTip(masterToggle, tip);
+            }
+
+            masterToggle.Toggled += async (_, _) =>
+            {
+                if (masterToggle.IsOn == master.IsOn)
+                {
+                    return;
+                }
+
+                masterToggle.IsEnabled = false;
+                await _store.SetMasterAsync(masterToggle.IsOn);
+                Render();
+            };
+            body.Children.Add(masterToggle);
+        }
+
         foreach (NotifySwitchRow row in _store.Rows)
         {
             var toggle = new ToggleSwitch
@@ -78,7 +110,9 @@ public sealed class NotificationsSection : UserControl
                 Render();
             };
 
-            var item = new StackPanel { Spacing = 4 };
+            // Each kind sits under the master it follows, disabled (its
+            // stored value still shown) while the master is off.
+            var item = new StackPanel { Spacing = 4, Margin = new Thickness(_store.Master is null ? 0 : 24, 0, 0, 0) };
             item.Children.Add(toggle);
             if (row.Help is { } help)
             {

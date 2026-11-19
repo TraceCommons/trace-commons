@@ -727,6 +727,45 @@
                             </StackPanel>
                         </Border>
                         <!--
+                            The one-time offers to turn a notification kind on (W17-D2;
+                            MonitorNotices.swift offerItems): the idle offer on Traces and
+                            History, the verdicts offer on History. The core's sentence, then
+                            Enable as the primary button and No thanks after it. The X closes the card
+                            until the window opens again. Filled from code.
+                        -->
+                        <Border x:Name="IdleOfferCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <StackPanel Spacing="8">
+                                <TextBlock x:Name="IdleOfferText" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <Button x:Name="IdleOfferAccept" Style="{StaticResource TcPrimaryButtonStyle}" Click="OnAcceptNotifyOffer" Tag="idle_sessions" />
+                                    <Button x:Name="IdleOfferDecline" Style="{StaticResource TcSecondaryButtonStyle}" Click="OnDeclineNotifyOffer" Tag="idle_sessions" />
+                                </StackPanel>
+                                <TextBlock x:Name="IdleOfferRefusal" Visibility="Collapsed" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <Border x:Name="VerdictsOfferCard"
+                                Visibility="Collapsed"
+                                Padding="14,12"
+                                Background="{ThemeResource TcSurfaceCardBrush}"
+                                BorderBrush="{ThemeResource TcHairlineBrush}"
+                                BorderThickness="1"
+                                CornerRadius="{StaticResource TcCardCornerRadius}">
+                            <StackPanel Spacing="8">
+                                <TextBlock x:Name="VerdictsOfferText" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <Button x:Name="VerdictsOfferAccept" Style="{StaticResource TcPrimaryButtonStyle}" Click="OnAcceptNotifyOffer" Tag="verdicts_landed" />
+                                    <Button x:Name="VerdictsOfferDecline" Style="{StaticResource TcSecondaryButtonStyle}" Click="OnDeclineNotifyOffer" Tag="verdicts_landed" />
+                                </StackPanel>
+                                <TextBlock x:Name="VerdictsOfferRefusal" Visibility="Collapsed" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Border>
+                        <!--
                             Approved sessions held because the privacy witness is busy,
                             from status.witness_capacity in the Rust's words. A banner of
                             its own rather than a case of the health one, because a higher

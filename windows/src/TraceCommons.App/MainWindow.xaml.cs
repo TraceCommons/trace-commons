@@ -379,6 +379,7 @@ public sealed partial class MainWindow : Window
         // about it should stand between a contributor and the sessions they
         // opened the app to review.
         await ViewModel.CheckForUpdateAsync();
+        await RefreshNotifyOffersAsync();
 
         await RefreshTrayAsync();
         await ShowOnboardingIfNeededAsync();

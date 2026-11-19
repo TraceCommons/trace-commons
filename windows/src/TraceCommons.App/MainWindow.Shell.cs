@@ -881,10 +881,12 @@ public sealed partial class MainWindow
             settings.CheckForUpdatesRequested += async (_, _) => await ViewModel.CheckForUpdateAsync();
             _settingsView = settings;
             _settingsWindow = new SettingsWindow(settings);
-            _settingsWindow.Closed += (_, _) =>
+            _settingsWindow.Closed += async (_, _) =>
             {
                 _settingsWindow = null;
                 _settingsView = null;
+                // A kind turned on in Settings ends its offer.
+                await RefreshNotifyOffersAsync();
             };
         }
 
@@ -896,6 +898,65 @@ public sealed partial class MainWindow
 
     // ---- Notices -----------------------------------------------------------
 
+    /// <summary>
+    /// The one-time notification offers (W17-D2; MonitorNotices.swift
+    /// offerItems), read from the daemon's settings.
+    /// </summary>
+    private NotificationKindsStore? _notifyOffers;
+
+    private NotificationKindsStore NotifyOffers =>
+        _notifyOffers ??= new NotificationKindsStore((method, json) => _host.CallAsync(method, json));
+
+    /// <summary>Reads the offers again and redraws the notices.</summary>
+    private async System.Threading.Tasks.Task RefreshNotifyOffersAsync()
+    {
+        await NotifyOffers.ReadAsync();
+        RefreshNotices();
+    }
+
+    /// <summary>
+    /// Fills an offer's card for <paramref name="place"/> in the core's
+    /// words and answers the offer, or null when none is pending.
+    /// </summary>
+    private NotifyOffer? DrawNotifyOffer(OfferPlace place, Border card, TextBlock text, Button accept, Button decline, TextBlock refusal)
+    {
+        if (NotifyOffers.Offers(place) is not { Count: > 0 } offers)
+        {
+            return null;
+        }
+
+        NotifyOffer offer = offers[0];
+        text.Text = offer.Text;
+        accept.Content = offer.Accept;
+        decline.Content = offer.Decline;
+        accept.IsEnabled = decline.IsEnabled = !NotifyOffers.Busy;
+        bool refused = NotifyOffers.RefusedOfferKind == offer.Kind && NotifyOffers.Refusal is not null;
+        refusal.Text = refused ? NotifyOffers.Refusal! : string.Empty;
+        refusal.Visibility = refused ? Visibility.Visible : Visibility.Collapsed;
+        return offer;
+    }
+
+    /// <summary>Enable: the kind on, which ends the offer.</summary>
+    private async void OnAcceptNotifyOffer(object sender, RoutedEventArgs e) => await AnswerNotifyOfferAsync(sender, accept: true);
+
+    /// <summary>No thanks: the offer's marker cleared, nothing else.</summary>
+    private async void OnDeclineNotifyOffer(object sender, RoutedEventArgs e) => await AnswerNotifyOfferAsync(sender, accept: false);
+
+    private async System.Threading.Tasks.Task AnswerNotifyOfferAsync(object sender, bool accept)
+    {
+        string? kind = (sender as FrameworkElement)?.Tag as string;
+        NotifyOffer? offer = NotifyOffers
+            .Offers(kind == "verdicts_landed" ? OfferPlace.History : OfferPlace.Traces)
+            .FirstOrDefault(o => o.Kind == kind);
+        if (offer is null)
+        {
+            return;
+        }
+
+        await NotifyOffers.AnswerAsync(offer, accept);
+        RefreshNotices();
+    }
+
     /// <summary>The cards present now, each with its element.</summary>
     private IEnumerable<(NoticeKind Kind, FrameworkElement Card)> PresentNotices()
     {
@@ -904,6 +965,10 @@ public sealed partial class MainWindow
         if (ViewModel.LegacyOffer.ShowsCard) yield return (NoticeCatalog.LegacyOffer, LegacyOfferCard);
         if (ViewModel.ShowFirstContribution) yield return (NoticeCatalog.FirstContribution, FirstContributionCard);
         if (ViewModel.HasArmingOffer) yield return (NoticeCatalog.ArmingOffer(ViewModel.ArmingOfferProjectId), ArmingOfferCard);
+        if (DrawNotifyOffer(OfferPlace.Traces, IdleOfferCard, IdleOfferText, IdleOfferAccept, IdleOfferDecline, IdleOfferRefusal) is { } idle)
+            yield return (NoticeCatalog.NotifyOffer(idle.Kind), IdleOfferCard);
+        if (DrawNotifyOffer(OfferPlace.History, VerdictsOfferCard, VerdictsOfferText, VerdictsOfferAccept, VerdictsOfferDecline, VerdictsOfferRefusal) is { } verdicts)
+            yield return (NoticeCatalog.NotifyOffer(verdicts.Kind), VerdictsOfferCard);
         if (ViewModel.GrantVoidCards.Count > 0) yield return (NoticeCatalog.GrantVoids, VoidCards);
         if (ViewModel.ArmingRewordingCards.Count > 0) yield return (NoticeCatalog.ArmingRewordings, RewordingCards);
         if (ViewModel.HasGateHeldBanner) yield return (NoticeCatalog.GateHeld, GateHeldCard);
@@ -917,6 +982,7 @@ public sealed partial class MainWindow
     private static IEnumerable<FrameworkElement> AllCards(MainWindow w) => new FrameworkElement[]
     {
         w.UpdateCard, w.LegacyNoticeCard, w.LegacyOfferCard, w.FirstContributionCard, w.ArmingOfferCard,
+        w.IdleOfferCard, w.VerdictsOfferCard,
         w.RewordingCards, w.VoidCards, w.GateHeldCard, w.WitnessCard, w.HealthCard, w.UndoCard,
         w.PrivateAIOfferCard, w.ActionNoticeCard,
     };

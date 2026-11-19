@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using TraceCommons.Interop.Shell;
 using Xunit;
 
 namespace TraceCommons.Interop.Tests;
@@ -91,6 +92,41 @@ public class NotificationKindsTests
         NudgeRequest request = NotificationKinds.SetKind(kind, on);
         Assert.Equal("set_notify_kind", request.Method);
         Assert.Equal(expected, request.ParamsJson);
+    }
+
+    /// <summary>
+    /// The master switch above the kinds (<c>.notifications</c>), its label
+    /// and hover tip the core's (SETTING_NOTIFY_MASTER approved 2026-11-19).
+    /// </summary>
+    [Fact]
+    public void TheMasterSwitchIsTheCoresAndWritesSetNotificationsEnabled()
+    {
+        NotifyMasterRow master = Assert.IsType<NotifyMasterRow>(NotificationKinds.Master(State(AllOn), NudgeWords.Word));
+        Assert.Equal(NudgeWords.Word("SETTING_NOTIFY_MASTER"), master.Label);
+        Assert.StartsWith("Notifications from ", master.Label, StringComparison.Ordinal);
+        Assert.Equal(NudgeWords.Word("SETTING_NOTIFY_MASTER_TOOLTIP"), master.Tooltip);
+        Assert.True(master.IsOn);
+
+        Assert.Equal(new NudgeRequest("set_notifications_enabled", """{"on":false}"""), NotificationKinds.SetMaster(false));
+        Assert.Equal(new NudgeRequest("set_notifications_enabled", """{"on":true}"""), NotificationKinds.SetMaster(true));
+    }
+
+    [Fact]
+    public void AnUnreportedMasterHasNoSwitch()
+    {
+        Assert.Null(NotificationKinds.Master(State("""{"notify": {"digest": true}}"""), NudgeWords.Word));
+        Assert.Null(NotificationKinds.Master(null, NudgeWords.Word));
+        Assert.Null(NotificationKinds.Master(State(AllOn), _ => null));
+    }
+
+    [Fact]
+    public void TheApprovedWordsAreTheOwnersExactly()
+    {
+        Assert.Equal("Waiting and contributed traces", NudgeWords.Word("SETTING_DIGEST"));
+        Assert.Equal("When traces you sent are judged", NudgeWords.Word("SETTING_NOTIFY_VERDICTS"));
+        Assert.Equal(
+            "Traces you send are now judged in the background. Want a notification when that happens? At most twice a week.",
+            NudgeWords.Word("OFFER_NOTIFY_VERDICTS_EXISTING"));
     }
 
     [Fact]
@@ -273,6 +309,22 @@ public class NotificationKindsStoreTests
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task TheMasterWritesThenReadsAndItsKindsFollowIt()
+    {
+        var daemon = new FakeDaemon();
+        NotificationKindsStore store = Store(daemon);
+        await store.ReadAsync();
+        Assert.True(store.Master!.IsOn);
+
+        daemon.SettingsJson = Settings.Replace("\"notifications_enabled\": true", "\"notifications_enabled\": false", StringComparison.Ordinal);
+        await store.SetMasterAsync(false);
+
+        Assert.Equal(("set_notifications_enabled", """{"on":false}"""), daemon.Calls[1]);
+        Assert.False(store.Master!.IsOn);
+        Assert.All(store.Rows, r => Assert.False(r.Enabled));
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task ARefusedWriteSaysSoAndKeepsTheStoredValue()
     {
         var daemon = new FakeDaemon();
@@ -313,5 +365,97 @@ public class NotificationKindsStoreTests
         Assert.Equal("verdicts_landed", store.RefusedOfferKind);
         Assert.Equal("refused", store.Refusal);
         Assert.Single(store.Offers(OfferPlace.History));
+    }
+}
+
+/// <summary>
+/// Where the one-time offers sit (MonitorNotices.swift:313-372, 695-725):
+/// the idle offer with the traces offers, on Traces and History; the
+/// verdicts offer with History's own offers, on History and Home's history.
+/// Not now (the X) closes either until the window opens again.
+/// </summary>
+public class NotifyOfferPlacementTests
+{
+    private static readonly NoticeKind Idle = NoticeCatalog.NotifyOffer("idle_sessions");
+    private static readonly NoticeKind Verdicts = NoticeCatalog.NotifyOffer("verdicts_landed");
+
+    [Fact]
+    public void EachOfferIsItsOwnCardClosedForNow()
+    {
+        Assert.Equal("notify-offer:idle_sessions", Idle.Id);
+        Assert.Equal("notify-offer:verdicts_landed", Verdicts.Id);
+        Assert.Equal(NoticeGroup.TracesOffers, Idle.Group);
+        Assert.Equal(NoticeGroup.HistoryOffers, Verdicts.Group);
+        Assert.Equal(NoticeClose.ForNow, Idle.Close);
+        Assert.Equal(NoticeClose.ForNow, Verdicts.Close);
+        Assert.Equal(CloseWord.Close, NoticeCatalog.CloseWordFor(Idle));
+    }
+
+    [Theory]
+    [InlineData(NoticePlace.Traces, true, false)]
+    [InlineData(NoticePlace.History, true, true)]
+    [InlineData(NoticePlace.HomeHistory, false, true)]
+    [InlineData(NoticePlace.Home, false, false)]
+    [InlineData(NoticePlace.PrivateAI, false, false)]
+    [InlineData(NoticePlace.Insights, false, false)]
+    public void EachPlaceDrawsTheMacsOffers(NoticePlace place, bool idle, bool verdicts)
+    {
+        IReadOnlyList<string> shown = NoticeCatalog.Order(place, new[] { Verdicts, Idle }).Select(c => c.Id).ToList();
+        Assert.Equal(idle, shown.Contains(Idle.Id));
+        Assert.Equal(verdicts, shown.Contains(Verdicts.Id));
+    }
+
+    [Fact]
+    public void OnHistoryTheTracesOffersSitBehindHistorysOwnThenWhatIsHappeningNow()
+    {
+        Assert.Equal(
+            new[] { "update", Idle.Id, Verdicts.Id, "gate-held", "action-notice" },
+            NoticeCatalog.Order(NoticePlace.History, new[] { NoticeCatalog.ActionNotice, NoticeCatalog.GateHeld, Verdicts, Idle, NoticeCatalog.Update })
+                .Select(c => c.Id));
+    }
+}
+
+/// <summary>The window and Settings use the models above, and nothing of their own.</summary>
+public class NotificationShellWiringTests
+{
+    private static string ShellSource(string relativePath)
+    {
+        string path = System.IO.Path.Combine(AppContext.BaseDirectory, "shell-source", relativePath + ".txt");
+        Assert.True(System.IO.File.Exists(path), $"{relativePath} was not copied to {path}");
+        return System.IO.File.ReadAllText(path).Replace("\r\n", "\n", StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReengageIsDeclaredFromTheTrayAndPostedInTheDaemonsWords()
+    {
+        string window = ShellSource("TraceCommons.App/MainWindow.xaml.cs");
+        Assert.Contains("_host.AcceptedEvents = ReengageNotice.AcceptedEvents(_tray.IsPresent);", window);
+        Assert.Contains("_host.ReengageDue += OnReengageDue;", window);
+        Assert.Contains("_tray.ShowNotice(notice.Title, notice.Body)", window);
+        Assert.Contains("_tray.BalloonClicked += OnTrayBalloonClicked;", window);
+
+        string host = ShellSource("TraceCommons.App/DaemonHost.cs");
+        Assert.Contains("daemon.Subscribe(OnDaemonEvent, AcceptedEvents)", host);
+        Assert.Contains("ReengageNotice.From(evt)", host);
+    }
+
+    [Fact]
+    public void TheOffersAreTheStoresOnTheirPlaces()
+    {
+        string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
+        Assert.Contains("DrawNotifyOffer(OfferPlace.Traces, IdleOfferCard", shell);
+        Assert.Contains("DrawNotifyOffer(OfferPlace.History, VerdictsOfferCard", shell);
+        Assert.Contains("await NotifyOffers.AnswerAsync(offer, accept);", shell);
+    }
+
+    [Fact]
+    public void SettingsDrawsTheStoresMasterAndKinds()
+    {
+        string section = ShellSource("TraceCommons.App/Controls/Settings/NotificationsSection.cs");
+        Assert.Contains("_store.Master is { } master", section);
+        Assert.Contains("await _store.SetMasterAsync(masterToggle.IsOn);", section);
+        Assert.Contains("foreach (NotifySwitchRow row in _store.Rows)", section);
+        Assert.Contains("await _store.SetAsync(kind, toggle.IsOn);", section);
+        Assert.Contains("NotificationsHost.Content = new NotificationsSection(host);", ShellSource("TraceCommons.App/Controls/SettingsView.Sections.cs"));
     }
 }
