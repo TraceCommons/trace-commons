@@ -46,6 +46,8 @@ pub(super) struct Coordinator {
     app: Weak<App>,
     window: glib::WeakRef<adw::Window>,
     stack: gtk::Stack,
+    /// The steps crossfading on the spatial spring.
+    fade: Rc<super::first_run_fade::StepFade>,
     heading: adw::WindowTitle,
     state: RefCell<State>,
     tools: Rc<RefCell<Tools>>,
@@ -93,6 +95,8 @@ pub(super) struct Coordinator {
     /// The NEAR AI credit section, drawn once an enrollment is held.
     payout: RefCell<Option<Rc<super::payout_link::PayoutLinkView>>>,
     payout_shown: Cell<bool>,
+    /// Whether Join's account card was last drawn chosen.
+    join_chosen: Cell<bool>,
     /// The animated stage under every step (`FirstRunStage.swift`).
     stage: Rc<super::first_run_stage_view::Stage>,
 }
@@ -173,10 +177,10 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let stack = gtk::Stack::builder()
         .vexpand(true)
         .vhomogeneous(false)
-        // Steps fade into each other, as the Mac's do, so the stage's N and
-        // tiles carry the move between them.
-        .transition_type(gtk::StackTransitionType::Crossfade)
         .build();
+    // Steps fade into each other on the Mac's spatial spring, so the
+    // stage's N and tiles carry the move between them.
+    let fade = super::first_run_fade::StepFade::new(&stack);
     let heading = adw::WindowTitle::new(crate::copy::APP_NAME, "");
     let error = body_label("");
     error.add_css_class("tc-refused");
@@ -191,6 +195,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         app: Rc::downgrade(app),
         window: window.downgrade(),
         stack: stack.clone(),
+        fade: fade.clone(),
         heading: heading.clone(),
         state: RefCell::new(State {
             daemon_started: true,
@@ -234,6 +239,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
         referral: RefCell::new(String::new()),
         payout: RefCell::new(None),
         payout_shown: Cell::new(false),
+        join_chosen: Cell::new(false),
         stage: stage.clone(),
     });
     if let Some(handed) = super::roots::take_first_run_handoff() {
@@ -274,7 +280,7 @@ pub(super) fn present(app: &Rc<App>) -> adw::Window {
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::External)
         .vexpand(true)
-        .child(&super::first_run_screens::column(&stack))
+        .child(&super::first_run_screens::column(fade.root()))
         .build();
     stage.follow(&scroll);
     content.append(&scroll);
@@ -322,7 +328,7 @@ impl Coordinator {
             move || {
                 if let Some(c) = weak.upgrade() {
                     c.stage.set_agent(true);
-                    c.stack.set_visible_child_name("agent");
+                    c.fade.show("agent");
                 }
             }
         });
@@ -334,7 +340,7 @@ impl Coordinator {
             move || {
                 if let Some(c) = weak.upgrade() {
                     c.stage.set_agent(false);
-                    c.stack.set_visible_child_name("welcome");
+                    c.fade.show("welcome");
                 }
             }
         });
@@ -348,6 +354,14 @@ impl Coordinator {
             }
         });
         tools.root.prepend(&self.stage.slot(Step::Tools));
+        self.stage.set_tools_rows({
+            let tools = Rc::downgrade(&tools);
+            Rc::new(move |since| {
+                if let Some(tools) = tools.upgrade() {
+                    tools.rise_rows(since);
+                }
+            })
+        });
         tools.connect_changed({
             let stage = Rc::downgrade(&self.stage);
             move || {
@@ -455,7 +469,7 @@ impl Coordinator {
             Step::Terms => copy.frame.step_terms,
             Step::Join => copy.frame.step_join,
         });
-        self.stack.set_visible_child_name(name(step));
+        self.fade.show(name(step));
         self.stage.set_agent(false);
         self.stage.set_step(step, !self.busy.get(), {
             let weak = Rc::downgrade(self);
@@ -595,10 +609,10 @@ impl Coordinator {
     fn render_private_ai(&self) {
         clear(&self.private_body);
         let tools = self.tools.borrow();
-        self.private_body.append(&screens::private_ai_body(
-            &tools.connectable(),
-            tools.found_count(),
-        ));
+        let connectable = tools.connectable();
+        let (body, figure) = screens::private_ai_body(&connectable, tools.found_count());
+        self.private_body.append(&body);
+        self.stage.set_private_count(&figure, connectable.len());
     }
 
     fn render_traces(self: &Rc<Self>) {
@@ -636,12 +650,17 @@ impl Coordinator {
         if let Some((headline, note)) =
             screens::traces_lines(found, self.trace_lines.borrow().as_ref(), earns)
         {
-            self.traces_body.append(&body_label(&headline));
+            // The estimate rises into place once the count is done.
+            let estimate = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            estimate.append(&body_label(&headline));
             if let Some(note) = note {
                 let note = body_label(&note);
                 note.add_css_class("tc-meta");
-                self.traces_body.append(&note);
+                estimate.append(&note);
             }
+            let lift = super::lift::Lift::new(&estimate);
+            self.traces_body.append(&lift);
+            self.stage.set_estimate(&lift);
         }
         // Asked once per first run, once something is counted.
         if found.is_some_and(|n| n > 0) && !self.trace_lines_asked.replace(true) {
@@ -855,6 +874,16 @@ impl Coordinator {
                 .map(|p| f64::from(p.y()))
         });
         self.customizing.set(true);
+        // The title and the graphic's captions fade out where they were on
+        // the open spring; the stage fades the graphic itself.
+        let fade_out: fn(f64) -> f64 =
+            |since| super::first_run_stage::motion::customize_fade_out(since, false);
+        let settle =
+            super::first_run_stage::spring_settle(super::first_run_stage::customize::DURATION);
+        self.fade.fade_away(&self.uses_flow, fade_out, settle);
+        if let Some(title) = self.uses_title.borrow().as_ref() {
+            self.fade.fade_away(title, fade_out, settle);
+        }
         self.stage.set_open(true);
         self.uses_card.set_visible(false);
         self.uses_flow.set_visible(false);
@@ -953,6 +982,17 @@ impl Coordinator {
                     arms.add_css_class("tc-meta");
                     arms.set_visible(rules::arms_after_sign_in(&c.state.borrow(), &project));
                     let project = Rc::new(project);
+                    // Ask, Automatic and Never side by side in one well, the
+                    // chosen one's pill filling (`FirstRunSegmented`).
+                    let picker = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                    picker.add_css_class("tc-first-run-segmented");
+                    picker.set_halign(gtk::Align::Start);
+                    picker.set_accessible_role(gtk::AccessibleRole::Group);
+                    picker.update_property(&[gtk::accessible::Property::Label(&fill(
+                        copy.rules.rule_for,
+                        "folder",
+                        &project.project_label,
+                    ))]);
                     for rule in rules::offerable_modes(&project) {
                         let index = match rule {
                             Rule::Ask => 0,
@@ -960,6 +1000,7 @@ impl Coordinator {
                             Rule::Never => 2,
                         };
                         let check = gtk::CheckButton::with_label(choices.choices[index].label);
+                        check.add_css_class("tc-first-run-segment");
                         check.set_group(group.as_ref());
                         if group.is_none() {
                             group = Some(check.clone());
@@ -982,8 +1023,9 @@ impl Coordinator {
                                 }
                             }
                         });
-                        row.append(&check);
+                        picker.append(&check);
                     }
+                    row.append(&picker);
                     // Automatic picked before sign-in is armed at Start, and
                     // says so in Uses' words (`armsAfterSignIn`).
                     row.append(&arms);
@@ -992,6 +1034,8 @@ impl Coordinator {
                         .label(copy.rules.past_sessions)
                         .child(&history)
                         .build();
+                    // Its chevron turns over the standard 0.22 s.
+                    more.add_css_class("tc-first-run-disclosure");
                     more.connect_expanded_notify({
                         let weak = Rc::downgrade(&c);
                         let id = project.project_id.clone();
@@ -1055,6 +1099,8 @@ impl Coordinator {
                         .unwrap_or(rules.past_sessions);
                     let check = gtk::CheckButton::with_label(label);
                     check.set_sensitive(session["selectable"].as_bool() == Some(true));
+                    // The small switch, before its words (`FirstRunSwitch`).
+                    let switch = super::first_run_switch::SmallSwitch::new(check.clone());
                     check.set_active(
                         c.state
                             .borrow()
@@ -1080,7 +1126,7 @@ impl Coordinator {
                             }
                         }
                     });
-                    body.append(&check);
+                    body.append(&switch.root);
                 }
                 if let Some(count) = value["not_listed"].as_u64().filter(|count| *count > 0) {
                     body.append(&body_label(&fill(
@@ -1168,6 +1214,23 @@ impl Coordinator {
         // near.ai, the one way in (owner, 2026-10-12).
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
         card.add_css_class("tc-card");
+        // Outlined in the accent once signed in, over the standard 0.22 s
+        // (`accountCard`'s `chosen`): built as it last read, then restyled.
+        card.add_css_class("tc-join-card");
+        let chosen = state.signed_in;
+        if self.join_chosen.replace(chosen) {
+            card.add_css_class("tc-join-chosen");
+        }
+        super::first_run_fade::restyle_after_drawn(&card, {
+            let card = card.clone();
+            move || {
+                if chosen {
+                    card.add_css_class("tc-join-chosen");
+                } else {
+                    card.remove_css_class("tc-join-chosen");
+                }
+            }
+        });
         card.append(&eyebrow(copy.join.near_ai_eyebrow));
         card.append(&body_label(copy.join.near_ai_text));
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);

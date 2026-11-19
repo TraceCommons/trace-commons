@@ -689,6 +689,10 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
         pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
         pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#ffffff", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#000000", 0.24);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.92);
     }
     /// The dark scheme.
     pub mod dark {
@@ -716,5 +720,9 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
         pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
         pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#071a2e", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#ffffff", 0.38);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#071a2e", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.15);
     }
 }
