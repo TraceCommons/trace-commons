@@ -224,7 +224,7 @@ try {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
         Wait-Process -Id $id -Timeout 15 -ErrorAction SilentlyContinue
     }
-    Compare-MachineState -Before $baseline -After 'single-instance'
+    Compare-MachineState -Before $baseline -After 'the single-instance launches'
 }
 finally {
     foreach ($id in $started) {
