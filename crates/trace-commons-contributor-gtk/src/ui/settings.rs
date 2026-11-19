@@ -671,21 +671,22 @@ impl SettingsView {
         background_body.set_text(copy::PORTAL_STATUS_CHECKING);
         autostart_card.append(&background_body);
         sections.body(Section::Startup).append(&autostart_card);
-        // The Traces map's style (the Mac's General section; this shell
-        // has none, so beside the other choices about this computer's
-        // window): the rocket and station, or the laptop and the orb.
-        let (map_style_card, map_style_switch) = map_style_card();
-        sections.body(Section::Startup).append(&map_style_card);
-        // The Linux app's Appearance choice (Omarchy skin spec, D2): a card
-        // of its own under Startup, since the sections are pinned to the
-        // macOS groups. It writes only the shell's own preference file.
+        // General, as the Mac's (`GeneralSection`): the appearance, the
+        // edge rail's switch, the Traces map's style and Home's promotions,
+        // in its order.
+        // The Linux app's Appearance choice (Omarchy skin spec, D2). It
+        // writes only the shell's own preference file.
         sections
-            .body(Section::Startup)
+            .body(Section::General)
             .append(&super::appearance::settings_card());
         // The edge rail's switch, under the same "Desktop" eyebrow the Mac
         // gives it; shown once the session is known to support a rail.
         let edge_rail = super::edge_surfaces::rail_switch();
-        sections.body(Section::Startup).append(&edge_rail.card);
+        sections.body(Section::General).append(&edge_rail.card);
+        // The Traces map's style: the rocket and station, or the laptop and
+        // the orb.
+        let (map_style_card, map_style_switch) = map_style_card();
+        sections.body(Section::General).append(&map_style_card);
 
         // Home's promotion switch, as the Mac's General section has it: the
         // core's card heading, the switch and the line under it.
@@ -716,7 +717,9 @@ impl SettingsView {
         promotions_row.append(&promotions_switch);
         promotions_card.append(&promotions_row);
         style::append_meta(&promotions_card, home_words.promotions_caption);
-        sections.body(Section::Startup).append(&promotions_card);
+        sections.body(Section::General).append(&promotions_card);
+        // The Mac's last General card, the credit-arrival animation's
+        // switch, goes here.
 
         // §5.6. Kept visually separate from everything above it because it
         // is the only thing on this screen that grants no data use at all

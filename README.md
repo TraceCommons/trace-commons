@@ -144,9 +144,10 @@ Three things live here:
   Windows apps link.
 - **The desktop apps**: the native SwiftUI macOS app in `macos/` is the lead
   client and the one new releases ship. The Linux GTK app
-  (`crates/trace-commons-contributor-gtk`) is back in development but not
-  yet released again. The Windows app (`windows/`, C#) and the Tauri app
-  (`tauri-desktop/`) are frozen.
+  (`crates/trace-commons-contributor-gtk`) has reached Mac parity on `main`
+  but is not yet released. The Windows app (`windows/`, C#) is being brought
+  to Mac parity and will replace the Tauri app (`tauri-desktop/`, frozen) on
+  Windows once it matches.
 
 Ironclaw is a separate, TEE-hosted trace source with its own client
 integration; the shared protocol DTOs live in
@@ -227,7 +228,7 @@ crates/
                                  client-only tests do not build the server.
 
 macos/                           Native SwiftUI macOS app, the lead client.
-windows/                         Windows app, C# (frozen).
+windows/                         Windows app, C# (Mac-parity work in progress).
 tauri-desktop/                   Tauri app (frozen; its own Cargo workspace).
 migrations/                      PostgreSQL schema.
 scripts/                         install.sh, install.ps1, contribute.sh; operator and CI scripts.
@@ -382,7 +383,7 @@ command line, where it would land in your shell history and in `ps`.
 
 The desktop app ships as a universal notarized DMG
 (`brew install --cask TraceCommons/tap/trace-commons`). New `app-v*` releases
-are macOS only: the Windows app is frozen and the Linux app is not yet
+are macOS only: the Windows app is still on its existing release and the Linux app is not yet
 released again, both on their existing releases, and
 [`docs/release-runbook.md`](docs/release-runbook.md) names the
 last release that carried them. The CLI above still ships for macOS, Linux

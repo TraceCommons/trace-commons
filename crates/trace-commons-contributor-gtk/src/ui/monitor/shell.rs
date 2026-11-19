@@ -1034,6 +1034,13 @@ impl Shell {
             window.present();
             return;
         }
+        let window = self.settings_window_for(&app.window);
+        window.present();
+        self.settings_window.replace(Some(window));
+    }
+
+    /// The Settings window beside `main`, holding the Settings view.
+    fn settings_window_for(&self, main: &adw::ApplicationWindow) -> adw::Window {
         let words = monitor_screens_copy();
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.add_css_class("tc-root");
@@ -1053,19 +1060,19 @@ impl Shell {
             .hide_on_close(true)
             .content(&column)
             .build();
-        if let Some(application) = app.window.application() {
+        window.add_css_class("tc-settings-window");
+        if let Some(application) = main.application() {
             window.set_application(Some(&application));
         }
         // A hidden Settings window must not keep the process alive after
         // the main window has gone.
         let weak = window.downgrade();
-        app.window.connect_destroy(move |_| {
+        main.connect_destroy(move |_| {
             if let Some(window) = weak.upgrade() {
                 window.destroy();
             }
         });
-        window.present();
-        self.settings_window.replace(Some(window));
+        window
     }
 
     // --- Panes -----------------------------------------------------------
@@ -1710,7 +1717,7 @@ mod tests {
         // The one header bar in this file is the Settings window's own.
         assert_eq!(code.matches("adw::HeaderBar").count(), 1);
         let settings = code
-            .split("pub fn present_settings")
+            .split("fn settings_window_for")
             .nth(1)
             .expect("Settings has its own window");
         assert!(
@@ -3000,6 +3007,223 @@ mod tests {
                 [pixels[at], pixels[at + 1], pixels[at + 2], pixels[at + 3]]
             })
             .collect()
+    }
+
+    /// A window's pixels at `points`, drawn from its widget tree, as R, G, B.
+    fn any_window_pixels(window: &gtk::Window, points: &[(i32, i32)]) -> Vec<[u8; 3]> {
+        let (width, height) = (window.width(), window.height());
+        let paintable = gtk::WidgetPaintable::new(Some(window));
+        let node = std::cell::RefCell::new(None);
+        pump_until(|| {
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+            *node.borrow_mut() = snapshot.to_node();
+            node.borrow().is_some()
+        });
+        let node = node.into_inner().expect("a render node");
+        let renderer = gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface"))
+            .expect("a renderer");
+        let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+        let texture = renderer.render_texture(&node, Some(&viewport));
+        renderer.unrealize();
+        let stride = texture.width() as usize * 4;
+        let mut pixels = vec![0u8; stride * texture.height() as usize];
+        texture.download(&mut pixels, stride);
+        points
+            .iter()
+            .map(|&(x, y)| {
+                let at = y as usize * stride + x as usize * 4;
+                [pixels[at + 2], pixels[at + 1], pixels[at]]
+            })
+            .collect()
+    }
+
+    /// A colour the painted glass sheet of `dark` defines, as R, G, B.
+    fn glass_rgb(dark: bool, name: &str) -> [u8; 3] {
+        let sheet = if dark {
+            style::brand_tokens::GLASS_DARK_CSS
+        } else {
+            style::brand_tokens::GLASS_LIGHT_CSS
+        };
+        let hex = sheet
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("@define-color {name} #")))
+            .unwrap_or_else(|| panic!("no opaque {name}"))
+            .trim_end_matches(';')
+            .trim()
+            .to_owned();
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+        [byte(0), byte(2), byte(4)]
+    }
+
+    /// WCAG contrast of two drawn colours.
+    fn drawn_contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+        let luminance = |c: [u8; 3]| {
+            let channel = |v: u8| {
+                let v = f64::from(v) / 255.0;
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(c[0]) + 0.7152 * channel(c[1]) + 0.0722 * channel(c[2])
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The Settings window on the Mac's settingsGround with a card on it
+    /// in the Mac's card fill, edged by the hairline where (in Dark) the
+    /// fill alone is the ground's; its text in the Mac's glass inks, each
+    /// drawn at 4.5:1 or more on the card. A sheet stays on the Monitor's
+    /// pane and card, as the Mac raises Look inside on a pane. On the
+    /// branch before this fix Settings drew the pane's #171B2D with the
+    /// olive inks #E8EAE3 / #A6AC9F and hairline #3B4038.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_settings_and_a_sheet_take_the_monitors_palette() {
+        let mounted = mounted(false);
+        crate::ui::style::install();
+        let manager = adw::StyleManager::default();
+        // A Settings card as the sections draw theirs, with a line in each
+        // of the three inks.
+        let card = style::card(gtk::Orientation::Vertical, 8);
+        card.set_halign(gtk::Align::Start);
+        card.set_valign(gtk::Align::Start);
+        card.set_margin_top(24);
+        card.set_margin_start(24);
+        let words = monitor_screens_copy();
+        let lines: Vec<(gtk::Label, &str)> = [
+            ("tc-body", "tc_glass_ink"),
+            ("tc-meta", "tc_glass_ink_secondary"),
+            ("tc-tertiary", "tc_glass_ink_tertiary"),
+        ]
+        .into_iter()
+        .map(|(class, ink)| {
+            let label = gtk::Label::new(Some(words.settings_title));
+            label.add_css_class(class);
+            card.append(&label);
+            (label, ink)
+        })
+        .collect();
+        mounted.shell.settings_root.append(&card);
+        let settings = mounted.shell.settings_window_for(&mounted.window);
+        // A sheet as the Look inside sheet and the dialogs are made: a
+        // plain window holding a card.
+        let sheet_card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sheet_card.add_css_class("card");
+        sheet_card.set_size_request(200, 120);
+        sheet_card.set_halign(gtk::Align::Center);
+        sheet_card.set_valign(gtk::Align::Center);
+        let sheet = adw::Window::builder()
+            .default_width(400)
+            .default_height(300)
+            .content(&sheet_card)
+            .build();
+        settings.present();
+        sheet.present();
+        let near = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 3);
+        for dark in [false, true] {
+            manager.set_color_scheme(if dark {
+                adw::ColorScheme::ForceDark
+            } else {
+                adw::ColorScheme::ForceLight
+            });
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            pump_until(|| std::time::Instant::now() >= end);
+            // The Settings window's ground, low in the window, clear of
+            // anything the Settings page draws.
+            let ground_ink = glass_rgb(dark, "tc_glass_settings_ground");
+            let (w, h) = (settings.width(), settings.height());
+            let ground = any_window_pixels(settings.upcast_ref(), &[(w / 2, h - 20)])[0];
+            assert!(
+                near(ground, ground_ink),
+                "dark={dark}: Settings draws {ground:?}, not {ground_ink:?}"
+            );
+            // The card: its fill inside, its hairline at its left edge.
+            let at = card.compute_bounds(&settings).expect("the card laid out");
+            let (x, y) = (at.x() as i32, at.y() as i32);
+            let (cw, ch) = (at.width() as i32, at.height() as i32);
+            let drawn = any_window_pixels(
+                settings.upcast_ref(),
+                &[(x + cw - 4, y + ch / 2), (x, y + ch / 2)],
+            );
+            let fill = glass_rgb(dark, "tc_glass_settings_card");
+            assert!(
+                near(drawn[0], fill),
+                "dark={dark}: the card draws {:?}, not {fill:?}",
+                drawn[0]
+            );
+            let rule = glass_rgb(dark, "tc_glass_settings_rule");
+            assert!(
+                near(drawn[1], rule),
+                "dark={dark}: the card's edge draws {:?}, not {rule:?}",
+                drawn[1]
+            );
+            // Told from the ground at least as well as the Monitor's own
+            // card is told from its pane.
+            let monitor = drawn_contrast(
+                glass_rgb(dark, "tc_glass_window_card"),
+                glass_rgb(dark, "tc_glass_window_pane"),
+            );
+            let edge = drawn_contrast(drawn[1], ground);
+            assert!(
+                edge >= monitor && edge > 1.2,
+                "dark={dark}: the card's edge is {edge:.2}:1 on the ground"
+            );
+            // Each line's most-inked pixel: the ink, at 4.5:1 or more.
+            for (label, ink) in &lines {
+                let bounds = label.compute_bounds(&settings).expect("laid out");
+                let mut points = Vec::new();
+                for py in bounds.y() as i32..(bounds.y() + bounds.height()) as i32 {
+                    for px in bounds.x() as i32..(bounds.x() + bounds.width()) as i32 {
+                        points.push((px, py));
+                    }
+                }
+                let pixels = any_window_pixels(settings.upcast_ref(), &points);
+                let strongest = pixels
+                    .iter()
+                    .copied()
+                    .max_by(|a, b| drawn_contrast(*a, fill).total_cmp(&drawn_contrast(*b, fill)))
+                    .expect("the line drew");
+                let ratio = drawn_contrast(strongest, fill);
+                assert!(ratio >= 4.5, "dark={dark}: {ink} draws {ratio:.2}:1");
+                // Its ink is drawn somewhere in it (a stem's full cover).
+                let want = glass_rgb(dark, ink);
+                let off = |c: &[u8; 3]| {
+                    c.iter()
+                        .zip(want)
+                        .map(|(x, y)| x.abs_diff(y))
+                        .max()
+                        .unwrap()
+                };
+                let closest = pixels.iter().min_by_key(|c| off(c)).expect("the line drew");
+                assert!(
+                    off(closest) <= 12,
+                    "dark={dark}: no pixel of the line is {ink} {want:?}; nearest {closest:?}"
+                );
+            }
+            // The sheet: the Monitor's pane and card.
+            let pane = glass_rgb(dark, "tc_glass_window_pane");
+            let (w, h) = (sheet.width(), sheet.height());
+            let drawn = any_window_pixels(sheet.upcast_ref(), &[(8, h - 8), (w / 2, h / 2)]);
+            assert!(
+                near(drawn[0], pane),
+                "dark={dark}: the sheet draws {:?}",
+                drawn[0]
+            );
+            let card = glass_rgb(dark, "tc_glass_window_card");
+            assert!(
+                near(drawn[1], card),
+                "dark={dark}: its card draws {:?}, not {card:?}",
+                drawn[1]
+            );
+        }
+        manager.set_color_scheme(adw::ColorScheme::Default);
+        sheet.destroy();
+        settings.destroy();
+        mounted.window.close();
     }
 
     /// A point in the gap between the main pane and the map pane, and one

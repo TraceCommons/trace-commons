@@ -269,6 +269,9 @@ impl Sheet {
         // 1.5 fix needs them to), and neither is wider than the screen.
         let width = sheet_width(room_over(app.window.upcast_ref()));
         let window = adw::Window::builder()
+            // The name window lists and overviews give it; the header draws
+            // its own title widget.
+            .title(crate::copy::APP_NAME)
             .transient_for(&app.window)
             .modal(true)
             .default_width(width)

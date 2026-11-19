@@ -132,11 +132,7 @@ pub fn refresh(app: &Rc<App>) {
         // in either direction -- is the one move this section may not make.
         let Ok(Ok(balance)) = result.map(serde_json::from_value::<crate::model::NearAiBalance>)
         else {
-            render_section(
-                app,
-                &app.home.balance,
-                &crate::model::NearAiBalance::default(),
-            );
+            app.home.render_balance(None);
             return;
         };
         render(app, &balance);
@@ -195,7 +191,7 @@ fn details(row: &crate::balance::BalanceView) -> Vec<&str> {
 /// One toned statement, the figures under it, and at most one control.
 pub fn render(app: &Rc<App>, balance: &crate::model::NearAiBalance) {
     render_section(app, &app.private_inference.balance, balance);
-    render_section(app, &app.home.balance, balance);
+    app.home.render_balance(Some(balance));
     // A read that answered: Home marks credit that arrived since the
     // figure it last showed.
     app.home.balance_read(balance);
