@@ -27,6 +27,7 @@ public sealed partial class SessionRootsWindow : Window
     public SessionRootsWindow(DaemonHost host, IReadOnlyList<SourceCandidate> candidates)
     {
         InitializeComponent();
+        WindowClocks.Watch(this);
 
         ViewModel = new SessionRootsViewModel(host, candidates);
         ViewModel.Finished += OnFinished;

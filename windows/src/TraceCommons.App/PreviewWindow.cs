@@ -41,6 +41,7 @@ public sealed class PreviewWindow : Window
         _sheet.Decided += OnDecided;
         _sheet.CloseRequested += Close;
         Content = _sheet;
+        WindowClocks.Watch(this);
 
         Closed += OnClosed;
     }
