@@ -385,47 +385,67 @@ pub fn pane_fade() -> Ease {
     Ease::token(STANDARD)
 }
 
-/// The side a period's bars slide from: the new ones come in from it and
-/// the old ones go out toward it, fading, as SwiftUI's symmetric
-/// `.move(edge:)` moves both.
+/// The side a period's bars slide from (`TracesGraphFooter.slide`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edge {
     Leading,
     Trailing,
 }
 
-/// Where the outgoing and incoming bars are, as a share of the bars'
-/// width (positive is toward the trailing edge), and their opacities,
-/// `t` seconds into a period step from `edge`.
-pub fn period_slide(edge: Edge, t: f64) -> ((f64, f64), (f64, f64)) {
-    let p = PERIOD_SLIDE.progress(t.max(0.0));
-    let side = match edge {
-        Edge::Leading => -1.0,
-        Edge::Trailing => 1.0,
-    };
-    ((side * p, 1.0 - p), (side * (1.0 - p), p))
-}
-
-/// The bars as they swap, `t` seconds in: a period step slides both sets
-/// toward its edge (`period_slide`), a zoom crossfades them in place over
-/// `GlassMotion.fast`. Each set's offset as a share of the bars' width and
-/// its opacity, the old set first.
-pub fn bars_swap(edge: Option<Edge>, t: f64) -> ((f64, f64), (f64, f64)) {
-    match edge {
-        Some(edge) => period_slide(edge, t),
-        None => {
-            let p = zoom_fade().progress(t);
-            ((0.0, 1.0 - p), (0.0, p))
+impl Edge {
+    fn side(self) -> f64 {
+        match self {
+            Self::Leading => -1.0,
+            Self::Trailing => 1.0,
         }
     }
 }
 
-/// How long a swap of the bars runs.
-pub fn bars_swap_length(edge: Option<Edge>) -> f64 {
+/// The bars as they swap, `t` seconds in: each set's offset as a share of
+/// the bars' width (positive is toward the trailing edge) and its
+/// opacity, the old set first.
+///
+/// The swap's timing is the new period's: a step (`edge` set) runs 0.45 s
+/// on `(0.4, 0, 0.2, 1)`, a zoom (`edge` none) the token curve over 0.15 s.
+/// The new bars come in from `edge`, fading in, or only fade in on a zoom
+/// (`.move(edge:).combined(with: .opacity)`, or `.opacity`). The old bars
+/// leave with the transition of their last render, which SwiftUI keeps for
+/// a view it removes: `was`, the edge of the step before (none at first
+/// and after a zoom), toward which they move as they fade out.
+pub fn bars_swap(was: Option<Edge>, edge: Option<Edge>, t: f64) -> ((f64, f64), (f64, f64)) {
+    let p = bars_swap_ease(edge).progress(t.max(0.0));
+    let old = was.map_or(0.0, |was| was.side() * p);
+    let new = edge.map_or(0.0, |edge| edge.side() * (1.0 - p));
+    ((old, 1.0 - p), (new, p))
+}
+
+/// The swap's timing: a step's slide, or a zoom's fade.
+pub fn bars_swap_ease(edge: Option<Edge>) -> Ease {
     match edge {
-        Some(_) => PERIOD_SLIDE.length(),
-        None => zoom_fade().length(),
+        Some(_) => PERIOD_SLIDE,
+        None => zoom_fade(),
     }
+}
+
+/// How far open the graph footer is `t` seconds after it began to move
+/// from `from` toward `to` (0 closed, 1 open); its opacity is the same.
+pub fn drawer_at(from: f64, to: f64, t: f64) -> f64 {
+    from + (to - from) * footer().progress(t)
+}
+
+/// A pane's opacity `t` seconds into opening (fading in) or closing.
+pub fn pane_opacity(opening: bool, t: f64) -> f64 {
+    let p = pane_fade().progress(t);
+    if opening { p } else { 1.0 - p }
+}
+
+/// Whether a pane opening or closing fades, as the Mac's
+/// `GlassThreePane.apply` decides: not under reduced motion, not in a
+/// window that keeps its width (`keeps_width`: maximised, full screen,
+/// tiled), and not when the main pane's width would change (within half
+/// a point, as the layout rounds).
+pub fn pane_fades(animations: bool, keeps_width: bool, main_before: f64, main_after: f64) -> bool {
+    animations && !keeps_width && (main_after - main_before).abs() < 0.5
 }
 
 #[cfg(test)]
@@ -786,25 +806,6 @@ mod tests {
         );
     }
 
-    /// A period step: both sets of bars move toward the edge over 0.45 s,
-    /// the old fading out and the new in (`.move(edge:)` with
-    /// `.opacity`, symmetric).
-    #[test]
-    fn a_period_step_slides_both_sets_toward_its_edge() {
-        let ((old_x, old_a), (new_x, new_a)) = period_slide(Edge::Trailing, 0.0);
-        assert_eq!((old_x, old_a, new_x, new_a), (0.0, 1.0, 1.0, 0.0));
-        let ((old_x, old_a), (new_x, new_a)) = period_slide(Edge::Leading, 0.0);
-        assert_eq!((old_x, old_a, new_x, new_a), (0.0, 1.0, -1.0, 0.0));
-        // Halfway in time the curve is 0.775561 of the way.
-        let ((old_x, old_a), (new_x, new_a)) = period_slide(Edge::Trailing, 0.225);
-        close(old_x, 0.775_561_333, 1e-5, "old bars");
-        close(old_a, 1.0 - 0.775_561_333, 1e-5, "old opacity");
-        close(new_x, 1.0 - 0.775_561_333, 1e-5, "new bars");
-        close(new_a, 0.775_561_333, 1e-5, "new opacity");
-        let ((old_x, old_a), (new_x, new_a)) = period_slide(Edge::Leading, 0.45);
-        assert_eq!((old_x, old_a, new_x, new_a), (-1.0, 0.0, 0.0, 1.0));
-    }
-
     /// Each of the hover's stages takes its own timing from
     /// `MapToolPile.hover`, and none under reduced motion.
     #[test]
@@ -924,20 +925,100 @@ mod tests {
         assert_eq!(covered_opacity(STACK.length()), 0.0);
     }
 
-    /// A zoom swaps the bars in place on the token curve over 0.15 s; a
-    /// step slides them.
+    /// A step brings the new bars in from its edge over 0.45 s on
+    /// `(0.4, 0, 0.2, 1)`, fading in; the old ones fade, moving toward the
+    /// edge of the step before, if any. A zoom fades both in place over
+    /// 0.15 s on the token curve.
     #[test]
-    fn a_zoom_crossfades_the_bars_in_place() {
-        assert_eq!(bars_swap_length(None), 0.15);
-        assert_eq!(bars_swap_length(Some(Edge::Leading)), 0.45);
-        let ((old_x, old_a), (new_x, new_a)) = bars_swap(None, 0.15 * 0.25);
-        assert_eq!((old_x, new_x), (0.0, 0.0));
+    fn the_bars_swap_as_the_macs_transitions_do() {
+        // Halfway in time the slide curve is 0.775561 of the way.
+        let p = 0.775_561_333;
+        // The first step back: the old bars only fade.
+        let ((old_x, old_a), (new_x, new_a)) = bars_swap(None, Some(Edge::Trailing), 0.225);
+        assert_eq!(old_x, 0.0);
+        close(old_a, 1.0 - p, 1e-5, "old opacity");
+        close(new_x, 1.0 - p, 1e-5, "new bars from the trailing edge");
+        close(new_a, p, 1e-5, "new opacity");
+        // Then forward: the old bars leave toward the trailing edge they
+        // came with, the new come from the leading one.
+        let ((old_x, _), (new_x, _)) = bars_swap(Some(Edge::Trailing), Some(Edge::Leading), 0.225);
+        close(old_x, p, 1e-5, "old toward trailing");
+        close(new_x, -(1.0 - p), 1e-5, "new from leading");
+        assert_eq!(
+            bars_swap(Some(Edge::Leading), Some(Edge::Leading), 0.0),
+            ((0.0, 1.0), (-1.0, 0.0))
+        );
+        assert_eq!(
+            bars_swap(Some(Edge::Leading), Some(Edge::Trailing), 0.45),
+            ((-1.0, 0.0), (0.0, 1.0))
+        );
+        // A zoom: in place, on the token curve over 0.15 s.
+        assert_eq!(bars_swap_ease(None).length(), 0.15);
+        assert_eq!(bars_swap_ease(Some(Edge::Leading)).length(), 0.45);
+        let ((old_x, old_a), (new_x, new_a)) = bars_swap(Some(Edge::Leading), None, 0.15 * 0.25);
+        close(
+            old_x,
+            -0.767_284_393,
+            1e-5,
+            "the old bars keep their step's edge",
+        );
         close(new_a, 0.767_284_393, 1e-5, "new bars");
         close(old_a, 1.0 - 0.767_284_393, 1e-5, "old bars");
-        assert_eq!(bars_swap(None, 0.15), ((0.0, 0.0), (0.0, 1.0)));
+        assert_eq!(new_x, 0.0);
+    }
+
+    /// The footer opens on the token curve over 0.25 s, from wherever it
+    /// is, its opacity with it.
+    #[test]
+    fn the_footer_opens_on_the_token_curve() {
+        assert_eq!(drawer_at(0.0, 1.0, 0.0), 0.0);
+        close(
+            drawer_at(0.0, 1.0, 0.0625),
+            0.767_284_393,
+            1e-5,
+            "a quarter in",
+        );
+        close(
+            drawer_at(1.0, 0.0, 0.0625),
+            1.0 - 0.767_284_393,
+            1e-5,
+            "closing",
+        );
+        close(
+            drawer_at(0.5, 1.0, 0.125),
+            0.5 + 0.5 * 0.946_079_254,
+            1e-5,
+            "turned",
+        );
+        assert_eq!(drawer_at(0.0, 1.0, 0.25), 1.0);
+    }
+
+    /// A pane fades over 0.22 s on the token curve, and only where the Mac
+    /// would: motion on, a window free to change its width, and the main
+    /// pane keeping its width.
+    #[test]
+    fn a_pane_fades_only_where_the_macs_does() {
+        close(pane_opacity(true, 0.055), 0.767_284_393, 1e-5, "opening");
+        close(
+            pane_opacity(false, 0.055),
+            1.0 - 0.767_284_393,
+            1e-5,
+            "closing",
+        );
         assert_eq!(
-            bars_swap(Some(Edge::Trailing), 0.225),
-            period_slide(Edge::Trailing, 0.225)
+            (pane_opacity(true, 0.22), pane_opacity(false, 0.22)),
+            (1.0, 0.0)
+        );
+        assert!(pane_fades(true, false, 440.0, 440.0));
+        assert!(pane_fades(true, false, 512.4, 512.0), "within half a point");
+        assert!(!pane_fades(false, false, 440.0, 440.0), "reduced motion");
+        assert!(
+            !pane_fades(true, true, 440.0, 440.0),
+            "a window that keeps its width"
+        );
+        assert!(
+            !pane_fades(true, false, 600.0, 440.0),
+            "the main pane squeezed"
         );
     }
 

@@ -427,14 +427,26 @@ impl ThreePane {
         });
         // As the Mac: no fade under reduced motion, in a window that keeps
         // its width, or when the main pane's width changes.
-        let fades = glass_motion::animations_enabled()
-            && wanted.is_some_and(|wanted| {
-                PaneLayout::new(wanted, new, imp.kept_main.get()).main == before.main
-            })
-            && !self
-                .root()
-                .and_downcast::<gtk::Window>()
-                .is_some_and(|window| window.is_maximized() || window.is_fullscreen());
+        let keeps_width = self
+            .root()
+            .and_downcast::<gtk::Window>()
+            .is_some_and(|window| {
+                let tiled = window
+                    .surface()
+                    .and_downcast::<gtk::gdk::Toplevel>()
+                    .is_some_and(|toplevel| {
+                        toplevel.state().contains(gtk::gdk::ToplevelState::TILED)
+                    });
+                window.is_maximized() || window.is_fullscreen() || tiled
+            });
+        let fades = wanted.is_some_and(|wanted| {
+            map_motion::pane_fades(
+                glass_motion::animations_enabled(),
+                keeps_width,
+                before.main,
+                PaneLayout::new(wanted, new, imp.kept_main.get()).main,
+            )
+        });
         let map_place = before.map.map(|width| (before.map_x(), width));
         let inspector_place = before.inspector.map(|width| (before.inspector_x(), width));
         self.fade(
@@ -474,7 +486,7 @@ impl ThreePane {
         if leaving.take().is_some() {
             pane.set_can_target(true);
         }
-        let ease = map_motion::pane_fade();
+        let length = map_motion::pane_fade().length();
         match change {
             (false, true) => {
                 leaving.set(None);
@@ -488,9 +500,9 @@ impl ThreePane {
                 let done = pane.clone();
                 driver.start(
                     &pane,
-                    ease.length(),
+                    length,
                     0.0,
-                    move |t| fading.set_opacity(ease.progress(t)),
+                    move |t| fading.set_opacity(map_motion::pane_opacity(true, t)),
                     move || done.set_opacity(1.0),
                 );
             }
@@ -508,9 +520,9 @@ impl ThreePane {
                 // On this container's clock: the pane's own stops with it.
                 driver.start(
                     self,
-                    ease.length(),
+                    length,
                     0.0,
-                    move |t| fading.set_opacity(1.0 - ease.progress(t)),
+                    move |t| fading.set_opacity(map_motion::pane_opacity(false, t)),
                     move || {
                         gone.set_opacity(1.0);
                         gone.set_can_target(true);

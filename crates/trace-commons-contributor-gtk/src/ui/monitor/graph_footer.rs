@@ -12,9 +12,11 @@
 //! are round glass pills (`GlassPillIconButton`).
 //!
 //! How it moves, as the Mac's (`map_motion` holds the numbers): a period
-//! step slides the old bars out and the new ones in toward the side the
-//! step came from, fading, over 0.45 s on `(0.4, 0, 0.2, 1)`; a zoom
-//! crossfades them in place over 0.15 s on the token curve (`Swap`). The
+//! step brings the new bars in from its side, fading in, over 0.45 s on
+//! `(0.4, 0, 0.2, 1)`, while the old ones fade out, moving toward the side
+//! they themselves came in from (SwiftUI removes a view with the
+//! transition of its last render); a zoom crossfades them in place over
+//! 0.15 s on the token curve (`Swap`). The
 //! footer opens from 0 to its 206 points and closes again over 0.25 s on
 //! the token curve, moving up from the window's foot and fading
 //! (`Drawer`). Each is at its end at once with animations off, followed
@@ -62,13 +64,18 @@ struct State {
     /// The bars on their way out while a step or a zoom swaps them.
     swap: RefCell<Option<Swap>>,
     swapping: Driver,
+    /// The edge of the last swap (`TracesGraphFooter.slide`): none at
+    /// first and after a zoom. The bars it brought in leave with it.
+    slide: Cell<Option<Edge>>,
 }
 
 /// The bars of the period before a step or a zoom, on their way out:
-/// the side the step slides from (none for a zoom) and how far in it is.
+/// the edge they came in from (`was`), the side the step slides from
+/// (none for a zoom), and how far in it is.
 #[derive(Clone, Debug)]
 pub struct Swap {
     pub old: Vec<Bucket>,
+    pub was: Option<Edge>,
     pub edge: Option<Edge>,
     pub t: f64,
 }
@@ -401,6 +408,7 @@ impl GraphFooter {
                 focused: Cell::new(false),
                 swap: RefCell::new(None),
                 swapping: Driver::default(),
+                slide: Cell::new(None),
             }),
             bars,
             shared_value,
@@ -513,19 +521,25 @@ impl GraphFooter {
     fn swap_bars(&self, edge: Option<Edge>) {
         self.state.swapping.finish();
         let old = self.state.buckets.borrow().clone();
+        let was = self.state.slide.replace(edge);
         self.rebucket();
         if !glass_motion::animations_enabled() {
             self.state.swap.replace(None);
             return;
         }
-        self.state.swap.replace(Some(Swap { old, edge, t: 0.0 }));
+        self.state.swap.replace(Some(Swap {
+            old,
+            was,
+            edge,
+            t: 0.0,
+        }));
         let state = self.state.clone();
         let done = self.state.clone();
         let bars = self.bars.clone();
         let drawn = self.bars.clone();
         self.state.swapping.start(
             &self.bars,
-            map_motion::bars_swap_length(edge),
+            map_motion::bars_swap_ease(edge).length(),
             0.0,
             move |t| {
                 if let Some(swap) = state.swap.borrow_mut().as_mut() {
@@ -650,7 +664,8 @@ pub fn paint_swap(
     hovered: Option<usize>,
     dark: bool,
 ) {
-    let ((old_x, old_alpha), (new_x, new_alpha)) = map_motion::bars_swap(swap.edge, swap.t);
+    let ((old_x, old_alpha), (new_x, new_alpha)) =
+        map_motion::bars_swap(swap.was, swap.edge, swap.t);
     for (bars, x, alpha, hovered) in [
         (&swap.old[..], old_x, old_alpha, None),
         (buckets, new_x, new_alpha, hovered),
@@ -886,21 +901,24 @@ impl Drawer {
     /// Opens or closes it.
     pub fn set_reveal_child(&self, open: bool) {
         let imp = self.imp();
-        if imp.open.replace(open) == open && !imp.driver.is_running() {
-            self.apply(if open { 1.0 } else { 0.0 });
+        if imp.open.replace(open) == open {
+            // Asked again on the way (the shell syncs often): it keeps
+            // going; at rest it is where it should be.
+            if !imp.driver.is_running() {
+                self.apply(if open { 1.0 } else { 0.0 });
+            }
             return;
         }
         let from = imp.shown.get();
         let to = if open { 1.0 } else { 0.0 };
-        let ease = map_motion::footer();
         let weak = self.downgrade();
         imp.driver.start(
             self,
-            ease.length(),
+            map_motion::footer().length(),
             0.0,
             move |t| {
                 if let Some(drawer) = weak.upgrade() {
-                    drawer.apply(from + (to - from) * ease.progress(t));
+                    drawer.apply(map_motion::drawer_at(from, to, t));
                 }
             },
             || {},
@@ -1032,6 +1050,7 @@ mod tests {
         let flat = (0xf2_i32, 0xf3_i32, 0xf6_i32);
         let swap = |edge, t| Swap {
             old: empty_week(),
+            was: edge,
             edge,
             t,
         };
@@ -1456,11 +1475,17 @@ mod tests {
         back.emit_clicked();
         let swap = footer.swap().expect("a step slides");
         assert_eq!(swap.edge, Some(Edge::Trailing));
+        assert_eq!(swap.was, None, "the first bars only fade out");
         pump_until(|| footer.swap().is_some_and(|swap| swap.t > 0.0));
         assert!(footer.swap().is_some_and(|swap| swap.t < 0.45), "part-way");
         pump_until(|| footer.swap().is_none());
         assert!(footer.swap().is_none(), "and done");
         footer.next.emit_clicked();
+        assert_eq!(
+            footer.swap().map(|swap| swap.was),
+            Some(Some(Edge::Trailing)),
+            "the bars leave with the edge they came in from"
+        );
         assert_eq!(
             footer.swap().map(|swap| swap.edge),
             Some(Some(Edge::Leading))
@@ -1504,10 +1529,17 @@ mod tests {
         let settings = gtk::Settings::default().expect("settings");
         let previous = settings.is_gtk_enable_animations();
         let footer = GraphFooter::new();
+        // Under the tab's screen, as in the window: the footer takes its
+        // own height from the column, not the window's.
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let screen = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        screen.set_vexpand(true);
+        column.append(&screen);
+        column.append(&footer.root);
         let window = gtk::Window::builder()
             .default_width(600)
             .default_height(400)
-            .child(&footer.root)
+            .child(&column)
             .build();
         window.present();
         settings.set_gtk_enable_animations(false);
