@@ -379,9 +379,15 @@ public sealed partial class TracesMapView : UserControl
     {
         mark.VerticalAlignment = VerticalAlignment.Center;
         var item = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        var text = new TextBlock { Text = word, FontSize = 11, Foreground = new SolidColorBrush(Ink("textTertiary")), VerticalAlignment = VerticalAlignment.Center };
         item.Children.Add(new Border { Width = 10, Height = 10, Child = mark });
-        item.Children.Add(new TextBlock { Text = word, FontSize = 11, Foreground = new SolidColorBrush(Ink("textTertiary")), VerticalAlignment = VerticalAlignment.Center });
-        AutomationProperties.SetAccessibilityView(item, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        item.Children.Add(text);
+        // The legend is hidden from assistive tech, as the Mac's is (FlowMapView.swift:191).
+        foreach (UIElement element in new UIElement[] { item, mark, text })
+        {
+            AutomationProperties.SetAccessibilityView(element, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        }
+
         return item;
     }
 
@@ -958,9 +964,16 @@ public sealed partial class TracesMapView : UserControl
         }
     }
 
-    /// <summary>Whether the pile is moving now: a run playing through it, or its hover stages or coins in motion.</summary>
+    /// <summary>
+    /// Whether the pile is drawn on the moving layer, over the arcs and the
+    /// rocket: while a run plays through it, while its stages or coins move,
+    /// and whenever it is open or opening, since the Mac draws the open card
+    /// over everything round it (MapToolPile.swift; FlowMapView.swift:141-142).
+    /// Only a closed pile at rest goes in the still layer.
+    /// </summary>
     private bool PileMoves(double now) =>
-        Motion && WindowClocks.Running && ((_player.Run is { } run && run.Moving(now - run.Start)) || _pile.Moving(now));
+        (Motion && WindowClocks.Running && ((_player.Run is { } run && run.Moving(now - run.Start)) || _pile.Moving(now)))
+        || _pile.Stages(now, !(Motion && WindowClocks.Running)).Tall > 0;
 
     /// <summary>The field, the nodes and the overflow counts: redrawn on a change, a pointer move or a shimmer pass.</summary>
     private void OnDrawStill(CanvasControl sender, CanvasDrawEventArgs args)
@@ -1436,7 +1449,18 @@ public sealed partial class TracesMapView : UserControl
                 }
             }
 
-            _libraryFrames[index] = frame;
+            // Kept for the next turn only while a whole turn's frames stay
+            // small (64 MB); past that each frame is drawn and let go.
+            if ((w + 2 * pad) * (h + 2 * pad) * 4 * frames <= 64.0 * 1024 * 1024)
+            {
+                _libraryFrames[index] = frame;
+            }
+            else
+            {
+                ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
+                frame.Dispose();
+                return;
+            }
         }
 
         ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
@@ -1852,6 +1876,17 @@ public sealed partial class TracesMapView : UserControl
         string key = $"{size:F2}|{bold}|{mono}|{icons}";
         if (!Formats.TryGetValue(key, out CanvasTextFormat? format))
         {
+            // Sizes follow the zoom; a resize must not grow this without end.
+            if (Formats.Count >= 64)
+            {
+                foreach (CanvasTextFormat old in Formats.Values)
+                {
+                    old.Dispose();
+                }
+
+                Formats.Clear();
+            }
+
             format = new CanvasTextFormat
             {
                 FontFamily = icons ? "Segoe Fluent Icons, Segoe MDL2 Assets" : mono ? "Cascadia Mono, Consolas" : "Segoe UI Variable Text, Segoe UI",
