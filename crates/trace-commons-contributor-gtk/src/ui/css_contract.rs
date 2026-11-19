@@ -146,7 +146,7 @@ mod tests {
         // Home's hero cards: generated from the hero tokens at load time.
         let hero = super::super::hero_art::css();
         // The control motion rules: generated from the motion tokens.
-        let motion = super::super::motion_css::css();
+        let motion = super::super::motion_css::css(false);
         for sheet in [
             STYLE_CSS,
             BRAND_CSS,

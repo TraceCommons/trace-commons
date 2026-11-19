@@ -1327,6 +1327,15 @@ def render_motion_rust(tokens: dict, springs: dict[str, tuple[float, float]]) ->
         duration, bounce = springs[name]
         out.append(f"    /// `GlassMotion.{name}`: `.spring(duration:bounce:)`.")
         out.append(f"    pub const {name.upper()}: (f64, f64) = ({rust_float(duration)}, {rust_float(bounce)});")
+    # What a modal's fade carries in: the blur behind it and its dim.
+    out.append("    /// `size.modalScrimBlur`: the blur behind a modal, in points.")
+    out.append(f"    pub const MODAL_SCRIM_BLUR: f64 = {tile_number(tokens['size']['modalScrimBlur'], 'modalScrimBlur')};")
+    for scheme in SCHEMES:
+        colour = flat_color(tokens, "modalScrim", scheme)
+        if colour["hex"].lower() != "#000000":
+            raise TokenError(f"modalScrim {scheme}: a dim is black, not {colour['hex']}")
+        out.append(f"    /// `modalScrim`'s black, {scheme}: how far a modal dims what it covers.")
+        out.append(f"    pub const MODAL_SCRIM_{scheme.upper()}: f64 = {tile_number(colour['alpha'], 'modalScrim')};")
     out.append("}")
     return out
 

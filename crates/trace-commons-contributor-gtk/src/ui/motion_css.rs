@@ -21,6 +21,10 @@
 //!   first-run folder's past traces (`ToolsScreen` repo disclosure); the
 //!   toolkit swaps its icon instead, which this replaces.
 //!
+//! - Modal: a confirmation over a window blurs what it covers by
+//!   `size.modalScrimBlur` under `modalScrim`'s dim (`GlassModalHost`),
+//!   fading over `motion.standard` (`modal_motion` toggles the classes).
+//!
 //! GTK itself drops every CSS transition while `gtk-enable-animations` is
 //! off, and picks the setting up live, which is Reduce Motion's nil.
 
@@ -57,7 +61,7 @@ fn ms(seconds: f64) -> String {
 
 /// The motion rules, appended after the hand-written sheet so they win
 /// over the toolkit's own transitions.
-pub fn css() -> String {
+pub fn css(dark: bool) -> String {
     let fast = ms(motion::FAST);
     let standard = ms(motion::STANDARD);
     let ease = motion::EASE_CSS;
@@ -99,8 +103,26 @@ pub fn css() -> String {
          {chevron}:checked {{\n  -gtk-icon-source: -gtk-icontheme(\"pan-end-symbolic\");\n  -gtk-icon-transform: rotate(90deg);\n}}\n\
          {chevron}:checked:dir(rtl) {{\n  -gtk-icon-source: -gtk-icontheme(\"pan-end-symbolic-rtl\");\n  -gtk-icon-transform: rotate(-90deg);\n}}\n"
     ));
+    // The modal scrim: `filter` dims by multiplying, and a black wash at
+    // `alpha` over a colour is the colour times `1 - alpha`.
+    let alpha = if dark {
+        motion::MODAL_SCRIM_DARK
+    } else {
+        motion::MODAL_SCRIM_LIGHT
+    };
+    let blur = motion::MODAL_SCRIM_BLUR;
+    let dim = 1.0 - alpha;
+    out.push_str(&format!(
+        ".{MODAL_HOST} {{\n  transition: filter {standard} {ease};\n}}\n\
+         .{MODAL_HOST}.{MODAL_COVERED} {{\n  filter: blur({blur}px) brightness({dim});\n}}\n"
+    ));
     out
 }
+
+/// The class on a window's content that a modal may cover.
+pub const MODAL_HOST: &str = "tc-modal-host";
+/// The class while a modal covers it.
+pub const MODAL_COVERED: &str = "tc-modal-covered";
 
 #[cfg(test)]
 mod tests {
@@ -133,7 +155,7 @@ mod tests {
         assert!(HOVER.contains(".animation(GlassMotion.fast(reduceMotion), value: shows)"));
         assert!(PRESS.contains("public static let darkening: Double = 0.08"));
         assert!(PRESS.contains(".animation(GlassMotion.fast(reduceMotion), value: pressed)"));
-        let css = css();
+        let css = css(true);
         for selector in HOVER_FADES {
             let body = rule(&css, selector);
             assert!(
@@ -157,7 +179,7 @@ mod tests {
             ".fill(Self.fill(selected: selected, hovering: hovering)?.color ?? Color.clear)"
         ));
         assert!(!LIST_ROW.contains(".animation("));
-        let css = css();
+        let css = css(true);
         let kebab = rule(&css, PRESS_ONLY[0]);
         assert!(!kebab.contains("background-color"), "{kebab}");
         assert!(kebab.contains("box-shadow 150ms"), "{kebab}");
@@ -173,7 +195,7 @@ mod tests {
                 .contains("kind == .watch ? GlassTokens.Motion.fast : GlassTokens.Motion.standard")
         );
         assert!(CONTROLS.contains(".easeOut(duration: Self.duration(kind))"));
-        let css = css();
+        let css = css(true);
         assert!(css.contains(
             "switch {\n  transition: background-color 220ms cubic-bezier(0, 0, 0.58, 1)"
         ));
@@ -192,7 +214,7 @@ mod tests {
             "../../../../macos/Sources/TraceCommonsApp/Views/FirstRun/ToolsScreen.swift"
         );
         assert!(tools.contains(".animation(GlassMotion.standard(reduceMotion), value: isOpen)"));
-        let css = css();
+        let css = css(true);
         assert!(css.contains("expander-widget > box > title > expander {\n  transition: -gtk-icon-transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1);"));
         assert!(css.contains("expander-widget.tc-disclosure-standard > box > title > expander {\n  transition: -gtk-icon-transform 220ms"));
         assert!(css.contains("-gtk-icon-transform: rotate(90deg);"));
@@ -203,7 +225,7 @@ mod tests {
     #[test]
     fn every_sheet_carries_the_motion_rules() {
         for dark in [false, true] {
-            assert!(super::super::style::stylesheet(dark).contains(&css()));
+            assert!(super::super::style::stylesheet(dark).contains(&css(dark)));
         }
     }
 
@@ -219,7 +241,31 @@ mod tests {
         provider.connect_parsing_error(move |_, section, error| {
             captured.borrow_mut().push(format!("{section}: {error}"));
         });
-        provider.load_from_data(&css());
+        provider.load_from_data(&css(false));
+        provider.load_from_data(&css(true));
         assert!(errors.borrow().is_empty(), "{:?}", errors.borrow());
+    }
+
+    /// `GlassModalHost`: what a modal covers is blurred by 8 under the
+    /// modal scrim (40% in Dark, 25% in Light), and the layer fades over
+    /// `motion.standard` on the token curve.
+    #[test]
+    fn a_modal_blurs_and_dims_what_it_covers() {
+        let modal = include_str!("../../../../macos/Sources/TCDesign/Components/Modal.swift");
+        assert!(modal.contains(".blur(radius: covered ? GlassTokens.Size.modalScrimBlur : 0)"));
+        assert!(modal.contains(
+            ".animation(GlassMotion.standard(reduceMotion), value: requests.map(\\.id))"
+        ));
+        let dark = css(true);
+        assert!(
+            dark.contains(
+                ".tc-modal-host.tc-modal-covered {\n  filter: blur(8px) brightness(0.6);"
+            ),
+            "{dark}"
+        );
+        assert!(dark.contains(
+            ".tc-modal-host {\n  transition: filter 220ms cubic-bezier(0.2, 0.8, 0.2, 1);"
+        ));
+        assert!(css(false).contains("filter: blur(8px) brightness(0.75);"));
     }
 }

@@ -624,6 +624,13 @@ class MotionTokensTests(unittest.TestCase):
         with self.assertRaisesRegex(generate.TokenError, "expressive"):
             generate.parse_springs(source)
 
+    def test_the_modal_scrim_it_fades_is_the_flat_themes(self):
+        rendered = "\n".join(generate.render_motion_rust(
+            self.tokens, generate.parse_springs(generate.GLASS_MOTION.read_text())))
+        self.assertIn("pub const MODAL_SCRIM_BLUR: f64 = 8.0;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_LIGHT: f64 = 0.25;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_DARK: f64 = 0.4;", rendered)
+
     def test_the_gtk_output_carries_the_motion_module(self):
         self.assertIn("pub mod motion {", generate.render_gtk(self.tokens))
 

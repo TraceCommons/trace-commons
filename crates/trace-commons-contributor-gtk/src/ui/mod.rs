@@ -38,6 +38,7 @@ mod lift;
 mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
+mod modal_motion;
 pub mod monitor;
 mod motion_css;
 pub mod omarchy;

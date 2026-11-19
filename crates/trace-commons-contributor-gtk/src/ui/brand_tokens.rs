@@ -744,4 +744,10 @@ pub mod motion {
     pub const SPATIAL: (f64, f64) = (0.9, 0.04);
     /// `GlassMotion.expressive`: `.spring(duration:bounce:)`.
     pub const EXPRESSIVE: (f64, f64) = (0.78, 0.32);
+    /// `size.modalScrimBlur`: the blur behind a modal, in points.
+    pub const MODAL_SCRIM_BLUR: f64 = 8.0;
+    /// `modalScrim`'s black, light: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_LIGHT: f64 = 0.25;
+    /// `modalScrim`'s black, dark: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_DARK: f64 = 0.4;
 }

@@ -449,6 +449,9 @@ pub fn install() {
     // The Appearance choice. With Standard -- the default -- this changes
     // nothing above.
     super::appearance::start();
+
+    // The Mac's modal fade and scrim, on every confirmation the shell raises.
+    super::modal_motion::install();
 }
 
 thread_local! {
@@ -537,7 +540,7 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
         first_run_glow_css(),
         include_str!("style.css"),
         super::hero_art::css(),
-        super::motion_css::css()
+        super::motion_css::css(dark)
     );
     if translucent {
         let (glass, insights) = if dark {
@@ -627,7 +630,7 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
         define(&first_run_glow_css()),
         include_str!("style.css"),
         recolour_insights(insights, palette, dark),
-        super::motion_css::css(),
+        super::motion_css::css(dark),
     )
 }
 
