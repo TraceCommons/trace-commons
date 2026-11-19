@@ -128,13 +128,18 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 192),
+    // Lowered from 206 (first-run parity, 2026-11-17): the roots and
+    // Connect screens' own words left with them. Then to 177: the legacy
+    // Welcome, Consent, Watch and Done pages' words, and the tools' names,
+    // now `source_copy`'s. Then to 174: the retired NEAR AI second scan's
+    // health line, its button and its Settings check (#2180). Then to
+    // 164, measured: the Mac's words main took into the core (#2160, #2187).
+    ("copy.rs", 164),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 3),
     ("tray.rs", 1),
     ("ui/history.rs", 3),
-    ("ui/onboarding.rs", 2),
     ("ui/preview.rs", 10),
     ("ui/queue.rs", 2),
     // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became

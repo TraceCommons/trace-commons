@@ -5,6 +5,7 @@
   "issued_at": "2026-11-05T00:00:00Z",
   "expires_at": "2026-11-06T00:00:00Z",
   "flags": {
+    "claude_desktop_private_ai": false,
     "insights_skills": false
   }
 }

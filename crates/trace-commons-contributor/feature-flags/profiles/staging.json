@@ -1,13 +1,15 @@
 {
   "schema_version": 1,
-  "registry_version": 3,
+  "registry_version": 4,
   "environment": "staging",
   "capabilities": [
+    "claude_desktop_private_ai_v1",
     "insights_skills_v1",
     "skills_catalog_suggestions_v1",
     "skills_server_catalog_v1"
   ],
   "remote_enable": [
+    "claude_desktop_private_ai",
     "insights_skills",
     "skills_catalog_suggestions",
     "skills_server_catalog"

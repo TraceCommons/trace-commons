@@ -34,20 +34,35 @@ pub enum ServeError {
 
 /// Build the full application router.
 pub fn app(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new();
+    if state.vertex_gateway.is_none() {
+        router = router
+            .nest(
+                "/anthropic",
+                catch_panics(
+                    facade::anthropic::router(),
+                    Envelope::Anthropic,
+                    state.ledger.clone(),
+                ),
+            )
+            .nest(
+                "/openai",
+                catch_panics(
+                    facade::openai::router(),
+                    Envelope::OpenAi,
+                    state.ledger.clone(),
+                ),
+            );
+    }
+    router
         .nest(
-            "/anthropic",
+            "/vertex",
             catch_panics(
-                facade::anthropic::router(),
-                Envelope::Anthropic,
-                state.ledger.clone(),
-            ),
-        )
-        .nest(
-            "/openai",
-            catch_panics(
-                facade::openai::router(),
-                Envelope::OpenAi,
+                facade::vertex::router().layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    facade::vertex::authorize,
+                )),
+                Envelope::Vertex,
                 state.ledger.clone(),
             ),
         )
@@ -92,6 +107,65 @@ pub async fn serve_on(
     state: AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
+    serve_listener(ClosingListener::new(listener, None), state, shutdown).await
+}
+
+/// Own the OS listener and acknowledge its destruction before connection drain.
+/// Construct before spawning the server so even an unpolled task owns this guard.
+pub(crate) struct ClosingListener {
+    listener: Option<tokio::net::TcpListener>,
+    stopped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl ClosingListener {
+    pub(crate) fn new(
+        listener: tokio::net::TcpListener,
+        stopped: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Self {
+        Self {
+            listener: Some(listener),
+            stopped,
+        }
+    }
+}
+
+impl axum::serve::Listener for ClosingListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        // Delegate retry/backoff to the same implementation axum uses for an
+        // ordinary TcpListener; the wrapper changes ownership observation only.
+        axum::serve::Listener::accept(self.listener.as_mut().expect("listener lives until drop"))
+            .await
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener
+            .as_ref()
+            .expect("listener lives until drop")
+            .local_addr()
+    }
+}
+
+impl Drop for ClosingListener {
+    fn drop(&mut self) {
+        // Closing the sender alone is not the barrier: release the actual OS
+        // socket first, then wake the host. Axum drops its listener before it
+        // waits for accepted connections to drain.
+        drop(self.listener.take());
+        if let Some(stopped) = self.stopped.take() {
+            let _ = stopped.send(());
+        }
+    }
+}
+
+pub(crate) async fn serve_listener(
+    listener: ClosingListener,
+    state: AppState,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
+    use axum::serve::Listener;
     let port = listener.local_addr().map_or(0, |addr| addr.port());
     tracing::info!(port, "IronWire listening");
     let closing = state.shutdown.clone();

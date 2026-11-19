@@ -1,7 +1,17 @@
 {
   "schema_version": 1,
-  "registry_version": 3,
+  "registry_version": 4,
   "flags": {
+    "claude_desktop_private_ai": {
+      "description": "Claude Desktop Code setup and dedicated Private AI routing",
+      "owner": "private-ai",
+      "class": "product",
+      "default": false,
+      "required_capabilities": [
+        "claude_desktop_private_ai_v1"
+      ],
+      "timing": "live"
+    },
     "insights_skills": {
       "description": "Local skill inventory, observed usage, public publisher feeds, and update detection in Insights.",
       "owner": "TraceCommons",

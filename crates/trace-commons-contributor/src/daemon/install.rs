@@ -30,7 +30,7 @@ pub fn systemd_unit_text(exe: &str, config_dir: &str) -> String {
     format!(
         "[Unit]\n\
          Description={app} background uploader{channel}\n\
-         Documentation=https://github.com/zmanian/trace-commons-server\n\
+         Documentation=https://github.com/TraceCommons/trace-commons\n\
          After=network-online.target\n\
          \n\
          [Service]\n\
@@ -77,8 +77,21 @@ pub fn install(store: &ConfigStore) -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
-    let path = unit_path()?;
-    match std::fs::remove_file(&path) {
+    uninstall_at(&unit_path()?, super::host_link::runtime_dir().as_deref())
+}
+
+/// [`uninstall`] with the unit file and the host link's runtime directory
+/// given. Also removes the "host part is installed" marker the unit's daemon
+/// left (`host_link`), so a Flatpak window started later in this login runs
+/// its own daemon rather than waiting on a host daemon that is gone.
+fn uninstall_at(path: &std::path::Path, runtime: Option<&std::path::Path>) -> Result<()> {
+    if let Some(runtime) = runtime
+        && super::host_link::forget_host_unit(runtime).is_err()
+    {
+        // DRAFT, NEEDS APPROVAL (2026-11-17).
+        println!("could not remove the host link marker; it clears at logout");
+    }
+    match std::fs::remove_file(path) {
         Ok(()) => {
             println!("removed {}", path.display());
             println!("disable it with: systemctl --user disable --now {UNIT_FILE_NAME}");
@@ -95,6 +108,22 @@ pub fn uninstall() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_forgets_the_host_unit_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join(UNIT_FILE_NAME);
+        std::fs::write(&unit, b"[Unit]\n").unwrap();
+        let runtime = dir.path().join("run");
+        std::fs::create_dir(&runtime).unwrap();
+        let marker = runtime.join(super::super::host_link::HOST_UNIT_MARKER_FILE);
+        std::fs::write(&marker, b"").unwrap();
+        uninstall_at(&unit, Some(&runtime)).unwrap();
+        assert!(!unit.exists());
+        assert!(!marker.exists());
+        // Nothing installed and no runtime directory: still fine.
+        uninstall_at(&unit, None).unwrap();
+    }
     use crate::config::tests_support::temp_store;
 
     fn cfg() -> crate::config::ContributorConfig {
@@ -134,6 +163,15 @@ mod tests {
         )));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    /// The unit's documentation link names the repository as it is now
+    /// called, not its pre-rename name.
+    #[test]
+    fn the_unit_documents_the_current_repository() {
+        let unit = systemd_unit_text("/x", "/y");
+        assert!(unit.contains("\nDocumentation=https://github.com/TraceCommons/trace-commons\n"));
+        assert!(!unit.contains("zmanian/trace-commons-server"));
     }
 
     /// A staging daemon gets its own unit, so it runs beside a production

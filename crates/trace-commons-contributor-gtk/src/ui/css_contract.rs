@@ -20,6 +20,12 @@ mod tests {
     const SOURCES: &[(&str, &str)] = &[
         ("roots.rs", include_str!("roots.rs")),
         ("first_run.rs", include_str!("first_run.rs")),
+        ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+        ("first_run_tools.rs", include_str!("first_run_tools.rs")),
+        (
+            "first_run_stage_view.rs",
+            include_str!("first_run_stage_view.rs"),
+        ),
         ("insights.rs", include_str!("insights.rs")),
         (
             "insights_analytics.rs",
@@ -45,6 +51,10 @@ mod tests {
             include_str!("monitor/graph_footer.rs"),
         ),
         ("monitor/inspector.rs", include_str!("monitor/inspector.rs")),
+        (
+            "monitor/traces_list.rs",
+            include_str!("monitor/traces_list.rs"),
+        ),
         ("monitor/map.rs", include_str!("monitor/map.rs")),
         (
             "monitor/transfer_card.rs",
@@ -89,8 +99,8 @@ mod tests {
     /// EMPTY, and it should stay that way. It held ten entries for one round:
     /// six were this check's own blindness to compound selectors (see
     /// `is_defined`) and were never defects at all, and the remaining four
-    /// were real, all in `onboarding.rs`, all fixed by photographing the pages
-    /// under Xvfb -- `scripts/linux-build.sh --onboarding-shots` -- and moving
+    /// were real, all in the old `onboarding.rs` pages, all fixed by
+    /// photographing the pages under Xvfb and moving
     /// each name onto the class the surrounding code already used for that
     /// job.
     ///
@@ -217,8 +227,8 @@ mod tests {
             ("first_run_terms.rs", include_str!("first_run_terms.rs")),
             ("roots.rs", include_str!("roots.rs")),
             ("onboarding.rs", include_str!("onboarding.rs")),
-            ("onboarding_nearai.rs", include_str!("onboarding_nearai.rs")),
-            ("onboarding_wallet.rs", include_str!("onboarding_wallet.rs")),
+            ("first_run_screens.rs", include_str!("first_run_screens.rs")),
+            ("first_run_tools.rs", include_str!("first_run_tools.rs")),
         ];
         let mut offenders = Vec::new();
         for (file, source) in FLOW {

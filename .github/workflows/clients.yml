@@ -26,6 +26,9 @@ on:
       - "design-tokens/**"
       - "scripts/design-tokens/**"
       - "windows/**"
+      # The parity gallery: its NAME grammar is pinned by the Windows sample
+      # tests (SampleDaemonTests.CaptureNamesFollowTheGalleryGrammar).
+      - "scripts/parity/**"
       - "installer/**"
       - "scripts/windows/**"
       - "scripts/install.ps1"
@@ -600,6 +603,9 @@ jobs:
       - name: Run weston + portal verification
         env:
           WESTON_SHOT_OUT: ${{ runner.temp }}/weston-insights.png
+          # Offscreen renders (GSK textures, not screenshots) that mounted
+          # tests write for review, such as the Traces folder list.
+          TC_RENDER_DIR: ${{ runner.temp }}/tc-renders
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
       - name: Upload the captured frame
         if: ${{ !cancelled() }}
@@ -607,6 +613,14 @@ jobs:
         with:
           name: weston-insights-frame
           path: ${{ runner.temp }}/weston-insights.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload the offscreen renders
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gtk-offscreen-renders
+          path: ${{ runner.temp }}/tc-renders
           if-no-files-found: ignore
           retention-days: 7
 
@@ -755,6 +769,22 @@ jobs:
         env:
           TC_FFI_LIB_DIR: ${{ github.workspace }}\target\debug
         run: msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Release -p:Platform=x64 -p:TcPackaged=true -p:GenerateAppxPackageOnBuild=true
+
+      # The recorded-sample mode (TRACE_COMMONS_SAMPLE) is compiled into Debug
+      # builds only, so the Release build above never compiles it: every
+      # `#if DEBUG` line in the app would otherwise reach main unbuilt. This
+      # compiles the unpackaged Debug app, and runs the sample tests against
+      # the Debug interop assembly, where the client is present (the Release
+      # run above checks that it is absent).
+      - name: Build the Debug app and run the sample tests in Debug
+        working-directory: windows
+        shell: pwsh
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\debug
+        run: |
+          msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Debug -p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Debug --filter "FullyQualifiedName~SampleDaemonTests|FullyQualifiedName~NativeBindingTests" --logger "console;verbosity=normal"
 
       - name: Confirm exactly one package was produced
         working-directory: windows

@@ -146,7 +146,9 @@ windows/scripts/win-exec.sh 'cd C:\src\trace-commons-server\windows; $env:TC_FFI
 
 A GUI app cannot start from an SSH session — see the gotchas — so
 `win-capture.ps1` hands the launch to a scheduled task in the interactive
-console session and photographs the screen from there.
+console session and captures the app's own window from there, by its window
+handle: never the screen. It writes `<png>.log` with the box's UTC time, the
+window's pid, its frame and whether it was in the foreground.
 
 ```bash
 windows/scripts/win-exec.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\win-capture.ps1 -Exe "C:\src\...\TraceCommons.exe" -SettleSeconds 15'
@@ -244,6 +246,8 @@ layout. Raise it before doing serious visual work.
 boot. The bootstrap disables it via
 `HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff`.
 
-**Raise the target window before capturing**, or the screenshot shows whatever
-shell launched the task and a healthy app looks like one that never opened.
-`win-capture.ps1` does this via `-ProcessName`.
+**A console window takes the foreground.** A capture task that opens a
+console leaves the app inactive, so its title bar and other inactive-state
+colours are what gets photographed. `win-capture.ps1` starts both of its
+tasks through `wscript.exe`, which has no window, asks for the foreground,
+and logs whether it got it.

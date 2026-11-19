@@ -41,35 +41,38 @@
 //!
 //! ## The icon
 //!
-//! The icon is "The Turn", in the status-bar template variant the design
-//! spec defines for exactly this position: frameless, a single ink, stroke
-//! 8/64 so the brackets survive the loss of the frame at 14 and 16 px.
-//! `ui::mark` is the only description of that geometry in the application;
-//! this module serialises it rather than restating it.
+//! The icon is the Mac's menu-bar item: the NEAR AI N in the logo kit's
+//! single ink, with the decisions-owed badge, the news ring and the halo
+//! under the Mac's conditions (`tray_icon`). It is drawn into
+//! `IconPixmap`s, re-drawn when what it shows changes, and the host is told
+//! with `NewIcon`. While pixmaps are offered `IconName` is empty, because a
+//! host prefers a name it can resolve and would never show the states.
 //!
-//! The `StatusNotifierItem` protocol names an icon, it does not carry one,
-//! so the mark has to exist as a file somewhere the host can read. This
-//! module writes a small icon theme of its own -- two SVGs and an
-//! `index.theme`, under the application's data directory -- and hands the
-//! host its root in `IconThemePath`. That is the protocol's own mechanism
-//! for an application whose icon is not installed system-wide, and it
+//! A small icon theme is still written under the application's data
+//! directory and handed to the host in `IconThemePath`: the N alone, for a
+//! host that cannot take a pixmap, and the app tile for notifications. That
 //! keeps us out of `~/.local/share/icons`, which belongs to the packaging
 //! and to the contributor, not to a running process.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use zbus::interface;
 use zbus::zvariant;
 
+use crate::tray_icon::{self, Strip};
 use crate::ui::mark;
+use trace_commons_mark::near;
 
 /// Where the menu object lives on this connection. Named once: the item's
 /// `Menu` property and the object server's registration have to agree, and
 /// a host that is handed a path nothing is exported at simply shows no
 /// menu.
 const MENU_PATH: &str = "/MenuBar";
+
+/// Where the item itself lives; its signals are emitted from this path.
+const ITEM_PATH: &str = "/StatusNotifierItem";
 
 /// What a press asks the window for.
 ///
@@ -102,6 +105,24 @@ pub enum TrayRequest {
 #[derive(Clone, Default)]
 pub struct TrayState {
     answering: Arc<AtomicBool>,
+    icon: Arc<IconShared>,
+}
+
+/// One `StatusNotifierItem` pixmap: width, height, ARGB32 big-endian.
+type Pixmap = (i32, i32, Vec<u8>);
+
+/// What the icon shows, shared between the window, which draws it on the
+/// main thread, and the D-Bus thread, which serves it.
+#[derive(Default)]
+struct IconShared {
+    /// The last strip drawn and the scheme it was drawn for.
+    drawn: Mutex<Option<(Strip, mark::Scheme)>>,
+    pixmaps: Mutex<Vec<Pixmap>>,
+    /// The drawn mark's tooltip clause, the core's words; empty while no
+    /// mark is drawn.
+    tooltip: Mutex<String>,
+    /// Wakes the D-Bus thread to tell the host the icon changed.
+    changed: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl TrayState {
@@ -116,6 +137,52 @@ impl TrayState {
     pub fn answering(&self) -> bool {
         self.answering.load(Ordering::Relaxed)
     }
+
+    /// Draw `strip` for `scheme`, with the core's `tooltip` for the drawn
+    /// mark, and tell the host if anything changed. Main thread: the
+    /// scheme is libadwaita's. Equal inputs draw nothing.
+    pub fn show(&self, strip: Strip, scheme: mark::Scheme, tooltip: &str) {
+        let tooltip_changed = {
+            let mut kept = lock(&self.icon.tooltip);
+            let changed = *kept != tooltip;
+            if changed {
+                *kept = tooltip.to_string();
+            }
+            changed
+        };
+        let icon_changed = {
+            let mut drawn = lock(&self.icon.drawn);
+            let changed = *drawn != Some((strip, scheme));
+            if changed {
+                *drawn = Some((strip, scheme));
+                *lock(&self.icon.pixmaps) = tray_icon::pixmaps(&strip, scheme);
+            }
+            changed
+        };
+        if icon_changed || tooltip_changed {
+            if let Some(tx) = lock(&self.icon.changed).as_ref() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    /// Draw the last strip again for `scheme`, after the desktop's style
+    /// changed, keeping its words.
+    pub fn redraw(&self, scheme: mark::Scheme) {
+        let strip = lock(&self.icon.drawn).map(|(strip, _)| strip);
+        let tooltip = lock(&self.icon.tooltip).clone();
+        if let Some(strip) = strip {
+            self.show(strip, scheme, &tooltip);
+        }
+    }
+}
+
+/// A poisoned lock still holds the last value written, which is all any of
+/// these are.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// What "toggle answering" means, in one place.
@@ -231,7 +298,12 @@ struct Item {
     /// property getter runs on a zbus worker thread and may not touch GTK.
     icon_name: String,
     icon_theme_path: String,
+    icon: Arc<IconShared>,
 }
+
+/// `ToolTip`'s `(sa(iiay)ss)`: an icon name, its pixmaps, a title and a
+/// description.
+type ToolTip = (String, Vec<Pixmap>, String, String);
 
 #[interface(name = "org.kde.StatusNotifierItem")]
 impl Item {
@@ -263,9 +335,35 @@ impl Item {
     /// which a system theme may or may not know: no icon is a worse
     /// outcome than the mark, but it is still better than a broken one,
     /// and this is a bonus surface.
+    /// Empty while pixmaps are offered: a host that can resolve a name
+    /// prefers it, and would then never show the badge, ring or halo.
     #[zbus(property)]
-    fn icon_name(&self) -> &str {
-        &self.icon_name
+    fn icon_name(&self) -> String {
+        if lock(&self.icon.pixmaps).is_empty() {
+            self.icon_name.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    /// The icon as drawn for its current state, at every size in
+    /// `tray_icon::PIXMAP_SIZES`.
+    #[zbus(property)]
+    fn icon_pixmap(&self) -> Vec<Pixmap> {
+        lock(&self.icon.pixmaps).clone()
+    }
+
+    /// The drawn mark's tooltip clause, in the core's words, as the Mac's
+    /// item carries it (`MenuPanelStatus.markTooltip`). Empty while no mark
+    /// is drawn.
+    #[zbus(property)]
+    fn tool_tip(&self) -> ToolTip {
+        (
+            String::new(),
+            Vec::new(),
+            lock(&self.icon.tooltip).clone(),
+            String::new(),
+        )
     }
 
     /// Where the host should look for [`Self::icon_name`], in addition to
@@ -509,7 +607,10 @@ pub fn spawn(answering: TrayState) -> async_channel::Receiver<TrayRequest> {
     // may only be read from the main thread. Everything after this point
     // runs on a thread that must never touch GTK, so the icons are written
     // -- and their paths frozen -- here.
-    let icons = install_icons(mark::current_scheme());
+    let scheme = mark::current_scheme();
+    let icons = install_icons(scheme);
+    // The first drawing, before anything is known: the N alone.
+    answering.show(Strip::LOADING, scheme, "");
     let icon_name = icons
         .map(|icons| icons.status_name.clone())
         .unwrap_or_else(|| crate::ui::APP_ID.to_string());
@@ -538,12 +639,16 @@ fn register(
     icon_theme_path: String,
 ) -> anyhow::Result<()> {
     let connection = zbus::blocking::Connection::session()?;
+    let icon = Arc::clone(&answering.icon);
+    let (changed_tx, changed) = std::sync::mpsc::channel();
+    *lock(&icon.changed) = Some(changed_tx);
     connection.object_server().at(
-        "/StatusNotifierItem",
+        ITEM_PATH,
         Item {
             tx: tx.clone(),
             icon_name,
             icon_theme_path,
+            icon,
         },
     )?;
     // Exported before the watcher is told about the item, so a host that
@@ -567,9 +672,25 @@ fn register(
     watcher.call::<_, _, ()>("RegisterStatusNotifierItem", &(unique_name.as_str()))?;
 
     // The object server dispatches on zbus's own executor threads for as
-    // long as `connection` lives; this thread's only remaining job is to
-    // keep it alive, which an `Arc` kept in a park loop does without
-    // spinning.
+    // long as `connection` lives. This thread tells the host whenever the
+    // window draws a new icon, and otherwise only keeps the connection
+    // alive.
+    while changed.recv().is_ok() {
+        let _ = connection.emit_signal(
+            None::<()>,
+            ITEM_PATH,
+            "org.kde.StatusNotifierItem",
+            "NewIcon",
+            &(),
+        );
+        let _ = connection.emit_signal(
+            None::<()>,
+            ITEM_PATH,
+            "org.kde.StatusNotifierItem",
+            "NewToolTip",
+            &(),
+        );
+    }
     let keepalive = Arc::new(connection);
     loop {
         std::thread::park();
@@ -636,23 +757,17 @@ fn write_theme(root: &Path, scheme: mark::Scheme) -> std::io::Result<Icons> {
     std::fs::write(root.join("index.theme"), index_theme())?;
 
     let app_icon = apps.join(format!("{}.svg", crate::ui::APP_ID));
-    std::fs::write(&app_icon, mark::svg(scheme, MARK_SVG_SIZE))?;
+    std::fs::write(&app_icon, near::app_icon_svg(MARK_SVG_SIZE))?;
 
-    // The template variant carries the ink of the current scheme, rather
-    // than `currentColor` for the host to resolve. A GTK host recolours a
-    // symbolic icon by overriding `fill`, and the mark is drawn entirely
-    // in strokes, so that override would pass it by; a host that does not
-    // recolour at all would resolve `currentColor` to black and lose the
-    // mark on a dark panel. Naming the scheme's own ink is right in both
-    // cases, and matches what the window is drawing at the same moment.
-    // The cost is that a scheme change after startup does not reach the
-    // tray until the next run: following it would mean rewriting this file
-    // and emitting `NewIcon` from the main thread into the D-Bus one, and
-    // a bonus surface does not justify that machinery yet.
+    // The N alone, for a host that takes no pixmap. It carries the ink of
+    // the current scheme, the logo kit's black or white, rather than
+    // `currentColor`: a host that does not recolour would resolve that to
+    // black and lose the mark on a dark panel. The pixmaps follow a scheme
+    // change; this file is written once per run.
     let status_name = format!("{}-symbolic", crate::ui::APP_ID);
     std::fs::write(
         status.join(format!("{status_name}.svg")),
-        mark::template_svg(scheme.ink(), MARK_SVG_SIZE),
+        near::template_svg(mark::ink(scheme), MARK_SVG_SIZE),
     )?;
 
     Ok(Icons {
@@ -708,10 +823,10 @@ mod tests {
         let index = std::fs::read_to_string(root.join("index.theme")).expect("index");
         assert!(index.contains("Directories=scalable/apps,scalable/status"));
 
-        // The framed variant for the notification, the frameless one for the
-        // tray -- the spec's rule for a status area, not a preference.
+        // The app tile for the notification, the N alone for the tray, as
+        // the Mac's app icon and menu-bar item.
         let app = std::fs::read_to_string(&icons.app_icon).expect("app icon");
-        assert!(app.contains(r##"<rect x="1" y="1""##));
+        assert_eq!(app, near::app_icon_svg(MARK_SVG_SIZE));
         let status = std::fs::read_to_string(
             root.join("scalable")
                 .join("status")
@@ -719,7 +834,8 @@ mod tests {
         )
         .expect("status icon");
         assert!(!status.contains("<rect"));
-        assert_eq!(status.matches(r##"stroke-width="8""##).count(), 2);
+        assert!(status.contains(near::PATH));
+        assert!(status.contains(r##"fill="#000000""##));
 
         let _ = std::fs::remove_dir_all(&root);
     }

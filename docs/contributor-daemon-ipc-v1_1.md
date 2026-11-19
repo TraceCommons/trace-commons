@@ -643,7 +643,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 
 | Method | Params | Result | Notes |
 |---|---|---|---|
-| `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
+| `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes`, `service_level` | additive: `service_level` (integer, 2026-11-17) is what this daemon offers a shell using it as its background service; a shell below whose minimum it is, or a daemon that omits it, reads as "too old" (`daemon::service`) |
 | `status` | — | see below | |
 | `list_pending` | `project_id` (optional); `filter` (optional); `order` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. `order: "suggested"` (nudge value addendum, section 2) sorts the selected entries by mission fit, then estimate tier (skipped for a one-tier table), then the `user_turns` bucket, then newest write, then insertion order; absent, `null` or `"queue"` is queue insertion order, as before. Any other `order` string is refused with `order-unrecognized`, a non-string with `order-invalid`. The parameters combine: filters select first, `order` sorts second. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status). An entry with recorded features carries `credit_estimate`, a band; absent otherwise; see ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
@@ -721,7 +721,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_plan` | `id` (required), `action` (`connect` \| `disconnect`) | `id`, `action`, `outcome`, `plan_id`, `path`, `changes[]`, `occupied[]` | works out an edit and **writes nothing**; see "The harness list" below |
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
-| `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
+| `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths; `source_revisions` counts each declaration's writes by settings key (`claude_source` for `claude_root` too), absent before the first, so a shell can tell a declaration landed while its mode stayed `watch` | |
 | `get_setup_status` | empty object | versioned completion/readiness state, enrollment scope, saved data uses and available scope choices | read-only; no offline initialization or setup mutation |
 | `complete_setup` | `expected_scope` from `get_setup_status`; optional `scopes[]` of wire-name data uses | durable completion state for the same enrollment | agent-selected scopes use the existing validation/audit path; publishes `status_changed`; grants no automatic-upload permission |
 | `get_config_schema` | empty object | versioned settings-patch JSON Schema, effects and patch semantics | read-only; credentials and read-only settings are not settable properties |
@@ -6295,6 +6295,22 @@ with no herdr found, or with herdr not answering within 10 s, is refused with
 cannot trust is refused with `managed-herdr-socket-untrusted`. A herdr older
 than socket protocol 22 is refused with `managed-unsupported-version`.
 
+The managed snapshot's `capabilities.daemon_on_host` (boolean) is `true`
+when the answering daemon runs outside a Flatpak sandbox. A Flatpak window
+attached to the host daemon over the host link
+(`$XDG_RUNTIME_DIR/trace-commons/daemon.sock`, see
+`docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`)
+reads it; a daemon that omits it is treated as `false`. It gates nothing:
+Launch still follows `terminal_launch`, which the daemon computes from its
+own environment. The host link speaks this same contract and version; each
+connection must come from the daemon's own uid (`SO_PEERCRED`).
+
+`hello`'s `service_level` is how a shell tells a background service that is
+too old for it: `daemon::service::MIN_SERVICE_LEVEL` is the shell's minimum,
+and an absent level is below every minimum. The daemon reports no build
+version on the wire, and none is added: a shell compares what it needs, not
+release numbers.
+
 With `managed_terminal` set to `rex`, a launch whose Rex app does not connect
 within 10 s is refused with `managed-rex-not-ready`, and one whose `rex`
 call fails or gives nothing before the tab is opened with
@@ -6485,11 +6501,23 @@ refused these two shapes -- a raw `set_settings` caller (another shell, or a
 future one) had no such floor and could persist a declaration nothing would
 ever actually route through.
 
-`claude_root` and `codex_root` each take a JSON string (a filesystem path)
-or `null` (clear the override, falling back to the conventional per-user
-location); setting either here only takes effect from the daemon's *next*
-supervisor tick onward -- the tick already scheduled or in flight when this
-call returns has already read the old value.
+`claude_root` and `codex_root` each take a JSON string (a filesystem path
+from the root) or `null` (clear the override, falling back to the
+conventional per-user location); setting either here only takes effect from
+the daemon's *next* supervisor tick onward -- the tick already scheduled or
+in flight when this call returns has already read the old value. A relative
+or empty path is `bad_params` / `settings-invalid-value` and changes
+nothing, as is a relative or empty `path` in a `watch` declaration for any
+`*_source` key: it would be read against whatever directory the daemon was
+started in. From the CLI, `daemon settings --set claude_root=` (an empty
+value) sends `null` and clears the folder; the same holds for `codex_root`.
+
+A folder declared for Claude Code or Codex (by `*_root` or `*_source`) that
+is the tool's home -- it holds a real `projects` (Claude Code) or `sessions`
+(Codex) folder, not a symlink -- is read at that store folder, even while
+the store is empty. The mapping is applied when the declaration is set,
+when the settings load, and on every pass, so a home declared before its
+store existed is read at the store once the store is made.
 
 A caller that needs the
 watcher to scan a non-default location from the very first tick -- most
@@ -10112,3 +10140,45 @@ snapshot. It does not represent notification permission. Consumers also read on
 attach/start and after a subscription delivery gap. Missing methods on an older
 daemon mean unavailable flags; native clients must not invent local enables.
 See [feature flags](operator/feature-flags.md) for lifetime and offline behavior.
+## Claude Desktop Code connection
+
+These asynchronous methods own one connection separately from managed CLI
+sessions. They require an enabled `claude_desktop_private_ai` effective feature
+flag; missing or disabled flags refuse setup/export/restore. Disconnect remains
+available for cleanup. A live disable stops accepting requests, clears pending
+starts and preserves the saved binding for re-enable; account-policy changes
+still revoke it. They require no new trace collection consent:
+
+| Method | Parameters | Action |
+| --- | --- | --- |
+| `claude_desktop_status` | `{}` | Report safe connection metadata. |
+| `claude_desktop_configure` | `{ "model": string, "background_model"?: string }` | Replace the connection and rotate its local capability. Private AI must already be on and the NEAR AI inference credential present. Omitted background defaults to the main model. |
+| `claude_desktop_preset` | `{}` | Return variables for explicit copy into Claude's saved environment. |
+| `claude_desktop_disconnect` | `{}` | Stop accepting requests and revoke the saved environment before replying. |
+
+Every successful result is `{ "state": string, "observed": boolean,
+"copy": { string: string }, "model"?: string, "background_model"?: string,
+"environment"?: string }`. States are `disconnected`, `ready`, `observed`,
+`unavailable`, `sign_in_required`, and `disabled`. `environment` appears only
+on a successful explicit configure/preset action. Status and disconnect never
+return a port, project capability, control token or inference credential.
+Unknown parameters are refused. Unsupported or unavailable model selection
+returns `unavailable`, without a preset.
+
+`copy` owns `title`, `setup`, `save`, `copy`, `disconnect`, `main_model`,
+`background_model`, all six `status_<state>` keys, `instructions`, and `error`.
+Shells use this shared table for the ordinary tool row and setup sheet.
+
+Connection metadata is atomically persisted at mode 0600, including a SHA-256
+binding to the non-expiring inference key; it never contains that key. Normal
+daemon restart retains the port and opaque Vertex project capability. Credential
+withdrawal/change, Private AI off and developer dry run revoke the binding.
+Concurrent configure, disconnect, shutdown and credential changes cancel stale
+startup generations rather than publishing them afterward. Shutdown closes the
+listener within the existing bounded cleanup wait while accepted calls drain in
+retained cleanup tasks.
+
+`observed` requires a completed successful inference ledger row for one of the
+selected served models. Token counts, attempts, listener readiness, failed calls
+and cancellation do not establish observation. The ledger is preserved for
+Insights; bodies and token capture stay off. See [Claude Desktop setup](claude-desktop.md).

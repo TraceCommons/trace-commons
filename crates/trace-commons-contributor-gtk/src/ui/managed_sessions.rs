@@ -315,16 +315,59 @@ fn refusal_key(label: &str) -> &'static str {
     }
 }
 
+/// Whether a snapshot at `revision` is drawn: never one older than the last
+/// drawn, which a slow answer from before a change could otherwise be.
+fn accepts_revision(seen: &std::cell::Cell<u64>, revision: u64) -> bool {
+    if revision < seen.get() {
+        return false;
+    }
+    seen.set(revision);
+    true
+}
+
+/// The daemon behind the window changed (a reopen: switch-over or
+/// fallback), or may have restarted (`resync_required`). Revisions count per
+/// daemon -- the sandbox's and the host's are separate -- so the last one
+/// drawn says nothing about the next daemon's first.
+pub(super) fn backend_changed(seen: &std::cell::Cell<u64>) {
+    seen.set(0);
+}
+
+/// Whether a failed `managed_snapshot` still draws the start area, with the
+/// unavailable line and "Set up": in a sandbox whose daemon does not answer
+/// -- the host daemon installed but stopped, attached over the host link.
+/// Otherwise "Start it" would be unreachable from the window.
+fn draws_unreachable(error: &str, sandboxed: bool) -> bool {
+    sandboxed && error == "daemon-not-running"
+}
+
+/// What the start area is drawn from when the daemon does not answer: no
+/// accounts, no sessions, and no terminal or host daemon.
+fn unreachable_snapshot() -> Value {
+    json!({"capabilities": {"terminal_launch": false, "daemon_on_host": false}})
+}
+
 pub fn refresh(app: &Rc<App>) {
     app.call("managed_snapshot", json!({}), |app, result| {
-        let Ok(snapshot) = result else { return; };
-        let revision = snapshot["revision"].as_u64().unwrap_or_default();
-        if revision < app.private_inference.managed_revision.get() { return; }
-        app.private_inference.managed_revision.set(revision);
-        let signed_in = Some(snapshot["capabilities"]["near_ai_signin"] == true);
-        if app.private_inference.near_ai_signed_in.replace(signed_in) != signed_in {
-            super::edge_surfaces::data_changed(app);
-        }
+        let snapshot = match result {
+            Ok(snapshot) => {
+                let revision = snapshot["revision"].as_u64().unwrap_or_default();
+                if !accepts_revision(&app.private_inference.managed_revision, revision) { return; }
+                // Only a real answer moves the rail's sign-in state; an
+                // unreachable daemon leaves the last one standing.
+                let signed_in = Some(snapshot["capabilities"]["near_ai_signin"] == true);
+                if app.private_inference.near_ai_signed_in.replace(signed_in) != signed_in {
+                    super::edge_surfaces::data_changed(app);
+                }
+                snapshot
+            }
+            // No revision to compare: the next answer is drawn whatever it is.
+            Err(error) if draws_unreachable(&error.to_string(), sandboxed()) => {
+                backend_changed(&app.private_inference.managed_revision);
+                unreachable_snapshot()
+            }
+            Err(_) => return,
+        };
         let root = &app.private_inference.managed;
         clear(root);
         root.append(&style::section(&text("title")));
@@ -332,8 +375,18 @@ pub fn refresh(app: &Rc<App>) {
         let controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let launch_app = Rc::clone(app);
         let launch_snapshot = snapshot.clone();
-        let launch = button("launch", move || launch_dialog(&launch_app, &launch_snapshot));
-        launch.set_sensitive(snapshot["capabilities"]["terminal_launch"] == true && !launch_accounts(&snapshot).is_empty());
+        // In a Flatpak without the host daemon, Launch offers the background
+        // service until "Not now" (owner-approved flow, 2026-11-17).
+        let sandboxed = sandboxed();
+        let has_accounts = !launch_accounts(&snapshot).is_empty();
+        let launch = button("launch", move || {
+            match crate::service::launch_press(&launch_snapshot, sandboxed, has_accounts, super::service_dialog::dismissed()) {
+                crate::service::LaunchPress::Open => launch_dialog(&launch_app, &launch_snapshot),
+                crate::service::LaunchPress::OfferService => offer_service(&launch_app, crate::service::Trigger::Launch),
+                crate::service::LaunchPress::Unavailable => {}
+            }
+        });
+        launch.set_sensitive(crate::service::launch_press(&snapshot, sandboxed, has_accounts, super::service_dialog::dismissed()) != crate::service::LaunchPress::Unavailable);
         controls.append(&launch);
         let add_app = Rc::clone(app);
         let terminal = snapshot["capabilities"]["terminal_launch"] == true;
@@ -358,6 +411,13 @@ pub fn refresh(app: &Rc<App>) {
         let destination = session_destination(&snapshot);
         *app.private_inference.managed_destination.borrow_mut() = destination.map(str::to_owned);
         style::append_meta(root, destination.map(|d| text("terminal_scope").replace("{destination}", d)).unwrap_or_else(|| text("terminal_unavailable")));
+        if crate::service::offers_set_up(&snapshot, sandboxed) {
+            let a = Rc::clone(app);
+            let set_up = gtk::Button::with_label(trace_commons_contributor::managed::copy::background_service::SET_UP);
+            set_up.set_halign(gtk::Align::Start);
+            set_up.connect_clicked(move |_| offer_service(&a, crate::service::Trigger::SetUp));
+            root.append(&set_up);
+        }
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             row.append(&tiled(account["tool"].as_str().unwrap_or_default(), format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default())));
@@ -404,6 +464,50 @@ pub fn refresh(app: &Rc<App>) {
         }
         root.append(&style::section(&text("global_title")));
         style::append_body(root, text("global_scope"));
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A mounted test's stand-in for `/.flatpak-info`.
+    static TEST_SANDBOXED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether this window runs in a Flatpak sandbox.
+fn sandboxed() -> bool {
+    #[cfg(test)]
+    if let Some(sandboxed) = TEST_SANDBOXED.with(std::cell::Cell::get) {
+        return sandboxed;
+    }
+    trace_commons_contributor::daemon::host_link::runs_sandboxed()
+}
+
+/// Look at the background service and show its dialog when `trigger` calls
+/// for one. Ended either way, the Private AI area is drawn again: after
+/// "Not now" Launch goes quiet; after a switch-over it reads the host
+/// daemon (the reopen already refreshed everything).
+fn offer_service(app: &Rc<App>, trigger: crate::service::Trigger) {
+    app.service_state(move |app, state| {
+        let Some(dialog) =
+            crate::service::prompt(trigger, state, super::service_dialog::dismissed())
+        else {
+            refresh(app);
+            return;
+        };
+        let host: Rc<dyn super::service_dialog::ServiceHost> =
+            Rc::new(super::service_dialog::AppHost(Rc::downgrade(app)));
+        let weak = Rc::downgrade(app);
+        super::service_dialog::present(
+            Some(app.window.upcast_ref()),
+            None,
+            dialog,
+            host,
+            move |_| {
+                if let Some(app) = weak.upgrade() {
+                    refresh(&app);
+                }
+            },
+        );
     });
 }
 
@@ -533,6 +637,51 @@ fn add_dialog(app: &Rc<App>, terminal: bool, tools: Vec<&'static str>) {
     window.present();
 }
 
+/// Where Launch sends the folder it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchRoute {
+    /// A switch-over is under way: where the launch would land is not
+    /// known, so nothing is sent.
+    Refuse,
+    /// Sent as it is.
+    AsIs,
+    /// A document-portal folder bound for the host daemon: sent as the
+    /// host folder it stands for, or not at all.
+    MapToHost,
+}
+
+/// [`LaunchRoute`] for `cwd`, from `target` (`Worker::declaration_target`:
+/// where a call made now would land), as `roots::declare_to_daemon`
+/// decides for a folder declaration. The snapshot the dialog opened with
+/// may predate a switch-over, so it is not asked.
+fn launch_route(
+    target: Option<bool>,
+    cwd: &std::path::Path,
+    doc_root: Option<&std::path::Path>,
+) -> LaunchRoute {
+    match target {
+        None => LaunchRoute::Refuse,
+        Some(on_host) if crate::document_portal::needs_mapping_in(cwd, on_host, doc_root) => {
+            LaunchRoute::MapToHost
+        }
+        Some(_) => LaunchRoute::AsIs,
+    }
+}
+
+/// Whether a folder mapped to its host path may still go: only while the
+/// window is on the host daemon once the portal has answered. A switch-over
+/// meanwhile would send a host path to the sandbox's daemon.
+fn mapped_launch_proceeds(target: Option<bool>) -> bool {
+    target == Some(true)
+}
+
+/// The `cwd` a launch sends for a folder the portal mapped to its host
+/// path. `None` for a path that is not UTF-8: the wire carries a string, and
+/// a lossy one would name a different folder.
+fn launch_cwd(host: &std::path::Path) -> Option<Value> {
+    host.to_str().map(|cwd| json!(cwd))
+}
+
 fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     let accounts = launch_accounts(snapshot);
     if accounts.is_empty() {
@@ -652,16 +801,21 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
     }
     let a = Rc::clone(app);
     let generations = snapshot["generations"].clone();
+    // A folder from the sandboxed chooser is a document-portal path; a
+    // daemon on the host gets the folder it stands for, or no launch
+    // (`launch_route`).
     let w = window.clone();
     content.append(&button("launch_short", move || {
         let Some(account) = accounts.get(picker.selected() as usize) else { return; };
         let opencode = account["tool"] == "opencode";
         if opencode && model.text().trim().is_empty() { a.toast(&text("model_required")); return; }
-        let request = json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":folder.text().as_str(),"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()});
+        let cwd = folder.text().to_string();
+        let mut request = json!({"request_id":uuid::Uuid::new_v4(),"purpose":"coding","tool":account["tool"],"connection":account["connection"],"account_id":account["id"],"cwd":cwd,"expected_generation":generations[account["tool"].as_str().unwrap_or_default()],"save_default":false,"model":if opencode { Some(model.text().trim().to_owned()) } else { None },"collect_traces":opencode && collect.is_active()});
         // The picked terminal is saved before the launch; a refused save
         // stops the launch.
         let picked = terminal_picker.as_ref().map_or(0, |d| d.selected());
-        match terminal_to_save(terminal_choices.as_deref(), picked) {
+        let terminal = terminal_to_save(terminal_choices.as_deref(), picked);
+        let launch = move |a: &Rc<App>, request: Value| match terminal {
             Some(terminal) => a.call(
                 "set_managed_terminal",
                 json!({ "terminal": terminal }),
@@ -673,7 +827,42 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
                     action(app, "managed_launch_prepare", request, true);
                 },
             ),
-            None => action(&a, "managed_launch_prepare", request, true),
+            None => action(a, "managed_launch_prepare", request, true),
+        };
+        let route = launch_route(
+            a.worker.declaration_target(),
+            std::path::Path::new(&cwd),
+            crate::document_portal::doc_root().as_deref(),
+        );
+        if route == LaunchRoute::Refuse {
+            a.toast(&text("action_failed"));
+        } else if route == LaunchRoute::MapToHost {
+            // One D-Bus round trip, off the GTK thread.
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(crate::document_portal::host_path(
+                    std::path::Path::new(&cwd),
+                    true,
+                ));
+            });
+            let a = Rc::clone(&a);
+            gtk::glib::spawn_future_local(async move {
+                match rx.recv().await {
+                    Ok(Ok(_)) if !mapped_launch_proceeds(a.worker.declaration_target()) => {
+                        a.toast(&text("action_failed"))
+                    }
+                    Ok(Ok(host)) => match launch_cwd(&host) {
+                        Some(cwd) => {
+                            request["cwd"] = cwd;
+                            launch(&a, request);
+                        }
+                        None => a.toast(&text("action_failed")),
+                    },
+                    _ => a.toast(&text("action_failed")),
+                }
+            });
+        } else {
+            launch(&a, request);
         }
         w.close();
     }));
@@ -681,7 +870,159 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
+mod mounted_tests {
+    use super::*;
+    use crate::worker::{Job, Outcome, Worker};
+    use trace_commons_contributor::managed::copy::background_service as words;
+
+    fn texts(root: &gtk::Widget, out: &mut Vec<(String, bool)>) {
+        if let Some(label) = root.downcast_ref::<gtk::Label>() {
+            out.push((label.label().to_string(), true));
+        }
+        if let Some(button) = root.downcast_ref::<gtk::Button>() {
+            out.push((
+                button.label().map(|l| l.to_string()).unwrap_or_default(),
+                button.is_sensitive(),
+            ));
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            texts(&widget, out);
+            child = widget.next_sibling();
+        }
+    }
+
+    /// In a sandbox whose daemon is not the host daemon, the start area
+    /// keeps its unavailable line and adds "Set up"; Launch offers the
+    /// service until "Not now", then goes quiet while "Set up" stays.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_sandbox_start_area_shows_unavailable_and_set_up() {
+        let context = gtk::glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.ServiceSetUpTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-setup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, jobs, results) = Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        TEST_SANDBOXED.with(|s| s.set(Some(true)));
+        let snapshot = json!({
+            "revision": 1,
+            "accounts": [{"id": "a1", "tool": "claude", "connection": "near_ai", "label": "A", "auth_state": "ready"}],
+            "sessions": [],
+            "capabilities": {"terminal_launch": false, "daemon_on_host": false},
+        });
+        let render = |dismissed: bool| -> Vec<(String, bool)> {
+            crate::ui::service_dialog::set_dismissed(dismissed);
+            app.private_inference.managed_revision.set(0);
+            // Without this the loop below can read the previous draw, which
+            // has "Set up" too, before the new answer is drawn.
+            clear(&app.private_inference.managed);
+            refresh(&app);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                while let Ok((id, job)) = jobs.try_recv() {
+                    let reply = match job {
+                        Job::Call { method, .. } if method == "managed_snapshot" => {
+                            Ok(snapshot.clone())
+                        }
+                        _ => Err("synthetic-refused".to_string()),
+                    };
+                    let _ = results.try_send((id, Outcome::Call(reply.map_err(Into::into))));
+                }
+                let mut out = Vec::new();
+                texts(app.private_inference.managed.upcast_ref(), &mut out);
+                if out.iter().any(|(t, _)| t == words::SET_UP) {
+                    return out;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the start area was not drawn"
+                );
+                context.iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
+        let shown = render(false);
+        assert!(
+            shown
+                .iter()
+                .any(|(t, _)| *t == text("terminal_unavailable"))
+        );
+        assert!(shown.iter().any(|(t, on)| *t == words::SET_UP && *on));
+        assert!(
+            shown.iter().any(|(t, on)| *t == text("launch") && *on),
+            "Launch offers the service"
+        );
+        let shown = render(true);
+        assert!(
+            shown.iter().any(|(t, on)| *t == words::SET_UP && *on),
+            "Set up stays after Not now"
+        );
+        assert!(
+            shown.iter().any(|(t, on)| *t == text("launch") && !*on),
+            "Launch is quiet after Not now"
+        );
+        TEST_SANDBOXED.with(|s| s.set(None));
+        crate::ui::service_dialog::set_dismissed(false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    /// Launch decides where a folder goes as a folder declaration does
+    /// (`roots::declare_to_daemon`): from where a call made now would land,
+    /// not from the snapshot the dialog opened with. Refused while a
+    /// switch-over is under way; a portal folder is mapped only for the
+    /// host daemon; and a mapped folder goes only if the window is still on
+    /// the host once the portal answers.
+    #[test]
+    fn launch_follows_the_switch_over_like_a_declaration() {
+        use super::LaunchRoute;
+        let root = std::path::Path::new("/run/user/1000/doc");
+        let portal = std::path::Path::new("/run/user/1000/doc/a1/project");
+        let host = std::path::Path::new("/home/u/project");
+        let route = |target, cwd| super::launch_route(target, cwd, Some(root));
+        assert_eq!(route(None, portal), LaunchRoute::Refuse);
+        assert_eq!(route(None, host), LaunchRoute::Refuse);
+        assert_eq!(route(Some(true), portal), LaunchRoute::MapToHost);
+        assert_eq!(route(Some(true), host), LaunchRoute::AsIs);
+        assert_eq!(route(Some(false), portal), LaunchRoute::AsIs);
+        assert_eq!(route(Some(false), host), LaunchRoute::AsIs);
+        assert_eq!(
+            super::launch_route(Some(true), portal, None),
+            LaunchRoute::AsIs
+        );
+        // After the portal answers.
+        assert!(super::mapped_launch_proceeds(Some(true)));
+        assert!(!super::mapped_launch_proceeds(Some(false)));
+        assert!(!super::mapped_launch_proceeds(None));
+    }
+
+    /// A mapped host folder that is not UTF-8 is refused, never sent with
+    /// U+FFFD in place of its bytes: the host daemon would open a session in
+    /// a folder that does not exist, or in a different one.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_folder_that_is_not_utf8_is_refused_not_mangled() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/home/u/caf\xe9"));
+        assert_eq!(super::launch_cwd(bad), None);
+        assert_eq!(
+            super::launch_cwd(std::path::Path::new("/home/u/café")),
+            Some(json!("/home/u/café"))
+        );
+    }
+
     /// Owner, 2026-11-03: a session grouped in herdr opens there, so the
     /// launch lines and a launch's refusal name herdr; an older daemon sends
     /// only `terminal_destination`, which then names where sessions open.
@@ -1012,6 +1353,41 @@ mod tests {
         assert_eq!(
             tool_unavailable("claude"),
             "Claude Code wasn't found on this computer."
+        );
+    }
+
+    #[test]
+    fn a_new_daemon_is_drawn_from_its_first_revision() {
+        let seen = std::cell::Cell::new(0);
+        assert!(accepts_revision(&seen, 7));
+        // A slow answer from before a change on the same daemon.
+        assert!(!accepts_revision(&seen, 6));
+        // The switch-over: the host daemon counts from its own start.
+        backend_changed(&seen);
+        assert!(
+            accepts_revision(&seen, 3),
+            "the new daemon's snapshot was ignored"
+        );
+        assert!(accepts_revision(&seen, 3));
+        assert!(!accepts_revision(&seen, 2));
+    }
+
+    /// The host daemon installed but stopped: the window is attached over
+    /// the host link to a socket nobody answers. The start area still draws
+    /// its unavailable line and "Set up", so "Start it" can be reached.
+    #[test]
+    fn an_unanswered_snapshot_in_a_sandbox_still_offers_set_up() {
+        assert!(draws_unreachable("daemon-not-running", true));
+        // Other failures, and a window outside a sandbox, draw nothing new.
+        assert!(!draws_unreachable("managed-storage-unavailable", true));
+        assert!(!draws_unreachable("daemon-not-running", false));
+        let snapshot = unreachable_snapshot();
+        assert!(crate::service::offers_set_up(&snapshot, true));
+        assert!(launch_accounts(&snapshot).is_empty());
+        assert_eq!(session_destination(&snapshot), None);
+        assert_eq!(
+            crate::service::launch_press(&snapshot, true, false, false),
+            crate::service::LaunchPress::OfferService
         );
     }
 }

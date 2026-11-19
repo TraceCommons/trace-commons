@@ -1,0 +1,540 @@
+//! Tools, as the Mac draws it (`ToolsScreen`, `ToolChecks`): one check per
+//! tool found here, unticked until the person ticks it (an unticked tool is
+//! Not used), a row per folder added with "add your tool", the core's line
+//! when one tool is watched in two rows, and Continue once anything is
+//! watched. Every decision is `first_run::tools`; this file only draws it.
+//!
+//! The same screen serves both first-run windows: before the daemon runs
+//! (`roots::present`, which writes the declaration to the settings file and
+//! starts the daemon) and with it running (the coordinator, which sends the
+//! planner's `Commit::Roots`).
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+
+use adw::prelude::*;
+use trace_commons_contributor::first_run_copy::first_run_copy;
+use trace_commons_contributor::source::discovery;
+
+use super::first_run_marker_check::MarkerCheck;
+use super::onboarding::body_label;
+use crate::first_run::tools::{
+    AddOutcome, AddedFolder, FolderKind, Found, ToolAnswer, Tools, add_outcome,
+};
+
+/// The live Tools screen.
+pub(super) struct ToolsScreen {
+    pub root: gtk::Box,
+    rows: gtk::Box,
+    pending: RefCell<Option<(String, Vec<FolderKind>)>>,
+    pub continue_button: gtk::Button,
+    pub failure: gtk::Label,
+    tools: Rc<RefCell<Tools>>,
+    parent: glib::WeakRef<gtk::Window>,
+    busy: std::cell::Cell<bool>,
+    refused: gtk::Label,
+    /// Under `failure`: [`super::roots::HostFolderHint`], when one is shown.
+    host_hint: gtk::Box,
+    host_hint_line: gtk::Label,
+    host_hint_command: gtk::Label,
+    /// The refusal the shown hint is for: the tool it names
+    /// ([`super::roots::HostFolderHint::tool`]) and the daemon's answer
+    /// before it.
+    refusal: RefCell<Option<crate::first_run::tools::Refusal>>,
+    /// The attached daemon's last settings answer, as Tools reads it.
+    watches: RefCell<crate::first_run::tools::Watches>,
+    /// When each row's check last changed (monotonic seconds), by tool or
+    /// folder: a row rebuilt mid-stroke carries on drawing.
+    toggled: RefCell<HashMap<String, f64>>,
+    /// The rows' marker checks, alive while their rows are.
+    marks: RefCell<Vec<Rc<MarkerCheck>>>,
+    /// Told after anything Tools shows changes: found, watched or not.
+    on_change: RefCell<Option<Rc<dyn Fn()>>>,
+}
+
+/// The tool's name, as the Mac's `SourceKind.displayName` gives it.
+pub(super) fn tool_name(source: &str) -> &'static str {
+    super::roots::source_title(source)
+}
+
+fn kind_name(kind: &FolderKind) -> &'static str {
+    match kind {
+        FolderKind::Source(source) => tool_name(source),
+        FolderKind::Trajectory => first_run_copy().tools.trajectory_label,
+    }
+}
+
+fn fill(template: &str, key: &str, value: &str) -> String {
+    template.replace(&format!("{{{key}}}"), value)
+}
+
+fn folder_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Build Tools. `on_continue` runs when Continue is pressed with a
+/// declaration the daemon would take; the caller commits it and calls
+/// [`ToolsScreen::finish`] with the result.
+pub(super) fn build(
+    tools: Rc<RefCell<Tools>>,
+    parent: &gtk::Window,
+    on_continue: impl Fn() + 'static,
+) -> Rc<ToolsScreen> {
+    let copy = first_run_copy();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    root.set_margin_start(32);
+    root.set_margin_end(32);
+    root.set_margin_top(24);
+    root.set_margin_bottom(24);
+    let title = gtk::Label::builder()
+        .label(format!(
+            "{}{}",
+            copy.tools.title_light, copy.tools.title_bold
+        ))
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    title.add_css_class("tc-flow-title");
+    root.append(&title);
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.append(&rows);
+    let refused = body_label(copy.tools.add_tool_refused);
+    refused.add_css_class("tc-refused");
+    refused.set_visible(false);
+    let failure = body_label("");
+    failure.add_css_class("tc-refused");
+    failure.set_visible(false);
+    let host_hint = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let host_hint_line = body_label("");
+    let host_hint_command = super::service_dialog::command_label("");
+    // Copies the command; never runs it.
+    let copy_command = gtk::Button::with_label(
+        trace_commons_contributor::managed::copy::background_service::COPY_COMMAND,
+    );
+    copy_command.set_halign(gtk::Align::Start);
+    copy_command.connect_clicked({
+        let command = host_hint_command.clone();
+        move |button| button.clipboard().set_text(&command.label())
+    });
+    host_hint.append(&host_hint_line);
+    host_hint.append(&host_hint_command);
+    host_hint.append(&copy_command);
+    host_hint.set_visible(false);
+    let continue_button = gtk::Button::with_label(copy.frame.continue_button);
+    continue_button.add_css_class("suggested-action");
+    continue_button.set_halign(gtk::Align::End);
+    continue_button.set_sensitive(false);
+    let screen = Rc::new(ToolsScreen {
+        root,
+        rows,
+        pending: RefCell::new(None),
+        continue_button,
+        failure,
+        tools,
+        parent: parent.downgrade(),
+        busy: std::cell::Cell::new(false),
+        refused,
+        host_hint,
+        host_hint_line,
+        host_hint_command,
+        refusal: RefCell::new(None),
+        watches: RefCell::new(Default::default()),
+        toggled: RefCell::new(HashMap::new()),
+        marks: RefCell::new(Vec::new()),
+        on_change: RefCell::new(None),
+    });
+    let add = gtk::Button::with_label(copy.tools.add_tool);
+    add.add_css_class("flat");
+    add.set_halign(gtk::Align::Start);
+    add.set_tooltip_text(Some(copy.tools.add_tool_caption));
+    add.connect_clicked({
+        let weak = Rc::downgrade(&screen);
+        move |_| {
+            if let Some(screen) = weak.upgrade() {
+                screen.choose_folder();
+            }
+        }
+    });
+    screen.root.append(&add);
+    // "Click to add or drag & drop": a folder dropped anywhere on Tools is
+    // added as one picked with the button.
+    let drop = gtk::DropTarget::new(gtk::gio::File::static_type(), gtk::gdk::DragAction::COPY);
+    drop.connect_drop({
+        let weak = Rc::downgrade(&screen);
+        move |_, value, _, _| {
+            let (Some(screen), Ok(file)) = (weak.upgrade(), value.get::<gtk::gio::File>()) else {
+                return false;
+            };
+            match file.path() {
+                Some(path) => {
+                    screen.add_path(&path);
+                    true
+                }
+                None => false,
+            }
+        }
+    });
+    screen.root.add_controller(drop);
+    screen.root.append(&screen.refused);
+    screen.root.append(&screen.failure);
+    screen.root.append(&screen.host_hint);
+    screen.root.append(&screen.continue_button);
+    let on_continue = Rc::new(on_continue);
+    screen.continue_button.connect_clicked({
+        let weak = Rc::downgrade(&screen);
+        move |_| {
+            let Some(screen) = weak.upgrade() else {
+                return;
+            };
+            if screen.busy.get() || !screen.tools.borrow().can_continue() {
+                return;
+            }
+            screen.set_busy(true);
+            screen.hide_refusal();
+            on_continue();
+        }
+    });
+    if screen.tools.borrow().discovered.is_none() {
+        screen.discover();
+    } else {
+        screen.render();
+    }
+    screen
+}
+
+fn now() -> f64 {
+    glib::monotonic_time() as f64 / 1e6
+}
+
+impl ToolsScreen {
+    /// `changed` runs after anything Tools shows changes: discovery
+    /// landing, a tool watched or not, a folder added. The first run's
+    /// stage redraws from it, since with animations off nothing else would.
+    pub fn connect_changed(&self, changed: impl Fn() + 'static) {
+        *self.on_change.borrow_mut() = Some(Rc::new(changed));
+    }
+
+    /// A row's marker check: `check` over the drawing, carrying on from
+    /// the last change of `key`.
+    fn mark(self: &Rc<Self>, check: gtk::CheckButton, key: &str) -> gtk::Overlay {
+        check.connect_toggled({
+            let weak = Rc::downgrade(self);
+            let key = key.to_owned();
+            move |_| {
+                if let Some(screen) = weak.upgrade() {
+                    screen.toggled.borrow_mut().insert(key.clone(), now());
+                }
+            }
+        });
+        let since = self.toggled.borrow().get(key).copied();
+        let mark = MarkerCheck::new(check, since);
+        let root = mark.root.clone();
+        self.marks.borrow_mut().push(mark);
+        root
+    }
+
+    fn discover(self: &Rc<Self>) {
+        // The core's loading line, for any computer (owner, 2026-11-17).
+        let loading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        loading.append(&super::glass_feedback::spinner());
+        let line = gtk::Label::new(Some(first_run_copy().folders.loading_this_computer));
+        line.add_css_class("tc-meta");
+        loading.append(&line);
+        self.rows.append(&loading);
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let found: Vec<Found> = discovery::probe_this_machine()
+                .iter()
+                .map(Found::from)
+                .collect();
+            let _ = tx.send_blocking(found);
+        });
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Ok(found) = rx.recv().await else {
+                return;
+            };
+            if let Some(screen) = weak.upgrade() {
+                screen.tools.borrow_mut().record_discovery(found);
+                screen.render();
+            }
+        });
+    }
+
+    /// Show the tools the attached daemon already watches
+    /// (`Tools::record_held`), from its settings answer `now`. Not while a
+    /// commit holds the answers it started from. When the command a
+    /// refusal's old-portal line gave has landed -- the daemon newly holds
+    /// that tool, or holds it still with its declaration written since --
+    /// the failure line and the command no longer apply and are hidden
+    /// (`first_run::tools::refusal_ended`).
+    pub fn record_watches(self: &Rc<Self>, now: crate::first_run::tools::Watches) {
+        if self.busy.get() {
+            return;
+        }
+        let ended = self
+            .refusal
+            .borrow()
+            .as_ref()
+            .filter(|refusal| crate::first_run::tools::refusal_ended(Some(refusal), &now))
+            .map(|refusal| refusal.tool);
+        if ended.is_some() {
+            self.hide_refusal();
+        }
+        let held_changed = self.tools.borrow().held != now.held;
+        let held = now.held.clone();
+        *self.watches.borrow_mut() = now;
+        if held_changed {
+            self.tools.borrow_mut().record_held(held);
+        }
+        // A tool held all along: the folder picked here is the one the
+        // command declared, so the row is the daemon's own again and
+        // Continue sends nothing for it.
+        if let Some(tool) = ended {
+            self.tools.borrow_mut().record_landed(tool);
+        }
+        if held_changed || ended.is_some() {
+            self.render();
+        }
+    }
+
+    /// Hide the failure line and the hint under it.
+    fn hide_refusal(&self) {
+        self.failure.set_visible(false);
+        self.host_hint.set_visible(false);
+        self.refusal.replace(None);
+    }
+
+    /// The commit ended: on failure say so with `failure`, and let Continue
+    /// be pressed again.
+    pub fn finish(&self, failure: Option<&str>) {
+        self.set_busy(false);
+        match failure {
+            Some(line) => {
+                self.failure.set_label(line);
+                self.failure.set_visible(true);
+            }
+            None => self.hide_refusal(),
+        }
+    }
+
+    /// Under the failure line: how to add a refused folder on the host
+    /// ([`super::roots::HostFolderHint`]), or nothing.
+    pub fn show_host_hint(&self, hint: Option<&super::roots::HostFolderHint>) {
+        match hint {
+            Some(hint) => {
+                self.host_hint_line.set_label(hint.line);
+                super::service_dialog::set_command(&self.host_hint_command, &hint.command);
+                self.host_hint.set_visible(true);
+                self.refusal.replace(Some(crate::first_run::tools::Refusal {
+                    tool: hint.tool,
+                    before: self.watches.borrow().clone(),
+                }));
+            }
+            None => {
+                self.host_hint.set_visible(false);
+                self.refusal.replace(None);
+            }
+        }
+    }
+
+    fn set_busy(&self, busy: bool) {
+        self.busy.set(busy);
+        self.rows.set_sensitive(!busy);
+        self.update();
+    }
+
+    fn update(&self) {
+        self.continue_button
+            .set_sensitive(!self.busy.get() && self.tools.borrow().can_continue());
+        let changed = self.on_change.borrow().clone();
+        if let Some(changed) = changed {
+            changed();
+        }
+    }
+
+    fn rerender(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(screen) = weak.upgrade() {
+                screen.render();
+            }
+        });
+    }
+
+    fn render(self: &Rc<Self>) {
+        while let Some(child) = self.rows.first_child() {
+            self.rows.remove(&child);
+        }
+        self.marks.borrow_mut().clear();
+        let copy = first_run_copy();
+        let tools = self.tools.borrow().clone();
+        for found in tools.listed() {
+            let name = tool_name(&found.source);
+            let check = gtk::CheckButton::with_label(name);
+            check.set_active(tools.is_watched(&found.source));
+            // A folder the daemon holds is not known here: no path is shown
+            // for it, rather than the one discovery found.
+            if tools.row_answer(&found.source) != ToolAnswer::Held && !found.path.is_empty() {
+                check.set_tooltip_text(Some(&found.path));
+            }
+            check.update_property(&[gtk::accessible::Property::Label(&fill(
+                copy.folders.watch_question,
+                "tool",
+                name,
+            ))]);
+            check.connect_toggled({
+                let weak = Rc::downgrade(self);
+                let found = found.clone();
+                move |check| {
+                    if let Some(screen) = weak.upgrade() {
+                        screen
+                            .tools
+                            .borrow_mut()
+                            .set_watched(&found, check.is_active());
+                        screen.update();
+                        screen.rerender();
+                    }
+                }
+            });
+            let mark = self.mark(check, &found.source);
+            self.rows.append(&mark);
+        }
+        let twice = tools.watched_twice();
+        for folder in tools.added.iter() {
+            let name = match &folder.kind {
+                FolderKind::Trajectory => copy.tools.trajectory_label.to_owned(),
+                FolderKind::Source(_) => folder_name(&folder.path),
+            };
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            let check = gtk::CheckButton::with_label(&name);
+            check.set_active(folder.watched == Some(true));
+            check.set_tooltip_text(Some(&folder.path));
+            check.update_property(&[gtk::accessible::Property::Label(&fill(
+                copy.folders.watch_question,
+                "tool",
+                &name,
+            ))]);
+            check.connect_toggled({
+                let weak = Rc::downgrade(self);
+                let path = folder.path.clone();
+                let trajectory = folder.kind == FolderKind::Trajectory;
+                move |check| {
+                    if let Some(screen) = weak.upgrade() {
+                        {
+                            let mut tools = screen.tools.borrow_mut();
+                            if trajectory && !check.is_active() {
+                                tools.withdraw_trajectory();
+                            } else {
+                                tools.answer_added(&path, Some(check.is_active()));
+                            }
+                        }
+                        screen.update();
+                        screen.rerender();
+                    }
+                }
+            });
+            row.append(&self.mark(check, &folder.path));
+            let meta = gtk::Label::builder()
+                .label(copy.tools.added_by_you)
+                .xalign(0.0)
+                .build();
+            meta.add_css_class("tc-meta");
+            row.append(&meta);
+            if let FolderKind::Source(source) = &folder.kind {
+                if folder.watched == Some(true) && twice.contains(source) {
+                    let line = body_label(&fill(
+                        copy.tools.one_folder_per_tool,
+                        "tool",
+                        tool_name(source),
+                    ));
+                    line.add_css_class("tc-refused");
+                    row.append(&line);
+                }
+            }
+            self.rows.append(&row);
+        }
+        if let Some((path, kinds)) = self.pending.borrow().clone() {
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            row.append(&body_label(&fill(
+                copy.tools.which_kind,
+                "folder",
+                &folder_name(&path),
+            )));
+            let choices = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            for kind in kinds.iter().cloned().map(Some).chain([None]) {
+                let label = kind.as_ref().map_or(copy.tools.neither, kind_name);
+                let button = gtk::Button::with_label(label);
+                button.connect_clicked({
+                    let weak = Rc::downgrade(self);
+                    let path = path.clone();
+                    move |_| {
+                        if let Some(screen) = weak.upgrade() {
+                            screen.pending.borrow_mut().take();
+                            if let Some(kind) = kind.clone() {
+                                screen
+                                    .tools
+                                    .borrow_mut()
+                                    .add(AddedFolder::new(kind, path.clone()));
+                            }
+                            screen.update();
+                            screen.rerender();
+                        }
+                    }
+                });
+                choices.append(&button);
+            }
+            row.append(&choices);
+            self.rows.append(&row);
+        }
+        self.update();
+    }
+
+    fn choose_folder(self: &Rc<Self>) {
+        if self.busy.get() {
+            return;
+        }
+        let parent = self.parent.upgrade();
+        let chooser = gtk::FileChooserNative::new(
+            Some(first_run_copy().tools.add_tool_caption),
+            parent.as_ref(),
+            gtk::FileChooserAction::SelectFolder,
+            None,
+            None,
+        );
+        let weak = Rc::downgrade(self);
+        chooser.connect_response(move |chooser, response| {
+            if response == gtk::ResponseType::Accept
+                && let Some(path) = chooser.file().and_then(|f| f.path())
+                && let Some(screen) = weak.upgrade()
+            {
+                screen.add_path(&path);
+            }
+            chooser.destroy();
+        });
+        chooser.show();
+    }
+
+    /// A folder picked or dropped: described by the core, then added, asked
+    /// about, or refused (`ToolsScreenLayout.outcome`).
+    fn add_path(self: &Rc<Self>, path: &std::path::Path) {
+        if self.busy.get() {
+            return;
+        }
+        let matches: Vec<Found> = discovery::describe_folder(path)
+            .iter()
+            .map(Found::from)
+            .collect();
+        let path = path.to_string_lossy().into_owned();
+        self.refused.set_visible(false);
+        match add_outcome(&path, &matches) {
+            AddOutcome::Added(folder) => self.tools.borrow_mut().add(folder),
+            AddOutcome::Ask { path, kinds } => {
+                self.pending.replace(Some((path, kinds)));
+            }
+            AddOutcome::Refused => self.refused.set_visible(true),
+        }
+        self.render();
+    }
+}

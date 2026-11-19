@@ -20,6 +20,13 @@ public static class StartupRegistration
 
     public static async Task<StartupRegistrationState> GetStateAsync()
     {
+        // A recorded-sample launch offers no switch, so it can never write
+        // the Run value or the startup task.
+        if (Program.IsSampleLaunch)
+        {
+            return StartupRegistrationState.SampleLaunch;
+        }
+
         if (!PackageIdentity.IsPackaged())
         {
             return new StartupRegistrationState(
@@ -42,6 +49,11 @@ public static class StartupRegistration
 
     public static async Task<StartupRegistrationState> SetEnabledAsync(bool enabled)
     {
+        if (Program.IsSampleLaunch)
+        {
+            return StartupRegistrationState.SampleLaunch;
+        }
+
         if (!PackageIdentity.IsPackaged())
         {
             bool actual = RunAtLogin.Set(enabled);
@@ -96,4 +108,10 @@ public sealed record StartupRegistrationState(bool IsSupported, bool IsEnabled, 
         false,
         false,
         "Windows startup settings aren't available just now.");
+
+    /// <summary>
+    /// A recorded-sample launch (Debug only): no switch and no notice, so
+    /// nothing is offered that would write the Run value or the task.
+    /// </summary>
+    internal static StartupRegistrationState SampleLaunch { get; } = new(false, false, string.Empty);
 }

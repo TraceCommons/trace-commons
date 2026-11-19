@@ -2953,6 +2953,32 @@ impl TraceMap {
     }
 
     /// Whether the last `list_pending` read answered.
+    pub fn pending_read(&self) -> bool {
+        self.reads.borrow().pending == Some(true)
+    }
+
+    /// `(watched, total)` tools from the last `tool_destinations` read
+    /// (`ToolDestinations.watchedCount`), or `None` when it was not read.
+    pub fn watched_tools(&self) -> Option<(usize, usize)> {
+        self.reads
+            .borrow()
+            .destinations
+            .as_ref()
+            .map(|destinations| {
+                let watched = destinations
+                    .tools
+                    .iter()
+                    .filter(|tool| {
+                        tool.sessions
+                            .as_ref()
+                            .is_some_and(|sessions| sessions.watch == "watched")
+                    })
+                    .count();
+                (watched, destinations.tools.len())
+            })
+    }
+
+    /// Whether the last `list_pending` read answered.
     pub fn set_pending_read(&self, answered: bool) {
         self.reads.borrow_mut().pending = Some(answered);
     }

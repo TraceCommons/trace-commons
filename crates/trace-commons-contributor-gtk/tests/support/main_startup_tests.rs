@@ -153,7 +153,6 @@ fn quit_during_pending_start_suppresses_completion_and_releases_daemon() {
         search_term: None,
         preview_tab: None,
         start_page: None,
-        onboarding_page: None,
         show_toast: false,
     });
     let startup = connect_startup(
