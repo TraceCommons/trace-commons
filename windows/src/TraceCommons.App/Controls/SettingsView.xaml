@@ -1016,6 +1016,12 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+
+                <!-- About (spec W24-D1 (a)): opens the About window. -->
+                <HyperlinkButton Content="{x:Bind AboutTitle}"
+                                 AutomationProperties.Name="{x:Bind AboutTitle}"
+                                 Click="OnAbout"
+                                 Padding="0" />
             </StackPanel>
         </ScrollViewer>
     </Grid>

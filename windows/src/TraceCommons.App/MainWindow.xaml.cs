@@ -146,6 +146,7 @@ public sealed partial class MainWindow : Window
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
+        _tray.AboutRequested += OnTrayAboutRequested;
         _tray.PrivateInferenceRequested += OnTrayPrivateInferenceRequested;
         _tray.PrivateInferenceStopRequested += OnTrayPrivateInferenceStopRequested;
         _tray.PauseRequested += OnTrayPauseRequested;
@@ -1721,6 +1722,7 @@ public sealed partial class MainWindow : Window
         _clockGate.SetClosed();
         StopMoveTicks();
         _settingsWindow?.Close();
+        _aboutWindow?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;

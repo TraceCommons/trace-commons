@@ -875,6 +875,7 @@ public sealed partial class MainWindow
                 OpenOnboarding(OnboardingState.Default()).Activate();
                 await ViewModel.RefreshAsync();
             };
+            settings.AboutRequested += (_, _) => ShowAboutWindow();
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
