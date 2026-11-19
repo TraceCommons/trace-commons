@@ -252,7 +252,7 @@ public sealed class HomeView : UserControl
             Foreground = (Brush)Application.Current.Resources["TcInkTertiaryBrush"],
             VerticalAlignment = VerticalAlignment.Center,
         };
-        AutomationProperties.SetAccessibilityView(dash, AccessibilityView.Raw);
+        AutomationProperties.SetAccessibilityView(dash, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
         row.Children.Add(dash);
         var link = new HyperlinkButton { Content = signIn.SignIn, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
         if (signIn.SignInName is string name)
