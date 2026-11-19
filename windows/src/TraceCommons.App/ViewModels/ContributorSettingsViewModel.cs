@@ -25,7 +25,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private bool _startupSupported = true;
     private bool _connected;
     private double _quiescenceMinutes;
-    private double _approvalHoldSeconds;
     private double _digestHours;
     private long _queueTtlDays;
     private bool _localNotifications;
@@ -1289,6 +1288,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
                 return false;
             }
 
+            // An unenroll is an account boundary (checklist L2): consent
+            // presses made before it, in any window, are not applied.
+            _host.Account.Boundary();
+
             // The NEAR AI sign-in goes with the enrollment (#1843): said only
             // when it did not, as macOS and GTK do.
             string nearAi = NearAiCredentialSurface.UnenrollNotice(response, _privateInferenceCopy);
@@ -1338,20 +1341,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         get => _quiescenceMinutes;
         private set => Set(ref _quiescenceMinutes, value);
     }
-
-    public double ApprovalHoldSeconds
-    {
-        get => _approvalHoldSeconds;
-        private set
-        {
-            if (Set(ref _approvalHoldSeconds, value))
-            {
-                Raise(nameof(HasNoUndoWindow));
-            }
-        }
-    }
-
-    public bool HasNoUndoWindow => ApprovalHoldSeconds == 0;
 
     public double DigestHours
     {
@@ -1624,9 +1613,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             case BehaviorSetting.QuiescenceMinutes:
                 QuiescenceMinutes = value;
                 break;
-            case BehaviorSetting.ApprovalHoldSeconds:
-                ApprovalHoldSeconds = value;
-                break;
             case BehaviorSetting.DigestHours:
                 DigestHours = value;
                 break;
@@ -1674,7 +1660,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
 
         QuiescenceMinutes = settings.QuiescenceSeconds / 60.0;
-        ApprovalHoldSeconds = settings.ApprovalHoldSeconds;
         DigestHours = settings.DigestIntervalSeconds / 3600.0;
         _queueTtlDays = settings.QueueTtlDays;
         _localNotifications = settings.LocalNotifications;

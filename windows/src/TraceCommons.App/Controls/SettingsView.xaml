@@ -60,7 +60,7 @@
                                    Visibility="{x:Bind Settings.HasConnectionDetail, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="Wrap" />
-                        <ItemsControl ItemsSource="{x:Bind Settings.ConnectionRows}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.ConnectionRows}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:ConnectionStatusViewModel">
                                     <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" Margin="0,2">
@@ -205,7 +205,7 @@
                 <TextBlock Text="STARTUP"
                            Style="{StaticResource TcEyebrowTextStyle}"
                            Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
-                <ToggleSwitch Header="Start Near.ai when you sign in"
+                <ToggleSwitch x:Name="StartAtLoginSwitch"
                               IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
                               IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                               Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
@@ -218,7 +218,7 @@
 
                 <TextBlock Text="ALWAYS INCLUDED"
                            Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.AlwaysIncluded}">
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.AlwaysIncluded}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ConsentScopeViewModel">
                             <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
@@ -238,7 +238,7 @@
 
                 <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
                            Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.OptionalScopes}">
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.OptionalScopes}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ConsentScopeViewModel">
                             <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
@@ -276,19 +276,6 @@
                                    SpinButtonPlacementMode="Inline"
                                    IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
                                    ValueChanged="OnBehaviorChanged" />
-                        <NumberBox x:Name="ApprovalHoldSeconds"
-                                   Header="How long you can take something back (seconds after approval)"
-                                   Value="{x:Bind Settings.ApprovalHoldSeconds, Mode=OneWay}"
-                                   Minimum="0"
-                                   Maximum="300"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="No undo window. Approving sends on the next pass."
-                                   Visibility="{x:Bind Settings.HasNoUndoWindow, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
                         <NumberBox x:Name="DigestHours"
                                    Header="How often you can be interrupted (hours between notifications, at most)"
                                    Value="{x:Bind Settings.DigestHours, Mode=OneWay}"
@@ -315,7 +302,7 @@
                 <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
                            Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.Projects}">
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.Projects}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:ProjectSettingViewModel">
                             <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
@@ -385,7 +372,7 @@
                             from what IronWire answered about that tool, never
                             from the switch below.
                         -->
-                        <ItemsControl ItemsSource="{x:Bind Settings.RoutingToolRows}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.RoutingToolRows}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:RoutingToolRowViewModel">
                                     <Grid ColumnDefinitions="*,Auto"
@@ -616,7 +603,7 @@
                     terminal names from the daemon and collapses itself when
                     the daemon offers none. No string is typed here.
                 -->
-                <ContentControl x:Name="ManagedTerminalHost"
+                <ContentControl IsTabStop="False" x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
                 <!--
@@ -635,7 +622,7 @@
                         BorderThickness="1"
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12">
-                    <ItemsControl ItemsSource="{x:Bind Settings.DisclosureRows}">
+                    <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.DisclosureRows}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate x:DataType="interop:DisclosureRow">
                                 <StackPanel Spacing="2" Margin="0,3">
@@ -1012,7 +999,7 @@
                 <TextBlock Text="Nothing has been changed."
                            Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}">
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.AuditEntries}">
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="vm:AuditSettingViewModel">
                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">

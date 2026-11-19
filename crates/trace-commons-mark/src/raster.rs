@@ -41,7 +41,7 @@ use crate::{Scheme, VIEW};
 type Rect = (f64, f64, f64, f64);
 
 /// A colour as straight (non-premultiplied) 8-bit RGBA.
-type Rgba = [u8; 4];
+pub(crate) type Rgba = [u8; 4];
 
 /// The mark decomposed into painting order: a list of `(colour, rectangles)`
 /// layers, each painted over the last.
@@ -129,7 +129,7 @@ pub mod shapes {
 /// The palette lives in this crate as hex strings because that is the form
 /// every client's design system states it in, and a second numeric spelling
 /// here would be one more thing that can drift.
-fn parse_hex(hex: &str) -> Rgba {
+pub(crate) fn parse_hex(hex: &str) -> Rgba {
     let b = hex.as_bytes();
     debug_assert_eq!(b.len(), 7, "expected #RRGGBB, got {hex}");
     let nibble = |c: u8| -> u8 {
@@ -159,7 +159,7 @@ fn coverage(rect: Rect, px: u32, py: u32, scale: f64) -> f64 {
 }
 
 /// Composite `src` over `dst` at coverage `a`, straight alpha, per channel.
-fn over(dst: Rgba, src: Rgba, a: f64) -> Rgba {
+pub(crate) fn over(dst: Rgba, src: Rgba, a: f64) -> Rgba {
     let blend = |d: u8, s: u8| -> u8 {
         let v = d as f64 * (1.0 - a) + s as f64 * a;
         // Round half away from zero without calling `round`, so the rounding

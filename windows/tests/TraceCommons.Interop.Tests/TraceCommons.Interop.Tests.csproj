@@ -260,6 +260,11 @@
     <None Include="$(MSBuildThisFileDirectory)../../packaging/Package.appxmanifest"
           Link="manifest-source/Package.appxmanifest.txt"
           CopyToOutputDirectory="PreserveNewest" />
+    <!-- The app's project file, for the exe's version resource names
+         (ManifestBrandTests): Task Manager and Startup apps show them. -->
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.App/TraceCommons.App.csproj"
+          Link="manifest-source/TraceCommons.App.csproj.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!--

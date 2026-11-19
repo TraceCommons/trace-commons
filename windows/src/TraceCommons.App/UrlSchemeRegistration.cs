@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using Microsoft.Win32;
+using TraceCommons.Interop;
 
 namespace TraceCommons.App;
 
@@ -39,7 +40,7 @@ namespace TraceCommons.App;
 /// </remarks>
 public static class UrlSchemeRegistration
 {
-    private const string Scheme = "tracecommons";
+    private const string Scheme = InviteScheme.Scheme;
 
     /// <summary>
     /// Registers the scheme for the current user, pointing at this
@@ -75,7 +76,7 @@ public static class UrlSchemeRegistration
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(
                 $@"Software\Classes\{Scheme}");
 
-            key.SetValue(string.Empty, "URL:Near.ai Invite");
+            key.SetValue(string.Empty, InviteScheme.DisplayName);
 
             // The marker that tells the shell this key is a protocol handler.
             // Its presence is what matters; the value is empty by convention.

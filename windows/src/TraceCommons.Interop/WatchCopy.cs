@@ -155,7 +155,7 @@ public static class WatchCopy
     /// name, because there the state column is the row's own vocabulary and an
     /// empty cell in a list reads as a fault.
     /// </summary>
-    public const string UnknownNote = UnresolvedBucketCopy.Note;
+    public static string UnknownNote => UnresolvedBucketCopy.Note;
 
     /// <summary>
     /// What to show as a row's name: the human label for the unresolvable
