@@ -259,6 +259,37 @@
   padding: 14px;
 }
 
+/* Home's stat tiles (`HomeStatTile`): the caption in the eyebrow type,
+   uppercase as the Mac draws it, in the tertiary ink; the figure bold and
+   tabular; the line under it in the secondary ink. */
+.tc-home-tile-caption {
+  text-transform: uppercase;
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-home-tile-caption-ink {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-home-tile-value {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.tc-home-tile-detail {
+  color: @tc_glass_ink_secondary;
+}
+
+button.tc-home-tile {
+  padding: 10px 12px;
+}
+
+button.tc-home-link {
+  padding: 0;
+  min-height: 0;
+  color: @accent_color;
+}
+
 /* The Settings window (`SettingsModal`'s settingsGround): its own
    ground under the header bar and the sections, and its cards' fill. In
    Dark the card is the ground's own navy, so its hairline is its edge. */

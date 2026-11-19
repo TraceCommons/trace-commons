@@ -1160,6 +1160,7 @@ impl App {
             "commons_credit_summary",
             serde_json::json!({}),
             |app, result| {
+                app.home.render_credit_summary(result.as_ref().ok());
                 *app.credit_condition.borrow_mut() = result
                     .ok()
                     .and_then(|value| monitor::summary::pending_condition(&value));

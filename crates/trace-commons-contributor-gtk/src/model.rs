@@ -17,6 +17,10 @@ use serde::Deserialize;
 pub struct Status {
     #[serde(default)]
     pub logged_in: bool,
+    /// The machine-wide settlement estimate, while the daemon reports one
+    /// (Home's Not contributed dollar line).
+    #[serde(default)]
+    pub settlement_estimate: Option<SettlementEstimate>,
     #[serde(default)]
     pub tenant_id: Option<String>,
     /// CLI completion for the current enrollment, absent on older daemons.
@@ -344,6 +348,27 @@ pub struct Health {
     pub since: Option<String>,
 }
 
+/// A trace's credit estimate (`DaemonData.CreditEstimate`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct CreditEstimate {
+    #[serde(default)]
+    pub low: f64,
+    #[serde(default)]
+    pub high: f64,
+    #[serde(default)]
+    pub drawn: Option<bool>,
+}
+
+/// The daemon's machine-wide settlement estimate on `status`
+/// (`DaemonData.SettlementEstimate`): its finished lines only.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SettlementEstimate {
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub share_text: Option<String>,
+}
+
 /// One queue entry, as `list_pending` and the `snapshot` event carry it.
 ///
 /// `project_key` and `path` are absent from the wire by design; they are
@@ -393,6 +418,10 @@ pub struct QueueEntry {
     /// larger. Never label this one "would send".
     #[serde(default)]
     pub size_bytes: u64,
+    /// The credit the core estimates for this trace, and whether to draw
+    /// it (Home's Not contributed estimate sums only the drawn ones).
+    #[serde(default)]
+    pub credit_estimate: Option<CreditEstimate>,
     #[serde(default)]
     pub discovered_at: Option<chrono::DateTime<chrono::Utc>>,
     /// When the session itself started, when the daemon knew it. The
