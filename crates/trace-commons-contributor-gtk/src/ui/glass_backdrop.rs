@@ -347,11 +347,11 @@ pub fn rounded_bands(rect: Rect, radius: i32) -> Vec<Rect> {
     bands
 }
 
-/// The region to blur: every shown pane, in surface coordinates, rounded
+/// The region to blur: every shown pane, offset by `offset`, rounded
 /// at the pane radius. Only the panes: on the Mac the gaps between them show
 /// the desktop unblurred. `panes` are bounds in the window's coordinates
-/// (`compute_bounds`); `offset` is where the window's origin sits in its
-/// surface (`surface_transform`, the client-side shadow's margin).
+/// (`compute_bounds`); `offset` is where the window's origin sits in the
+/// coordinates the region is sent in ([`region_offset`]).
 pub fn blur_region(panes: &[(f64, f64, f64, f64)], offset: (f64, f64), radius: i32) -> Vec<Rect> {
     let mut region = Vec::new();
     for &(x, y, width, height) in panes {
@@ -370,6 +370,20 @@ pub fn blur_region(panes: &[(f64, f64, f64, f64)], offset: (f64, f64), radius: i
         ));
     }
     region
+}
+
+/// Where the window's origin sits in the coordinates the region is sent in.
+/// KWin reads a Wayland window's blur and contrast regions from the
+/// window's own geometry (`contentsRect`), which leaves out the client-side
+/// shadow, so there the region is in the window's coordinates; sent from
+/// the surface's, it landed one shadow margin inside every pane. X11 keeps
+/// the surface offset: not seen on a running KWin, and the window stays
+/// painted there ([`readable`]).
+pub fn region_offset(backend: Backend, surface_transform: (f64, f64)) -> (f64, f64) {
+    match backend {
+        Backend::Wayland => (0.0, 0.0),
+        Backend::X11 | Backend::Other => surface_transform,
+    }
 }
 
 /// `_KDE_NET_WM_BLUR_BEHIND_REGION`: CARDINAL/32, `x y w h` per rectangle
@@ -755,7 +769,11 @@ fn apply(window: &adw::ApplicationWindow, panes: &[gtk::Widget], state: &mut Sta
             )
         })
         .collect();
-    let region = blur_region(&bounds, window.surface_transform(), PANE_RADIUS);
+    let region = blur_region(
+        &bounds,
+        region_offset(capability.backend, window.surface_transform()),
+        PANE_RADIUS,
+    );
     let Some(surface) = window.surface() else {
         return;
     };
@@ -1138,6 +1156,28 @@ mod tests {
         // The top edge lands on the rounded row: 10 + 17.4 rounds to 27.
         assert_eq!(region.iter().map(|r| r.y).min(), Some(27));
         assert!(blur_region(&[], (0.0, 0.0), PANE_RADIUS).is_empty());
+    }
+
+    /// KWin places a Wayland window's blur region from the window's own
+    /// geometry (`contentsRect`), which excludes the client-side shadow, so
+    /// the region is in window coordinates there. Taken from the surface
+    /// instead, it landed one shadow margin (about 26 px) down and right of
+    /// every pane: the second rounded edge inside each pane in the KDE
+    /// screenshots. X11 keeps the surface offset (not seen on a KWin).
+    #[test]
+    fn on_wayland_the_region_is_in_the_windows_own_coordinates() {
+        let shadow = (26.0, 26.0);
+        let pane = [(10.0, 10.0, 300.0, 400.0)];
+        let region = blur_region(&pane, region_offset(Backend::Wayland, shadow), PANE_RADIUS);
+        // The pane's top-left, inside its rounded corner, is blurred, and
+        // nothing past its right and bottom edges is.
+        assert!(covers(&region, 10 + PANE_RADIUS, 10 + PANE_RADIUS));
+        assert!(covers(&region, 10 + 150, 10 + 1));
+        assert!(!covers(&region, 10 + 300 + 5, 10 + 200));
+        assert!(!covers(&region, 10 + 150, 10 + 400 + 5));
+        assert_eq!(region.iter().map(|r| r.y).min(), Some(10));
+        assert_eq!(region.iter().map(|r| r.x).min(), Some(10));
+        assert_eq!(region_offset(Backend::X11, shadow), shadow);
     }
 
     #[test]
