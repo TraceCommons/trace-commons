@@ -298,9 +298,12 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
     // A config folder holding `%NAME%`, inside the command Windows Terminal
     // writes for the helper.
     cases.push((root.join("plain"), root.join("cfg %USERNAME% x")));
+    // A lone `%`, and a `%NAME%` that is not set.
+    cases.push((root.join("plain2"), root.join("cfg 100% x")));
+    cases.push((root.join("plain3"), root.join("cfg %W14_NOT_SET% x")));
     // The folders `plan` refuses for Windows Terminal, by name: `;` in the
-    // folder, and the case whose config folder holds `%NAME%`.
-    let refused_for_wt = ["a;b", "plain"];
+    // folder, and the cases whose config folder holds `%`.
+    let refused_for_wt = ["a;b", "plain", "plain2", "plain3"];
 
     let session = Uuid::new_v4();
     let ticket = "abcdef0123456789";
@@ -315,6 +318,9 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
             std::fs::create_dir_all(config).unwrap();
             let stub = stub_dir.join(format!("stub {} {index}.exe", app.id()));
             std::fs::copy(&built, &stub).unwrap();
+            // As `helper_path` hands it over: canonicalized, which on
+            // Windows is a verbatim `\\?\` path.
+            let stub = stub.canonicalize().unwrap();
             let out = stub.with_extension("out");
             let label = format!("{} {folder:?} {config:?}", app.name());
             let plan = match plan(*app, program, &stub, config, folder, session, ticket) {
@@ -351,6 +357,48 @@ fn real_windows_terminals_receive_the_folder_and_every_argument() {
                     "{label}: got cwd {:?} args {:?} from {:?}; want cwd {want_cwd:?} args {want:?}",
                     arrived.cwd, arrived.args, arrived.raw
                 ));
+            }
+        }
+    }
+    // Measured, not asserted: what Windows Terminal does with the `%`
+    // cases `plan` refuses, started past the refusal, so the report can say
+    // why every `%` is refused rather than only a defined `%NAME%`.
+    if let Some((_, program)) = apps
+        .iter()
+        .find(|(app, _)| *app == TerminalApp::WindowsTerminal)
+    {
+        for (index, name) in ["cfg %USERNAME% x", "cfg 100% x", "cfg %W14_NOT_SET% x"]
+            .into_iter()
+            .enumerate()
+        {
+            let config = root.join(name);
+            std::fs::create_dir_all(&config).unwrap();
+            let stub = stub_dir.join(format!("measure {index}.exe"));
+            std::fs::copy(&built, &stub).unwrap();
+            let stub = stub.canonicalize().unwrap();
+            let out = stub.with_extension("out");
+            let mut args: Vec<OsString> = ["new-tab", "--title", "NEAR AI", "-d"]
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+            args.push(root.clone().into_os_string());
+            args.push(stub.clone().into_os_string());
+            args.extend(helper_args(&config, session, ticket));
+            let _ = std::process::Command::new(program)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .spawn()
+                .map(|mut c| c.try_wait());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !out.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            match read_arrived(&out) {
+                Some(arrived) => eprintln!(
+                    "measured: config {name:?} arrived as {:?}",
+                    arrived.args.get(1)
+                ),
+                None => eprintln!("measured: config {name:?}: the stub never ran"),
             }
         }
     }
