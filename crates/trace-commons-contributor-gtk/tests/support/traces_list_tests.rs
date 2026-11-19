@@ -548,8 +548,8 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             let switch = with_class(&row, "tc-tree-switch").remove(0);
             let on = switch
                 .clone()
-                .downcast::<gtk::Switch>()
-                .expect("a switch")
+                .downcast::<crate::ui::glass_switch::GlassSwitch>()
+                .expect("a glass switch")
                 .is_active();
             assert_eq!(on, mode == "auto_upload", "{name}: the switch's state");
             let knob = slider(&switch);
