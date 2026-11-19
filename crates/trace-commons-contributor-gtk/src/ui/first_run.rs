@@ -867,7 +867,10 @@ impl Coordinator {
         }
         self.update_uses_action();
         clear(&self.customize_box);
-        self.customize_box.append(&super::glass_feedback::spinner());
+        // Centred, where the stock spinner it replaced drew.
+        let spinner = super::glass_feedback::spinner();
+        spinner.set_halign(gtk::Align::Center);
+        self.customize_box.append(&spinner);
         self.sync_tools();
         self.commit(
             Commit::Roots,

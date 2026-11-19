@@ -52,11 +52,17 @@ pub fn install() {
     });
 }
 
+/// Every window is watched and the type checked when it is shown: a GTK
+/// that lists a window while it is still being built would show it as a
+/// plain `GtkWindow` here.
 fn watch(object: &glib::Object) {
-    let Some(dialog) = object.downcast_ref::<adw::MessageDialog>() else {
-        return;
-    };
-    cover(dialog.upcast_ref());
+    if let Some(window) = object.downcast_ref::<gtk::Window>() {
+        cover(window);
+    }
+}
+
+fn is_confirmation(window: &gtk::Window) -> bool {
+    window.is::<adw::MessageDialog>()
 }
 
 /// The content a modal over `window` blurs and dims.
@@ -77,7 +83,7 @@ fn still_covered(parent: &gtk::Window, leaving: &gtk::Window) -> bool {
 }
 
 /// Fades `dialog` in each time it is shown and covers its parent while it
-/// is up.
+/// is up, if it is a confirmation.
 pub fn cover(dialog: &gtk::Window) {
     let fade = Rc::new(Tween::new(1.0));
     let parent: Rc<RefCell<Option<glib::WeakRef<gtk::Window>>>> = Rc::default();
@@ -85,6 +91,9 @@ pub fn cover(dialog: &gtk::Window) {
         let fade = Rc::clone(&fade);
         let parent = Rc::clone(&parent);
         dialog.connect_map(move |dialog| {
+            if !is_confirmation(dialog) {
+                return;
+            }
             if let Some(window) = dialog.transient_for() {
                 if let Some(content) = covered(&window) {
                     content.add_css_class(MODAL_HOST);
@@ -103,6 +112,9 @@ pub fn cover(dialog: &gtk::Window) {
         });
     }
     dialog.connect_unmap(move |dialog| {
+        if !is_confirmation(dialog) {
+            return;
+        }
         dialog.set_opacity(1.0);
         let Some(window) = parent.borrow_mut().take().and_then(|w| w.upgrade()) else {
             return;

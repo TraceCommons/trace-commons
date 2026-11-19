@@ -222,6 +222,31 @@ mod turn {
     }
 
     impl ObjectImpl for Turn {
+        fn constructed(&self) {
+            self.parent_constructed();
+            // A read still out when the window comes back, or motion is
+            // turned back on, starts the icon turning again.
+            let obj = self.obj();
+            let weak = obj.downgrade();
+            glass_motion::on_window_state(&*obj, move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+            let weak = obj.downgrade();
+            glass_motion::on_animations_changed(&*obj, move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+            let weak = obj.downgrade();
+            obj.connect_map(move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+        }
+
         fn dispose(&self) {
             while let Some(child) = self.obj().first_child() {
                 child.unparent();
@@ -297,6 +322,9 @@ impl Turn {
         if imp.tick.borrow().is_some() {
             return;
         }
+        if !imp.refreshing.get() && imp.clicked.get().is_none() {
+            return;
+        }
         if !glass_motion::animations_enabled() || glass_motion::window_hidden(self) {
             imp.clicked.set(None);
             self.show(0.0);
@@ -344,6 +372,8 @@ pub fn refresh_pill(title: &str, name: &str) -> (gtk::Button, Turn) {
     row.append(&turn);
     let button = gtk::Button::new();
     button.set_child(Some(&row));
+    // A word and an icon: the toolkit's padding for one.
+    button.add_css_class("image-text-button");
     button.set_tooltip_text(Some(name));
     button.update_property(&[gtk::accessible::Property::Label(name)]);
     let spinning = turn.clone();

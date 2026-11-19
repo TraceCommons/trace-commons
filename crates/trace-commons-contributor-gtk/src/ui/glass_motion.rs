@@ -343,18 +343,29 @@ impl Tween {
     }
 }
 
-/// `GlassExpander`'s details: opened, they fade in over `motion.fast` on
-/// the token curve (the toggle runs in `withAnimation(GlassMotion.fast)`,
-/// and SwiftUI's default transition is opacity). Closed, they go at once:
-/// the toolkit takes the child out of the expander, so nothing is left to
-/// fade. The chevron's turn is `motion_css`'s.
+/// `GlassExpander`'s details: opened by a click or a key, they fade in
+/// over `motion.fast` on the token curve (the button's toggle runs in
+/// `withAnimation(GlassMotion.fast)`, and SwiftUI's default transition is
+/// opacity). Opened from code (a list rebuilt with its rows kept open, a
+/// result shown) they are whole at once, as the Mac animates only the
+/// button. Closed, they go at once: the toolkit takes the child out of the
+/// expander, so nothing is left to fade. The chevron's turn is
+/// `motion_css`'s.
 pub fn expander(expander: &gtk::Expander) {
+    let pressed = Rc::new(std::cell::Cell::new(false));
+    {
+        // `activate` is what a click on the title and Enter or Space emit,
+        // just before the toolkit flips `expanded`.
+        let pressed = Rc::clone(&pressed);
+        expander.connect_activate(move |_| pressed.set(true));
+    }
     let tween = Tween::new(1.0);
     expander.connect_expanded_notify(move |expander| {
+        let by_hand = pressed.replace(false);
         let Some(child) = expander.child() else {
             return;
         };
-        if !expander.is_expanded() {
+        if !expander.is_expanded() || !by_hand {
             tween.set(1.0, |_| {});
             child.set_opacity(1.0);
             return;
@@ -764,8 +775,9 @@ mod tests {
         assert_eq!(total, 15);
     }
 
-    /// An opened expander's details fade in over `motion.fast`, passing
-    /// through the middle; with motion off they are whole at once.
+    /// An expander opened by hand fades its details in over `motion.fast`,
+    /// passing through the middle; opened from code, or with motion off,
+    /// they are whole at once.
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn mounted_an_opened_expanders_details_fade_in() {
@@ -782,7 +794,13 @@ mod tests {
         window.set_child(Some(&control));
         window.present();
         pump_until(&|| control.is_mapped());
+        // Opened from code (a rebuilt list keeping a row open): at once.
         control.set_expanded(true);
+        assert_eq!(details.opacity(), 1.0, "opened from code, it faded");
+        control.set_expanded(false);
+        // Opened by hand: from clear.
+        control.activate();
+        assert!(control.is_expanded());
         assert_eq!(details.opacity(), 0.0, "the details start clear");
         let between = std::cell::Cell::new(false);
         pump_until(&|| {
@@ -794,7 +812,7 @@ mod tests {
         assert_eq!(details.opacity(), 1.0);
         control.set_expanded(false);
         settings.set_gtk_enable_animations(false);
-        control.set_expanded(true);
+        control.activate();
         assert_eq!(details.opacity(), 1.0, "motion off: whole at once");
         settings.set_gtk_enable_animations(true);
         window.destroy();
