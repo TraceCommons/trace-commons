@@ -217,6 +217,7 @@ else
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
     ui::monitor::shell::tests::mounted_strip_is_the_four_tabs_and_narrows_before_onboarding \
+    ui::monitor::shell::tests::mounted_the_ember_glides_to_the_chosen_tab \
     ui::monitor::shell::tests::mounted_tabs_are_named_by_their_titles \
     ui::monitor::shell::tests::mounted_pages_sit_behind_the_tabs_and_the_breadcrumb \
     ui::monitor::shell::tests::mounted_toggles_and_panes_follow_what_each_tab_allows \

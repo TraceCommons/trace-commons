@@ -53,9 +53,11 @@ use super::pane_layout::{self, Visibility};
 use super::prefs::PanePrefs;
 use super::tabs::{self, Back, Location, MapView, Route, Tab, TracesPage};
 use super::three_pane::ThreePane;
-use super::{demand, glass_paint, glyph, graph_model};
+use super::{demand, glass_paint, glyph, graph_model, tab_motion};
+use crate::ui::glass_motion;
 use crate::ui::style::brand_tokens;
 use crate::ui::{App, style};
+use gtk::glib;
 
 /// The existing screens the window hosts, and the notices laid over them.
 pub struct Pages<'a> {
@@ -129,6 +131,77 @@ const HIGH_CONTRAST_CLASS: &str = "tc-high-contrast";
 fn glowing_tab(tabs: &[gtk::ToggleButton]) -> Option<&gtk::ToggleButton> {
     tabs.iter()
         .find(|button| button.is_active() && button.is_visible())
+}
+
+/// The ember's glide between tabs (`GlassRuleTabs`' matched ember on
+/// `spring(0.35, 0.85)`): from the frame last drawn to the chosen tab's,
+/// ticked on the strip's frame clock at display rate, so it stops while the
+/// window is hidden, and ends at the new tab at once under reduced motion,
+/// read at every frame.
+#[derive(Default)]
+struct EmberGlide {
+    /// The frame drawn last, `(left, width)`.
+    drawn: Option<(f64, f64)>,
+    /// Where a glide began and when, once its first frame is drawn.
+    from: Option<(f64, f64)>,
+    began: Option<f64>,
+    tick: Option<gtk::TickCallbackId>,
+}
+
+impl EmberGlide {
+    /// A new tab was chosen: glide from wherever the ember is drawn.
+    fn start(glide: &Rc<RefCell<Self>>, ember: &gtk::DrawingArea) {
+        let mut state = glide.borrow_mut();
+        if let Some(tick) = state.tick.take() {
+            tick.remove();
+        }
+        state.began = None;
+        state.from = state.drawn.filter(|_| glass_motion::animations_enabled());
+        if state.from.is_none() {
+            return;
+        }
+        let weak = Rc::downgrade(glide);
+        state.tick = Some(ember.add_tick_callback(move |area, _| {
+            area.queue_draw();
+            let Some(glide) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if glide.borrow().from.is_some() {
+                glib::ControlFlow::Continue
+            } else {
+                glide.borrow_mut().tick = None;
+                glib::ControlFlow::Break
+            }
+        }));
+    }
+
+    /// Ends any glide where it is going.
+    fn snap(&mut self) {
+        self.from = None;
+        self.began = None;
+    }
+
+    /// The frame to draw for a tab at `target`, at the frame clock's time.
+    fn frame(&mut self, target: (f64, f64), now: Option<f64>) -> (f64, f64) {
+        let drawn = match (self.from, now) {
+            (Some(from), Some(now)) if glass_motion::animations_enabled() => {
+                let began = *self.began.get_or_insert(now);
+                let t = now - began;
+                if t >= tab_motion::ember_settles() {
+                    self.snap();
+                    target
+                } else {
+                    tab_motion::glide(from, target, t)
+                }
+            }
+            _ => {
+                self.snap();
+                target
+            }
+        };
+        self.drawn = Some(drawn);
+        drawn
+    }
 }
 
 /// Keep the window's high-contrast class in step with the desktop
@@ -305,6 +378,9 @@ pub struct Shell {
     window: adw::ApplicationWindow,
     app: RefCell<Weak<App>>,
     tabs: Vec<(Tab, gtk::ToggleButton)>,
+    /// The ember's glide, read by the mounted tests.
+    #[cfg_attr(not(test), allow(dead_code))]
+    ember_glide: Rc<RefCell<EmberGlide>>,
     /// The Private AI tab's dot, and the tone it is drawn in.
     inference_dot: gtk::DrawingArea,
     inference_tone: Rc<Cell<style::Tone>>,
@@ -486,6 +562,7 @@ impl Shell {
         // are drawn once over the whole strip: the line reaches 0.3 of a
         // tab's width into each neighbour, which a tab's own background
         // could not.
+        let ember_glide = Rc::new(RefCell::new(EmberGlide::default()));
         let ember = gtk::DrawingArea::builder()
             .can_target(false)
             .can_focus(false)
@@ -496,33 +573,52 @@ impl Shell {
                 .iter()
                 .map(|(_, button)| button.clone())
                 .collect();
-            ember.set_draw_func(move |area, context, _, height| {
-                let Some(selected) = glowing_tab(&tabs) else {
-                    return;
-                };
-                let Some(bounds) = selected.compute_bounds(area) else {
-                    return;
-                };
-                glass_paint::paint_ember(
-                    context,
-                    f64::from(height),
-                    f64::from(bounds.x()),
-                    f64::from(bounds.width()),
-                    adw::StyleManager::default().is_dark(),
-                );
-            });
+            // The ember glides to a newly chosen tab on the strip's spring
+            // (`tab_motion`); a tab shown or hidden moves it at once.
+            let glide = Rc::clone(&ember_glide);
+            {
+                let glide = Rc::clone(&glide);
+                ember.set_draw_func(move |area, context, _, height| {
+                    let Some(selected) = glowing_tab(&tabs) else {
+                        glide.borrow_mut().drawn = None;
+                        return;
+                    };
+                    let Some(bounds) = selected.compute_bounds(area) else {
+                        return;
+                    };
+                    let target = (f64::from(bounds.x()), f64::from(bounds.width()));
+                    let frame_time = area
+                        .frame_clock()
+                        .map(|clock| clock.frame_time() as f64 / 1e6);
+                    let (left, width) = glide.borrow_mut().frame(target, frame_time);
+                    glass_paint::paint_ember(
+                        context,
+                        f64::from(height),
+                        left,
+                        width,
+                        adw::StyleManager::default().is_dark(),
+                    );
+                });
+            }
             for (_, button) in &tab_buttons {
                 let weak = ember.downgrade();
-                button.connect_toggled(move |_| {
-                    if let Some(ember) = weak.upgrade() {
-                        ember.queue_draw();
+                let chosen = Rc::clone(&glide);
+                button.connect_toggled(move |button| {
+                    let Some(ember) = weak.upgrade() else {
+                        return;
+                    };
+                    if button.is_active() {
+                        EmberGlide::start(&chosen, &ember);
                     }
+                    ember.queue_draw();
                 });
                 // A tab shown or hidden moves the others (onboarding hides
-                // two), and the glow with them.
+                // two), and the glow with them, at once.
                 let weak = ember.downgrade();
+                let moved = Rc::clone(&glide);
                 button.connect_visible_notify(move |_| {
                     if let Some(ember) = weak.upgrade() {
+                        moved.borrow_mut().snap();
                         ember.queue_draw();
                     }
                 });
@@ -909,6 +1005,7 @@ impl Shell {
             window: window.clone(),
             app: RefCell::new(Weak::new()),
             tabs: tab_buttons,
+            ember_glide,
             inference_dot,
             inference_tone,
             breadcrumb,
@@ -2047,6 +2144,51 @@ mod tests {
         assert_eq!(shell.shown().tab, Tab::Traces);
         assert_eq!(shell.content.visible_child_name().as_deref(), Some("queue"));
         mounted.window.close();
+    }
+
+    /// A tab chosen draws the ember on its way there, on the strip's
+    /// spring, and it comes to rest on the tab; with GTK's animations off
+    /// it is there at once.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_ember_glides_to_the_chosen_tab() {
+        gtk::init().expect("GTK display");
+        let mounted = mounted(false);
+        let shell = &mounted.shell;
+        let settings = gtk::Settings::default().expect("settings");
+        settings.set_gtk_enable_animations(true);
+        pump_until(|| shell.ember_glide.borrow().drawn.is_some());
+        let home = shell.ember_glide.borrow().drawn.expect("drawn");
+        shell.pick_tab(Tab::Traces);
+        let target = {
+            let traces = &shell.tabs[2].1;
+            let bounds = traces
+                .compute_bounds(traces.parent().as_ref().expect("strip"))
+                .expect("bounds");
+            f64::from(bounds.x())
+        };
+        assert!(shell.ember_glide.borrow().from.is_some(), "a glide began");
+        let between = std::cell::Cell::new(false);
+        pump_until(|| {
+            let state = shell.ember_glide.borrow();
+            if let Some((left, _)) = state.drawn {
+                if left > home.0 + 1.0 && left < target - 1.0 {
+                    between.set(true);
+                }
+            }
+            state.from.is_none()
+        });
+        assert!(between.get(), "the ember was drawn between the tabs");
+        let rest = shell.ember_glide.borrow().drawn.expect("drawn");
+        assert!((rest.0 - target).abs() < 0.5, "{rest:?} vs {target}");
+
+        settings.set_gtk_enable_animations(false);
+        shell.pick_tab(Tab::Home);
+        assert!(shell.ember_glide.borrow().from.is_none(), "no glide");
+        pump();
+        let at = shell.ember_glide.borrow().drawn.expect("drawn");
+        assert!((at.0 - home.0).abs() < 0.5, "{at:?}");
+        settings.set_gtk_enable_animations(true);
     }
 
     #[test]

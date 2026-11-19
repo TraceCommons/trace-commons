@@ -32,6 +32,7 @@ pub mod prefs;
 pub mod shell;
 pub mod station;
 pub mod summary;
+pub mod tab_motion;
 pub mod tabs;
 pub mod three_pane;
 pub mod tool_art;
