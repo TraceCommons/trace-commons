@@ -139,6 +139,11 @@ public class TransferCardTests
         // Every word on the card is the face's, the core's: none typed here.
         Assert.Contains("MonitorWords.NoticeDetails", card, StringComparison.Ordinal);
         Assert.Contains("MonitorWords.Close", card, StringComparison.Ordinal);
+
+        // The stack's X draws over the front card, which RefreshNotices
+        // raises to 1 (box 2026-11-19: the transfer card hid it).
+        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
+        Assert.Matches("x:Name=\"NoticeClose\"\\s+Canvas\\.ZIndex=\"2\"", markup);
     }
 
     private static string ShellSource(string relativePath)
