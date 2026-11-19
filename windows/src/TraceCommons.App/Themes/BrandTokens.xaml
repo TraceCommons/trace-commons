@@ -110,7 +110,7 @@
             <StaticResource x:Key="TcToolClaudeBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcToolCodexBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcToolOpenCodeBrush" ResourceKey="TextFillColorPrimaryBrush" />
-            <StaticResource x:Key="TcTileFolderBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcTileFolderBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>

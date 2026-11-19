@@ -78,7 +78,8 @@ public sealed class LaunchArtView : UserControl
 {
     private readonly Border _folder;
     private readonly UISettings _settings = new();
-    private bool _resting;
+    private readonly LaunchArtLife _life = new();
+    private bool _subscribed;
 
     public LaunchArtView(string tool)
     {
@@ -128,7 +129,7 @@ public sealed class LaunchArtView : UserControl
             Width = LaunchHandoff.FolderTileSide, Height = LaunchHandoff.FolderTileSide,
             CornerRadius = new CornerRadius(LaunchHandoff.ControlRadius),
             Background = (Brush)Application.Current.Resources["TcTileFolderBrush"],
-            Child = new FontIcon { Glyph = "", FontSize = 13, Foreground = ink },
+            Child = new FontIcon { Glyph = LaunchHandoff.FolderGlyph, FontSize = 13, Foreground = ink },
         };
         Add(canvas, _folder, (LaunchHandoff.Width - LaunchHandoff.FolderTileSide) / 2,
             (LaunchHandoff.Height - LaunchHandoff.FolderTileSide) / 2);
@@ -147,25 +148,136 @@ public sealed class LaunchArtView : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        // Followed live from Windows 10 2004; before it, read once here.
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
-        {
-            _settings.AnimationsEnabledChanged += OnAnimationsEnabledChanged;
-        }
-
-        SettingChangeWatch.Add(this);
-
         Visual visual = ElementCompositionPreview.GetElementVisual(_folder);
         visual.CenterPoint = new Vector3((float)(LaunchHandoff.FolderTileSide / 2), (float)(LaunchHandoff.FolderTileSide / 2), 0);
         ElementCompositionPreview.SetIsTranslationEnabled(_folder, true);
-        bool animate = !LaunchHandoff.StartsAtRest(_settings.AnimationsEnabled);
-        Place(visual, LaunchHandoff.Folder(animate ? 0 : LaunchHandoff.Duration, animate));
-        if (!animate)
+        LaunchArtStep step = _life.Loaded(_settings.AnimationsEnabled);
+        Watch(_life.Watching);
+        if (step == LaunchArtStep.Animate)
         {
-            _resting = true;
+            Animate(visual);
+        }
+        else
+        {
+            Act(step);
+        }
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e) => Act(_life.Unloaded(IsLoaded));
+
+    /// <summary>
+    /// The dialog this art is shown in has closed: stop watching and rest,
+    /// whether or not a final Unloaded arrives (review of #2207: the late
+    /// Unloaded returns early, and a dialog that raised no second one left
+    /// the art in the watch list with its event handler attached).
+    /// </summary>
+    public void Release() => Act(_life.Closed());
+
+    private void OnSettingChange() => Act(_life.SettingChanged(_settings.AnimationsEnabled));
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.19041.0")]
+    private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
+    {
+        bool enabled = sender.AnimationsEnabled;
+        DispatcherQueue?.TryEnqueue(() => Act(_life.SettingChanged(enabled)));
+    }
+
+    /// <summary>Joins or leaves the watch list and the animations event, as the life says.</summary>
+    private void Watch(bool watching)
+    {
+        if (watching == _subscribed)
+        {
             return;
         }
 
+        _subscribed = watching;
+        // Followed live from Windows 10 2004; before it, read once on Loaded.
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
+        {
+            if (watching)
+            {
+                _settings.AnimationsEnabledChanged += OnAnimationsEnabledChanged;
+            }
+            else
+            {
+                _settings.AnimationsEnabledChanged -= OnAnimationsEnabledChanged;
+            }
+        }
+
+        if (watching)
+        {
+            SettingChangeWatch.Add(this);
+        }
+        else
+        {
+            SettingChangeWatch.Remove(this);
+        }
+    }
+
+    private void Act(LaunchArtStep step)
+    {
+        Watch(_life.Watching);
+        if (step != LaunchArtStep.Rest)
+        {
+            return;
+        }
+
+        Visual visual = ElementCompositionPreview.GetElementVisual(_folder);
+        visual.StopAnimation("Translation.X");
+        visual.StopAnimation("Scale.X");
+        visual.StopAnimation("Scale.Y");
+        Place(visual, LaunchHandoff.Folder(LaunchHandoff.Duration, false));
+    }
+
+    /// <summary>
+    /// Hears WM_SETTINGCHANGE on the window an art is shown in. On the box
+    /// (Windows Server 2025, 2026-11-19) turning animations off mid-move
+    /// raised no <c>AnimationsEnabledChanged</c> while the window kept the
+    /// foreground, and the folder slid on to the end; the system does
+    /// broadcast WM_SETTINGCHANGE to every top-level window. The subclass is
+    /// installed once per window, under its own id, and does nothing while
+    /// no art is shown.
+    /// </summary>
+    private static class SettingChangeWatch
+    {
+        private const uint WmSettingChange = 0x001A;
+        private static readonly UIntPtr SubclassId = (UIntPtr)14;
+        private static readonly SubclassProc Proc = WndProc;
+        private static readonly HashSet<IntPtr> Windows = new();
+        private static readonly LaunchArtWatchList<LaunchArtView> Shown = new();
+
+        private delegate IntPtr SubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
+
+        [DllImport("comctl32.dll")]
+        private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc proc, UIntPtr id, UIntPtr data);
+
+        [DllImport("comctl32.dll")]
+        private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        public static void Add(LaunchArtView art)
+        {
+            Shown.Add(art);
+            if (art.XamlRoot?.ContentIslandEnvironment is not { } island) return;
+            IntPtr hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(island.AppWindowId);
+            if (hwnd != IntPtr.Zero && Windows.Add(hwnd)) SetWindowSubclass(hwnd, Proc, SubclassId, UIntPtr.Zero);
+        }
+
+        public static void Remove(LaunchArtView art) => Shown.Remove(art);
+
+        private static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
+        {
+            if (msg == WmSettingChange)
+            {
+                foreach (LaunchArtView art in Shown.Snapshot()) art.OnSettingChange();
+            }
+
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
+        }
+    }
+
+    private static void Animate(Visual visual)
+    {
+        Place(visual, LaunchHandoff.Folder(0, true));
         Compositor compositor = visual.Compositor;
         CompositionEasingFunction linear = compositor.CreateLinearEasingFunction();
         ScalarKeyFrameAnimation x = compositor.CreateScalarKeyFrameAnimation();
@@ -184,105 +296,6 @@ public sealed class LaunchArtView : UserControl
         visual.StartAnimation("Translation.X", x);
         visual.StartAnimation("Scale.X", scale);
         visual.StartAnimation("Scale.Y", scale);
-    }
-
-    private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        // The dialog's popup raises a late Unloaded while the art is still
-        // shown; resting then stopped the move before its first frame.
-        if (!LaunchHandoff.RestsOnUnloaded(IsLoaded))
-        {
-            return;
-        }
-
-        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
-        {
-            _settings.AnimationsEnabledChanged -= OnAnimationsEnabledChanged;
-        }
-
-        SettingChangeWatch.Remove(this);
-        Rest();
-    }
-
-    /// <summary>A system setting changed (WM_SETTINGCHANGE, on the UI thread):
-    /// read animations again, and rest if they are now off.</summary>
-    private void OnSettingChange()
-    {
-        if (LaunchHandoff.RestsOnSettingChange(_settings.AnimationsEnabled))
-        {
-            Rest();
-        }
-    }
-
-    /// <summary>
-    /// Hears WM_SETTINGCHANGE on the window an art is shown in. On the box
-    /// (Windows Server 2025, 2026-11-19) turning animations off mid-move
-    /// raised no <c>AnimationsEnabledChanged</c> while the window kept the
-    /// foreground, and the folder slid on to the end; the system does
-    /// broadcast WM_SETTINGCHANGE to every top-level window. The subclass is
-    /// installed once per window, under its own id, and does nothing while
-    /// no art is shown.
-    /// </summary>
-    private static class SettingChangeWatch
-    {
-        private const uint WmSettingChange = 0x001A;
-        private static readonly UIntPtr SubclassId = (UIntPtr)14;
-        private static readonly SubclassProc Proc = WndProc;
-        private static readonly HashSet<IntPtr> Windows = new();
-        private static readonly List<LaunchArtView> Shown = new();
-
-        private delegate IntPtr SubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data);
-
-        [DllImport("comctl32.dll")]
-        private static extern bool SetWindowSubclass(IntPtr hwnd, SubclassProc proc, UIntPtr id, UIntPtr data);
-
-        [DllImport("comctl32.dll")]
-        private static extern IntPtr DefSubclassProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-        public static void Add(LaunchArtView art)
-        {
-            if (!Shown.Contains(art)) Shown.Add(art);
-            if (art.XamlRoot?.ContentIslandEnvironment is not { } island) return;
-            IntPtr hwnd = Microsoft.UI.Win32Interop.GetWindowFromWindowId(island.AppWindowId);
-            if (hwnd != IntPtr.Zero && Windows.Add(hwnd)) SetWindowSubclass(hwnd, Proc, SubclassId, UIntPtr.Zero);
-        }
-
-        public static void Remove(LaunchArtView art) => Shown.Remove(art);
-
-        private static IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
-        {
-            if (msg == WmSettingChange)
-            {
-                foreach (LaunchArtView art in Shown.ToArray()) art.OnSettingChange();
-            }
-
-            return DefSubclassProc(hwnd, msg, wParam, lParam);
-        }
-    }
-
-    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.19041.0")]
-    private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
-    {
-        if (!sender.AnimationsEnabled)
-        {
-            DispatcherQueue?.TryEnqueue(Rest);
-        }
-    }
-
-    /// <summary>Stops the move and draws the rest frame.</summary>
-    private void Rest()
-    {
-        if (_resting)
-        {
-            return;
-        }
-
-        _resting = true;
-        Visual visual = ElementCompositionPreview.GetElementVisual(_folder);
-        visual.StopAnimation("Translation.X");
-        visual.StopAnimation("Scale.X");
-        visual.StopAnimation("Scale.Y");
-        Place(visual, LaunchHandoff.Folder(LaunchHandoff.Duration, false));
     }
 
     private static void Place(Visual visual, (double X, double Y, double Scale) folder)

@@ -151,24 +151,16 @@ public static class LaunchHandoff
     /// <summary>The folder tile is the large tool tile: 30, radius control (Indicators.swift:282-284; GlassTokens.swift:578).</summary>
     public const double FolderTileSide = 30;
 
+    /// <summary>
+    /// The folder's glyph: Segoe Fluent Icons FolderFill (U+E8D5), filled as
+    /// the Mac's SF Symbol <c>folder.fill</c> (Indicators.swift:306),
+    /// in place of the outline Folder (U+E8B7) that left the 203/204 pixel
+    /// difference on the box (review of #2207).
+    /// </summary>
+    public const string FolderGlyph = "\uE8D5";
+
     /// <summary>Under Reduce Motion (animations off) the art starts on its rest frame (:187, :218-219).</summary>
     public static bool StartsAtRest(bool animationsEnabled) => !animationsEnabled;
-
-    /// <summary>
-    /// Whether an Unloaded event puts the art at rest. WinUI can raise
-    /// Unloaded late, after the element has moved into a dialog's popup and
-    /// while it is still shown (box, 2026-11-19: 340 ms after Loaded, with
-    /// no second Loaded); only an art that is no longer loaded rests.
-    /// </summary>
-    public static bool RestsOnUnloaded(bool stillLoaded) => !stillLoaded;
-
-    /// <summary>
-    /// Whether a system setting change (WM_SETTINGCHANGE, read again from
-    /// <c>UISettings.AnimationsEnabled</c>) puts a moving art at rest. On the
-    /// box (Windows Server 2025, 2026-11-19) turning animations off raised no
-    /// <c>AnimationsEnabledChanged</c> while the window kept the foreground.
-    /// </summary>
-    public static bool RestsOnSettingChange(bool animationsEnabled) => !animationsEnabled;
 
     /// <summary>The folder at <paramref name="elapsed"/> seconds from the art appearing.</summary>
     public static (double X, double Y, double Scale) Folder(double elapsed, bool animationsEnabled)
@@ -179,4 +171,122 @@ public static class LaunchHandoff
 
     /// <summary>The logo's top-left offset from the terminal's top centre: x LogoX, y H/2 + ContentY - 14 (:247).</summary>
     public static (double X, double Y) LogoOffset => (LogoX - TerminalX, TerminalHeight / 2 + ContentY - 14);
+}
+
+/// <summary>What the launch art does next, as <see cref="LaunchArtLife"/> decides.</summary>
+public enum LaunchArtStep
+{
+    /// <summary>Nothing.</summary>
+    None,
+
+    /// <summary>Run the move from its first frame.</summary>
+    Animate,
+
+    /// <summary>Stop the move and draw the rest frame.</summary>
+    Rest,
+}
+
+/// <summary>
+/// The launch art's life, decided from the facts the view hands it, so each
+/// rule is tested here and the view only acts on the step it gets back.
+/// </summary>
+/// <remarks>
+/// Each art is watched (it hears setting changes and the animations event)
+/// from its first Loaded until it is released: by an Unloaded once it is no
+/// longer loaded, or by its dialog closing, whichever comes first. A dialog
+/// that never raises the second Unloaded still releases its art when
+/// <c>ShowAsync</c> returns, so no art outlives its dialog in the watch list.
+/// </remarks>
+public sealed class LaunchArtLife
+{
+    /// <summary>Whether the rest frame is drawn: the move ended early, or never ran.</summary>
+    public bool Resting { get; private set; }
+
+    /// <summary>Whether the art is in the watch list and hears setting changes.</summary>
+    public bool Watching { get; private set; }
+
+    /// <summary>The art was loaded. Under Reduce Motion (animations off) it starts
+    /// on its rest frame (ManagedFolderExplainer.swift:187, :218-219).</summary>
+    public LaunchArtStep Loaded(bool animationsEnabled)
+    {
+        Watching = true;
+        if (Resting)
+        {
+            return LaunchArtStep.Rest;
+        }
+
+        if (LaunchHandoff.StartsAtRest(animationsEnabled))
+        {
+            Resting = true;
+            return LaunchArtStep.Rest;
+        }
+
+        return LaunchArtStep.Animate;
+    }
+
+    /// <summary>
+    /// An Unloaded event. WinUI raises one late, after the element has moved
+    /// into a dialog's popup and while it is still shown (box, 2026-11-19:
+    /// 340 ms after Loaded, with no second Loaded); only an art that is no
+    /// longer loaded is released and rests.
+    /// </summary>
+    public LaunchArtStep Unloaded(bool stillLoaded) => stillLoaded ? LaunchArtStep.None : Release();
+
+    /// <summary>The dialog the art is shown in has closed.</summary>
+    public LaunchArtStep Closed() => Release();
+
+    /// <summary>
+    /// A system setting changed (WM_SETTINGCHANGE), with animations read
+    /// again. On the box (Windows Server 2025, 2026-11-19) turning
+    /// animations off raised no <c>AnimationsEnabledChanged</c> while the
+    /// window kept the foreground, and the folder slid on. The animations
+    /// event itself ends here too.
+    /// </summary>
+    public LaunchArtStep SettingChanged(bool animationsEnabled) =>
+        Watching && !animationsEnabled ? RestNow() : LaunchArtStep.None;
+
+    private LaunchArtStep Release()
+    {
+        Watching = false;
+        return RestNow();
+    }
+
+    private LaunchArtStep RestNow()
+    {
+        if (Resting)
+        {
+            return LaunchArtStep.None;
+        }
+
+        Resting = true;
+        return LaunchArtStep.Rest;
+    }
+}
+
+/// <summary>
+/// The arts that hear a window's WM_SETTINGCHANGE: added on Loaded, removed
+/// when released. The window subclass reads it on each setting change.
+/// </summary>
+public sealed class LaunchArtWatchList<T>
+    where T : class
+{
+    private readonly List<T> _shown = new();
+
+    /// <summary>How many arts are watched.</summary>
+    public int Count => _shown.Count;
+
+    /// <summary>Watches <paramref name="art"/>, once.</summary>
+    public void Add(T art)
+    {
+        if (!_shown.Contains(art))
+        {
+            _shown.Add(art);
+        }
+    }
+
+    /// <summary>Stops watching <paramref name="art"/>.</summary>
+    public void Remove(T art) => _shown.Remove(art);
+
+    /// <summary>The watched arts, copied, so a handler may remove itself.</summary>
+    public T[] Snapshot() => _shown.ToArray();
 }

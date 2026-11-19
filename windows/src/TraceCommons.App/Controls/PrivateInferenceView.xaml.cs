@@ -23,12 +23,11 @@ public sealed partial class PrivateInferenceView : UserControl
         InitializeComponent();
 
         ViewModel = new PrivateInferenceViewModel(host);
-        // The managed card's sign-in is this page's ceremony, on NEAR AI,
-        // with the login chosen on this page (owner, 2026-11-01: GitHub,
-        // Google or the NEAR wallet), never one fixed here.
-        ManagedContent.Content = new ManagedSessionsView(host, async () =>
-            await ViewModel.ContinueCredentialAsync(
-                await ViewModel.StartCredentialAsync()));
+        // Signed out, the managed view draws no NEAR AI card, as on macOS:
+        // sign-in is this page's own ceremony, in its account section, with
+        // the login chosen on this page (owner, 2026-11-01: GitHub, Google or
+        // the NEAR wallet).
+        ManagedContent.Content = new ManagedSessionsView(host);
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
         Unloaded += (_, _) => ViewModel.Funding.Deactivate();

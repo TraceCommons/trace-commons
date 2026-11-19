@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -201,8 +202,27 @@ public sealed record ManagedSnapshot(
     /// <summary>What the sign-in card holds at its foot (ManagedSessionsView.swift:119-129).</summary>
     [JsonIgnore] public ManagedToolArea ToolArea =>
         !Capabilities.TerminalLaunch ? ManagedToolArea.NoTerminal
-        : InstallTools.Length > 0 ? ManagedToolArea.Install
+        : NeedsToolInstallation ? ManagedToolArea.Install
         : ManagedToolArea.Buttons;
+
+    /// <summary>
+    /// Whether no tool this shell launches is installed: the daemon sends a
+    /// <c>tools</c> row and none of the launched tools in it is installed
+    /// (<c>needsToolInstallation</c>, ManagedSessionsSurface.swift:1004-1007).
+    /// An older daemon that sends no row never asks for an install.
+    /// </summary>
+    [JsonIgnore] public bool NeedsToolInstallation =>
+        Tools is not null && !Tools.Any(t => LaunchedTools.Contains(t.Tool) && t.Installed);
+
+    /// <summary>
+    /// The launched tools the daemon reports as not installed, in the
+    /// shell's order: the Install links beside the Start buttons, and the
+    /// signed-out install row (<c>missingInstallTools</c>,
+    /// ManagedSessionsSurface.swift:990-994).
+    /// </summary>
+    [JsonIgnore] public ManagedTool[] MissingInstallTools =>
+        LaunchedTools.Select(tool => Tools?.FirstOrDefault(t => t.Tool == tool && !t.Installed))
+            .OfType<ManagedTool>().ToArray();
 
     public static ManagedSnapshot? Parse(string json) => JsonSerializer.Deserialize<ManagedSnapshot>(json,
         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -298,4 +318,112 @@ public static class ManagedLaunchFolder
         if (path.Length >= 3 && path[0] is '\\' or '/' && path[1] is '\\' or '/' && path[2] is not ('\\' or '/')) return true;
         return false;
     }
+}
+
+/// <summary>
+/// A managed action's failure, and where it is said: under the NEAR AI
+/// card's Start buttons for a launch begun there, as the Mac's
+/// <c>failureOnSignInCard</c> (ManagedSessionsView.swift:131-136), and under
+/// the sessions otherwise. The next action clears it (checklist L3).
+/// </summary>
+public sealed class ManagedFailure
+{
+    /// <summary>The core key of the line that says why, or null with no failure.</summary>
+    public string? Key { get; private set; }
+
+    /// <summary>Whether the failure came from a launch begun on the card.</summary>
+    public bool FromCard { get; private set; }
+
+    /// <summary>An action begins: the last failure is cleared.</summary>
+    public void Begin()
+    {
+        Key = null;
+        FromCard = false;
+    }
+
+    /// <summary>The action was refused with <paramref name="key"/>.</summary>
+    public void Refuse(string key, bool fromCard)
+    {
+        Key = key;
+        FromCard = fromCard;
+    }
+
+    /// <summary>Whether the card says it: a card launch's failure while the card is drawn.</summary>
+    public bool OnCard(bool cardShown) => Key is not null && FromCard && cardShown;
+
+    /// <summary>
+    /// The card's lines (ManagedSessionsView.swift:215-228): "That didn't
+    /// work.", then the line that says why unless that is the same line,
+    /// with <c>{terminal}</c> filled. Empty with no failure.
+    /// </summary>
+    public string[] CardLines(Func<string, string> text, string? terminal)
+    {
+        if (Key is null)
+        {
+            return [];
+        }
+
+        string failed = text("action_failed");
+        return Key == "action_failed"
+            ? [failed]
+            : [failed, ManagedSignIn.FillTerminal(text(Key), terminal, text("terminal"))];
+    }
+}
+
+/// <summary>
+/// Keeps keyboard focus on the same button across a rebuild of the managed
+/// sessions view: a button is known by its name and its place among buttons
+/// of that name, since every read rebuilds every button.
+/// </summary>
+public static class ManagedFocus
+{
+    /// <summary>The key of the button at <paramref name="focused"/> among
+    /// <paramref name="names"/> (every button's name, in order); null when
+    /// no button there has focus.</summary>
+    public static (string Name, int Index)? KeyOf(IReadOnlyList<string> names, int focused)
+    {
+        if (focused < 0 || focused >= names.Count)
+        {
+            return null;
+        }
+
+        string name = names[focused];
+        int index = 0;
+        for (int i = 0; i < focused; i++)
+        {
+            if (names[i] == name)
+            {
+                index++;
+            }
+        }
+
+        return (name, index);
+    }
+
+    /// <summary>The position of the button <paramref name="key"/> names
+    /// among <paramref name="names"/>, or -1 when it is gone.</summary>
+    public static int Find(IReadOnlyList<string> names, (string Name, int Index) key)
+    {
+        int seen = 0;
+        for (int i = 0; i < names.Count; i++)
+        {
+            if (names[i] == key.Name && seen++ == key.Index)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Which button a rebuild focuses, and the return kept for the next one.
+    /// The focused button keeps focus. While a dialog is open
+    /// (<paramref name="busy"/>) the pressed button's return is kept for
+    /// when it closes; once it has closed, focus goes back to that button
+    /// (box, 2026-11-19: it had dropped to the Settings gear).
+    /// </summary>
+    public static ((string Name, int Index)? Target, (string Name, int Index)? Keep) Rebuild(
+        (string Name, int Index)? focused, bool busy, (string Name, int Index)? returnTo) =>
+        busy ? (focused, returnTo) : (focused ?? returnTo, null);
 }

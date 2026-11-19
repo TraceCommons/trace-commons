@@ -1577,6 +1577,10 @@ WINDOWS_TOKEN_KEYS = [
 # a fill or ink aliases the primary text brush and a label on a fill the
 # page ground, as DesignSystem.xaml does for the rest of the palette.
 WINDOWS_HC_GROUND_ROLES = {"onAccent", "onStatus"}
+# A token key that is a ground under ink: the folder tile, whose glyph is
+# drawn in the primary text brush, so aliasing the tile to that brush too
+# would hide the glyph (review of #2207).
+WINDOWS_HC_GROUND_TOKEN_KEYS = {"TcTileFolderBrush"}
 
 
 def render_windows(tokens: dict) -> str:
@@ -1627,7 +1631,8 @@ def render_windows(tokens: dict) -> str:
     for name, _, _ in WINDOWS_LEGACY_KEYS:
         out.append(f'            <StaticResource x:Key="{name}" ResourceKey="TextFillColorPrimaryBrush" />')
     for name, _ in WINDOWS_TOKEN_KEYS:
-        out.append(f'            <StaticResource x:Key="{name}" ResourceKey="TextFillColorPrimaryBrush" />')
+        stock = "ApplicationPageBackgroundThemeBrush" if name in WINDOWS_HC_GROUND_TOKEN_KEYS else "TextFillColorPrimaryBrush"
+        out.append(f'            <StaticResource x:Key="{name}" ResourceKey="{stock}" />')
     out.append("        </ResourceDictionary>")
     out.append("    </ResourceDictionary.ThemeDictionaries>")
     out.append("</ResourceDictionary>")

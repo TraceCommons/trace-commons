@@ -725,16 +725,18 @@ public class PrivateInferenceTests
     }
 
     /// <summary>
-    /// The managed card's Sign in starts the ceremony with no provider (owner,
-    /// 2026-11-02): the login is chosen on the browser page, so the view holds
-    /// no selector and the start call carries no argument.
+    /// The sign-in starts the ceremony with no provider (owner, 2026-11-02):
+    /// the login is chosen on the browser page, so the view holds no selector
+    /// and the start call carries no argument. Signed out, the managed view
+    /// draws no card and no Sign in of its own, as on macOS (review of
+    /// #2207); the page's account section is the one sign-in.
     /// </summary>
     [Fact]
-    public void TheManagedCardSignInStartsWithNoProvider()
+    public void TheSignInStartsWithNoProviderAndTheManagedViewHasNoneOfItsOwn()
     {
         string view = File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "PrivateInferenceView.xaml.cs.txt"));
-        Assert.Contains("await ViewModel.StartCredentialAsync()));", view);
+        Assert.Contains("ManagedContent.Content = new ManagedSessionsView(host);", view);
         Assert.DoesNotContain("StartCredentialAsync(NearAiCredentialSurface.Provider", view);
         string viewModel = File.ReadAllText(
             Path.Combine(AppContext.BaseDirectory, "PrivateInferenceViewModel.cs.txt"));

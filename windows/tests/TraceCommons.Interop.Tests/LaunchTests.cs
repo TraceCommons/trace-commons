@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Linq;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
@@ -255,8 +256,15 @@ public sealed class LaunchTests
         // Box, 2026-11-19: a ContentDialog raises Unloaded on its content
         // about 340 ms after Loaded while the dialog stays open, so resting
         // on every Unloaded stopped the move before its first visible frame.
-        Assert.False(LaunchHandoff.RestsOnUnloaded(stillLoaded: true));
-        Assert.True(LaunchHandoff.RestsOnUnloaded(stillLoaded: false));
+        var life = new LaunchArtLife();
+        Assert.Equal(LaunchArtStep.Animate, life.Loaded(animationsEnabled: true));
+        Assert.Equal(LaunchArtStep.None, life.Unloaded(stillLoaded: true));
+        Assert.False(life.Resting);
+        Assert.True(life.Watching);
+        // A real Unloaded, once the art has left the tree, rests and releases it.
+        Assert.Equal(LaunchArtStep.Rest, life.Unloaded(stillLoaded: false));
+        Assert.True(life.Resting);
+        Assert.False(life.Watching);
     }
 
     [Fact]
@@ -265,8 +273,53 @@ public sealed class LaunchTests
         // Box, 2026-11-19: turning animations off mid-move raised no
         // UISettings.AnimationsEnabledChanged while the window kept the
         // foreground, and the folder slid on; WM_SETTINGCHANGE does arrive.
-        Assert.True(LaunchHandoff.RestsOnSettingChange(animationsEnabled: false));
-        Assert.False(LaunchHandoff.RestsOnSettingChange(animationsEnabled: true));
+        var life = new LaunchArtLife();
+        life.Loaded(animationsEnabled: true);
+        Assert.Equal(LaunchArtStep.None, life.SettingChanged(animationsEnabled: true));
+        Assert.False(life.Resting);
+        Assert.Equal(LaunchArtStep.Rest, life.SettingChanged(animationsEnabled: false));
+        Assert.True(life.Resting);
+        // Once at rest, nothing more happens.
+        Assert.Equal(LaunchArtStep.None, life.SettingChanged(animationsEnabled: false));
+    }
+
+    [Fact]
+    public void ClosingTheDialogReleasesTheArtWithNoSecondUnloaded()
+    {
+        // Review of #2207: the late Unloaded returns early, so an art whose
+        // dialog raised no second one stayed watched for the app's life.
+        // The dialog's close releases it; the watch list is then empty.
+        var watched = new LaunchArtWatchList<object>();
+        var art = new object();
+        var life = new LaunchArtLife();
+        life.Loaded(animationsEnabled: true);
+        if (life.Watching) watched.Add(art);
+        life.Unloaded(stillLoaded: true);
+        if (!life.Watching) watched.Remove(art);
+        Assert.Equal(1, watched.Count);
+
+        Assert.Equal(LaunchArtStep.Rest, life.Closed());
+        Assert.False(life.Watching);
+        if (!life.Watching) watched.Remove(art);
+        Assert.Equal(0, watched.Count);
+        // A setting change after the release does nothing, and a late
+        // Unloaded after the close does not rest it twice.
+        Assert.Equal(LaunchArtStep.None, life.SettingChanged(animationsEnabled: false));
+        Assert.Equal(LaunchArtStep.None, life.Unloaded(stillLoaded: false));
+    }
+
+    [Fact]
+    public void TheWatchListHoldsEachArtOnceAndIsSafeToChangeWhileRead()
+    {
+        var watched = new LaunchArtWatchList<object>();
+        var a = new object();
+        var b = new object();
+        watched.Add(a);
+        watched.Add(a);
+        watched.Add(b);
+        Assert.Equal(2, watched.Count);
+        foreach (object art in watched.Snapshot()) watched.Remove(art);
+        Assert.Equal(0, watched.Count);
     }
 
     [Fact]
@@ -274,6 +327,10 @@ public sealed class LaunchTests
     {
         // ManagedFolderExplainer.swift:187, :218-219: Reduce Motion draws the rest frame.
         Assert.True(LaunchHandoff.StartsAtRest(animationsEnabled: false));
+        var life = new LaunchArtLife();
+        Assert.Equal(LaunchArtStep.Rest, life.Loaded(animationsEnabled: false));
+        Assert.True(life.Resting);
+        Assert.True(life.Watching);
         Assert.Equal((-34.0, 9.0, 0.9), LaunchHandoff.Folder(0, animationsEnabled: false));
     }
 
@@ -285,5 +342,118 @@ public sealed class LaunchTests
         Assert.Equal((156.0, 100.0), (LaunchHandoff.TerminalWidth, LaunchHandoff.TerminalHeight));
         Assert.Equal((34.0, 45.0), LaunchHandoff.LogoOffset);
         Assert.Equal(28.0, LaunchHandoff.LogoSide);
+        // Review of #2207: these four survived a mutation run unpinned.
+        // Radius.control under the flat theme (GlassTokens.swift:480).
+        Assert.Equal(11.0, LaunchHandoff.ControlRadius);
+        // ink(0.06) ground, ink(0.18) dots (ManagedFolderExplainer.swift:231, :235).
+        Assert.Equal((0.06, 0.18), (LaunchHandoff.TerminalInk, LaunchHandoff.DotInk));
+        // HStack(spacing: 4) of 6 pt circles, padded 9, bar 18, hairline 1 (:233-241).
+        Assert.Equal((6.0, 4.0, 9.0, 18.0, 1.0),
+            (LaunchHandoff.DotSide, LaunchHandoff.DotSpacing, LaunchHandoff.BarPadding, LaunchHandoff.BarHeight, LaunchHandoff.Hairline));
+        // The large tool tile (GlassTokens.swift:578; Indicators.swift:282-284).
+        Assert.Equal(30.0, LaunchHandoff.FolderTileSide);
+        // The launch button: logo 14, spaced s3 = 6 (:152, :166; GlassTokens.swift:504).
+        Assert.Equal((14.0, 6.0), (LaunchHandoff.ButtonLogoSide, LaunchHandoff.ButtonSpacing));
+    }
+
+    [Fact]
+    public void TheFolderIsTheFilledFolderGlyph()
+    {
+        // Indicators.swift:306 `folder.fill`: Segoe Fluent Icons FolderFill,
+        // not the outline Folder (U+E8B7) the box diff showed.
+        Assert.Equal("\uE8D5", LaunchHandoff.FolderGlyph);
+    }
+
+    // ---- The card's foot, failure and focus -------------------------------
+
+    [Fact]
+    public void InstallIsAskedOnlyWhenNoLaunchedToolIsInstalled()
+    {
+        // ManagedSessionsSurface.swift:990-1007: needsToolInstallation and
+        // missingInstallTools key on installation, not on launchability.
+        Assert.False(Snapshot().NeedsToolInstallation);
+        Assert.Empty(Snapshot().MissingInstallTools);
+        var some = Snapshot("""
+            [{"tool":"opencode","installed":false,"install_url":"c"},{"tool":"claude","installed":true,"install_url":"a"},{"tool":"codex","installed":false,"install_url":"b"}]
+            """);
+        Assert.False(some.NeedsToolInstallation);
+        Assert.Equal(ManagedToolArea.Buttons, some.ToolArea);
+        // In the shell's order, whatever the daemon's.
+        Assert.Equal(["codex", "opencode"], some.MissingInstallTools.Select(t => t.Tool).ToArray());
+        var none = Snapshot("""
+            [{"tool":"claude","installed":false,"install_url":"a"},{"tool":"red_team","installed":true,"install_url":"r"}]
+            """);
+        Assert.True(none.NeedsToolInstallation);
+        Assert.Equal(["claude"], none.MissingInstallTools.Select(t => t.Tool).ToArray());
+        // A row with no launched tool at all asks for an install, as the Mac's does.
+        var noLaunched = Snapshot("""[{"tool":"red_team","installed":true,"install_url":"r"}]""");
+        Assert.True(noLaunched.NeedsToolInstallation);
+        Assert.Equal(ManagedToolArea.Install, noLaunched.ToolArea);
+    }
+
+    [Fact]
+    public void ACardLaunchsFailureIsSaidOnTheCardAndClearedByTheNextAction()
+    {
+        // ManagedSessionsView.swift:131-136, :160-163, :215-228; checklist L3.
+        var copy = new Dictionary<string, string>
+        {
+            ["action_failed"] = "That didn't work.",
+            ["terminal_not_found"] = "{terminal} wasn't found on this computer. Choose another in Settings.",
+            ["terminal"] = "your terminal",
+        };
+        string T(string key) => copy.GetValueOrDefault(key, string.Empty);
+        var failure = new ManagedFailure();
+        Assert.Empty(failure.CardLines(T, "Windows Terminal"));
+        Assert.False(failure.OnCard(cardShown: true));
+
+        failure.Refuse("terminal_not_found", fromCard: true);
+        Assert.True(failure.OnCard(cardShown: true));
+        Assert.False(failure.OnCard(cardShown: false));
+        Assert.Equal(new[] { "That didn't work.", "Windows Terminal wasn't found on this computer. Choose another in Settings." },
+            failure.CardLines(T, "Windows Terminal"));
+        Assert.Equal("your terminal wasn't found on this computer. Choose another in Settings.", failure.CardLines(T, null)[1]);
+
+        // The next action clears it.
+        failure.Begin();
+        Assert.Null(failure.Key);
+        Assert.False(failure.OnCard(cardShown: true));
+        Assert.Empty(failure.CardLines(T, "Windows Terminal"));
+
+        // "That didn't work." alone is said once; a refusal from elsewhere is not the card's.
+        failure.Refuse("action_failed", fromCard: true);
+        Assert.Equal(new[] { "That didn't work." }, failure.CardLines(T, null));
+        failure.Refuse("action_failed", fromCard: false);
+        Assert.False(failure.OnCard(cardShown: true));
+    }
+
+    [Fact]
+    public void FocusReturnsToThePressedButtonOnceTheDialogCloses()
+    {
+        // Box, 2026-11-19: closing the launch dialog dropped focus to the
+        // Settings gear, because every read rebuilds the view.
+        string[] names = ["Start Claude Code", "Start Codex", "Remove", "Remove"];
+        Assert.Equal(("Remove", 1), ManagedFocus.KeyOf(names, 3));
+        Assert.Equal(("Start Codex", 0), ManagedFocus.KeyOf(names, 1));
+        Assert.Null(ManagedFocus.KeyOf(names, -1));
+        Assert.Equal(3, ManagedFocus.Find(names, ("Remove", 1)));
+        Assert.Equal(-1, ManagedFocus.Find(names, ("Remove", 2)));
+        Assert.Equal(-1, ManagedFocus.Find(names, ("Gone", 0)));
+
+        (string, int) pressed = ("Start Codex", 0);
+        // A poll while the dialog is open: nothing on the page has focus, and
+        // the return is kept.
+        var (target, keep) = ManagedFocus.Rebuild(null, busy: true, pressed);
+        Assert.Null(target);
+        Assert.Equal(pressed, keep);
+        // A second poll, still open: kept again.
+        (target, keep) = ManagedFocus.Rebuild(null, busy: true, keep);
+        Assert.Equal(pressed, keep);
+        // The dialog has closed: focus goes back to the pressed button, once.
+        (target, keep) = ManagedFocus.Rebuild(null, busy: false, keep);
+        Assert.Equal(pressed, target);
+        Assert.Null(keep);
+        // A button that has focus keeps it.
+        (target, _) = ManagedFocus.Rebuild(("Remove", 1), busy: false, pressed);
+        Assert.Equal(("Remove", 1), target);
     }
 }
