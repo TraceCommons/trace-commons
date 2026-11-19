@@ -498,7 +498,7 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             !switch.is_empty(),
             "dark={dark}: the selected folder row has its switch"
         );
-        let knob = switch[0].first_child().expect("the switch's knob");
+        let knob = slider(&switch[0]);
         let at = bounds(&knob, app.window.upcast_ref());
         let middle = (
             (at.x() + at.width() / 2.0) as i32,
@@ -528,9 +528,7 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
         let page: gtk::Widget = app.queue.root.clone().upcast();
         let row = with_class(&page, "tc-tree-row-selected").remove(0);
         let row_at = bounds(&row, app.window.upcast_ref());
-        let knob = with_class(&row, "tc-tree-switch")[0]
-            .first_child()
-            .expect("the switch's knob");
+        let knob = slider(&with_class(&row, "tc-tree-switch")[0]);
         let at = bounds(&knob, app.window.upcast_ref());
         let points = [
             (
@@ -555,6 +553,18 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
     manager.set_color_scheme(adw::ColorScheme::Default);
     app.window.close();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A switch's knob: its `slider` node (the on and off images come first).
+fn slider(switch: &gtk::Widget) -> gtk::Widget {
+    let mut child = switch.first_child();
+    while let Some(widget) = child {
+        if widget.css_name() == "slider" {
+            return widget;
+        }
+        child = widget.next_sibling();
+    }
+    panic!("the switch has no slider");
 }
 
 /// The folder list's stock icons resolve in the theme the app runs with.
