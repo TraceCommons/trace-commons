@@ -129,15 +129,20 @@ public class GlassClockWiringTests
     }
 
     [Fact]
-    public void AnElementInNoWindowMayNotMoveAndAnUnreportedWindowMay()
+    public void AnElementInNoWindowMayNotMoveAnUnreportedWindowMayAndAClosedOneStaysStopped()
     {
         var windows = new WindowClockRegistry<Window>();
         Assert.False(windows.MayTick(null));
         Assert.True(windows.MayTick(new Window()));
-        Window closed = new();
-        windows.Set(closed, false);
-        windows.Forget(closed);
-        Assert.True(windows.MayTick(closed));
+
+        // A clock still loaded in a window that has closed never ticks again.
+        Window closing = new();
+        var clock = new FakeClock(windows, closing);
+        var gate = new WindowClockGate();
+        gate.Changed += mayTick => windows.Set(closing, mayTick);
+        gate.SetClosed();
+        Assert.False(windows.MayTick(closing));
+        Assert.Equal(0, clock.Pump());
     }
 
     [Fact]

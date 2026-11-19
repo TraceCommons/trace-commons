@@ -45,7 +45,7 @@ internal static class WindowClocks
     /// <summary>
     /// Follows a window other than the main one with its own
     /// <see cref="WindowClockGate"/>: minimised from its presenter, hidden
-    /// from its visibility, and dropped when it closes.
+    /// from its visibility, and stopped for good when it closes.
     /// </summary>
     public static void Watch(Window window)
     {
@@ -75,13 +75,8 @@ internal static class WindowClocks
             }
         };
         window.VisibilityChanged += (_, args) => gate.SetHiddenToTray(!args.Visible);
-        window.Closed += (_, _) =>
-        {
-            gate.SetClosed();
-            if (root is not null)
-            {
-                Windows.Forget(root);
-            }
-        };
+        // Closed stays stopped: a clock whose Unloaded never comes cannot
+        // tick in a window that is gone. The registry holds roots weakly.
+        window.Closed += (_, _) => gate.SetClosed();
     }
 }

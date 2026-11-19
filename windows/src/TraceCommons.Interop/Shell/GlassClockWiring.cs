@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 namespace TraceCommons.Interop.Shell;
 
@@ -11,33 +12,30 @@ namespace TraceCommons.Interop.Shell;
 /// asks about the window it is drawn in: the Settings window keeps moving
 /// while the main window sits in the tray, and a minimised Settings window
 /// stops its own clocks while the main window's run on. A window that never
-/// reported may tick; an element in no window may not.
+/// reported may tick; an element in no window may not; a closed window stays
+/// stopped. Keys are held weakly, so a closed window's tree is not kept alive.
 /// </summary>
 public sealed class WindowClockRegistry<TWindow> where TWindow : class
 {
-    private readonly Dictionary<TWindow, bool> _mayTick =
-        new((IEqualityComparer<TWindow>)ReferenceEqualityComparer.Instance);
+    private readonly ConditionalWeakTable<TWindow, StrongBox<bool>> _mayTick = new();
 
     /// <summary>Raised with the window and its new answer whenever <see cref="MayTick"/> changes for it.</summary>
     public event Action<TWindow, bool>? Changed;
 
     /// <summary>Whether clocks drawn in <paramref name="window"/> may run.</summary>
     public bool MayTick(TWindow? window) =>
-        window is not null && (!_mayTick.TryGetValue(window, out bool mayTick) || mayTick);
+        window is not null && (!_mayTick.TryGetValue(window, out StrongBox<bool>? mayTick) || mayTick.Value);
 
     /// <summary>Records <paramref name="window"/>'s gate.</summary>
     public void Set(TWindow window, bool mayTick)
     {
         bool before = MayTick(window);
-        _mayTick[window] = mayTick;
+        _mayTick.GetOrCreateValue(window).Value = mayTick;
         if (before != mayTick)
         {
             Changed?.Invoke(window, mayTick);
         }
     }
-
-    /// <summary>Drops a closed window, so its key is not held.</summary>
-    public void Forget(TWindow window) => _mayTick.Remove(window);
 }
 
 /// <summary>
