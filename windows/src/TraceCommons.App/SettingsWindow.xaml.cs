@@ -24,6 +24,7 @@ public sealed partial class SettingsWindow : Window
     public SettingsWindow(SettingsView view)
     {
         InitializeComponent();
+        WindowClocks.Watch(this);
         Title = MonitorWords.SettingsTitle;
         SettingsHost.Content = view;
     }

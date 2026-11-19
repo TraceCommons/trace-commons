@@ -28,6 +28,8 @@ public sealed partial class SettingsView : UserControl
     {
         LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
         InitializeComponent();
+        // The app's name from brand.rs (tc_app_name), never a literal (W10).
+        StartAtLoginSwitch.Header = $"Start {TraceCommons.Interop.Shell.MonitorWords.AppName} when you sign in";
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
         InitializeShellSwitches();
@@ -399,7 +401,6 @@ public sealed partial class SettingsView : UserControl
         BehaviorSetting setting = sender.Name switch
         {
             "QuiescenceMinutes" => BehaviorSetting.QuiescenceMinutes,
-            "ApprovalHoldSeconds" => BehaviorSetting.ApprovalHoldSeconds,
             "DigestHours" => BehaviorSetting.DigestHours,
             _ => throw new InvalidOperationException("unknown behavior setting"),
         };

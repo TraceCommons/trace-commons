@@ -193,8 +193,8 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
             // one the daemon accepts, which is this shell's bug rather than
             // the contributor's, so it does not get the "answer both" hint.
             Error = exception.IsRootsNotDeclared
-                ? "Near.ai could not record that answer. Please report this."
-                : "Could not start. Another Near.ai instance may already be running.";
+                ? TraceCommons.Interop.Shell.MonitorWords.AppName + " could not record that answer. Please report this."
+                : $"Could not start. Another {TraceCommons.Interop.Shell.MonitorWords.AppName} instance may already be running.";
         }
         finally
         {

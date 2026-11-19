@@ -109,6 +109,7 @@ public sealed class AboutWindow : Window
             Background = (Brush)Application.Current.Resources["TcWindowBackgroundBrush"],
             Children = { column },
         };
+        WindowClocks.Watch(this);
     }
 
     private static (string, string?) PackagedVersion()

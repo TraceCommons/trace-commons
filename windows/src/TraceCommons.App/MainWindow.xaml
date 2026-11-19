@@ -24,6 +24,7 @@
     xmlns:vm="using:TraceCommons.App.ViewModels"
     xmlns:interop="using:TraceCommons.Interop"
     xmlns:controls="using:TraceCommons.App.Controls"
+    xmlns:look="using:TraceCommons.App.Look"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -301,6 +302,40 @@
                         </Grid>
                     </controls:MonitorTabButton>
                 </StackPanel>
+
+                <!--
+                    The ember under the tab shown (spec W5; GlassRuleTabs.emberGlow,
+                    Navigation.swift:313-339): a halo behind the title, brightest
+                    at the rule under its middle and gone by 26 up and by the
+                    tab's sides, and a 2 high line, clear, ember, clear, reaching
+                    30 percent past each side, centred on the 1 high rule. Placed
+                    and glided between tabs from code (MainWindow.Look.cs) on the
+                    Mac's spring(0.35, 0.85). Decorative: no hit test, no name.
+                -->
+                <Canvas x:Name="TabEmberLayer"
+                        Grid.Row="0"
+                        IsHitTestVisible="False"
+                        AutomationProperties.AccessibilityView="Raw">
+                    <Grid x:Name="TabEmber" Height="36">
+                        <Rectangle x:Name="TabEmberHalo" Height="26" VerticalAlignment="Bottom" Margin="0,0,0,1">
+                            <Rectangle.Fill>
+                                <RadialGradientBrush Center="0.5,1" GradientOrigin="0.5,1" RadiusX="0.5" RadiusY="1">
+                                    <GradientStop Offset="0" Color="{ThemeResource TcGlassTabEmberHaloColor}" />
+                                    <GradientStop Offset="1" Color="{ThemeResource TcGlassTabEmberHaloClearColor}" />
+                                </RadialGradientBrush>
+                            </Rectangle.Fill>
+                        </Rectangle>
+                        <Rectangle x:Name="TabEmberLine" Height="2" VerticalAlignment="Bottom" Margin="0,0,0,-0.5">
+                            <Rectangle.Fill>
+                                <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                    <GradientStop Offset="0" Color="{ThemeResource TcGlassTabEmberClearColor}" />
+                                    <GradientStop Offset="0.5" Color="{ThemeResource TcGlassTabEmberColor}" />
+                                    <GradientStop Offset="1" Color="{ThemeResource TcGlassTabEmberClearColor}" />
+                                </LinearGradientBrush>
+                            </Rectangle.Fill>
+                        </Rectangle>
+                    </Grid>
+                </Canvas>
 
                 <!-- The breadcrumb on a sub-page (MonitorWindowView.swift:749-769),
                      built from code with the core's words. -->
@@ -706,25 +741,80 @@
                                 BorderBrush="{ThemeResource TcHairlineBrush}"
                                 BorderThickness="1"
                                 CornerRadius="{StaticResource TcCardCornerRadius}">
-                            <StackPanel Spacing="8">
-                                <!-- Evidence first, question second: someone who reads
-                                     only the first line still learns why they are being
-                                     asked. -->
-                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
-                                           Style="{StaticResource TcTitleCardTextStyle}"
-                                           TextWrapping="Wrap" />
-                                <StackPanel Orientation="Horizontal" Spacing="12">
-                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind ViewModel.ArmingOfferDecline}"
-                                            Click="OnDeclineArming" />
-                                    <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                            Content="{x:Bind ViewModel.ArmingOfferConfirm}"
-                                            Click="OnAcceptArming" />
+                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+                                <!-- The notice coin (GlassNoticeMark, PopoverNotice.swift:116-159):
+                                     a bolt in the accent, turning to a check in the "on" colour once
+                                     the daemon has armed the project, with a ring spreading from it
+                                     (ArmingOfferMotion.swift). Decorative: hidden from automation,
+                                     as the Mac's is (.accessibilityHidden). Driven from
+                                     MainWindow.Arming.cs, which also sizes it from ArmingOfferMotion. -->
+                                <Grid x:Name="ArmingMark"
+                                      Grid.Column="0"
+                                      VerticalAlignment="Top"
+                                      IsHitTestVisible="False"
+                                      AutomationProperties.AccessibilityView="Raw">
+                                    <Ellipse Fill="{ThemeResource TcSurfaceCardBrush}" />
+                                    <!-- Two inks, crossfaded: the accent bolt, and the "on" check
+                                         (ArmingOfferMotion.tint), so each keeps its theme's brush. -->
+                                    <Ellipse x:Name="ArmingMarkRing"
+                                             Stroke="{ThemeResource TcAccentTextBrush}" />
+                                    <Ellipse x:Name="ArmingMarkRingOn"
+                                             Stroke="{ThemeResource TcStatusOnBrush}"
+                                             Opacity="0" />
+                                    <FontIcon x:Name="ArmingMarkBolt"
+                                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                              Glyph="&#xE945;"
+                                              FontWeight="SemiBold"
+                                              Foreground="{ThemeResource TcAccentTextBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                                    <FontIcon x:Name="ArmingMarkCheck"
+                                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                              Glyph="&#xE73E;"
+                                              FontWeight="SemiBold"
+                                              Foreground="{ThemeResource TcStatusOnBrush}"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              Opacity="0" />
+                                    <!-- Hidden on its visual by InitArmingMotion, not by an
+                                         Opacity here: with XAML Opacity 0 the pulse never
+                                         showed (box frames, 2026-11-19), while the check and
+                                         ring, whose visuals SetMarkAtRest writes first, did. -->
+                                    <Ellipse x:Name="ArmingPulse"
+                                             Stroke="{ThemeResource TcStatusOnBrush}" />
+                                </Grid>
+                                <StackPanel Grid.Column="1" Spacing="8">
+                                    <!-- Evidence first, question second: someone who reads
+                                         only the first line still learns why they are being
+                                         asked. Every word is the core's (tc_arming_offer_copy_json). -->
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferEvidence, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferQuestion, Mode=OneWay}"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferBody, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <StackPanel Orientation="Horizontal" Spacing="12">
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind ViewModel.ArmingOfferDecline, Mode=OneWay}"
+                                                IsEnabled="{x:Bind ViewModel.ArmingOfferDeclineEnabled, Mode=OneWay}"
+                                                Click="OnDeclineArming" />
+                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                                Content="{x:Bind ViewModel.ArmingOfferConfirm, Mode=OneWay}"
+                                                IsEnabled="{x:Bind ViewModel.ArmingOfferEnableEnabled, Mode=OneWay}"
+                                                Click="OnAcceptArming" />
+                                    </StackPanel>
+                                    <!-- A refused Enable: the core's project_mode_failed
+                                         (AppModel.swift:4752-4756). Leaves with the offer it was
+                                         about, or on the next confirmed Enable. -->
+                                    <TextBlock Text="{x:Bind ViewModel.ArmingOfferRefusal, Mode=OneWay}"
+                                               Visibility="{x:Bind ViewModel.HasArmingOfferRefusal, Mode=OneWay}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
                                 </StackPanel>
-                            </StackPanel>
+                            </Grid>
                         </Border>
                         <!--
                             Approved sessions held because the privacy witness is busy,
@@ -981,7 +1071,7 @@
                 <!-- Header, queue, recovery bar, decision notice, caveat, week
                      band, progress. -->
                 <Grid Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
-                      RowDefinitions="Auto,*,Auto,Auto,Auto,Auto,Auto,Auto">
+                      RowDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto,Auto">
 
                     <!--
                         Content header.
@@ -1085,17 +1175,15 @@
                              the case where a contributor wants to confirm the view
                              is current, which is a reasonable thing to want from
                              something that uploads on their behalf. -->
-                        <Button Grid.Column="2"
-                                Style="{StaticResource TcSecondaryButtonStyle}"
-                                Click="OnRefreshClick"
-                                IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                VerticalAlignment="Center"
-                                AutomationProperties.Name="Refresh the queue">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon Glyph="&#xE72C;" FontSize="12" />
-                                <TextBlock Text="Refresh" />
-                            </StackPanel>
-                        </Button>
+                        <!-- The Mac's refresh pill (GlassRefreshButton): the word, then
+                             the glyph, which turns once a click and on while
+                             the queue is read; disabled while it is. -->
+                        <look:GlassRefreshButton Grid.Column="2"
+                                                 Content="Refresh"
+                                                 Click="OnRefreshClick"
+                                                 IsRefreshing="{x:Bind ViewModel.IsBusy, Mode=OneWay}"
+                                                 VerticalAlignment="Center"
+                                                 AutomationProperties.Name="Refresh the queue" />
 
                         <!-- History, the Traces tab's other page, behind the
                              breadcrumb (MonitorNavigation.swift:23-29). Its word
@@ -1329,9 +1417,9 @@
                         the choice between the two readings is behind the ABI: no
                         shell decides it. Nothing here is typed out.
                     -->
-                    <StackPanel Grid.Row="2"
+                    <StackPanel Grid.Row="1"
                                 Spacing="6"
-                                Margin="0,0,0,12">
+                                Margin="22,0,22,12">
                         <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
                                    Style="{StaticResource TcTitleCardTextStyle}"
                                    TextWrapping="Wrap" />
@@ -1497,10 +1585,11 @@
                         </Grid>
                     </StackPanel>
 
-                    <ProgressBar Grid.Row="6"
-                                 IsIndeterminate="True"
-                                 Foreground="{ThemeResource TcGreenFillBrush}"
-                                 Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
+                    <!-- Work under way: the Mac's spinner (W5-D3), in place of
+                         the stock indeterminate bar. -->
+                    <look:GlassSpinner Grid.Row="6"
+                                       HorizontalAlignment="Left"
+                                       Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay}" />
                 </Grid>
 
 

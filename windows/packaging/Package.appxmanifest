@@ -29,7 +29,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>Near.ai</DisplayName>
+    <DisplayName>Near AI Gateway</DisplayName>
     <PublisherDisplayName>Iqlusion Inc</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
 
@@ -73,7 +73,7 @@
   <Applications>
     <Application Id="App" Executable="TraceCommons.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Near.ai"
+        DisplayName="Near AI Gateway"
         Description="Review and contribute agent traces from this machine."
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
@@ -90,7 +90,7 @@
         -->
         <uap:Extension Category="windows.protocol">
           <uap:Protocol Name="tracecommons">
-            <uap:DisplayName>Near.ai invite</uap:DisplayName>
+            <uap:DisplayName>Near AI Gateway</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
 
@@ -107,7 +107,7 @@
           <desktop:StartupTask
             TaskId="TraceCommonsStartup"
             Enabled="false"
-            DisplayName="Near.ai" />
+            DisplayName="Near AI Gateway" />
         </desktop:Extension>
       </Extensions>
     </Application>
