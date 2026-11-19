@@ -156,6 +156,16 @@ public static class MapMotion
     /// </summary>
     public static bool ClockRuns(bool wanted, bool loaded, bool windowVisible) => wanted && loaded && windowVisible;
 
+    /// <summary>
+    /// Whether the running clock must be started again to take a new
+    /// interval. A DispatcherQueueTimer keeps the wait it was started with
+    /// when its interval changes, so a clock waiting ~30 s for the next
+    /// shimmer on the Private AI view left the Traces view's arcs and station
+    /// still for that long after switching back.
+    /// </summary>
+    public static bool ClockRestarts(bool running, double currentInterval, double wantedInterval) =>
+        !running || Math.Abs(currentInterval - wantedInterval) > 1e-6;
+
     // The tool pile (MapToolPile.swift:137-199).
 
     /// <summary>A coin moving to a new place in the pile (:139).</summary>

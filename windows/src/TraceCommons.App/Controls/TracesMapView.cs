@@ -796,9 +796,12 @@ public sealed partial class TracesMapView : UserControl
         }
 
         _timer ??= CreateTimer();
-        _timer.Interval = TimeSpan.FromSeconds(Math.Max(interval, MapMotion.TransferFrameInterval));
-        if (!_timer.IsRunning)
+        TimeSpan wanted = TimeSpan.FromSeconds(Math.Max(interval, MapMotion.TransferFrameInterval));
+        if (MapMotion.ClockRestarts(_timer.IsRunning, _timer.Interval.TotalSeconds, wanted.TotalSeconds))
         {
+            // A running timer keeps the wait it started with: start it again on the new one.
+            _timer.Stop();
+            _timer.Interval = wanted;
             _timer.Start();
         }
     }

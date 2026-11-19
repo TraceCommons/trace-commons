@@ -89,6 +89,17 @@ public class MapClockTests
         Assert.Equal((2.0, 1.0, MapMotion.CoinGrown), coin);
     }
 
+    [Theory]
+    [InlineData(true, 32.5, 1.0 / 30, true)]   // waiting for a shimmer, the arcs want 30 a second
+    [InlineData(true, 1.0 / 20, 1.0 / 60, true)]
+    [InlineData(true, 1.0 / 60, 1.0 / 30, true)]
+    [InlineData(false, 32.5, 1.0 / 30, true)]  // stopped: start it
+    [InlineData(true, 1.0 / 30, 1.0 / 30, false)] // already on the wanted beat: leave its phase alone
+    public void AChangedIntervalStartsTheClockAgain(bool running, double current, double wanted, bool restarts)
+    {
+        Assert.Equal(restarts, MapMotion.ClockRestarts(running, current, wanted));
+    }
+
     [Fact]
     public void ACoinGrowsOnTheMacsSpringAsATraceArrives()
     {
