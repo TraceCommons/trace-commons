@@ -11,8 +11,18 @@
 //! legend is two equal capsule wells (`GlassLegendCell`), and the controls
 //! are round glass pills (`GlassPillIconButton`).
 //!
-//! Deliberate platform differences: the bars swap in place on a period
-//! step (the Mac slides them), and where the Mac draws SF Symbols, which
+//! How it moves, as the Mac's (`map_motion` holds the numbers): a period
+//! step brings the new bars in from its side, fading in, over 0.45 s on
+//! `(0.4, 0, 0.2, 1)`, while the old ones fade out, moving toward the side
+//! they themselves came in from (SwiftUI removes a view with the
+//! transition of its last render); a zoom crossfades them in place over
+//! 0.15 s on the token curve (`Swap`). The
+//! footer opens from 0 to its 206 points and closes again over 0.25 s on
+//! the token curve, moving up from the window's foot and fading
+//! (`Drawer`). Each is at its end at once with animations off, followed
+//! live.
+//!
+//! Deliberate platform difference: where the Mac draws SF Symbols, which
 //! are Apple's, the pills draw stock symbolic icons (`pill_symbol`, and
 //! `find-location` for the binoculars).
 
@@ -25,6 +35,9 @@ use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
 use super::glass_paint;
 use super::graph_model::{self, Bucket, Window};
+use super::map_motion::{self, Edge};
+use crate::ui::glass_motion::{self, Driver};
+use gtk::subclass::prelude::ObjectSubclassIsExt;
 
 /// The Mac's fixed footer height, rule included.
 pub const HEIGHT: i32 = 206;
@@ -48,10 +61,27 @@ struct State {
     data: RefCell<GraphData>,
     buckets: RefCell<Vec<Bucket>>,
     focused: Cell<bool>,
+    /// The bars on their way out while a step or a zoom swaps them.
+    swap: RefCell<Option<Swap>>,
+    swapping: Driver,
+    /// The edge of the last swap (`TracesGraphFooter.slide`): none at
+    /// first and after a zoom. The bars it brought in leave with it.
+    slide: Cell<Option<Edge>>,
+}
+
+/// The bars of the period before a step or a zoom, on their way out:
+/// the edge they came in from (`was`), the side the step slides from
+/// (none for a zoom), and how far in it is.
+#[derive(Clone, Debug)]
+pub struct Swap {
+    pub old: Vec<Bucket>,
+    pub was: Option<Edge>,
+    pub edge: Option<Edge>,
+    pub t: f64,
 }
 
 pub struct GraphFooter {
-    pub root: gtk::Revealer,
+    pub root: Drawer,
     state: Rc<State>,
     bars: gtk::DrawingArea,
     shared_value: gtk::Label,
@@ -371,15 +401,7 @@ impl GraphFooter {
         body.append(&column);
         body.set_size_request(-1, HEIGHT);
 
-        // Never expanding: the bars' vexpand would otherwise pass up through
-        // the revealer, hidden or not, and a hidden footer would take a
-        // share of the main pane's height from the tab's screen.
-        let root = gtk::Revealer::builder()
-            .transition_type(gtk::RevealerTransitionType::SlideUp)
-            .vexpand(false)
-            .child(&body)
-            .build();
-        follow_reduced_motion(&root);
+        let root = Drawer::new(&body);
 
         let footer = Rc::new(Self {
             root,
@@ -389,6 +411,9 @@ impl GraphFooter {
                 data: RefCell::new(GraphData::default()),
                 buckets: RefCell::new(Vec::new()),
                 focused: Cell::new(false),
+                swap: RefCell::new(None),
+                swapping: Driver::default(),
+                slide: Cell::new(None),
             }),
             bars,
             shared_value,
@@ -433,25 +458,44 @@ impl GraphFooter {
         });
         footer.bars.add_controller(motion);
 
-        let step = |button: &gtk::Button, change: fn(Window) -> Window| {
+        // Each control's swap: previous slides the bars from the trailing
+        // edge, next and jump to now from the leading one, a zoom swaps
+        // them in place (`TracesGraphFooter.step`, `.zoom`).
+        let step = |button: &gtk::Button, edge: Option<Edge>, change: fn(Window) -> Window| {
             let weak = Rc::downgrade(&footer);
             button.connect_clicked(move |_| {
                 if let Some(footer) = weak.upgrade() {
                     footer.state.window.set(change(footer.state.window.get()));
                     footer.state.hovered.set(None);
-                    footer.rebucket();
+                    footer.swap_bars(edge);
                 }
             });
         };
-        step(&previous, |window| window.stepped(-1));
-        step(&footer.next, |window| window.stepped(1));
-        step(&footer.zoom_out, |window| {
+        step(&previous, Some(Edge::Trailing), |window| window.stepped(-1));
+        step(&footer.next, Some(Edge::Leading), |window| {
+            window.stepped(1)
+        });
+        step(&footer.zoom_out, None, |window| {
             window.zoomed(window.range.zoomed_out())
         });
-        step(&footer.zoom_in, |window| {
+        step(&footer.zoom_in, None, |window| {
             window.zoomed(window.range.zoomed_in())
         });
-        step(&footer.jump, Window::jumped_to_now);
+        step(&footer.jump, Some(Edge::Leading), Window::jumped_to_now);
+
+        // Animations turned off part-way: the bars are at their end.
+        if let Some(settings) = gtk::Settings::default() {
+            let weak = Rc::downgrade(&footer);
+            settings.connect_gtk_enable_animations_notify(move |settings| {
+                if let Some(footer) = weak.upgrade()
+                    && !settings.is_gtk_enable_animations()
+                {
+                    footer.state.swapping.finish();
+                    footer.state.swap.replace(None);
+                    footer.bars.queue_draw();
+                }
+            });
+        }
 
         footer.rebucket();
         footer
@@ -494,6 +538,50 @@ impl GraphFooter {
 
     pub fn window(&self) -> Window {
         self.state.window.get()
+    }
+
+    /// The bars swapping now, if they are.
+    pub fn swap(&self) -> Option<Swap> {
+        self.state.swap.borrow().clone()
+    }
+
+    /// The new period's bars, the old ones swapping out toward `edge`
+    /// (a step) or in place (a zoom), on the bars' frame clock; at once
+    /// with animations off.
+    fn swap_bars(&self, edge: Option<Edge>) {
+        self.state.swapping.finish();
+        let old = self.state.buckets.borrow().clone();
+        let was = self.state.slide.replace(edge);
+        self.rebucket();
+        if !glass_motion::animations_enabled() {
+            self.state.swap.replace(None);
+            return;
+        }
+        self.state.swap.replace(Some(Swap {
+            old,
+            was,
+            edge,
+            t: 0.0,
+        }));
+        let state = self.state.clone();
+        let done = self.state.clone();
+        let bars = self.bars.clone();
+        let drawn = self.bars.clone();
+        self.state.swapping.start(
+            &self.bars,
+            map_motion::bars_swap_ease(edge).length(),
+            0.0,
+            move |t| {
+                if let Some(swap) = state.swap.borrow_mut().as_mut() {
+                    swap.t = t;
+                }
+                bars.queue_draw();
+            },
+            move || {
+                done.swap.replace(None);
+                drawn.queue_draw();
+            },
+        );
     }
 
     fn rebucket(&self) {
@@ -571,16 +659,58 @@ impl GraphFooter {
     }
 }
 
-/// Draws the graph for the footer's state.
+/// Draws the graph for the footer's state: while a step or a zoom swaps
+/// the bars, the old set going and the new coming (`paint_swap`).
 fn draw_bars(context: &gtk::cairo::Context, width: i32, state: &State) {
     let buckets = state.buckets.borrow();
-    paint_bars(
-        context,
-        f64::from(width),
-        &buckets,
-        state.hovered.get(),
-        dark_scheme(),
-    );
+    let swap = state.swap.borrow();
+    match swap.as_ref() {
+        Some(swap) => paint_swap(
+            context,
+            f64::from(width),
+            swap,
+            &buckets,
+            state.hovered.get(),
+            dark_scheme(),
+        ),
+        None => paint_bars(
+            context,
+            f64::from(width),
+            &buckets,
+            state.hovered.get(),
+            dark_scheme(),
+        ),
+    }
+}
+
+/// The bars part-way through `swap`: each set offset across the bars'
+/// width and faded as `map_motion::bars_swap` has it, the old under the
+/// new.
+pub fn paint_swap(
+    context: &gtk::cairo::Context,
+    width: f64,
+    swap: &Swap,
+    buckets: &[Bucket],
+    hovered: Option<usize>,
+    dark: bool,
+) {
+    let ((old_x, old_alpha), (new_x, new_alpha)) =
+        map_motion::bars_swap(swap.was, swap.edge, swap.t);
+    for (bars, x, alpha, hovered) in [
+        (&swap.old[..], old_x, old_alpha, None),
+        (buckets, new_x, new_alpha, hovered),
+    ] {
+        if alpha <= 0.0 {
+            continue;
+        }
+        let _ = context.save();
+        context.push_group();
+        context.translate(x * width, 0.0);
+        paint_bars(context, width, bars, hovered, dark);
+        let _ = context.pop_group_to_source();
+        let _ = context.paint_with_alpha(alpha);
+        let _ = context.restore();
+    }
 }
 
 /// `GlassBarGraph`: shared rises from the axis and kept hangs from it, as
@@ -707,21 +837,143 @@ fn rounded_rect(context: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r
     context.close_path();
 }
 
-/// The footer opens and closes over the Mac's .25s, and at once when the
-/// desktop has animations off.
-pub fn follow_reduced_motion(reveal: &gtk::Revealer) {
-    let duration = |animate: bool| if animate { 250 } else { 0 };
-    match gtk::Settings::default() {
-        Some(settings) => {
-            reveal.set_transition_duration(duration(settings.is_gtk_enable_animations()));
-            let weak = reveal.downgrade();
+mod drawer {
+    use super::*;
+    use gtk::glib;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct Drawer {
+        pub child: RefCell<Option<gtk::Widget>>,
+        /// How far open it is drawn, 0 to 1, and whether it is opening.
+        pub shown: Cell<f64>,
+        pub open: Cell<bool>,
+        pub driver: Driver,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Drawer {
+        const NAME: &'static str = "TcGraphDrawer";
+        type Type = super::Drawer;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for Drawer {
+        fn dispose(&self) {
+            if let Some(child) = self.child.take() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl WidgetImpl for Drawer {
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let Some(child) = self.child.borrow().clone() else {
+                return (0, 0, -1, -1);
+            };
+            let (minimum, natural, _, _) = child.measure(orientation, for_size);
+            match orientation {
+                gtk::Orientation::Vertical => {
+                    let height = (f64::from(natural) * self.shown.get().max(0.0)).round() as i32;
+                    (height, height, -1, -1)
+                }
+                _ => (minimum, natural, -1, -1),
+            }
+        }
+
+        fn size_allocate(&self, width: i32, _height: i32, baseline: i32) {
+            let Some(child) = self.child.borrow().clone() else {
+                return;
+            };
+            // The footer at its whole height from the drawer's top: the
+            // part not yet open lies past the window's foot, clipped.
+            let (_, natural, _, _) = child.measure(gtk::Orientation::Vertical, width);
+            child.allocate(width, natural, baseline, None);
+        }
+    }
+}
+
+gtk::glib::wrapper! {
+    /// The footer's holder: it opens from nothing to the footer's height
+    /// and closes again over `Motion.slide` on the token curve, the footer
+    /// moving up from the foot and fading in as it goes
+    /// (`MonitorWindowView`'s `.move(edge: .bottom)` with `.opacity`);
+    /// at once with animations off, followed live.
+    pub struct Drawer(ObjectSubclass<drawer::Drawer>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl Drawer {
+    pub fn new(child: &impl IsA<gtk::Widget>) -> Self {
+        let drawer: Self = gtk::glib::Object::new();
+        drawer.set_overflow(gtk::Overflow::Hidden);
+        // Never expanding: the bars' vexpand would otherwise pass up, and a
+        // hidden footer would take a share of the main pane's height.
+        drawer.set_vexpand(false);
+        drawer.set_hexpand(true);
+        child.set_parent(&drawer);
+        drawer.imp().child.replace(Some(child.clone().upcast()));
+        drawer.apply(0.0);
+        if let Some(settings) = gtk::Settings::default() {
+            let weak = drawer.downgrade();
             settings.connect_gtk_enable_animations_notify(move |settings| {
-                if let Some(reveal) = weak.upgrade() {
-                    reveal.set_transition_duration(duration(settings.is_gtk_enable_animations()));
+                if let Some(drawer) = weak.upgrade()
+                    && !settings.is_gtk_enable_animations()
+                {
+                    drawer.imp().driver.finish();
                 }
             });
         }
-        None => reveal.set_transition_duration(0),
+        drawer
+    }
+
+    /// Opens or closes it.
+    pub fn set_reveal_child(&self, open: bool) {
+        let imp = self.imp();
+        if imp.open.replace(open) == open {
+            // Asked again on the way (the shell syncs often): it keeps
+            // going; at rest it is where it should be.
+            if !imp.driver.is_running() {
+                self.apply(if open { 1.0 } else { 0.0 });
+            }
+            return;
+        }
+        let from = imp.shown.get();
+        let to = if open { 1.0 } else { 0.0 };
+        let weak = self.downgrade();
+        imp.driver.start(
+            self,
+            map_motion::footer().length(),
+            0.0,
+            move |t| {
+                if let Some(drawer) = weak.upgrade() {
+                    drawer.apply(map_motion::drawer_at(from, to, t));
+                }
+            },
+            || {},
+        );
+    }
+
+    /// Whether it is open, or opening.
+    pub fn reveals_child(&self) -> bool {
+        self.imp().open.get()
+    }
+
+    /// How far open it is drawn now, 0 to 1.
+    pub fn fraction(&self) -> f64 {
+        self.imp().shown.get()
+    }
+
+    fn apply(&self, shown: f64) {
+        let imp = self.imp();
+        imp.shown.set(shown);
+        if let Some(child) = imp.child.borrow().as_ref() {
+            child.set_opacity(shown.clamp(0.0, 1.0));
+            // Closed, it takes no focus and no pointer.
+            child.set_child_visible(shown > 0.0 || imp.open.get());
+        }
+        self.queue_resize();
     }
 }
 
@@ -814,6 +1066,52 @@ mod tests {
                 label: (*label).to_string(),
             })
             .collect()
+    }
+
+    /// Halfway through a step back (from the trailing edge) both sets of
+    /// bars have moved 78% of the way toward it: the first column's dot
+    /// at x 14 has left its place, the new first column is 55 points in,
+    /// and the old set, 191 points along, is all but faded. A zoom moves
+    /// neither set.
+    #[test]
+    fn a_period_step_slides_the_bars_and_a_zoom_does_not() {
+        use super::glass_paint::paint_tests::{near, paint};
+        let ground = (0xf2, 0xf3, 0xf6);
+        let flat = (0xf2_i32, 0xf3_i32, 0xf6_i32);
+        let swap = |edge, t| Swap {
+            old: empty_week(),
+            was: edge,
+            edge,
+            t,
+        };
+        let sliding = paint(246, 120, ground, |context| {
+            paint_swap(
+                context,
+                246.0,
+                &swap(Some(Edge::Trailing), 0.225),
+                &empty_week(),
+                None,
+                false,
+            );
+        });
+        assert!(
+            near(sliding(14, 44), flat, 0),
+            "the old dot left: {:?}",
+            sliding(14, 44)
+        );
+        let moved = 14 + (246.0 * (1.0 - 0.775_561_333)) as i32;
+        assert!(!near(sliding(moved, 44), flat, 0), "no new dot at {moved}");
+        let zooming = paint(246, 120, ground, |context| {
+            paint_swap(
+                context,
+                246.0,
+                &swap(None, 0.075),
+                &empty_week(),
+                None,
+                false,
+            );
+        });
+        assert!(!near(zooming(14, 44), flat, 0), "a zoom swaps in place");
     }
 
     /// `GlassBarGraph` drawn over the pane's ground: seven 30-wide columns
@@ -1184,6 +1482,76 @@ mod tests {
         );
     }
 
+    /// Previous slides the bars from the trailing edge, next and jump
+    /// from the leading one, a zoom swaps them in place; each runs on the
+    /// bars' clock and ends, and with animations off none runs.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_footer_slides_a_step_and_fades_a_zoom() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let footer = GraphFooter::new();
+        let window = gtk::Window::builder()
+            .default_width(600)
+            .default_height(400)
+            .child(&footer.root)
+            .build();
+        window.present();
+        footer.root.set_reveal_child(true);
+        pump_until(|| footer.bars.width() > 0 && footer.root.fraction() >= 1.0);
+        let back = find_pill(&footer, monitor_screens_copy().previous);
+        back.emit_clicked();
+        let swap = footer.swap().expect("a step slides");
+        assert_eq!(swap.edge, Some(Edge::Trailing));
+        assert_eq!(swap.was, None, "the first bars only fade out");
+        pump_until(|| footer.swap().is_some_and(|swap| swap.t > 0.0));
+        assert!(footer.swap().is_some_and(|swap| swap.t < 0.45), "part-way");
+        pump_until(|| footer.swap().is_none());
+        assert!(footer.swap().is_none(), "and done");
+        footer.next.emit_clicked();
+        assert_eq!(
+            footer.swap().map(|swap| swap.was),
+            Some(Some(Edge::Trailing)),
+            "the bars leave with the edge they came in from"
+        );
+        assert_eq!(
+            footer.swap().map(|swap| swap.edge),
+            Some(Some(Edge::Leading))
+        );
+        footer.zoom_out.emit_clicked();
+        assert_eq!(
+            footer.swap().map(|swap| swap.edge),
+            Some(None),
+            "a zoom in place"
+        );
+        settings.set_gtk_enable_animations(false);
+        assert!(footer.swap().is_none(), "followed live");
+        footer.zoom_in.emit_clicked();
+        assert!(footer.swap().is_none(), "none with animations off");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// The pill named `name`.
+    fn find_pill(footer: &GraphFooter, name: &str) -> gtk::Button {
+        let mut stack = vec![footer.root.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                && button.tooltip_text().as_deref() == Some(name)
+            {
+                return button.clone();
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                child = next.next_sibling();
+                stack.push(next);
+            }
+        }
+        panic!("no pill named {name}");
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     fn mounted_footer_opens_at_once_under_reduced_motion() {
@@ -1191,10 +1559,48 @@ mod tests {
         let settings = gtk::Settings::default().expect("settings");
         let previous = settings.is_gtk_enable_animations();
         let footer = GraphFooter::new();
+        // Under the tab's screen, as in the window: the footer takes its
+        // own height from the column, not the window's.
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let screen = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        screen.set_vexpand(true);
+        column.append(&screen);
+        column.append(&footer.root);
+        let window = gtk::Window::builder()
+            .default_width(600)
+            .default_height(400)
+            .child(&column)
+            .build();
+        window.present();
         settings.set_gtk_enable_animations(false);
-        assert_eq!(footer.root.transition_duration(), 0);
+        footer.root.set_reveal_child(true);
+        assert_eq!(footer.root.fraction(), 1.0, "open at once");
+        footer.root.set_reveal_child(false);
+        assert_eq!(footer.root.fraction(), 0.0, "closed at once");
         settings.set_gtk_enable_animations(true);
-        assert_eq!(footer.root.transition_duration(), 250);
+        footer.root.set_reveal_child(true);
+        // Part-way open on the token curve, then open; then turned off
+        // part-way through closing, it is closed at once.
+        let seen = Rc::new(Cell::new(false));
+        {
+            let seen = seen.clone();
+            let root = footer.root.clone();
+            pump_until(move || {
+                let f = root.fraction();
+                if f > 0.05 && f < 0.95 {
+                    seen.set(true);
+                }
+                f >= 1.0
+            });
+        }
+        assert!(seen.get(), "never part-way open");
+        assert_eq!(footer.root.fraction(), 1.0);
+        pump_until(|| footer.root.height() == HEIGHT);
+        assert_eq!(footer.root.height(), HEIGHT, "its 206 points");
+        footer.root.set_reveal_child(false);
+        settings.set_gtk_enable_animations(false);
+        assert_eq!(footer.root.fraction(), 0.0, "followed live");
         settings.set_gtk_enable_animations(previous);
+        window.close();
     }
 }

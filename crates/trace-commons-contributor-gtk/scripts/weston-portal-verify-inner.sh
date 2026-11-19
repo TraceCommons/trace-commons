@@ -201,15 +201,19 @@ else
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
     ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
+    ui::monitor::map::tests::mounted_the_pile_light_and_shimmer_move_on_the_clock_and_stop \
+    ui::monitor::map::tests::mounted_a_covered_transfer_card_fades_under_the_new_one \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
     ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
     ui::monitor::three_pane::tests::mounted_panes_take_the_layouts_widths_and_a_hidden_pane_takes_none \
     ui::monitor::three_pane::tests::mounted_minimum_width_is_the_sum_of_the_shown_panes \
     ui::monitor::three_pane::tests::mounted_kept_widths_open_the_window_and_never_go_under_a_panes_floor \
+    ui::monitor::three_pane::tests::mounted_panes_fade_as_they_open_and_close \
     ui::monitor::graph_footer::tests::mounted_footer_steps_zooms_and_names_every_pill \
     ui::monitor::graph_footer::tests::mounted_footer_opens_at_once_under_reduced_motion \
     ui::monitor::graph_footer::tests::mounted_footer_controls_are_the_macs_sizes \
+    ui::monitor::graph_footer::tests::mounted_footer_slides_a_step_and_fades_a_zoom \
     ui::monitor::shell::tests::mounted_tab_strip_is_the_macs_rule_tabs \
     ui::monitor::shell::tests::mounted_toolbar_controls_are_the_macs_size \
     ui::monitor::shell::tests::mounted_high_contrast_takes_no_layout_space \
