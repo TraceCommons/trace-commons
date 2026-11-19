@@ -5505,6 +5505,74 @@ mod tests {
         window.close();
     }
 
+    /// A card covered before it was ever drawn, in the same turn of the
+    /// main loop that showed it, still fades beneath the new one on the
+    /// stack's spring and is drawn while it does, as the Mac's removal
+    /// transition runs whether or not a frame of the old card was shown.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_card_covered_before_it_is_drawn_still_fades() {
+        use crate::ui::popover_stack::Slide;
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "codex")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        map.set_cards_shown(true);
+        map.observe_transfers(&listed, None, None, None);
+        // "a" arrives and "b" covers it in one turn: no frame of "a".
+        map.observe_transfers(&listed[1..], None, None, Some("a"));
+        map.observe_transfers(&[], None, None, Some("b"));
+        assert_eq!(map.card_ids(), ["b", "a"]);
+        let cards = map.transfers.front_cards();
+        assert_eq!(cards.len(), 1, "the covered card is drawn by the new one");
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
+        assert_eq!(
+            front.covered_opacity(),
+            1.0,
+            "the covered card starts whole"
+        );
+        let seen = Rc::new(Cell::new(false));
+        {
+            let seen = seen.clone();
+            let front = front.clone();
+            settle_within(400, move || {
+                let o = front.covered_opacity();
+                if o > 0.05 && o < 0.95 && front.drew_covered() {
+                    seen.set(true);
+                }
+                seen.get()
+            });
+        }
+        assert!(
+            seen.get(),
+            "the never-drawn covered card did not fade part-way"
+        );
+        {
+            let front = front.clone();
+            settle_within(1500, move || front.covered_opacity() == 0.0);
+        }
+        assert_eq!(front.covered_opacity(), 0.0, "then it goes");
+        front.queue_draw();
+        settle_within(200, || false);
+        assert!(!front.drew_covered(), "and is no longer drawn");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
     /// Iterates the main loop until `done` holds or `millis` pass.
     fn settle_within(millis: u64, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);

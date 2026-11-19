@@ -272,6 +272,8 @@ mod slide {
         pub last: std::cell::RefCell<Option<(gtk::gsk::RenderNode, f64)>>,
         pub covered_opacity: Cell<f64>,
         pub from_foot: Cell<bool>,
+        /// Whether the last frame drew the covered card.
+        pub drew_covered: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -308,6 +310,7 @@ mod slide {
             let widget = self.obj();
             let height = f64::from(widget.height());
             let opacity = self.covered_opacity.get();
+            self.drew_covered.set(false);
             if let Some((node, h)) = self.covered.borrow().as_ref()
                 && opacity > 0.0
             {
@@ -322,6 +325,7 @@ mod slide {
                 snapshot.append_node(node);
                 snapshot.pop();
                 snapshot.restore();
+                self.drew_covered.set(true);
             }
             if let Some(child) = widget.first_child() {
                 // Kept, so the card can fade where it is when the next
@@ -468,6 +472,11 @@ impl Slide {
         } else {
             0.0
         }
+    }
+
+    /// Whether the slide's last frame drew the card it covers.
+    pub fn drew_covered(&self) -> bool {
+        self.imp().drew_covered.get()
     }
 
     /// The arriving card's own opacity, while it fades in.

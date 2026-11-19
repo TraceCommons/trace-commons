@@ -204,6 +204,7 @@ else
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
     ui::monitor::map::tests::mounted_the_pile_light_and_shimmer_move_on_the_clock_and_stop \
     ui::monitor::map::tests::mounted_a_covered_transfer_card_fades_under_the_new_one \
+    ui::monitor::map::tests::mounted_a_card_covered_before_it_is_drawn_still_fades \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
     ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
     ui::settings::tests::mounted_the_map_style_card_has_the_shared_words \
