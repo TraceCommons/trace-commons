@@ -360,6 +360,15 @@ public sealed class LaunchTests
     }
 
     [Fact]
+    public void UnderHighContrastTheTerminalIsAnOutlineWithFullInkDots()
+    {
+        // Box, 2026-11-19, High Contrast Black: the 0.06 ground drew solid,
+        // hiding the logo and dots drawn in the same system colour.
+        Assert.Equal((0.06, 0.18), LaunchHandoff.TerminalInks(highContrast: false));
+        Assert.Equal((0.0, 1.0), LaunchHandoff.TerminalInks(highContrast: true));
+    }
+
+    [Fact]
     public void TheFolderIsTheFilledFolderGlyph()
     {
         // Indicators.swift:306 `folder.fill`: Segoe Fluent Icons FolderFill,

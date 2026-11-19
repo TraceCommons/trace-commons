@@ -94,16 +94,18 @@ public sealed class LaunchArtView : UserControl
         double left = (LaunchHandoff.Width - LaunchHandoff.TerminalWidth) / 2 + LaunchHandoff.TerminalX;
         double top = (LaunchHandoff.Height - LaunchHandoff.TerminalHeight) / 2;
         var ink = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
-        var hairline = (Brush)Application.Current.Resources["TcHairlineBrush"];
+        bool highContrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
+        (double groundInk, double dotInk) = LaunchHandoff.TerminalInks(highContrast);
+        var hairline = highContrast ? ink : (Brush)Application.Current.Resources["TcHairlineBrush"];
         Add(canvas, new Rectangle
         {
             Width = LaunchHandoff.TerminalWidth, Height = LaunchHandoff.TerminalHeight,
             RadiusX = LaunchHandoff.ControlRadius, RadiusY = LaunchHandoff.ControlRadius,
-            Fill = ink, Opacity = LaunchHandoff.TerminalInk,
+            Fill = ink, Opacity = groundInk,
         }, left, top);
         for (int i = 0; i < 3; i++)
         {
-            Add(canvas, new Ellipse { Width = LaunchHandoff.DotSide, Height = LaunchHandoff.DotSide, Fill = ink, Opacity = LaunchHandoff.DotInk },
+            Add(canvas, new Ellipse { Width = LaunchHandoff.DotSide, Height = LaunchHandoff.DotSide, Fill = ink, Opacity = dotInk },
                 left + LaunchHandoff.BarPadding + i * (LaunchHandoff.DotSide + LaunchHandoff.DotSpacing),
                 top + (LaunchHandoff.BarHeight - LaunchHandoff.DotSide) / 2);
         }

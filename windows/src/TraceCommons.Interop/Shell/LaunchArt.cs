@@ -145,6 +145,16 @@ public static class LaunchHandoff
     /// <summary>The terminal's ground and dots: ink at 0.06 and 0.18 (:231, :235).</summary>
     public const double TerminalInk = 0.06, DotInk = 0.18;
 
+    /// <summary>
+    /// The terminal's ground and dots as ink opacities. Under High Contrast
+    /// the ground is left out and the dots and rim are drawn in full ink:
+    /// on the box (2026-11-19) the 0.06 ground drew as solid system text
+    /// colour under High Contrast Black, and the logo and dots, in that same
+    /// colour, vanished into it.
+    /// </summary>
+    public static (double Ground, double Dots) TerminalInks(bool highContrast) =>
+        highContrast ? (0, 1) : (TerminalInk, DotInk);
+
     /// <summary>A launch button: logo 14, spaced s3 = 6 from the name (:152, :166; GlassTokens.swift:504).</summary>
     public const double ButtonLogoSide = 14, ButtonSpacing = 6;
 
