@@ -354,6 +354,148 @@ fn mounted_the_folder_list_is_the_macs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The window's pixels at `points` (window coordinates), drawn from its
+/// widget tree, as R, G, B.
+fn window_pixels(window: &adw::ApplicationWindow, points: &[(i32, i32)]) -> Vec<[u8; 3]> {
+    let (width, height) = (window.width(), window.height());
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+    let node = snapshot.to_node().expect("the window has drawn");
+    let renderer =
+        gtk::gsk::Renderer::for_surface(&window.surface().expect("a surface")).expect("a renderer");
+    let viewport = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
+    let texture = renderer.render_texture(&node, Some(&viewport));
+    renderer.unrealize();
+    let stride = texture.width() as usize * 4;
+    let mut pixels = vec![0u8; stride * texture.height() as usize];
+    texture.download(&mut pixels, stride);
+    // `download` writes B, G, R, A, premultiplied; the window is opaque.
+    points
+        .iter()
+        .map(|&(x, y)| {
+            let at = y as usize * stride + x as usize * 4;
+            [pixels[at + 2], pixels[at + 1], pixels[at]]
+        })
+        .collect()
+}
+
+/// A colour the generated glass sheet of `dark` defines, as R, G, B.
+fn glass_colour(dark: bool, name: &str) -> [u8; 3] {
+    let sheet = if dark {
+        crate::ui::style::brand_tokens::GLASS_DARK_CSS
+    } else {
+        crate::ui::style::brand_tokens::GLASS_LIGHT_CSS
+    };
+    let hex = sheet
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("@define-color {name} ")))
+        .unwrap_or_else(|| panic!("the glass sheet defines no {name}"))
+        .trim_end_matches(';')
+        .trim()
+        .trim_start_matches('#')
+        .to_owned();
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap();
+    [byte(0), byte(1), byte(2)]
+}
+
+fn luminance([r, g, b]: [u8; 3]) -> f64 {
+    let linear = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.03928 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// On a selected row the Submit pill is the Mac's control on the
+/// selection (`GlassGround.selection`): its own fill over the selection
+/// (`controlOnSelection`) and the selection's ink (`controlInk`), not the
+/// pane's dark pill with white words that sat on the pale-blue selection in
+/// the dark screenshot. Read from the drawn window, in both schemes.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().unwrap();
+    adw::init().expect("GTK display unavailable");
+    let application = adw::Application::builder()
+        .application_id("ai.tracecommons.TracesSelectionTest")
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    application
+        .register(None::<&gtk::gio::Cancellable>)
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("tc-traces-selection-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (worker, _jobs, _results) = Worker::fixture(dir.clone());
+    let app = App::build(&application, worker);
+    *app.projects.borrow_mut() = vec![project("api", "notify_only")];
+    *app.entries.borrow_mut() = vec![entry("a1", "api", 1), entry("a2", "api", 30)];
+    crate::ui::queue::render(&app);
+    assert!(app.open_screen("queue"), "the Traces tab opens");
+    app.window.present();
+    app.shell.select(
+        &app,
+        crate::ui::monitor::inspector::Selection::Folder("api".into()),
+    );
+    let manager = adw::StyleManager::default();
+    for dark in [false, true] {
+        manager.set_color_scheme(if dark {
+            adw::ColorScheme::ForceDark
+        } else {
+            adw::ColorScheme::ForceLight
+        });
+        settle(&context);
+        let page: gtk::Widget = app.queue.root.clone().upcast();
+        let row = with_class(&page, "tc-tree-row-selected").remove(0);
+        let pill = with_class(&row, "tc-tree-submit").remove(0);
+        let at = bounds(&pill, app.window.upcast_ref());
+        // Inside the pill's left padding, on its middle line: its fill.
+        let point = ((at.x() + 4.0) as i32, (at.y() + at.height() / 2.0) as i32);
+        let fill = window_pixels(&app.window, &[point])[0];
+        let wanted = glass_colour(dark, "tc_glass_control_on_selection");
+        let near = fill.iter().zip(wanted).all(|(a, b)| a.abs_diff(b) <= 3);
+        assert!(
+            near,
+            "dark={dark}: the pill draws {fill:?}, the Mac's {wanted:?}"
+        );
+        let ink = glass_colour(dark, "tc_glass_selected_ink");
+        let ratio = contrast(ink, fill);
+        assert!(ratio >= 4.5, "dark={dark}: its words at {ratio:.2}:1");
+        // The words are drawn in that ink: the pill holds a pixel of it.
+        let label = pill.first_child().expect("the pill's words");
+        let words = bounds(&label, app.window.upcast_ref());
+        let mut points = Vec::new();
+        for x in (words.x() as i32)..((words.x() + words.width()) as i32) {
+            points.push((x, (words.y() + words.height() / 2.0) as i32));
+        }
+        let drawn = window_pixels(&app.window, &points);
+        let closest = drawn
+            .iter()
+            .map(|p| contrast(*p, fill))
+            .fold(0.0_f64, f64::max);
+        let inked = drawn
+            .iter()
+            .any(|p| p.iter().zip(ink).all(|(a, b)| a.abs_diff(b) <= 24));
+        assert!(
+            inked,
+            "dark={dark}: no word pixel near the selection's ink, best {closest:.2}:1"
+        );
+    }
+    manager.set_color_scheme(adw::ColorScheme::Default);
+    app.window.close();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The folder list's stock icons resolve in the theme the app runs with.
 #[test]
 #[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]

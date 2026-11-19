@@ -685,6 +685,14 @@ def glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
     ratio = contrast(palette["selectedInk"], palette["controlSelected"])
     if ratio < 4.5:
         raise TokenError(f"glass {scheme}: selection text on controlSelected is {ratio:.2f}:1, under 4.5:1")
+    # A control on a selected row (`GlassGround.selection`): its own fill
+    # and hover over the selection, labelled in the selection's ink
+    # (`controlInk`), as the Mac's Submit pill on a selected Traces row.
+    for token in ("controlOnSelection", "controlOnSelectionHover"):
+        palette[token] = over(flat_color(tokens, token, scheme), palette["controlSelected"])
+        ratio = contrast(palette["selectedInk"], palette[token])
+        if ratio < 4.5:
+            raise TokenError(f"glass {scheme}: selection text on {token} is {ratio:.2f}:1, under 4.5:1")
     return palette
 
 
@@ -898,6 +906,8 @@ GLASS_COLOURS = [
     ("statusOn", "status_on"),
     ("statusOff", "status_off"),
     ("tileFolder", "tile_folder"),
+    ("controlOnSelection", "control_on_selection"),
+    ("controlOnSelectionHover", "control_on_selection_hover"),
 ]
 
 

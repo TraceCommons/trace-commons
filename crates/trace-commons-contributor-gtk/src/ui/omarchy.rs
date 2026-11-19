@@ -135,6 +135,11 @@ pub struct Palette {
     /// The hit's text on that wash: the ink, moved until it clears 4.5:1 on
     /// the wash over every ground, bare and under each kept overlay.
     pub highlight_ink: Rgb,
+    /// A control on a selected row (the Mac's `controlOnSelection`): the
+    /// accent fill moved away from its label, so [`Palette::on_accent`]
+    /// reads on it at least as well as on the accent, and its hover.
+    pub control_on_selection: Rgb,
+    pub control_on_selection_hover: Rgb,
 }
 
 /// The highlighted excerpt's wash, as Pango's `bgalpha`.
@@ -292,6 +297,12 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
         }
     };
 
+    // Black under a light label, white under a dark one.
+    let away = if on_accent.luminance() > 0.18 {
+        Rgb::BLACK
+    } else {
+        Rgb::WHITE
+    };
     Ok(Palette {
         mode,
         bg,
@@ -324,6 +335,8 @@ pub fn parse(text: &str, light_marker: bool) -> Result<Palette, PaletteError> {
         redaction_ink,
         highlight,
         highlight_ink,
+        control_on_selection: accent.mix(away, 0.16),
+        control_on_selection_hover: accent.mix(away, 0.26),
     })
 }
 

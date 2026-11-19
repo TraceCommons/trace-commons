@@ -1047,6 +1047,23 @@ window.tc-glass-window:backdrop .tc-tree-split-menu > button {
   color: @tc_glass_selected_ink;
 }
 
+/* A control on a selected row: the Mac's `GlassGround.selection`, its own
+   fill over the selection (`controlOnSelection`) and the selection's ink
+   (`controlInk`), in and out of focus; the selection does not dim. */
+.tc-tree-row-selected .tc-tree-submit,
+.tc-tree-row-selected .tc-tree-split-menu > button,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-submit,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-split-menu > button {
+  background-color: @tc_glass_control_on_selection;
+  color: @tc_glass_selected_ink;
+}
+
+.tc-tree-row-selected .tc-tree-submit:hover,
+.tc-tree-row-selected .tc-tree-split-menu > button:hover,
+.tc-tree-row-selected .tc-tree-kebab > button:hover {
+  background-color: @tc_glass_control_on_selection_hover;
+}
+
 /* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
    `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
    slider, so a 17-wide slider in 2 of padding is 38 wide. */

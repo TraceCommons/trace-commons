@@ -665,6 +665,8 @@ fn omarchy_define(p: &omarchy::Palette, name: &str) -> Option<String> {
         "tc_glass_ink" | "tc_glass_toolbar_glyph" => hex(p.ink),
         "tc_glass_ink_secondary" => hex(p.muted),
         "tc_glass_selected_ink" => hex(p.on_accent),
+        "tc_glass_control_on_selection" => hex(p.control_on_selection),
+        "tc_glass_control_on_selection_hover" => hex(p.control_on_selection_hover),
         "tc_glass_toolbar_glyph_hidden" => hex(p.tertiary),
         "tc_glass_toolbar_expanded" => hex(p.accent_text),
         "tc_glass_control_hover" => hex(p.control_hover),
@@ -1709,7 +1711,7 @@ mod tests {
                 .into_iter()
                 .filter(|n| n.starts_with("tc_glass_"))
                 .count();
-            assert_eq!(glass, 43, "{name}");
+            assert_eq!(glass, 45, "{name}");
         }
     }
 
@@ -1761,6 +1763,8 @@ mod tests {
                 p.redaction_bg,
                 p.redaction_ink,
                 p.highlight,
+                p.control_on_selection,
+                p.control_on_selection_hover,
             ]
             .iter()
             .map(|c| c.hex())
@@ -1828,7 +1832,14 @@ mod tests {
             .iter()
             .flat_map(|ink| glass_grounds.iter().map(move |g| (*ink, *g)))
             .collect();
-        let glass_label = [("tc_glass_selected_ink", "tc_glass_control_selected")];
+        let glass_label = [
+            ("tc_glass_selected_ink", "tc_glass_control_selected"),
+            ("tc_glass_selected_ink", "tc_glass_control_on_selection"),
+            (
+                "tc_glass_selected_ink",
+                "tc_glass_control_on_selection_hover",
+            ),
+        ];
         for (name, _, css) in omarchy_sheets() {
             let mut failures = check_css(&name, &css, &text, 4.5);
             failures.extend(check_css(&name, &css, &rules, 3.0));
