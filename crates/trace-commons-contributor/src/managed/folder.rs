@@ -20,6 +20,9 @@ pub struct FolderSettings {
     #[serde(default)]
     pub collect_traces: bool,
     pub cli_options: String,
+    /// Remembered Red Team input paths for this folder (hosts are never remembered).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub red_team_inputs: Vec<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -31,6 +34,8 @@ pub struct FolderSnapshot {
     pub collect_traces: bool,
     pub cli_options: String,
     pub remembered: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub red_team_inputs: Vec<PathBuf>,
 }
 
 pub fn canonical(cwd: &Path) -> Result<PathBuf, ManagedError> {
@@ -59,6 +64,7 @@ pub fn lookup(
             collect_traces: entry.collect_traces,
             cli_options: entry.cli_options.clone(),
             remembered: true,
+            red_team_inputs: entry.red_team_inputs.clone(),
         },
         None => FolderSnapshot {
             tool,
@@ -71,6 +77,7 @@ pub fn lookup(
                 .cloned()
                 .unwrap_or_default(),
             remembered: false,
+            red_team_inputs: Vec::new(),
         },
     };
     super::options::parse(tool, &result.cli_options)?;
@@ -94,6 +101,8 @@ pub fn apply_patch(
         collect_traces: bool,
         #[serde(default)]
         cli_options: String,
+        #[serde(default)]
+        red_team_inputs: Vec<PathBuf>,
         #[serde(default)]
         reset: bool,
     }
@@ -125,6 +134,7 @@ pub fn apply_patch(
                 background_model: update.background_model,
                 collect_traces: update.collect_traces,
                 cli_options: update.cli_options,
+                red_team_inputs: update.red_team_inputs,
             });
         }
     }

@@ -34,6 +34,7 @@ mod local_insights_cli;
 mod local_redaction_audit;
 mod macos_shell_settings_contract;
 mod managed_accounts;
+mod managed_cli_launch;
 mod managed_cli_options;
 mod managed_folder_settings;
 mod managed_launch;

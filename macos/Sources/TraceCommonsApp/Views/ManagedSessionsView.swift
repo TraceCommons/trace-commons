@@ -500,7 +500,7 @@ enum ManagedWords {
 // MARK: - Dialogs
 
 /// An eyebrow label over a control, as `GlassTextField` lays out its own.
-private struct ManagedField<Content: View>: View {
+struct ManagedField<Content: View>: View {
     let label: String
     @ViewBuilder let content: Content
 
@@ -597,6 +597,7 @@ struct ManagedLaunchSheet: View {
     @EnvironmentObject private var model: AppModel
     @State private var accountID = ""
     @State private var folderDraft = ManagedFolderDraft()
+    @State private var sandboxDraft = RedTeamSandboxDraft()
     @State private var loadedAccountID: String?
     /// NEAR AI's chat models for the chosen account's tool: nil until read,
     /// or when they could not be (offline, timeout, NEAR AI down).
@@ -674,6 +675,9 @@ struct ManagedLaunchSheet: View {
                         catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
                         supportsFolderSettings: supportsFolderSettings,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
+                    if ManagedSurface.showsSandboxSection(for: account.tool) {
+                        RedTeamSandboxSection(draft: $sandboxDraft)
+                    }
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
                     Text(project?.path ?? model.managedText("home_folder"))
@@ -706,10 +710,14 @@ struct ManagedLaunchSheet: View {
 
     private func launch() {
         guard toolAvailable, folderReady, !model.managedBusy, let snapshot = model.managedSnapshot, let account = snapshot.accounts.first(where: { $0.id == accountID }) else { return }
+        let sandbox: ManagedSandboxSettings? = ManagedSurface.showsSandboxSection(for: account.tool)
+            ? sandboxDraft.sandboxSettings()
+            : nil
         var params = ManagedSurface.launchParams(
             account: account, cwd: project?.path, requestID: UUID().uuidString,
             generation: snapshot.generations[account.tool] ?? 0,
-            model: folderDraft.model, collectTraces: folderDraft.collectTraces)
+            model: folderDraft.model, collectTraces: folderDraft.collectTraces,
+            sandbox: sandbox)
         if supportsFolderSettings {
             params = folderDraft.applying(to: params, daemonKeepsSavedModel: snapshot.capabilities.keepSavedModel == true,
                                           daemonReadsBackground: snapshot.capabilities.backgroundModel == true)
