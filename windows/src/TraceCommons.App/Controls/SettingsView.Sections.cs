@@ -98,6 +98,7 @@ public sealed partial class SettingsView
 
         _sectionsHost = host;
         Loaded += OnSectionsLoaded;
+        Unloaded += (_, _) => host.StatusChanged -= OnGateStatusChanged;
 
         DevicesHost.Content = new AccountDevicesSection(host);
         _payouts = new PayoutLinkSection(host);
@@ -178,11 +179,28 @@ public sealed partial class SettingsView
     /// </summary>
     private async void OnSectionsLoaded(object sender, RoutedEventArgs e)
     {
-        Loaded -= OnSectionsLoaded;
         if (_sectionsHost is not { } host)
         {
             return;
         }
+
+        // Read again whenever the daemon's status changes while Settings is
+        // up, so a Set up again that unenrolls closes the gated sections.
+        host.StatusChanged -= OnGateStatusChanged;
+        host.StatusChanged += OnGateStatusChanged;
+        await ReadGateAsync(host);
+    }
+
+    private async void OnGateStatusChanged()
+    {
+        if (_sectionsHost is { } host && IsLoaded)
+        {
+            await ReadGateAsync(host);
+        }
+    }
+
+    private async System.Threading.Tasks.Task ReadGateAsync(DaemonHost host)
+    {
 
         bool requires;
         if (Program.IsSampleLaunch)
@@ -195,8 +213,12 @@ public sealed partial class SettingsView
             requires = status.IsError || !OnboardingState.Default().IsSetupComplete(status.ResultAs<DaemonStatus>());
         }
 
-        _gate = SettingsGates.Of(onboardingKnown: true, requiresOnboarding: requires);
-        DrawList();
+        SettingsGate gate = SettingsGates.Of(onboardingKnown: true, requiresOnboarding: requires);
+        if (gate != _gate)
+        {
+            _gate = gate;
+            DrawList();
+        }
     }
 
     /// <summary>
