@@ -168,11 +168,28 @@ impl CreditArrival {
     }
 }
 
+/// Whether a credit's arrival asks the desktop for attention, from
+/// `XDG_CURRENT_DESKTOP` (a colon-separated list). Not on GNOME, where the
+/// request becomes a "ready" notification rather than a mark on the
+/// window's task: there the tray's animation is the whole of it (owner,
+/// 2026-11-19). KDE, Hyprland, Sway and other desktops are asked, on
+/// Wayland or X11.
+pub fn asks_attention(current_desktop: Option<&str>) -> bool {
+    !current_desktop
+        .unwrap_or_default()
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case("gnome"))
+}
+
 /// Asks the desktop to draw attention to `window`, as the Mac's
-/// informational request does, and only when it is shown and not active.
+/// informational request does, and only when it is shown and not active,
+/// and never on GNOME ([`asks_attention`]).
 pub fn request_attention(window: &gtk::Window) {
     use gtk::prelude::*;
     if !window.is_visible() || window.is_active() {
+        return;
+    }
+    if !asks_attention(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()) {
         return;
     }
     let Some(surface) = window.surface() else {
@@ -213,6 +230,26 @@ pub fn clear_attention_when_active(window: &gtk::Window) {
 
 #[cfg(test)]
 mod tests {
+    /// GNOME, alone or after a vendor's name, is never asked; KDE,
+    /// Hyprland, Sway, X11 desktops and an unknown session are.
+    #[test]
+    fn gnome_is_not_asked_for_attention() {
+        use super::asks_attention;
+        for gnome in [
+            "GNOME",
+            "ubuntu:GNOME",
+            "gnome",
+            "GNOME-Classic:GNOME",
+            "Zorin:GNOME",
+        ] {
+            assert!(!asks_attention(Some(gnome)), "{gnome}");
+        }
+        for other in ["KDE", "Hyprland", "sway", "XFCE", "X-Cinnamon", ""] {
+            assert!(asks_attention(Some(other)), "{other}");
+        }
+        assert!(asks_attention(None));
+    }
+
     use super::*;
     use std::cell::RefCell;
 
