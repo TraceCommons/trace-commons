@@ -1,3 +1,6 @@
+// The tests here are Unix-only; elsewhere their shared imports and helpers
+// are unused, which -D warnings turns into a build failure (Linux and Windows CI).
+#![cfg_attr(not(unix), allow(unused_imports, dead_code))]
 use clap::Parser;
 use serde_json::json;
 use std::path::PathBuf;
