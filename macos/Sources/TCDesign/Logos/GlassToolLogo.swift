@@ -3,7 +3,7 @@ import SwiftUI
 /// The tools that have logo artwork. A tool without one is drawn as its
 /// initials (`GlassTool.logo` is nil for it).
 public enum GlassToolLogoID: String, CaseIterable, Sendable {
-    case claude, codex, antigravity, openCode, theia
+    case claude, codex, antigravity, openCode, theia, redTeam
 
     var artwork: GlassLogoArtwork {
         switch self {
@@ -12,6 +12,7 @@ public enum GlassToolLogoID: String, CaseIterable, Sendable {
         case .antigravity: GlassLogoPaths.antigravity
         case .openCode: GlassLogoPaths.openCode
         case .theia: GlassLogoPaths.theia
+        case .redTeam: GlassLogoPaths.redTeam
         }
     }
 

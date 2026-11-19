@@ -246,6 +246,7 @@ public enum GlassTokens {
         public static let toolAntigravity: GlassRGBA = GlassRGBA(0x6D9CFF, alpha: 1, light: GlassRGBA(0x3A68D8, alpha: 1))
         public static let toolOpenCode: GlassRGBA = GlassRGBA(0x4FD39A, alpha: 1, light: GlassRGBA(0x1D9467, alpha: 1))
         public static let toolTheia: GlassRGBA = GlassRGBA(0x9D93FF, alpha: 1, light: GlassRGBA(0x6152E0, alpha: 1))
+        public static let toolRedTeam: GlassRGBA = GlassRGBA(0xEB1924, alpha: 1, light: GlassRGBA(0xC8141E, alpha: 1))
         public static let tileFolder: GlassRGBA = GlassRGBA(0x2A2A2C, alpha: 1, light: GlassRGBA(0xE6E6EA, alpha: 1))
         public static let tileFolderInk: GlassRGBA = GlassRGBA(0x8BE28B, alpha: 1, light: GlassRGBA(0x2C8A37, alpha: 1))
         /// Overlay strokes and fills over a surface: white on dark, black on light. Used at an alpha.
@@ -392,6 +393,7 @@ public enum GlassTokens {
             "toolAntigravity": toolAntigravity,
             "toolOpenCode": toolOpenCode,
             "toolTheia": toolTheia,
+            "toolRedTeam": toolRedTeam,
             "tileFolder": tileFolder,
             "tileFolderInk": tileFolderInk,
             "ink": ink,
