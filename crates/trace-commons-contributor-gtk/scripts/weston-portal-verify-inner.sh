@@ -186,6 +186,7 @@ else
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
     ui::home::tests::mounted_home_draws_the_macs_tiles \
+    ui::home::tests::mounted_the_account_sign_in_calls_what_is_missing \
     ui::hero_card::tests::a_hero_is_one_button_that_hovers_and_closes_on_its_own \
     ui::hero_card::tests::mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted \
     ui::insights::tests::mounted_insights_tabs_have_visible_labels_and_switch_pages \

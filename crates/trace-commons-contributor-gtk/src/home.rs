@@ -174,6 +174,35 @@ pub fn account_needs_sign_in(
         })
 }
 
+/// Where the Account heading's Sign in goes (`HomeFormat.accountSignInRoute`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSignInRoute {
+    /// The account session the Credit tiles wait on: `account_sign_in`, as
+    /// the Payouts section's sign-in and the Mac's `signInToAccount` call.
+    Account,
+    /// NEAR AI's sign-in, as the Private AI tab's balance row starts it.
+    NearAi,
+}
+
+impl AccountSignInRoute {
+    /// The daemon call the route starts with.
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::Account => "account_sign_in",
+            Self::NearAi => "near_ai_credential_start",
+        }
+    }
+}
+
+/// The account session when the commons' points wait on one, else NEAR AI.
+pub fn account_sign_in_route(credit: Option<&CreditSummary>) -> AccountSignInRoute {
+    if credit.is_some_and(CreditSummary::account_session_required) {
+        AccountSignInRoute::Account
+    } else {
+        AccountSignInRoute::NearAi
+    }
+}
+
 /// The NEAR AI balance tile's figure and the line under it
 /// (`HomeFormat.balance`): the amount left when the core reads one, else a
 /// dash; the core's sentence for an account with no ceiling goes under the
@@ -376,6 +405,43 @@ mod tests {
             Some(&balance("session_expired"))
         ));
         assert!(!account_needs_sign_in(None, Some(&balance("known"))));
+    }
+
+    /// The Account heading's Sign in signs in to what is missing, as the
+    /// Mac's `HomeFormat.accountSignInRoute` routes it: the account session
+    /// when the Credit tiles wait on one, else NEAR AI.
+    #[test]
+    fn the_account_sign_in_routes_as_the_macs() {
+        let summary = |value| serde_json::from_value::<CreditSummary>(value).unwrap();
+        let waits = summary(serde_json::json!({
+            "points_state": "unknown",
+            "points_unknown_reason": "account-session-required"
+        }));
+        let other_unknown = summary(serde_json::json!({
+            "points_state": "unknown",
+            "points_unknown_reason": "commons-unreachable"
+        }));
+        let known = summary(serde_json::json!({
+            "points_state": "known", "commons_points_lifetime_earned": 1
+        }));
+        assert_eq!(
+            account_sign_in_route(Some(&waits)),
+            AccountSignInRoute::Account
+        );
+        assert_eq!(
+            account_sign_in_route(Some(&other_unknown)),
+            AccountSignInRoute::NearAi
+        );
+        assert_eq!(
+            account_sign_in_route(Some(&known)),
+            AccountSignInRoute::NearAi
+        );
+        assert_eq!(account_sign_in_route(None), AccountSignInRoute::NearAi);
+        assert_eq!(AccountSignInRoute::Account.method(), "account_sign_in");
+        assert_eq!(
+            AccountSignInRoute::NearAi.method(),
+            "near_ai_credential_start"
+        );
     }
 
     /// The NEAR AI balance tile: what is left as the core formats it, a

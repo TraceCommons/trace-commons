@@ -351,12 +351,14 @@ impl HomeView {
                 }
             });
         }
-        // The Account heading's Sign in: NEAR AI's sign-in, as the Private
-        // AI tab's balance row starts it.
+        // The Account heading's Sign in signs in to what is missing, as the
+        // Mac's does (`HomeFormat.accountSignInRoute`): the account session
+        // when the Credit tiles wait on one, else NEAR AI's sign-in, as the
+        // Private AI tab's balance row starts it.
         let weak = Rc::downgrade(app);
         self.sign_in.connect_clicked(move |_| {
             if let Some(app) = weak.upgrade() {
-                super::credential::act(&app, copy::CredentialAction::Obtain);
+                app.home.start_sign_in(&app);
             }
         });
         let weak = Rc::downgrade(app);
@@ -519,6 +521,23 @@ impl HomeView {
             self.balance.detail.set_visible(detail.is_some());
         }
         self.draw_account_sign_in();
+    }
+
+    /// The Account heading's Sign in, routed by the last credit read.
+    fn start_sign_in(&self, app: &Rc<App>) {
+        let route = crate::home::account_sign_in_route(self.facts.borrow().credit.as_ref());
+        match route {
+            crate::home::AccountSignInRoute::Account => {
+                self.sign_in.set_sensitive(false);
+                app.call(route.method(), serde_json::json!({}), |app, _| {
+                    app.home.sign_in.set_sensitive(true);
+                    app.refresh();
+                });
+            }
+            crate::home::AccountSignInRoute::NearAi => {
+                super::credential::act(app, copy::CredentialAction::Obtain);
+            }
+        }
     }
 
     /// The Account heading's Sign in waits while a sign-in is under way.
@@ -1181,6 +1200,93 @@ mod tests {
         settle();
         assert!(!view.not_contributed.card.is_mapped());
         window.close();
+    }
+
+    /// The Account heading's Sign in, pressed in the real App (no daemon:
+    /// every call is recorded and stays unanswered), signs in to what is
+    /// missing as the Mac's does: `account_sign_in` while the Credit tiles
+    /// wait on an account session, NEAR AI's sign-in otherwise. Before this
+    /// fix it always started NEAR AI's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_account_sign_in_calls_what_is_missing() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        let application = adw::Application::builder()
+            .application_id("ai.tracecommons.HomeSignInTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("tc-home-sign-in-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (worker, jobs, _results) = crate::worker::Worker::fixture(dir.clone());
+        let app = App::build(&application, worker);
+        let settle = || {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+            }
+        };
+        let calls = || {
+            let mut seen = Vec::new();
+            while let Ok((_, job)) = jobs.try_recv() {
+                if let crate::worker::Job::Call { method, .. } = job {
+                    seen.push(method);
+                }
+            }
+            seen
+        };
+        settle();
+        calls();
+
+        app.home.render_credit_summary(Some(&serde_json::json!({
+            "points_state": "unknown",
+            "points_unknown_reason": "account-session-required"
+        })));
+        app.home.sign_in.set_sensitive(true);
+        app.home.sign_in.emit_clicked();
+        settle();
+        let pressed = calls();
+        assert!(
+            pressed.iter().any(|method| method == "account_sign_in"),
+            "the account session is signed in to: {pressed:?}"
+        );
+        assert!(
+            !pressed
+                .iter()
+                .any(|method| method == "near_ai_credential_start"),
+            "NEAR AI is not what the credit waits on: {pressed:?}"
+        );
+
+        app.home.render_credit_summary(Some(&serde_json::json!({
+            "points_state": "known",
+            "commons_points_lifetime_earned": 1
+        })));
+        app.home.render_balance(Some(&model::NearAiBalance {
+            state: "no_session".into(),
+            ..Default::default()
+        }));
+        app.home.sign_in.set_sensitive(true);
+        app.home.sign_in.emit_clicked();
+        settle();
+        let pressed = calls();
+        assert!(
+            pressed
+                .iter()
+                .any(|method| method == "near_ai_credential_start"),
+            "NEAR AI's sign-in starts: {pressed:?}"
+        );
+        assert!(
+            !pressed.iter().any(|method| method == "account_sign_in"),
+            "{pressed:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The main pane's width, the Monitor's.
