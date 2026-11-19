@@ -23,6 +23,7 @@ pub mod graph_footer;
 pub mod graph_model;
 pub mod inspector;
 pub mod map;
+pub mod map_motion;
 pub mod map_scene;
 pub mod map_transfers;
 pub mod notices;
