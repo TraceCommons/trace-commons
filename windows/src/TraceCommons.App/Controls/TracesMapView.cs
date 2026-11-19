@@ -70,7 +70,7 @@ public sealed partial class TracesMapView : UserControl
     private readonly TextBlock _cardTitle = new();
     private readonly TextBlock _cardDetail = new();
     private readonly StackPanel _foot = new();
-    private readonly StackPanel _legend = new() { Orientation = Orientation.Horizontal, Spacing = 10 };
+    private readonly FlowPanel _legend = new() { Spacing = 10, LineSpacing = 4 };
     private readonly Button _zoomOut = new();
     private readonly Button _zoomIn = new();
     private readonly StackPanel _switch = new() { Orientation = Orientation.Horizontal, Spacing = 2 };
@@ -141,6 +141,8 @@ public sealed partial class TracesMapView : UserControl
         var footRow = new Grid { ColumnSpacing = 12 };
         footRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         footRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        _legend.VerticalAlignment = VerticalAlignment.Bottom;
+        zoom.VerticalAlignment = VerticalAlignment.Bottom;
         footRow.Children.Add(_legend);
         Grid.SetColumn(zoom, 1);
         footRow.Children.Add(zoom);
@@ -910,7 +912,7 @@ public sealed partial class TracesMapView : UserControl
         return on ? p : 1 - p;
     }
 
-    private CanvasGeometry MarkUnit(ICanvasResourceCreator device) => _markUnit ??= PathGeometry(device, NearMarkPath.Unit);
+    private CanvasGeometry MarkUnit(ICanvasResourceCreator device) => _markUnit ??= MapPainter.MarkUnit(device);
 
     /// <summary>Every mark and dot of the field as one geometry, built once per size (checklist O3).</summary>
     private CanvasGeometry Tile(ICanvasResourceCreator device, Size size)
@@ -938,58 +940,6 @@ public sealed partial class TracesMapView : UserControl
         return _tile;
     }
 
-    private static CanvasGeometry PathGeometry(ICanvasResourceCreator device, IReadOnlyList<PathStep> steps)
-    {
-        using var builder = new CanvasPathBuilder(device);
-        builder.SetFilledRegionDetermination(CanvasFilledRegionDetermination.Winding);
-        bool open = false;
-        foreach (PathStep s in steps)
-        {
-            switch (s.Kind)
-            {
-                case PathStepKind.Move:
-                    if (open)
-                    {
-                        builder.EndFigure(CanvasFigureLoop.Open);
-                    }
-
-                    builder.BeginFigure((float)s.X, (float)s.Y);
-                    open = true;
-                    break;
-                case PathStepKind.Line:
-                    if (!open)
-                    {
-                        builder.BeginFigure((float)s.X, (float)s.Y);
-                        open = true;
-                    }
-                    else
-                    {
-                        builder.AddLine((float)s.X, (float)s.Y);
-                    }
-
-                    break;
-                case PathStepKind.Cubic:
-                    builder.AddCubicBezier(new Vector2((float)s.X1, (float)s.Y1), new Vector2((float)s.X2, (float)s.Y2), new Vector2((float)s.X, (float)s.Y));
-                    break;
-                case PathStepKind.Close:
-                    if (open)
-                    {
-                        builder.EndFigure(CanvasFigureLoop.Closed);
-                        open = false;
-                    }
-
-                    break;
-            }
-        }
-
-        if (open)
-        {
-            builder.EndFigure(CanvasFigureLoop.Open);
-        }
-
-        return CanvasGeometry.CreatePath(builder);
-    }
-
     /// <summary>A tool's logo in its viewBox units, parsed once.</summary>
     private CanvasGeometry? Logo(ICanvasResourceCreator device, string name)
     {
@@ -998,21 +948,11 @@ public sealed partial class TracesMapView : UserControl
             return cached;
         }
 
-        if (!MapArt.Logos.TryGetValue(name, out LogoArtwork? art))
+        if (MapPainter.Logo(device, name) is not { } geometry)
         {
             return null;
         }
 
-        var parts = new List<CanvasGeometry>();
-        foreach (string data in art.Paths)
-        {
-            if (SvgPathData.Parse(data) is { } steps)
-            {
-                parts.Add(PathGeometry(device, steps));
-            }
-        }
-
-        CanvasGeometry geometry = CanvasGeometry.CreateGroup(device, parts.ToArray(), CanvasFilledRegionDetermination.Winding);
         _logos[name] = geometry;
         return geometry;
     }
@@ -1023,11 +963,7 @@ public sealed partial class TracesMapView : UserControl
         Color tint = Ink(tool.TintToken, alpha);
         if (tool.Logo is { } name && MapArt.Logos.TryGetValue(name, out LogoArtwork? art) && Logo(device, name) is { } geometry)
         {
-            double scale = Math.Min(side / art.Width, side / art.Height);
-            Matrix3x2 m = Matrix3x2.CreateTranslation(-(float)(art.X + art.Width / 2), -(float)(art.Y + art.Height / 2))
-                * Matrix3x2.CreateScale((float)scale)
-                * Matrix3x2.CreateTranslation((float)centre.X, (float)centre.Y);
-            ds.FillGeometry(geometry.Transform(m), tint);
+            ds.FillGeometry(geometry.Transform(MapPainter.LogoFit(art, new Vector2((float)centre.X, (float)centre.Y), side)), tint);
         }
         else
         {
@@ -1261,22 +1197,7 @@ public sealed partial class TracesMapView : UserControl
             using var station = new CanvasCommandList(device);
             using (CanvasDrawingSession layer = station.CreateDrawingSession())
             {
-                using var seam = new CanvasStrokeStyle { LineJoin = CanvasLineJoin.Round };
-                foreach (DrawnFace face in LibraryStation.Frame(w, h, angle))
-                {
-                    using var builder = new CanvasPathBuilder(device);
-                    builder.BeginFigure((float)(at.X - w / 2 + face.Points[0].X), (float)(at.Y - h / 2 + face.Points[0].Y));
-                    for (int i = 1; i < face.Points.Count; i++)
-                    {
-                        builder.AddLine((float)(at.X - w / 2 + face.Points[i].X), (float)(at.Y - h / 2 + face.Points[i].Y));
-                    }
-
-                    builder.EndFigure(CanvasFigureLoop.Closed);
-                    using CanvasGeometry polygon = CanvasGeometry.CreatePath(builder);
-                    Color colour = Color.FromArgb(255, (byte)Math.Round(face.R * 255), (byte)Math.Round(face.G * 255), (byte)Math.Round(face.B * 255));
-                    layer.FillGeometry(polygon, colour);
-                    layer.DrawGeometry(polygon, colour, 0.6f, seam);
-                }
+                MapPainter.Station(layer, device, new Vector2((float)(at.X - w / 2), (float)(at.Y - h / 2)), w, h, angle);
             }
 
             DrawGlow(ds, station, With(brand, LibraryStation.Glow(library.Active)), LibraryStation.GlowRadius);
@@ -1290,7 +1211,7 @@ public sealed partial class TracesMapView : UserControl
             using var orb = new CanvasCommandList(device);
             using (CanvasDrawingSession layer = orb.CreateDrawingSession())
             {
-                DrawOrb(layer, device, at, r, angle);
+                MapPainter.Orb(layer, device, new Vector2((float)at.X, (float)at.Y), r, angle, Ink("heroCampaignBright"), Ink("heroCampaignDeep"));
             }
 
             DrawGlow(ds, orb, With(brand, LibraryOrb.Glow(library.Active)), LibraryOrb.GlowRadius);
@@ -1306,61 +1227,6 @@ public sealed partial class TracesMapView : UserControl
     {
         using var shadow = new ShadowEffect { Source = image, BlurAmount = (float)(radius / 2), ShadowColor = colour };
         ds.DrawImage(shadow);
-    }
-
-    /// <summary>The orb (LibraryOrb.swift:76-120).</summary>
-    private void DrawOrb(CanvasDrawingSession ds, ICanvasResourceCreator device, MapPoint c, double r, double angle)
-    {
-        Color blue = Ink("heroCampaignBright"), deep = Ink("heroCampaignDeep");
-        var light = new Vector2((float)(c.X - r * 0.35), (float)(c.Y - r * 0.4));
-        using (var glass = new CanvasRadialGradientBrush(device, new[]
-        {
-            new CanvasGradientStop { Position = 0, Color = With(blue, 0.95) },
-            new CanvasGradientStop { Position = 0.5f, Color = With(deep, 0.95) },
-            new CanvasGradientStop { Position = 1, Color = deep },
-        })
-        {
-            Center = light,
-            RadiusX = (float)(r * 1.5),
-            RadiusY = (float)(r * 1.5),
-        })
-        {
-            ds.FillCircle((float)c.X, (float)c.Y, (float)r, glass);
-        }
-
-        using CanvasGeometry sphere = CanvasGeometry.CreateCircle(device, (float)c.X, (float)c.Y, (float)r);
-        using (ds.CreateLayer(1, sphere))
-        {
-            Matrix3x2 saved = ds.Transform;
-            ds.Transform = Matrix3x2.CreateRotation((float)LibraryOrb.Lean) * Matrix3x2.CreateTranslation((float)c.X, (float)c.Y) * saved;
-            foreach (double latitude in new[] { -0.5, 0.0, 0.5 })
-            {
-                double y = r * latitude, half = r * Math.Sqrt(1 - latitude * latitude);
-                ds.DrawEllipse(0, (float)y, (float)half, (float)(half * 0.22), Color.FromArgb((byte)Math.Round(255 * 0.18), 255, 255, 255), 1);
-            }
-
-            foreach ((double width, bool near) in LibraryOrb.MeridianWidths(angle))
-            {
-                double w = r * width;
-                ds.DrawEllipse(0, 0, (float)w, (float)r, Color.FromArgb((byte)Math.Round(255 * (near ? 0.32 : 0.12)), 255, 255, 255), near ? 1.2f : 0.8f);
-            }
-
-            ds.Transform = saved;
-        }
-
-        double side = r * 0.95;
-        CanvasGeometry mark = MarkUnit(device);
-        ds.FillGeometry(mark.Transform(Matrix3x2.CreateScale((float)side) * Matrix3x2.CreateTranslation((float)(c.X - side / 2), (float)(c.Y - side / 2))), Color.FromArgb(255, 255, 255, 255));
-        using (var shine = new CanvasLinearGradientBrush(device, Color.FromArgb((byte)Math.Round(255 * 0.45), 255, 255, 255), Color.FromArgb(0, 255, 255, 255))
-        {
-            StartPoint = new Vector2((float)c.X, (float)(c.Y - r * 0.78)),
-            EndPoint = new Vector2((float)c.X, (float)(c.Y - r * 0.4)),
-        })
-        {
-            ds.FillEllipse((float)(c.X - r * 0.62 + r * 0.35), (float)(c.Y - r * 0.78 + r * 0.19), (float)(r * 0.35), (float)(r * 0.19), shine);
-        }
-
-        ds.DrawCircle((float)c.X, (float)c.Y, (float)r, Color.FromArgb((byte)Math.Round(255 * 0.35), 255, 255, 255), 1);
     }
 
     // ---- Transfers (MapToolPile.swift:233-276) --------------------------
@@ -1443,8 +1309,7 @@ public sealed partial class TracesMapView : UserControl
 
                 Color glowColour = flight is not null ? FlameOuter : charge > 0 ? Ink("mapOrbShared") : With(FlameOuter, 0.5);
                 double glowRadius = flight is not null ? 8 * s : TransferDrawing.PadCharge(charge) * s;
-                MapPoint at = fit.Point(rocket.At);
-                DrawRocket(ds, device, new Vector2((float)(fit.OriginX + rocket.At.X * s), (float)at.Y), rocket.Angle, s, rocket.Burn, glowRadius, glowColour);
+                DrawRocket(ds, device, fit.Point(rocket.At), rocket.Angle, s, rocket.Burn, glowRadius, glowColour);
             }
         }
 
@@ -1781,3 +1646,59 @@ public sealed partial class TracesMapView : UserControl
         ds.DrawTextLayout(layout, (float)x, (float)at.Y, colour);
     }
 }
+
+/// <summary>
+/// Lays its children out in rows, each whole, wrapping onto another row
+/// where the next would not fit: the legend at the map's foot wraps rather
+/// than run under the zoom (FlowMapView.swift:181-186, <c>HistoryFilterFlow</c>).
+/// </summary>
+internal sealed partial class FlowPanel : Panel
+{
+    public double Spacing { get; set; }
+
+    public double LineSpacing { get; set; }
+
+    protected override Size MeasureOverride(Size available)
+    {
+        double x = 0, y = 0, line = 0, widest = 0;
+        foreach (UIElement child in Children)
+        {
+            child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            Size d = child.DesiredSize;
+            if (x > 0 && x + d.Width > available.Width)
+            {
+                y += line + LineSpacing;
+                x = 0;
+                line = 0;
+            }
+
+            x += d.Width + Spacing;
+            line = Math.Max(line, d.Height);
+            widest = Math.Max(widest, x - Spacing);
+        }
+
+        return new Size(double.IsInfinity(available.Width) ? widest : Math.Min(widest, available.Width), y + line);
+    }
+
+    protected override Size ArrangeOverride(Size final)
+    {
+        double x = 0, y = 0, line = 0;
+        foreach (UIElement child in Children)
+        {
+            Size d = child.DesiredSize;
+            if (x > 0 && x + d.Width > final.Width)
+            {
+                y += line + LineSpacing;
+                x = 0;
+                line = 0;
+            }
+
+            child.Arrange(new Rect(x, y, d.Width, d.Height));
+            x += d.Width + Spacing;
+            line = Math.Max(line, d.Height);
+        }
+
+        return final;
+    }
+}
+

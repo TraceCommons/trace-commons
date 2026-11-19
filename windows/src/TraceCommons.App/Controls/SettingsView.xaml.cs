@@ -30,10 +30,37 @@ public sealed partial class SettingsView : UserControl
         InitializeComponent();
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
+        AddMapStyleSwitch();
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
         Loaded += OnFirstLoaded;
+    }
+
+    /// <summary>
+    /// The Traces map's style switch (W6-D1), as its own card after the
+    /// behaviour card: Settings has no General section on Windows yet (W17).
+    /// </summary>
+    private void AddMapStyleSwitch()
+    {
+        if (MapStyleSwitch.Build() is not { } content
+            || QuiescenceMinutes.Parent is not FrameworkElement inner
+            || inner.Parent is not Border behaviour
+            || behaviour.Parent is not Panel section)
+        {
+            return;
+        }
+
+        var card = new Border
+        {
+            Background = behaviour.Background,
+            BorderBrush = behaviour.BorderBrush,
+            BorderThickness = behaviour.BorderThickness,
+            CornerRadius = behaviour.CornerRadius,
+            Padding = behaviour.Padding,
+            Child = content,
+        };
+        section.Children.Insert(section.Children.IndexOf(behaviour) + 1, card);
     }
 
     public PublicProfileViewModel ViewModel { get; }

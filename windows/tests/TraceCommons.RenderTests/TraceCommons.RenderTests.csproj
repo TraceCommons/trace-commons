@@ -48,6 +48,12 @@
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
   </ItemGroup>
 
+  <!-- The map's own Win2D drawing, compiled here too, so a render test draws
+       with the code the window draws with (slice W6). -->
+  <ItemGroup>
+    <Compile Include="../../src/TraceCommons.App/Controls/MapPainter.cs" Link="MapPainter.cs" />
+  </ItemGroup>
+
   <!-- The Mac's own renders the Windows draws are compared with. -->
   <ItemGroup>
     <None Include="Fixtures/*.png" CopyToOutputDirectory="PreserveNewest" />
