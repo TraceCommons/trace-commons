@@ -511,6 +511,47 @@ fn mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection() {
             "dark={dark}: the knob {drawn:?} at {ratio:.2}:1 on the selection"
         );
     }
+    // Under every Omarchy skin too, measured on the selection as drawn
+    // (the skin's own): before this fix a white knob on the selection read
+    // 2.52:1 on Omarchy.
+    let display = gtk::gdk::Display::default().expect("a display");
+    for (name, text) in crate::ui::omarchy::fixtures::FIXTURES {
+        let palette = crate::ui::omarchy::parse(text, false).expect(name);
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&crate::ui::style::omarchy_stylesheet(&palette));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        settle(&context);
+        let page: gtk::Widget = app.queue.root.clone().upcast();
+        let row = with_class(&page, "tc-tree-row-selected").remove(0);
+        let row_at = bounds(&row, app.window.upcast_ref());
+        let knob = with_class(&row, "tc-tree-switch")[0]
+            .first_child()
+            .expect("the switch's knob");
+        let at = bounds(&knob, app.window.upcast_ref());
+        let points = [
+            (
+                (at.x() + at.width() / 2.0) as i32,
+                (at.y() + at.height() / 2.0) as i32,
+            ),
+            (
+                (row_at.x() + 3.0) as i32,
+                (row_at.y() + row_at.height() / 2.0) as i32,
+            ),
+        ];
+        let drawn = window_pixels(&app.window, &points);
+        let ratio = contrast(drawn[0], drawn[1]);
+        gtk::style_context_remove_provider_for_display(&display, &provider);
+        assert!(
+            ratio >= 3.0,
+            "{name}: the knob {:?} at {ratio:.2}:1 on the selection {:?}",
+            drawn[0],
+            drawn[1]
+        );
+    }
     manager.set_color_scheme(adw::ColorScheme::Default);
     app.window.close();
     let _ = std::fs::remove_dir_all(&dir);
