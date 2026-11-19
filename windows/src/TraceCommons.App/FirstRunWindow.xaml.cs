@@ -68,6 +68,16 @@ public sealed partial class FirstRunWindow : Window
     private double? _scanEndedAt;
 
     public FirstRunWindow(DaemonHost host, OnboardingState onboarding)
+        : this(host, onboarding, null)
+    {
+    }
+
+    /// <summary>
+    /// <paramref name="previewAt"/>: a Debug recorded-sample launch's
+    /// screenshot preview (<see cref="FirstRunPreview"/>), opened at that step
+    /// on a daemon that refuses every call. Null for every real first run.
+    /// </summary>
+    internal FirstRunWindow(DaemonHost host, OnboardingState onboarding, FirstRunStep? previewAt)
     {
         InitializeComponent();
         _host = host;
@@ -101,7 +111,9 @@ public sealed partial class FirstRunWindow : Window
             MarkWatchOnlyCompleteAsync,
             _ => { },
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
-        _runner = new FirstRunRunner(new FirstRunState(), daemon);
+        _runner = previewAt is FirstRunStep step
+            ? new FirstRunRunner(new FirstRunState { Step = step }, new RefusingFirstRunDaemon())
+            : new FirstRunRunner(new FirstRunState(), daemon);
         _runner.Changed += () => DispatcherQueue.TryEnqueue(Render);
         _model.Changed += OnModelChanged;
 

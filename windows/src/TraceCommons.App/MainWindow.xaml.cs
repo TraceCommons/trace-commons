@@ -703,6 +703,13 @@ public sealed partial class MainWindow : Window
         // own onboarding state, and every call it makes is refused anyway.
         if (_host.IsSample)
         {
+            // Screenshots of one step (FirstRunPreview): opened on a daemon
+            // that refuses everything, never this machine's state.
+            if (global::TraceCommons.Interop.FirstRun.FirstRunPreview.StepFrom(Environment.GetEnvironmentVariable(global::TraceCommons.Interop.FirstRun.FirstRunPreview.EnvironmentVariable)) is global::TraceCommons.Interop.FirstRun.FirstRunStep step)
+            {
+                var preview = new FirstRunWindow(_host, OnboardingState.Default(), step);
+                preview.Activate();
+            }
             return;
         }
 #endif
