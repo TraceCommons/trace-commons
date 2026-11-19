@@ -441,7 +441,9 @@ mod tests {
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn mounted_the_graphic_ticks_only_while_shown_and_motion_is_wanted() {
-        gtk::init().unwrap();
+        // libadwaita first, as the app starts it: the card's drawing
+        // reads the style manager, which must not be created mid-frame.
+        adw::init().unwrap();
         let settings = gtk::Settings::default().unwrap();
         let previous = settings.is_gtk_enable_animations();
         settings.set_gtk_enable_animations(true);

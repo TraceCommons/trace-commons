@@ -259,6 +259,64 @@
   padding: 14px;
 }
 
+/* Home's stat tiles (`HomeStatTile`): the caption in the eyebrow type,
+   uppercase as the Mac draws it, in the tertiary ink; the figure bold and
+   tabular; the line under it in the secondary ink. */
+.tc-home-tile-caption {
+  text-transform: uppercase;
+  color: @tc_glass_ink_tertiary;
+}
+
+/* The Mac's eyebrow size, 10, whatever the desktop's base font: GNOME's
+   11 pt base set the eyebrow's 0.77em at 11.3 px and KDE's 10 pt at 10.3,
+   and "NOT CONTRIBUTED" and "NEAR AI BALANCE" wrapped in a third of the
+   440 pane. Adwaita Sans and Noto Sans set those words wider than SF Pro,
+   so the tracking is eased from the Mac's 0.8 to 0.5: measured with pango
+   at 10 px bold, both set "NOT CONTRIBUTED" in 105 px of the tile's 110. */
+label.tc-type-eyebrow.tc-home-tile-caption-type {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.tc-home-tile-caption-ink {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-home-tile-value {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.tc-home-tile-detail {
+  color: @tc_glass_ink_secondary;
+}
+
+/* A third of the 440 pane: no generated 10em floor (the Insights
+   summary tile's), the Mac's 10 by 12 inside. */
+.tc-insights button.tc-insights-summary.tc-home-tile {
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+button.tc-home-link {
+  padding: 0;
+  min-height: 0;
+  color: @accent_color;
+}
+
+/* The Settings window (`SettingsModal`'s settingsGround): its own
+   ground under the header bar and the sections, and its cards' fill. In
+   Dark the card is the ground's own navy, so its hairline is its edge. */
+window.tc-settings-window,
+window.tc-settings-window headerbar,
+window.tc-settings-window .tc-root {
+  background-color: @tc_glass_settings_ground;
+}
+
+window.tc-settings-window .tc-card {
+  background-color: @tc_glass_settings_card;
+}
+
 .tc-card.tc-tool-card {
   background-color: @tc_surface_inset;
   border: none;
@@ -459,6 +517,15 @@ row:selected {
   border: none;
   box-shadow: none;
   color: @tc_glass_ink;
+}
+
+/* The legend's words at the map's foot: the Mac's `legendItem`,
+   `TypeScale.micro` at regular weight (10) in textTertiary, so the four
+   rules fit one line beside the zoom at a narrow pane, as on the Mac. */
+.tc-map-legend {
+  font-size: 10px;
+  font-weight: 400;
+  color: @tc_glass_ink_tertiary;
 }
 
 /* A node's card, on hover or keyboard focus: the node-card tier. */
@@ -1038,6 +1105,23 @@ window.tc-glass-window:backdrop .tc-tree-split-menu > button {
   color: @tc_glass_selected_ink;
 }
 
+/* A control on a selected row: the Mac's `GlassGround.selection`, its own
+   fill over the selection (`controlOnSelection`) and the selection's ink
+   (`controlInk`), in and out of focus; the selection does not dim. */
+.tc-tree-row-selected .tc-tree-submit,
+.tc-tree-row-selected .tc-tree-split-menu > button,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-submit,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-split-menu > button {
+  background-color: @tc_glass_control_on_selection;
+  color: @tc_glass_selected_ink;
+}
+
+.tc-tree-row-selected .tc-tree-submit:hover,
+.tc-tree-row-selected .tc-tree-split-menu > button:hover,
+.tc-tree-row-selected .tc-tree-kebab > button:hover {
+  background-color: @tc_glass_control_on_selection_hover;
+}
+
 /* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
    `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
    slider, so a 17-wide slider in 2 of padding is 38 wide. */
@@ -1052,6 +1136,20 @@ switch.tc-tree-switch > slider {
   min-width: 17px;
   min-height: 18px;
   margin: 0;
+}
+
+/* The switch on a selected row: its knob in the selection's ink (the
+   Mac's knob on, `textOnAccent`, is that ink), on and off, and its track
+   on in the control-on-selection fill, so neither vanishes into the
+   selection (Omarchy: a white knob on the selection measured 2.52:1). */
+.tc-tree-row-selected switch.tc-tree-switch > slider {
+  background-color: @tc_glass_selected_ink;
+  background-image: none;
+  box-shadow: none;
+}
+
+.tc-tree-row-selected switch.tc-tree-switch:checked {
+  background-color: @tc_glass_control_on_selection;
 }
 
 .tc-tree-menu-current {
@@ -1204,6 +1302,12 @@ window.tc-edge-surface {
 
 .tc-edge-rail-rule {
   background-color: alpha(@tc_glass_ink, 0.12);
+}
+
+/* A rail tile's name on hover, beside the tile (`attach_rail_tip`). */
+.tc-edge-rail-tip > contents {
+  padding: 4px 8px;
+  color: @tc_glass_ink;
 }
 
 .tc-edge-round {

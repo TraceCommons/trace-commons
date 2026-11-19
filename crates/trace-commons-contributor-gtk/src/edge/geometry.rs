@@ -87,10 +87,14 @@ pub const MARK_SIDE: i32 = 20;
 pub const FOLDER_ROW_PITCH: i32 = size::LIST_ROW + 2;
 pub const FOLDER_LIST_MAX_ROWS: i32 = 7;
 
-/// The folder list's height for `rows` rows: all of them up to seven.
-pub fn folder_list_height(rows: usize) -> i32 {
+/// The folder list's height for `rows` rows each `row_height` tall as
+/// drawn: all of them up to seven. The Mac's `listRow` is the least a row
+/// is; a row whose two lines need more on this desktop's fonts is given it,
+/// so no row is cut.
+pub fn folder_list_height(rows: usize, row_height: i32) -> i32 {
     let rows = i32::try_from(rows).unwrap_or(i32::MAX);
-    rows.min(FOLDER_LIST_MAX_ROWS) * FOLDER_ROW_PITCH
+    rows.min(FOLDER_LIST_MAX_ROWS)
+        * (row_height.max(size::LIST_ROW) + FOLDER_ROW_PITCH - size::LIST_ROW)
 }
 
 /// Which edges a layer-shell panel is anchored to, and its margins from
@@ -259,10 +263,12 @@ mod tests {
     #[test]
     fn the_folder_list_holds_seven_rows_then_scrolls() {
         assert_eq!(FOLDER_ROW_PITCH, 42);
-        assert_eq!(folder_list_height(0), 0);
-        assert_eq!(folder_list_height(3), 126);
-        assert_eq!(folder_list_height(7), 294);
-        assert_eq!(folder_list_height(40), 294);
+        assert_eq!(folder_list_height(0, 0), 0);
+        assert_eq!(folder_list_height(3, 30), 126);
+        assert_eq!(folder_list_height(7, 40), 294);
+        assert_eq!(folder_list_height(40, 40), 294);
+        // A row drawn taller than the Mac's 40 is given its height.
+        assert_eq!(folder_list_height(2, 52), 108);
     }
 
     #[test]
