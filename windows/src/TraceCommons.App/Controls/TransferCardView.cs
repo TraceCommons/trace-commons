@@ -46,16 +46,16 @@ internal sealed class TransferCardView : UserControl
         _frame.Padding = new Thickness(14, 12, 14, 12);
         Content = _frame;
 
-        _title.Style = Style("TcBodyTextStyle");
-        _tag.Style = Style("TcCaptionTextStyle");
+        _title.Style = Resource("TcBodyTextStyle");
+        _tag.Style = Resource("TcCaptionTextStyle");
         _tagPill.CornerRadius = (CornerRadius)Application.Current.Resources["TcPillCornerRadius"];
         _tagPill.Child = _tag;
-        _eyebrow.Style = Style("TcEyebrowTextStyle");
-        _folder.Style = Style("TcCaptionTextStyle");
-        _time.Style = Style("TcCaptionTextStyle");
-        _files.Style = Style("TcMonoCodeTextStyle");
-        _stays.Style = Style("TcCaptionTextStyle");
-        _note.Style = Style("TcCaptionTextStyle");
+        _eyebrow.Style = Resource("TcEyebrowTextStyle");
+        _folder.Style = Resource("TcCaptionTextStyle");
+        _time.Style = Resource("TcCaptionTextStyle");
+        _files.Style = Resource("TcMonoCodeTextStyle");
+        _stays.Style = Resource("TcCaptionTextStyle");
+        _note.Style = Resource("TcCaptionTextStyle");
 
         var head = new Grid { ColumnSpacing = 10 };
         head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -166,5 +166,5 @@ internal sealed class TransferCardView : UserControl
 
     private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];
 
-    private static Style Style(string key) => (Style)Application.Current.Resources[key];
+    private static Style Resource(string key) => (Style)Application.Current.Resources[key];
 }
