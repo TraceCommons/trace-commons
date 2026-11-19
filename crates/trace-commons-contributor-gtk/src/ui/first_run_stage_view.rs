@@ -479,8 +479,7 @@ impl Stage {
     }
 
     fn start_ticking(self: &Rc<Self>) {
-        if !animations() || self.inner.borrow().tick.is_some()
-        {
+        if !animations() || self.inner.borrow().tick.is_some() {
             return;
         }
         let weak = Rc::downgrade(self);
