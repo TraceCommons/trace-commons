@@ -662,7 +662,7 @@ mod imp {
             // The arcs, drawn again when their dashes have moved.
             let healthy = self.inputs.borrow().gate.state.is_healthy();
             let phase = transfers::dash_phase(self.dash_time.get(), reduce);
-            snapshot.append_node(&self.arcs_node(&scene, &fit, &palette, healthy, phase, &bounds));
+            snapshot.append_node(self.arcs_node(&scene, &fit, &palette, healthy, phase, &bounds));
             // The nodes, their names and the pad: drawn again only when
             // what they are drawn from changes.
             let motion = self.motion();
@@ -809,10 +809,8 @@ mod imp {
                     None => light.1.retarget(0.0, now, ease),
                 }
             }
-            let obj = self.obj();
-            obj.update_clock();
-            obj.queue_draw();
-            drop(obj);
+            self.obj().update_clock();
+            self.obj().queue_draw();
             let inside = {
                 let scene = self.scene.borrow();
                 let Some(stack) = scene.stack.as_ref() else {

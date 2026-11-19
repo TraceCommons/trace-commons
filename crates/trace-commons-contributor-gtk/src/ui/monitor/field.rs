@@ -145,7 +145,7 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, colours: &MapColo
     rgba(cr, &ink(dark));
     let _ = cr.fill();
     let _ = cr.pop_group_to_source();
-    let _ = cr.mask(&fade(width, height));
+    let _ = cr.mask(fade(width, height));
     let _ = cr.restore();
 }
 
@@ -209,7 +209,7 @@ pub fn tile_mask(width: f64, height: f64, scale: f64) -> Option<gtk::cairo::Imag
         cr.set_source_rgba(0.0, 0.0, 0.0, 1.0);
         let _ = cr.fill();
         let _ = cr.pop_group_to_source();
-        let _ = cr.mask(&fade(width, height));
+        let _ = cr.mask(fade(width, height));
     }
     surface.flush();
     Some(surface)
@@ -287,7 +287,7 @@ pub fn draw_light(
         let _ = cr.fill();
     }
     let _ = cr.pop_group_to_source();
-    let _ = cr.mask(&fade(width, height));
+    let _ = cr.mask(fade(width, height));
     // The bloom, over the marks and the veil.
     let bloom = gtk::cairo::RadialGradient::new(px, py, 0.0, px, py, reach);
     let alpha = map_motion::bloom(dark) * opacity;
