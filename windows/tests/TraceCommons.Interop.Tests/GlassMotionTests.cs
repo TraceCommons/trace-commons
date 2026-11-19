@@ -284,6 +284,19 @@ public class GlassLookWiringTests
         Assert.True(TabEmberGlide.From(150, 80, 12, 60).TranslateX > 0);
     }
 
+    // Navigation.swift:266 animates on `value: selection` only. The box
+    // showed the Windows ember jumping between tabs: the tab refresh calls
+    // the ember again with the same tab and frame, and that second call
+    // settled the glide it had just started.
+    [Fact]
+    public void TheEmberGlidesOnlyWhenTheTabChangesAndARepeatLeavesTheGlideAlone()
+    {
+        Assert.Equal(EmberMove.Place, TabEmberGlide.Decide(placed: false, sameTab: false, sameFrame: false));
+        Assert.Equal(EmberMove.Glide, TabEmberGlide.Decide(placed: true, sameTab: false, sameFrame: false));
+        Assert.Equal(EmberMove.Stay, TabEmberGlide.Decide(placed: true, sameTab: true, sameFrame: true));
+        Assert.Equal(EmberMove.Place, TabEmberGlide.Decide(placed: true, sameTab: true, sameFrame: false));
+    }
+
     [Fact]
     public void MicaOnlyWhereSupportedAndNeverUnderHighContrast()
     {

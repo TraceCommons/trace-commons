@@ -449,12 +449,42 @@ public static class TabEmberGlide
         return (oldCentre - newCentre, oldWidth / newWidth);
     }
 
+    /// <summary>
+    /// What a call to put the ember under the tab shown does. The Mac
+    /// animates the ember only when the selection changes
+    /// (<c>.animation(_, value: selection)</c>, Navigation.swift:266): a
+    /// first placement or a relayout under the same tab moves it at once, and
+    /// the same tab at the same frame leaves it alone, so a glide under way
+    /// is never cut short by a refresh that changed nothing.
+    /// </summary>
+    /// <param name="placed">The ember has been placed before.</param>
+    /// <param name="sameTab">The tab shown is the one it was placed under.</param>
+    /// <param name="sameFrame">That tab's frame in the strip has not changed.</param>
+    public static EmberMove Decide(bool placed, bool sameTab, bool sameFrame) =>
+        !placed ? EmberMove.Place
+        : !sameTab ? EmberMove.Glide
+        : sameFrame ? EmberMove.Stay
+        : EmberMove.Place;
+
     /// <summary>The glide <paramref name="seconds"/> in: translation and scale, on the Mac's spring.</summary>
     public static (double TranslateX, double ScaleX) At(double translateX, double scaleX, double seconds)
     {
         double p = GlassControlMotion.TabEmberGlide.At(seconds);
         return (translateX * (1 - p), scaleX + (1 - scaleX) * p);
     }
+}
+
+/// <summary>What <see cref="TabEmberGlide.Decide"/> tells the ember to do.</summary>
+public enum EmberMove
+{
+    /// <summary>Move to the tab's frame at once, stopping any glide.</summary>
+    Place,
+
+    /// <summary>Move to the new tab's frame, its visual springing there from the old tab's.</summary>
+    Glide,
+
+    /// <summary>Nothing changed: leave the ember, and any glide under way, alone.</summary>
+    Stay,
 }
 
 /// <summary>The material under the window's panes (spec W5-D1 (b)).</summary>

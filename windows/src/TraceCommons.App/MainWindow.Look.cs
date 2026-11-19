@@ -24,7 +24,7 @@ public sealed partial class MainWindow
 {
     private WindowMaterial _material = WindowMaterial.Painted;
     private bool _windowActive = true;
-    private (double X, double Width)? _emberAt;
+    private (ToggleButton Tab, double X, double Width)? _emberAt;
 
     // ---- The material (W5-D1 (b)) -------------------------------------------
 
@@ -58,12 +58,9 @@ public sealed partial class MainWindow
         WindowRoot.ActualThemeChanged += (_, _) => PaintGround();
         WindowRoot.Loaded += (_, _) => PaintGround();
         // A strip laid out again (a tab's count, a scale change) puts the
-        // ember under its tab at once; only a change of tab glides.
-        TabStrip.SizeChanged += (_, _) =>
-        {
-            _emberAt = null;
-            MoveTabEmber();
-        };
+        // ember under its tab at once (TabEmberGlide.Decide); only a change
+        // of tab glides.
+        TabStrip.SizeChanged += (_, _) => MoveTabEmber();
     }
 
     /// <summary>The window's ground and title bar in the key for the material and focus.</summary>
@@ -166,6 +163,15 @@ public sealed partial class MainWindow
 
         double x = shown.TransformToVisual(TabEmberLayer).TransformPoint(new Windows.Foundation.Point(0, 0)).X;
         double width = shown.ActualWidth;
+        EmberMove move = TabEmberGlide.Decide(
+            placed: _emberAt is not null,
+            sameTab: _emberAt?.Tab == shown,
+            sameFrame: _emberAt is (_, double atX, double atWidth) && atX == x && atWidth == width);
+        if (move == EmberMove.Stay)
+        {
+            return;
+        }
+
         (double emberX, double emberWidth) = GlassTabMotion.Ember(x, width);
         TabEmber.Visibility = Visibility.Visible;
         TabEmber.Width = emberWidth;
@@ -176,19 +182,21 @@ public sealed partial class MainWindow
         var visual = ElementCompositionPreview.GetElementVisual(TabEmber);
         visual.CenterPoint = new Vector3((float)(emberWidth / 2), (float)(TabEmber.Height / 2), 0);
 
-        if (_emberAt is (double oldX, double oldWidth) && (oldX != x || oldWidth != width))
+        if (move == EmberMove.Glide && _emberAt is (_, double oldX, double oldWidth))
         {
             (double translate, double scale) = TabEmberGlide.From(oldX, oldWidth, x, width);
+            LookLog($"ember: glide {translate:F1} scale {scale:F3} mayMove={GlassMotionSettings.MayMove}");
             GlassComposition.Run(TabEmber, "Translation.X", (float)translate, 0, GlassControlMotion.TabEmberGlide);
             GlassComposition.Run(TabEmber, "Scale.X", (float)scale, 1, GlassControlMotion.TabEmberGlide);
         }
         else
         {
+            LookLog($"ember: place at {x:F1} width {width:F1}");
             GlassComposition.Settle(TabEmber, "Translation.X", 0);
             GlassComposition.Settle(TabEmber, "Scale.X", 1);
         }
 
-        _emberAt = (x, width);
+        _emberAt = (shown, x, width);
     }
 
     private void OnShownTabSized(object sender, SizeChangedEventArgs e)
