@@ -1302,7 +1302,9 @@
 
                     <!--
                         The sessions a witness certificate is held for, gathered
-                        above the folders they are scattered across.
+                        below the folders they are scattered across, in a row of
+                        its own: sharing the list's row drew it over the first
+                        folder (QueueLayoutTests).
 
                         Drawn on every render including when it is empty. A
                         filtered section that renders as nothing when nothing
@@ -1317,9 +1319,9 @@
                         the choice between the two readings is behind the ABI: no
                         shell decides it. Nothing here is typed out.
                     -->
-                    <StackPanel Grid.Row="2"
+                    <StackPanel Grid.Row="3"
                                 Spacing="6"
-                                Margin="0,0,0,12">
+                                Margin="22,0,22,12">
                         <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
                                    Style="{StaticResource TcTitleCardTextStyle}"
                                    TextWrapping="Wrap" />
