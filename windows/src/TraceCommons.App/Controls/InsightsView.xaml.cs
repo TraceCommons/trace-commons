@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
+using TraceCommons.Interop;
 using Windows.Storage.Pickers;
 
 namespace TraceCommons.App.Controls;
@@ -14,11 +15,16 @@ public sealed partial class InsightsView : UserControl, IDisposable
     private string? _file;
     private readonly EpisodeMemberDraftBinding _episodeMemberDraft = new();
     private bool _closed;
-    public InsightsViewModel ViewModel { get; } = new();
+    public InsightsViewModel ViewModel { get; }
     public event EventHandler? ContributionSetupRequested;
 
-    public InsightsView(IntPtr window)
+    /// <param name="viewModel">
+    /// The tabs' state; a sample window passes one over the refusing sample
+    /// service and the Mac's sample benchmarks.
+    /// </param>
+    public InsightsView(IntPtr window, InsightsViewModel? viewModel = null)
     {
+        ViewModel = viewModel ?? new InsightsViewModel();
         InitializeComponent();
         _window = window;
         DataContext = ViewModel;
@@ -67,6 +73,41 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         if (sender is FrameworkElement { Tag: string pattern }) await ViewModel.Patterns.ToggleSessionsAsync(pattern);
     }
+    private async void OnBenchmarksChoice(object sender, SelectionChangedEventArgs args)
+    {
+        int population = BenchPopulation.SelectedIndex, period = BenchPeriod.SelectedIndex;
+        if (_closed || population < 0 || period < 0) return;
+        await ViewModel.Benchmarks.SelectAsync(
+            InsightsBenchmarkWords.PeriodWeeks[period], InsightsBenchmarkWords.Populations[population]);
+    }
+
+    /// <summary>A share row read as one element, as <c>.accessibilityElement(children: .combine)</c> does.</summary>
+    public static string ShareName(string task, string label) => task + ", " + label;
+
+    public static string PickName(string title, string model, string figure, string next) =>
+        string.Join(", ", title, model, figure, next);
+
+    public static string RowName(string model, string traces, string kept, string cost, string time) =>
+        string.Join(", ", model, traces, kept, cost, time);
+
+    /// <summary>A share bar's fill as a fraction of its track, at least 4 wide (InsightsBenchmarksTab.swift:368-371).</summary>
+    public static readonly DependencyProperty FractionProperty = DependencyProperty.RegisterAttached(
+        "Fraction", typeof(double), typeof(InsightsView), new PropertyMetadata(0.0, OnFractionChanged));
+
+    public static double GetFraction(DependencyObject element) => (double)element.GetValue(FractionProperty);
+
+    public static void SetFraction(DependencyObject element, double value) => element.SetValue(FractionProperty, value);
+
+    private static void OnFractionChanged(DependencyObject element, DependencyPropertyChangedEventArgs args)
+    {
+        if (element is not FrameworkElement bar || VisualTreeHelperParent(bar) is not FrameworkElement track) return;
+        void Size() => bar.Width = Math.Max(4, track.ActualWidth * GetFraction(bar));
+        track.SizeChanged += (_, _) => Size();
+        Size();
+    }
+
+    private static DependencyObject? VisualTreeHelperParent(FrameworkElement element) => element.Parent;
+
     public void Deactivate() { _episodeMemberDraft.Clear(); ViewModel.Cancel(); }
     private async void OnChoose(object sender, RoutedEventArgs args)
     {

@@ -63,7 +63,12 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private bool _closed;
     private Task _active = Task.CompletedTask;
     private readonly Dictionary<string, string> _copy = new();
-    public InsightsViewModel(ILocalInsights? service = null)
+    /// <param name="benchmarks">
+    /// The Benchmarks tab's reader (<c>insights_benchmarks</c> through the
+    /// daemon), or the Mac's sample in a sample window; with none, the tab
+    /// says the figure is unknown, as the Mac's does with no daemon.
+    /// </param>
+    public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null)
     {
         _service = service ?? new LocalInsights();
         // The tab headers bind while the control is built, before any read:
@@ -73,15 +78,24 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Overview = new InsightsOverviewViewModel(_service, copy);
         Patterns = new InsightsPatternsViewModel(_service, copy);
         Sessions = new InsightsSessionsViewModel(_service, copy);
+        Func<string, string> word = key => _copy.TryGetValue(key, out var text) ? text : string.Empty;
+        Benchmarks = benchmarks?.Invoke(word) ?? new InsightsBenchmarksModel((Func<string, string, Task<DaemonResponse>>?)null, word);
     }
 
-    /// <summary>The tabs, in the macOS order. Spend is not a tab: the view shows it disabled with its Later chip.</summary>
-    public const int OverviewTab = 0, PatternsTab = 1, SessionsTab = 2, AnalyzeTab = 3;
+    /// <summary>
+    /// The tabs: the Mac's Overview, Breakdown and Benchmarks in its order
+    /// (InsightsView.swift:162 <c>shownTabs</c>), then this app's Sessions and
+    /// Analyze, which the Mac does not have (their place is the owner's to
+    /// decide; listed in the PR). Skills follows the Mac's feature flag and is
+    /// not drawn here yet.
+    /// </summary>
+    public const int OverviewTab = 0, PatternsTab = 1, BenchmarksTab = 2, SessionsTab = 3, AnalyzeTab = 4;
     private int _shownTab = -1;
     private IReadOnlyList<AnalyticsChoice> _savedChoices = Array.Empty<AnalyticsChoice>();
     public InsightsOverviewViewModel Overview { get; }
     public InsightsPatternsViewModel Patterns { get; }
     public InsightsSessionsViewModel Sessions { get; }
+    public InsightsBenchmarksModel Benchmarks { get; }
 
     /// <summary>Show a tab and read its figures. Analyze reads nothing new.</summary>
     public Task SelectTabAsync(int tab)
@@ -94,6 +108,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     private Task LoadTabAsync(int tab) => tab switch {
         OverviewTab => Overview.LoadAsync(),
         PatternsTab => Patterns.LoadAsync(),
+        BenchmarksTab => Benchmarks.LoadAsync(),
         SessionsTab => Sessions.LoadAsync(),
         _ => Task.CompletedTask
     };

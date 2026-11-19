@@ -1114,19 +1114,9 @@ public sealed partial class MainWindow : Window
 
     private async void ShowInsightsPane()
     {
-#if DEBUG
-        // Recorded samples open the contribution panes, never local Insights,
-        // which reads this machine's own sessions (as on Linux, #2161).
-        if (_host.IsSample)
-        {
-            if (await StartContributionsAsync()) ViewModel.ShowQueue();
-            return;
-        }
-#endif
-
         if (InsightsPane.Content is not InsightsView)
         {
-            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this), CreateInsightsModel());
             page.ContributionSetupRequested += async (_, _) =>
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
@@ -1135,6 +1125,24 @@ public sealed partial class MainWindow : Window
         }
         ViewModel.ShowInsights();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
+    }
+
+    /// <summary>
+    /// Insights' state. A recorded sample never reads this machine's own
+    /// sessions (as on Linux, #2161): its service refuses every request
+    /// (<see cref="SampleInsights"/>) and Benchmarks draws the Mac's sample
+    /// (<c>InsightsSample</c>). Otherwise the local store and the daemon's
+    /// <c>insights_benchmarks</c>.
+    /// </summary>
+    private InsightsViewModel CreateInsightsModel()
+    {
+#if DEBUG
+        if (_host.IsSample)
+        {
+            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
+        }
+#endif
+        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)

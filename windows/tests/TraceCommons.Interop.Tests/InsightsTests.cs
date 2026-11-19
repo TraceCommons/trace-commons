@@ -336,7 +336,7 @@ public sealed class InsightsAnalyticsTests
         Assert.Equal(0, service.Count("week_overview"));
         Assert.Equal(0, service.Count("patterns"));
         Assert.Equal(0, service.Count("session_drill"));
-        Assert.Equal(3, InsightsViewModel.AnalyzeTab);
+        Assert.Equal(4, InsightsViewModel.AnalyzeTab);
     }
 
     [Fact]
