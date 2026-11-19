@@ -47,7 +47,6 @@ internal sealed class ToolTileView : UserControl
         Content = _canvas;
         AutomationProperties.SetAccessibilityView(this, AccessibilityView.Raw);
         ActualThemeChanged += (_, _) => _canvas.Invalidate();
-        _accessibility.HighContrastChanged += (_, _) => DispatcherQueue?.TryEnqueue(_canvas.Invalidate);
         Unloaded += (_, _) => _canvas.RemoveFromVisualTree();
     }
 

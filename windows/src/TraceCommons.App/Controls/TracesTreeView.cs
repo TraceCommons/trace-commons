@@ -135,7 +135,6 @@ internal sealed class TracesTreeView : UserControl
         _rows.PointerReleased += OnRowsPointerReleased;
         _rows.PointerCaptureLost += (_, _) => EndDrag();
         ActualThemeChanged += (_, _) => Render();
-        _accessibility.HighContrastChanged += (_, _) => DispatcherQueue?.TryEnqueue(Render);
         Unloaded += (_, _) => StopTicking();
     }
 

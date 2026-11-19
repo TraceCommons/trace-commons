@@ -147,7 +147,6 @@ internal sealed class TracesGraphFooter : UserControl
         Content = root;
 
         ActualThemeChanged += (_, _) => { Paint(); _canvas.Invalidate(); };
-        _accessibility.HighContrastChanged += (_, _) => DispatcherQueue.TryEnqueue(() => { Paint(); _canvas.Invalidate(); });
         Unloaded += (_, _) => StopTicking();
         Paint();
         Render();
