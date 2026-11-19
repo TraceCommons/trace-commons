@@ -34,10 +34,11 @@ public sealed partial class MainWindow : ITracesTreeHost
         _tree = new TracesTreeView(new TracesTreeState(order, arranged), this);
         TracesTreeHost.Child = _tree;
 
-        // The Windows sections that sat in rows of their own beside the
-        // folder list now follow the tree in its scroll, so the tree has the
+        // The empty state (in the tree, as the Mac's emptyTree is) and the
+        // Windows sections that sat in rows of their own beside the folder
+        // list now follow the tree in its scroll, so the tree has the
         // tab's room as on the Mac (round 2, box: at 615 px they left it none).
-        foreach (FrameworkElement section in new FrameworkElement[] { CertificateSection, ScrubCaveatLine, WeekBandSection })
+        foreach (FrameworkElement section in new FrameworkElement[] { QueueEmptyState, CertificateSection, ScrubCaveatLine, WeekBandSection })
         {
             if (!TracesContent.Children.Remove(section))
             {
