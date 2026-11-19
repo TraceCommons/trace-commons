@@ -1484,8 +1484,21 @@ mod tests {
                 let i = y as usize * stride + x as usize * 4;
                 [pixels[i + 2], pixels[i + 1], pixels[i]]
             };
-            let ground = at(4, height - 4);
+            // The ground is the glyph box's commonest pixel: the dashes
+            // cover a small share of it. A window corner is no ground: the
+            // window's rounded corner leaves it transparent, read as black.
             let bounds = glyph.compute_bounds(&window).expect("laid out");
+            let mut counts = std::collections::HashMap::new();
+            for y in bounds.y() as i32..(bounds.y() + bounds.height()) as i32 {
+                for x in bounds.x() as i32..(bounds.x() + bounds.width()) as i32 {
+                    *counts.entry(at(x, y)).or_insert(0usize) += 1;
+                }
+            }
+            let ground = counts
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(pixel, _)| pixel)
+                .expect("the glyph has pixels");
             let mut strongest = ground;
             for y in bounds.y() as i32..(bounds.y() + bounds.height()) as i32 {
                 for x in bounds.x() as i32..(bounds.x() + bounds.width()) as i32 {

@@ -3953,9 +3953,19 @@ mod tests {
                         "the window's focus state reached its switch"
                     );
                     let state = format!("dark={dark} unfocused={unfocused} {kind}");
+                    // Sizes are border boxes (`compute_bounds`): a
+                    // widget's `width()` is its content box, without the
+                    // padding that stands the knob in from the track's end.
+                    let size = |widget: &gtk::Widget| {
+                        let bounds = widget.compute_bounds(widget).expect("laid out");
+                        (
+                            bounds.width().round() as i32,
+                            bounds.height().round() as i32,
+                        )
+                    };
                     for (switch, active) in [(*on, true), (*off, false)] {
                         assert_eq!(
-                            (switch.width(), switch.height()),
+                            size(switch.upcast_ref()),
                             (width, height),
                             "{state}: the switch is the Mac's size"
                         );
@@ -3968,7 +3978,7 @@ mod tests {
                         }
                         let slider = slider.expect("a slider");
                         assert_eq!(
-                            (slider.width(), slider.height()),
+                            size(&slider),
                             (knob, knob),
                             "{state}: the knob is the Mac's"
                         );
