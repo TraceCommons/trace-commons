@@ -197,12 +197,14 @@ else
     ui::style::tests::every_omarchy_sheet_parses \
     ui::settings::navigation::tests::gtk_section_choices_scroll_and_resize_preserves_fields \
     ui::settings::navigation::tests::mounted_settings_opened_at_a_section_scrolls_there_on_first_show \
+    ui::settings::navigation::tests::mounted_the_layout_check_holds_while_minimised_and_resumes \
     ui::monitor::map::tests::mounted_map_preserves_identity_and_accessibility \
     ui::monitor::map::tests::mounted_map_focuses_the_camera_on_the_binoculars_tool \
     ui::monitor::map::tests::mounted_map_shows_transfer_cards_and_stops_under_reduced_motion \
     ui::monitor::map::tests::mounted_the_pile_opens_in_stages_and_the_style_switches_at_once \
     ui::monitor::map::tests::mounted_the_legend_fits_one_line_at_the_narrow_map_width \
     ui::monitor::map::tests::mounted_the_pile_light_and_shimmer_move_on_the_clock_and_stop \
+    ui::monitor::map::tests::mounted_the_clock_and_shimmer_hold_while_the_window_is_minimised \
     ui::monitor::map::tests::mounted_a_covered_transfer_card_fades_under_the_new_one \
     ui::monitor::map::tests::mounted_a_card_covered_before_it_is_drawn_still_fades \
     ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
@@ -307,6 +309,7 @@ else
     ui::first_run_screens::mounted_tests::the_marker_check_ticks_only_while_its_stroke_moves \
     ui::first_run_screens::mounted_tests::the_customize_card_rises_to_its_place \
     ui::first_run_stage_view::mounted_tests::the_stage_draws_under_the_steps_and_ticks_only_while_shown \
+    ui::first_run_stage_view::mounted_tests::the_stage_holds_while_its_window_is_minimised \
     ui::first_run_stage_view::mounted_tests::a_tool_watched_with_animations_off_is_drawn_lit \
     ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
     ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit \

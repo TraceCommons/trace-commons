@@ -125,7 +125,7 @@ impl Lift {
     /// ([`stage::customize`]). Nothing moves with animations off.
     pub fn slide_from(&self, ancestor: &impl IsA<gtk::Widget>, from_y: f64) {
         self.settle();
-        if !animations() {
+        if !animations() || super::glass_motion::window_hidden(self) {
             return;
         }
         *self.imp().slide.borrow_mut() = Some(Slide {
