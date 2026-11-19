@@ -718,3 +718,30 @@ pub mod first_run {
         pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
     }
 }
+
+/// The Mac's motion: `GlassTokens.Motion`'s durations in seconds, the
+/// token curve, and `GlassMotion`'s springs as (duration, bounce).
+pub mod motion {
+    /// `motion.fast`.
+    pub const FAST: f64 = 0.15;
+    /// `motion.standard`.
+    pub const STANDARD: f64 = 0.22;
+    /// `motion.slow`.
+    pub const SLOW: f64 = 0.3;
+    /// `motion.reveal`.
+    pub const REVEAL: f64 = 0.18;
+    /// `motion.slide`.
+    pub const SLIDE: f64 = 0.25;
+    /// `motion.spin`.
+    pub const SPIN: f64 = 0.8;
+    /// `motion.pulse`.
+    pub const PULSE: f64 = 1.6;
+    /// `GlassMotion.curve`'s control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The same curve as a CSS timing function.
+    pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+    /// `GlassMotion.spatial`: `.spring(duration:bounce:)`.
+    pub const SPATIAL: (f64, f64) = (0.9, 0.04);
+    /// `GlassMotion.expressive`: `.spring(duration:bounce:)`.
+    pub const EXPRESSIVE: (f64, f64) = (0.78, 0.32);
+}

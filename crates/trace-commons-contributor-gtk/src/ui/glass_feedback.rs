@@ -16,13 +16,13 @@
 //! while it is not shown: GTK runs a widget's frame clock only while it is
 //! mapped.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
-use super::glass_motion::{self, Driver};
+use super::glass_motion::{self, Driver, keep_ticking};
 use super::style::brand_tokens::{map, tile};
 use super::tool_tile::{self, Colour};
 
@@ -105,65 +105,6 @@ pub fn draw_skeleton(cr: &gtk::cairo::Context, width: f64, dark: bool) {
         tile::RADIUS_CONTROL,
     );
     let _ = cr.fill();
-}
-
-/// Runs `frame(seconds)` on `widget`'s clock while it is shown and motion
-/// is wanted, at most once per `interval`; stopped, it draws `frame(0)`.
-fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + 'static) {
-    let frame = std::rc::Rc::new(frame);
-    let tick: std::rc::Rc<RefCell<Option<gtk::TickCallbackId>>> = Default::default();
-    let start = {
-        let frame = std::rc::Rc::clone(&frame);
-        let tick = std::rc::Rc::clone(&tick);
-        move |widget: &gtk::Widget| {
-            if let Some(id) = tick.borrow_mut().take() {
-                id.remove();
-            }
-            if !glass_motion::animations_enabled() {
-                frame(0.0);
-                return;
-            }
-            let frame = std::rc::Rc::clone(&frame);
-            let began = Cell::new(None::<i64>);
-            let last = Cell::new(f64::NEG_INFINITY);
-            *tick.borrow_mut() = Some(widget.add_tick_callback(move |_, clock| {
-                let now = clock.frame_time();
-                let start = *began.get().get_or_insert(now);
-                began.set(Some(start));
-                let seconds = (now - start) as f64 / 1_000_000.0;
-                if seconds - last.get() >= interval {
-                    last.set(seconds);
-                    frame(seconds);
-                }
-                glib::ControlFlow::Continue
-            }));
-        }
-    };
-    let on_map = start.clone();
-    widget.connect_map(move |widget| on_map(widget));
-    let stop = std::rc::Rc::clone(&tick);
-    widget.connect_unmap(move |_| {
-        if let Some(id) = stop.borrow_mut().take() {
-            id.remove();
-        }
-    });
-    if let Some(settings) = gtk::Settings::default() {
-        let weak = widget.downgrade();
-        let id = settings.connect_gtk_enable_animations_notify(move |_| {
-            if let Some(widget) = weak.upgrade()
-                && widget.is_mapped()
-            {
-                start(&widget);
-            }
-        });
-        let settings = settings.downgrade();
-        let id = RefCell::new(Some(id));
-        widget.connect_destroy(move |_| {
-            if let (Some(settings), Some(id)) = (settings.upgrade(), id.borrow_mut().take()) {
-                settings.disconnect(id);
-            }
-        });
-    }
 }
 
 /// The Mac's spinner as a widget. To assistive tech it is a progress bar
