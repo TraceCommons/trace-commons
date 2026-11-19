@@ -791,7 +791,7 @@ mod tests {
             words
                 .home_history
                 .uncontributed_size
-                .replace("{size}", "145 KB")
+                .replace("{size}", "148 KB")
         );
         // The three on one line.
         let waiting = view
