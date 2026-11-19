@@ -1,3 +1,6 @@
+// The tests here are macOS-only; elsewhere their shared imports and helpers
+// are unused, which -D warnings turns into a build failure (Linux and Windows CI).
+#![cfg_attr(not(target_os = "macos"), allow(unused_imports, dead_code))]
 use super::*;
 use crate::config::ConfigStore;
 use crate::daemon::ipc::Request;
