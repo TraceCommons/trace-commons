@@ -149,6 +149,13 @@ public sealed class ArmingOfferFlow
     /// <summary>Enable is pressed once: locked from the press until the card goes (ArmingOfferMotion.swift:31-34).</summary>
     public bool EnableLocked => Step is not null;
 
+    /// <summary>
+    /// Whether the card's last departure was an armed card leaving after its
+    /// hold, so it leaves on the arming exit spring. Set before
+    /// <see cref="Changed"/> fires on every change of <see cref="Offer"/>.
+    /// </summary>
+    public bool LeftArmed { get; private set; }
+
     /// <summary>Not now is locked while its own call is out, and while Enable's is.</summary>
     public bool DeclineLocked => _declining || Step is not null;
 
@@ -161,6 +168,11 @@ public sealed class ArmingOfferFlow
     {
         ArmingOffer? next = Step is null ? answered : Offer;
         bool changed = !Equals(next, Offer);
+        if (changed)
+        {
+            LeftArmed = false;
+        }
+
         Offer = next;
         if (_refusedProject is not null && next?.ProjectId != _refusedProject)
         {
@@ -181,6 +193,7 @@ public sealed class ArmingOfferFlow
     {
         _generation++;
         _declining = false;
+        LeftArmed = false;
         Offer = null;
         Step = null;
         ClearRefusal();
@@ -215,7 +228,7 @@ public sealed class ArmingOfferFlow
             Changed?.Invoke();
             if (Array.IndexOf(WrittenInMemory, error.Message) >= 0)
             {
-                await _refresh().ConfigureAwait(true);
+                await RefreshQuietlyAsync().ConfigureAwait(true);
             }
 
             return;
@@ -223,13 +236,42 @@ public sealed class ArmingOfferFlow
 
         Step = ArmingOfferStep.Armed;
         Changed?.Invoke();
-        await _refresh().ConfigureAwait(true);
-        await _delay(Hold).ConfigureAwait(true);
-        if (IsCurrent(press) && Step == ArmingOfferStep.Armed)
+        // The hold starts at the reply and the re-read runs beside it, as the
+        // Mac's do (AppModel.swift:2228-2235): a slow or failed re-read never
+        // keeps the checked card up longer, and never strands it.
+        Task reread = RefreshQuietlyAsync();
+        try
         {
-            Offer = null;
-            Step = null;
-            Changed?.Invoke();
+            await _delay(Hold).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // A cancelled hold still ends with the card gone.
+        }
+        finally
+        {
+            if (IsCurrent(press) && Step == ArmingOfferStep.Armed)
+            {
+                LeftArmed = true;
+                Offer = null;
+                Step = null;
+                Changed?.Invoke();
+            }
+        }
+
+        _ = reread;
+    }
+
+    /// <summary>The re-read, whose failure is the next refresh's to report, never the click's.</summary>
+    private async Task RefreshQuietlyAsync()
+    {
+        try
+        {
+            await _refresh().ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            System.Diagnostics.Trace.TraceWarning("arming re-read failed: " + ex.GetType().Name);
         }
     }
 
@@ -259,6 +301,7 @@ public sealed class ArmingOfferFlow
         _declining = false;
         if (error is null && IsCurrent(press))
         {
+            LeftArmed = false;
             Offer = null;
             ClearRefusal();
         }

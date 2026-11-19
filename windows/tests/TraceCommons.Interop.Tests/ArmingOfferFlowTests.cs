@@ -37,6 +37,7 @@ public class ArmingOfferFlowTests
         public readonly List<(string Method, string Params)> Calls = new();
         public readonly Queue<TaskCompletionSource<DaemonResponse>> Replies = new();
         public int Refreshes;
+        public Func<Task>? RefreshOverride;
         public TaskCompletionSource Hold = new();
         public TimeSpan? HeldFor;
         public ArmingOffer? RefreshAnswer;
@@ -59,6 +60,11 @@ public class ArmingOfferFlowTests
                 () =>
                 {
                     Refreshes++;
+                    if (RefreshOverride is { } refresh)
+                    {
+                        return refresh();
+                    }
+
                     if (RefreshAnswers)
                     {
                         Flow.OnRefreshed(RefreshAnswer);
@@ -144,6 +150,67 @@ public class ArmingOfferFlowTests
         rig.Hold.SetResult();
         await pressed;
         Assert.Null(rig.Flow.Offer);
+    }
+
+    [Fact]
+    public async Task AFailedReReadNeverStrandsTheCheckedCard()
+    {
+        var rig = new Rig { RefreshOverride = () => throw new System.IO.IOException("pipe closed") };
+        rig.Flow.OnRefreshed(Api);
+        Task pressed = rig.Flow.AcceptAsync();
+
+        rig.Answer(Armed);
+        Assert.Equal(ArmingOfferStep.Armed, rig.Flow.Step);
+        rig.Hold.SetResult();
+        await pressed;
+
+        Assert.Null(rig.Flow.Offer);
+        Assert.Null(rig.Flow.Step);
+        Assert.True(rig.Flow.LeftArmed);
+    }
+
+    [Fact]
+    public async Task ASlowReReadDoesNotHoldTheCardPastTheHold()
+    {
+        var never = new TaskCompletionSource();
+        var rig = new Rig { RefreshOverride = () => never.Task };
+        rig.Flow.OnRefreshed(Api);
+        Task pressed = rig.Flow.AcceptAsync();
+
+        rig.Answer(Armed);
+        // The hold started at the reply, not after the re-read.
+        Assert.Equal(TimeSpan.FromMilliseconds(900), rig.HeldFor);
+        rig.Hold.SetResult();
+        await pressed;
+
+        Assert.Null(rig.Flow.Offer);
+    }
+
+    [Fact]
+    public async Task OnlyAnArmedCardLeavesOnTheArmingExit()
+    {
+        var rig = new Rig();
+        bool leftArmedWhenItWent = false;
+        rig.Flow.Changed += () =>
+        {
+            if (rig.Flow.Offer is null)
+            {
+                leftArmedWhenItWent = rig.Flow.LeftArmed;
+            }
+        };
+        rig.Flow.OnRefreshed(Api);
+        Task pressed = rig.Flow.AcceptAsync();
+        rig.Answer(Armed);
+        rig.Hold.SetResult();
+        await pressed;
+        Assert.True(leftArmedWhenItWent);
+
+        rig.Flow.OnRefreshed(Web);
+        Assert.False(rig.Flow.LeftArmed);
+        Task declined = rig.Flow.DeclineAsync();
+        rig.Answer(Declined);
+        await declined;
+        Assert.False(leftArmedWhenItWent);
     }
 
     [Fact]

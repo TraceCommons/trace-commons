@@ -21,7 +21,6 @@ namespace TraceCommons.App;
 public sealed partial class MainWindow
 {
     private ArmingOfferStep? _armingStepShown;
-    private bool _armingExitArmed;
 
     private void InitArmingMotion()
     {
@@ -40,14 +39,10 @@ public sealed partial class MainWindow
 
     /// <summary>
     /// Whether the card now leaving was armed, so it leaves on the arming
-    /// exit spring. Read once by the notice stack's fade.
+    /// exit spring. The flow sets this before it announces the change, so the
+    /// notice stack's fade reads it whichever handler runs first.
     /// </summary>
-    private bool ArmingExitPending()
-    {
-        bool armed = _armingExitArmed;
-        _armingExitArmed = false;
-        return armed;
-    }
+    private bool ArmingExitPending() => ViewModel.Arming.LeftArmed;
 
     private void OnArmingChanged()
     {
@@ -58,7 +53,6 @@ public sealed partial class MainWindow
             // The card leaves showing what it last showed (a SwiftUI removal
             // draws the view's last state); the mark is reset for the next
             // offer when one arrives.
-            _armingExitArmed = before == ArmingOfferStep.Armed;
             return;
         }
 

@@ -91,8 +91,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private QueueGroupViewModel? _openFolder;
     private HealthCopy? _health;
     private HealthNavigationTarget _healthNavigation;
-    /// <summary>The account consent writes are settled against (checklist L2).</summary>
-    private readonly AccountGeneration _account = new();
     private HealthCopy? _witness;
     private GateHeldNotice? _gateHeld;
     private HistoryRollup _rollup = new();
@@ -173,6 +171,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             span => Task.Delay(span),
             () => MonitorWords.ProjectModeFailed);
         Arming.Changed += RaiseArming;
+        _host.Account.BoundaryCrossed += Arming.AccountBoundary;
 
         _undoTick = _host.Dispatcher.CreateTimer();
         _undoTick.Interval = TimeSpan.FromSeconds(1);
@@ -1704,7 +1703,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             {
                 // A status naming another account is a boundary: replies to
                 // consent presses made before it are not applied (L2).
-                if (_account.Observe(parsedStatus.AccountScope))
+                if (_host.Account.Observe(parsedStatus.AccountScope))
                 {
                     Arming.AccountBoundary();
                 }

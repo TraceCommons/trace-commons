@@ -43,6 +43,14 @@ public sealed class DaemonHost : IAsyncDisposable
     /// </summary>
     public event Action? QueueChanged;
 
+    /// <summary>
+    /// The account consent writes are settled against, shared by every
+    /// window this host serves (checklist L2): a status read naming another
+    /// account, or an unenroll in Settings, voids presses made before it in
+    /// the main window too.
+    /// </summary>
+    public AccountGeneration Account { get; } = new();
+
     /// <summary>Raised on the UI thread when daemon status may have changed.</summary>
     public event Action? StatusChanged;
 

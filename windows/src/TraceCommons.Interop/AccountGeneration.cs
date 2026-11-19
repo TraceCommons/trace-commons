@@ -1,3 +1,5 @@
+using System;
+
 namespace TraceCommons.Interop;
 
 /// <summary>
@@ -14,6 +16,13 @@ namespace TraceCommons.Interop;
 /// </remarks>
 public sealed class AccountGeneration
 {
+    /// <summary>
+    /// Raised by <see cref="Boundary"/>: a sign-out or unenroll finished in
+    /// some window, and every window's consent presses from before it are
+    /// void. The app holds one instance for all its windows.
+    /// </summary>
+    public event Action? BoundaryCrossed;
+
     private bool _seen;
     private string? _scope;
 
@@ -38,17 +47,12 @@ public sealed class AccountGeneration
         return changed;
     }
 
-    /// <summary>
-    /// A failed status read. The owner stays the last account a read named,
-    /// so a read that fails between two accounts still counts the change
-    /// when the next one answers (stricter than the Linux port, which forgets).
-    /// </summary>
-    public void Forget()
-    {
-    }
-
     /// <summary>A sign-out or unenroll finished: writes pressed before it are not applied.</summary>
-    public void Boundary() => Current++;
+    public void Boundary()
+    {
+        Current++;
+        BoundaryCrossed?.Invoke();
+    }
 
     /// <summary>Whether a press stamped <paramref name="pressedUnder"/> may still be applied.</summary>
     public bool IsCurrent(long pressedUnder) => pressedUnder == Current;

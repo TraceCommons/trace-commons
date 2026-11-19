@@ -64,8 +64,20 @@ public class AccountGenerationTests
         var owner = new AccountGeneration();
         owner.Observe("sha256:a");
         long pressed = owner.Current;
-        owner.Forget();
+        // A failed read observes nothing; the next answered read is compared
+        // with the last account a read named.
         Assert.True(owner.Observe("sha256:b"));
         Assert.False(owner.IsCurrent(pressed));
+    }
+
+    [Fact]
+    public void AnUnenrollTellsEveryWindowBeforeAnyReadSaysSo()
+    {
+        var owner = new AccountGeneration();
+        int told = 0;
+        owner.BoundaryCrossed += () => told++;
+        owner.Observe("sha256:a");
+        owner.Boundary();
+        Assert.Equal(1, told);
     }
 }
