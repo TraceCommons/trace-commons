@@ -12,6 +12,10 @@ public struct MonitorSettingsNavCopy: MonitorWordTable {
     public let account: String
     /// The Payouts section (owner, 2026-11-04, D2).
     public let payouts: String
+    /// The General section: appearance, the edge rail, the Traces map's
+    /// style and Home's promotions. Decoded so the export's every field is
+    /// consumed; the section draws `SettingsWords.general`, the same word.
+    public let general: String
     public let startup: String
     public let watching: String
     public let uses: String
@@ -28,6 +32,7 @@ public struct MonitorSettingsNavCopy: MonitorWordTable {
         case connection
         case account
         case payouts
+        case general
         case startup
         case watching
         case uses

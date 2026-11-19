@@ -189,7 +189,19 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_status_on #1a8f4c;
 @define-color tc_glass_status_off #8a8a90;
 @define-color tc_glass_tile_folder #e6e6ea;
+@define-color tc_glass_window_pane #f2f3f6;
+@define-color tc_glass_window_card #fafafb;
+@define-color tc_glass_window_well #dbdde3;
+@define-color tc_glass_control_on_selection #044895;
+@define-color tc_glass_control_on_selection_hover #043f83;
+@define-color tc_glass_settings_ground #e9ebef;
+@define-color tc_glass_settings_card #f6f7f9;
+@define-color tc_glass_settings_rule #cdcfd2;
+@define-color tc_glass_toggle_on #0558b6;
+@define-color tc_glass_toggle_knob_on #ffffff;
+@define-color tc_glass_toggle_knob_off #ffffff;
 @define-color tc_glass_edge_rail_handle rgba(29, 29, 31, 0.28);
+@define-color tc_glass_toggle_off rgba(0, 0, 0, 0.43);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 14px 30px rgba(0, 0, 0, 0.12); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -269,7 +281,19 @@ pub const GLASS_DARK_CSS: &str = r#"
 @define-color tc_glass_status_on #30d158;
 @define-color tc_glass_status_off #a9a9b0;
 @define-color tc_glass_tile_folder #2a2a2c;
+@define-color tc_glass_window_pane #171b2d;
+@define-color tc_glass_window_card #14182a;
+@define-color tc_glass_window_well #0e111d;
+@define-color tc_glass_control_on_selection #6ba2de;
+@define-color tc_glass_control_on_selection_hover #5f92c9;
+@define-color tc_glass_settings_ground #0d1124;
+@define-color tc_glass_settings_card #0d1124;
+@define-color tc_glass_settings_rule #2a2e3e;
+@define-color tc_glass_toggle_on #7ebcff;
+@define-color tc_glass_toggle_knob_on #071a2e;
+@define-color tc_glass_toggle_knob_off #071a2e;
 @define-color tc_glass_edge_rail_handle rgba(255, 255, 255, 0.28);
+@define-color tc_glass_toggle_off rgba(255, 255, 255, 0.38);
 .tc-glass-pane { background-color: @tc_glass_pane; border-radius: 20px; box-shadow: 0px 18px 36px rgba(2, 3, 10, 0.6); }
 .tc-glass-card { background-color: @tc_glass_card; border-radius: 16px; box-shadow: none; }
 .tc-glass-card-quiet { background-color: @tc_glass_card_quiet; border-radius: 14px; box-shadow: none; }
@@ -435,6 +459,13 @@ pub mod glass {
         pub const LABEL_DARK: &str = "#A9A9B0";
         /// `textPrimary`, dark.
         pub const TEXT_PRIMARY_DARK: &str = "#F2F3F8";
+    }
+    /// The glass inks cairo draws with, opaque over the pane.
+    pub mod ink {
+        /// `textSecondary` over the pane, light.
+        pub const SECONDARY_LIGHT: &str = "#3C3C43";
+        /// `textSecondary` over the pane, dark.
+        pub const SECONDARY_DARK: &str = "#D8D9E0";
     }
     /// The tab strip's ember line and its halo, as colour and alpha.
     pub mod tabs {
@@ -697,6 +728,10 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#1d9467", 1.0);
         pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
         pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#ffffff", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#000000", 0.24);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#ffffff", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.92);
     }
     /// The dark scheme.
     pub mod dark {
@@ -724,5 +759,42 @@ pub mod first_run {
         pub const TOOL_OPEN_CODE: Rgba = ("#4fd39a", 1.0);
         pub const TINT_ACCENT: Rgba = ("#0091fd", 0.22);
         pub const TOGGLE_ON: Rgba = ("#7ebcff", 1.0);
+        pub const TEXT_ON_ACCENT: Rgba = ("#071a2e", 1.0);
+        pub const TOGGLE_OFF: Rgba = ("#ffffff", 0.38);
+        pub const TOGGLE_KNOB_OFF: Rgba = ("#071a2e", 1.0);
+        pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.15);
     }
+}
+
+/// The Mac's motion: `GlassTokens.Motion`'s durations in seconds, the
+/// token curve, and `GlassMotion`'s springs as (duration, bounce).
+pub mod motion {
+    /// `motion.fast`.
+    pub const FAST: f64 = 0.15;
+    /// `motion.standard`.
+    pub const STANDARD: f64 = 0.22;
+    /// `motion.slow`.
+    pub const SLOW: f64 = 0.3;
+    /// `motion.reveal`.
+    pub const REVEAL: f64 = 0.18;
+    /// `motion.slide`.
+    pub const SLIDE: f64 = 0.25;
+    /// `motion.spin`.
+    pub const SPIN: f64 = 0.8;
+    /// `motion.pulse`.
+    pub const PULSE: f64 = 1.6;
+    /// `GlassMotion.curve`'s control points (x1, y1, x2, y2).
+    pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];
+    /// The same curve as a CSS timing function.
+    pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+    /// `GlassMotion.spatial`: `.spring(duration:bounce:)`.
+    pub const SPATIAL: (f64, f64) = (0.9, 0.04);
+    /// `GlassMotion.expressive`: `.spring(duration:bounce:)`.
+    pub const EXPRESSIVE: (f64, f64) = (0.78, 0.32);
+    /// `size.modalScrimBlur`: the blur behind a modal, in points.
+    pub const MODAL_SCRIM_BLUR: f64 = 8.0;
+    /// `modalScrim`'s black, light: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_LIGHT: f64 = 0.25;
+    /// `modalScrim`'s black, dark: how far a modal dims what it covers.
+    pub const MODAL_SCRIM_DARK: f64 = 0.4;
 }

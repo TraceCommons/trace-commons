@@ -127,6 +127,7 @@ impl Inspector {
                     .collect(),
                 projects: app.projects.borrow().clone(),
                 rollup: app.summary_rollup.borrow().clone(),
+                rollup_loading: !app.summary_rollup_answered.get(),
                 condition: app.credit_condition.borrow().clone(),
                 history: app.history_records.borrow().clone(),
                 watched: app.shell.map.watched_tools(),

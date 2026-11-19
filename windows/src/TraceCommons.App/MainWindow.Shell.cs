@@ -130,6 +130,7 @@ public sealed partial class MainWindow
         TracesHistoryButton.Content = MonitorWords.CrumbTitle(new Crumb(CrumbWord.History, MonitorTab.Traces, false));
         HomeOpenTraces.Content = MonitorShellCopy.Top("open_traces");
         HomeOpenMissionDrafts.Content = MonitorWords.CrumbTitle(new Crumb(CrumbWord.Missions, MonitorTab.Home, false));
+        ApplyMissionCatalogueEntry();
 
         BuildTabs();
         ApplyTabDescriptions();
@@ -273,6 +274,11 @@ public sealed partial class MainWindow
             return _at with { Tab = MonitorTab.Home, HomePage = HomePage.MissionDrafts };
         }
 
+        if (ViewModel.ShowingMissions)
+        {
+            return _at with { Tab = MonitorTab.Home, HomePage = HomePage.Missions };
+        }
+
         if (ViewModel.ShowingHome)
         {
             return _at with { Tab = MonitorTab.Home, HomePage = HomePage.Overview };
@@ -381,9 +387,11 @@ public sealed partial class MainWindow
             case nameof(MainViewModel.ShowingPrivateInference):
             case nameof(MainViewModel.ShowingInsights):
             case nameof(MainViewModel.ShowingMissionDrafts):
+            case nameof(MainViewModel.ShowingMissions):
             case nameof(MainViewModel.ShowingHome):
             case nameof(MainViewModel.MissionsShown):
                 RefreshLocation();
+                ApplyMissionCatalogueEntry();
                 break;
             case nameof(MainViewModel.Demand):
             case nameof(MainViewModel.HasPrivateInferenceOffer):
@@ -1105,11 +1113,17 @@ public sealed partial class MainWindow
     /// <summary>Stops a card's motion and puts it at rest: opaque, in its place.</summary>
     private static void ResetMotion(FrameworkElement card)
     {
-        // A card that has never slid in has no Translation yet, and stopping
-        // an animation on a property that is not there throws E_INVALIDARG:
-        // from the constructor, a stowed exception before the first frame.
+        // A card that never slid has no Translation property until it is
+        // enabled, and stopping an animation on a missing property throws
+        // (box, 2026-11-19: every launch died here in RefreshNotices).
         ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
+        // A card that never arrived has no Translation property, and stopping
+        // an animation on a property that does not exist throws ("The
+        // specified property was not found", the app's first notice at
+        // launch). Give it the property first, at rest.
+        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
+        visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
         visual.Opacity = 1;

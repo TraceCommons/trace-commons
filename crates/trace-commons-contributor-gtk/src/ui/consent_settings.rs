@@ -732,11 +732,11 @@ impl UsesCard {
         heading.add_css_class("tc-card-title");
         heading.set_hexpand(true);
         head.append(&heading);
-        let refresh = gtk::Button::with_label(shell.settings_refresh);
-        refresh.set_tooltip_text(Some(shell.settings_refresh_uses));
-        refresh.update_property(&[gtk::accessible::Property::Label(
+        // The word and the icon that turns (`GlassRefreshButton`).
+        let (refresh, _) = super::glass_feedback::refresh_pill(
+            shell.settings_refresh,
             shell.settings_refresh_uses,
-        )]);
+        );
         head.append(&refresh);
         root.append(&head);
         style::append_caveat(&root, words.applies_from_now);

@@ -266,6 +266,7 @@ impl InsightsView {
             .expanded(true)
             .child(&summary_body)
             .build();
+        super::glass_motion::expander(&summary_expander);
         content.append(&summary_expander);
         let episode_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         episode_body.append(&label(copy("episode_scope")));
@@ -322,6 +323,7 @@ impl InsightsView {
             .label(copy("episode_title"))
             .child(&episode_body)
             .build();
+        super::glass_motion::expander(&episode_expander);
         content.append(&episode_expander);
         let card_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         card_body.append(&label(copy("card_selection_notice")));
@@ -355,6 +357,7 @@ impl InsightsView {
             .label(copy("card_title"))
             .child(&card_body)
             .build();
+        super::glass_motion::expander(&card_expander);
         content.append(&card_expander);
         let detail = label("");
         content.append(&detail);
@@ -377,6 +380,7 @@ impl InsightsView {
             .child(&evidence_content)
             .visible(false)
             .build();
+        super::glass_motion::expander(&evidence_expander);
         content.append(&evidence_expander);
         let assessment = gtk::Box::new(gtk::Orientation::Vertical, 8);
         assessment.append(&label(copy("assessment_notice")));

@@ -932,6 +932,13 @@
                                     Style="{StaticResource TcSecondaryButtonStyle}"
                                     Visibility="{x:Bind ViewModel.MissionsShown, Mode=OneWay}"
                                     Click="OnShowMissionDrafts" />
+                            <!-- W23's catalogue way in: Home draws it as its
+                                 own card (HomeView); this button keeps the
+                                 name the shell's code sets. -->
+                            <Button x:Name="HomeOpenMissionCatalogue"
+                                    Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Visibility="Collapsed"
+                                    Click="OnShowMissions" />
                         </StackPanel>
                     </Grid>
 
@@ -966,6 +973,10 @@
 
                 <ContentPresenter x:Name="MissionDraftsPane"
                                   Visibility="{x:Bind ViewModel.ShowingMissionDrafts, Mode=OneWay}" />
+
+                <!-- W23: the commons catalogue, its own Home page (MainWindow.Missions.cs). -->
+                <ContentPresenter x:Name="MissionsPane"
+                                  Visibility="{x:Bind ViewModel.ShowingMissions, Mode=OneWay}" />
 
                 <!-- Header, queue, recovery bar, decision notice, caveat, week
                      band, progress. -->
