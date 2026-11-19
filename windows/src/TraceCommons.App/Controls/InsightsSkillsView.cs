@@ -80,7 +80,7 @@ public sealed class InsightsSkillsView : UserControl
     /// <summary>What may move: the system's animation setting, and only while the window's clocks run.</summary>
     private SkillsHomeMotion Motion => new(!(_ui.AnimationsEnabled && WindowClocks.Running));
 
-    public string Section => _section;
+    public string ShownSection => _section;
 
     public void SelectSection(string section)
     {
