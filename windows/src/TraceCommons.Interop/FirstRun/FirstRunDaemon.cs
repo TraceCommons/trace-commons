@@ -132,6 +132,7 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     private readonly Func<Task<bool>> _markComplete;
     private readonly Func<Task<bool>> _markWatchOnly;
     private readonly Action<FirstRunFailure?> _finished;
+    private readonly Func<Uri, Task<bool>> _openBrowser;
 
     /// <param name="call">Sends one method with its JSON parameters.</param>
     /// <param name="start">Starts the daemon with a settings declaration; true once it runs.</param>
@@ -139,10 +140,13 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     /// <param name="markComplete">Writes the enrolled completion marker, after reading status for its tenant.</param>
     /// <param name="markWatchOnly">Writes the watch-only marker, refused while the daemon is logged in.</param>
     /// <param name="finished">The first run finished; what it must still say.</param>
+    /// <param name="openBrowser">Opens the sign-in page; true once it opened.</param>
     public FirstRunDaemon(
         Func<string, string, Task<DaemonResponse>> call, Func<string, Task<bool>> start, Func<bool> running,
-        Func<Task<bool>> markComplete, Func<Task<bool>> markWatchOnly, Action<FirstRunFailure?> finished)
+        Func<Task<bool>> markComplete, Func<Task<bool>> markWatchOnly, Action<FirstRunFailure?> finished,
+        Func<Uri, Task<bool>> openBrowser)
     {
+        _openBrowser = openBrowser;
         _call = call;
         _start = start;
         _running = running;
@@ -234,19 +238,41 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     }
 
     /// <summary>
-    /// The near.ai login: start the browser sign-in, then poll the
-    /// credential status until it ends, within <c>NearAILoginPoll.limit</c>
-    /// (600 s, FirstRunPlan.swift:57-60) and the verdict rules of :63-73.
+    /// The near.ai login (AppModel.swift:4863-4935): signed in at once when
+    /// the daemon keeps a session; else <c>near_ai_credential_start</c>, the
+    /// shell opens its <c>browser_url</c> (a page that does not open cancels
+    /// the attempt), and the attempt is polled by its id until it ends,
+    /// within <c>NearAILoginPoll.limit</c> (600 s, FirstRunPlan.swift:57-60),
+    /// read by <c>NearAILoginPoll.verdict</c> (:63-73).
     /// </summary>
     public async Task<NearAILoginOutcome> NearAILoginOutcome(CancellationToken cancel)
     {
-        if (await Verdict().ConfigureAwait(true) == LoginPoll.SignedIn)
+        if (await Verdict(null).ConfigureAwait(true) == LoginPoll.SignedIn)
         {
             return FirstRun.NearAILoginOutcome.SignedIn;
         }
 
-        if (!await Ok(DaemonProtocol.Methods.NearAiCredentialStart).ConfigureAwait(true))
+        DaemonResponse? started = await Call(DaemonProtocol.Methods.NearAiCredentialStart).ConfigureAwait(true);
+        if (started is not { IsError: false, Result: JsonElement res }
+            || NearAiCredentialSurface.ParseStart(res.GetRawText()) is not { } attempt
+            || !Uri.TryCreate(attempt.BrowserUrl, UriKind.Absolute, out Uri? url))
         {
+            return FirstRun.NearAILoginOutcome.Failed;
+        }
+
+        bool opened;
+        try
+        {
+            opened = !cancel.IsCancellationRequested && await _openBrowser(url).ConfigureAwait(true);
+        }
+        catch (Exception e) when (e is InvalidOperationException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
+        {
+            opened = false;
+        }
+
+        if (!opened)
+        {
+            await _call(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(attempt.AttemptId)).ConfigureAwait(true);
             return FirstRun.NearAILoginOutcome.Failed;
         }
 
@@ -259,10 +285,10 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
             }
             catch (TaskCanceledException)
             {
-                return FirstRun.NearAILoginOutcome.Cancelled;
+                return FirstRun.NearAILoginOutcome.Failed;
             }
 
-            switch (await Verdict().ConfigureAwait(true))
+            switch (await Verdict(attempt.AttemptId).ConfigureAwait(true))
             {
                 case LoginPoll.SignedIn:
                     return FirstRun.NearAILoginOutcome.SignedIn;
@@ -284,31 +310,40 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
         Ended,
     }
 
-    /// <summary><c>NearAILoginPoll.verdict</c> (FirstRunPlan.swift:63-73).</summary>
-    private async Task<LoginPoll> Verdict()
+    /// <summary><c>NearAILoginPoll.verdict</c> (FirstRunPlan.swift:63-73), read through the shared parser.</summary>
+    private async Task<LoginPoll> Verdict(string? attemptId)
     {
-        DaemonResponse? r = await Call(DaemonProtocol.Methods.NearAiCredentialStatus).ConfigureAwait(true);
-        if (r is not { IsError: false, Result: JsonElement res } || res.ValueKind != JsonValueKind.Object)
+        DaemonResponse? r = await Call2(DaemonProtocol.Methods.NearAiCredentialStatus, NearAiCredentialSurface.SerializeStatus(attemptId)).ConfigureAwait(true);
+        if (r is not { IsError: false, Result: JsonElement res })
         {
             return LoginPoll.Waiting;
         }
 
-        if (res.TryGetProperty("session_state", out JsonElement state) && state.ValueKind == JsonValueKind.String && state.GetString() == "present")
+        NearAiCredentialStatus status = NearAiCredentialSurface.ParseStatus(res.GetRawText());
+        if (status.SessionState == NearAiEnrollSurface.CredentialStatePresent)
         {
             return LoginPoll.SignedIn;
         }
 
-        if (!res.TryGetProperty("attempt_status", out JsonElement attempt) || attempt.ValueKind != JsonValueKind.String)
+        return status.AttemptStatus switch
         {
-            return LoginPoll.Waiting;
-        }
-
-        return attempt.GetString() switch
-        {
+            null => LoginPoll.Waiting,
             "waiting_for_browser" => LoginPoll.Waiting,
             "cancelled" => LoginPoll.Cancelled,
             _ => LoginPoll.Ended,
         };
+    }
+
+    private async Task<DaemonResponse?> Call2(string method, string json)
+    {
+        try
+        {
+            return await _call(method, json).ConfigureAwait(true);
+        }
+        catch (Exception e) when (e is TcException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     public Task<bool> CancelNearAILogin() => Ok(DaemonProtocol.Methods.NearAiCredentialCancel);

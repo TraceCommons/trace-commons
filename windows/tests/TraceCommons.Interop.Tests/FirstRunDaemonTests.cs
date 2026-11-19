@@ -29,12 +29,15 @@ public sealed class FirstRunDaemonTests
         }
     }
 
+    private static bool OpensBrowser = true;
+
     private static (FirstRunDaemon Daemon, Wire Wire, List<string> Local) Make(bool running = true)
     {
         var wire = new Wire();
         var local = new List<string>();
         var daemon = new FirstRunDaemon(wire.Call, json => { local.Add("start " + json); return Task.FromResult(true); }, () => running,
-            () => { local.Add("mark"); return Task.FromResult(true); }, () => { local.Add("mark-watch"); return Task.FromResult(true); }, _ => local.Add("finished"));
+            () => { local.Add("mark"); return Task.FromResult(true); }, () => { local.Add("mark-watch"); return Task.FromResult(true); }, _ => local.Add("finished"),
+            uri => { local.Add("open " + uri); return Task.FromResult(OpensBrowser); });
         return (daemon, wire, local);
     }
 
@@ -128,5 +131,49 @@ public sealed class FirstRunDaemonTests
         Assert.Equal(3, terms.Blocks.Count);
         Assert.Null(FetchedTerms.Decode(ok.Replace("\"heading\"", "\"poem\"")));
         Assert.Null(FetchedTerms.Decode(ok.Replace("\"content_sha256\":\"00\"", "\"x\":1")));
+    }
+
+    [Fact]
+    public async Task TheBrowserSignInOpensTheDaemonsPageAndPollsItsAttempt()
+    {
+        // AppModel.swift:4863-4935: a kept session first; else start, open
+        // browser_url, poll near_ai_credential_status by attempt_id until
+        // session_state is present.
+        OpensBrowser = true;
+        var (daemon, wire, local) = Make();
+        int polls = 0;
+        wire.Reply = m => m switch
+        {
+            "near_ai_credential_start" => "{\"result\":{\"attempt_id\":\"a1\",\"browser_url\":\"https://example.test/login\"}}",
+            "near_ai_credential_status" => ++polls < 3
+                ? "{\"result\":{\"state\":\"absent\",\"attempt_id\":\"a1\",\"attempt_status\":\"waiting_for_browser\"}}"
+                : "{\"result\":{\"state\":\"present\",\"session_state\":\"present\"}}",
+            _ => "{\"result\":{}}",
+        };
+        Assert.Equal(NearAILoginOutcome.SignedIn, await daemon.NearAILoginOutcome(default));
+        Assert.Equal(new[] { "open https://example.test/login" }, local);
+        Assert.Equal("near_ai_credential_status", wire.Sent[0].Method);
+        Assert.Equal("near_ai_credential_start", wire.Sent[1].Method);
+        Assert.Equal("a1", (string)wire.Sent[2].Params!["attempt_id"]!);
+    }
+
+    [Fact]
+    public async Task APageThatDoesNotOpenCancelsTheAttempt()
+    {
+        OpensBrowser = false;
+        try
+        {
+            var (daemon, wire, _) = Make();
+            wire.Reply = m => m == "near_ai_credential_start"
+                ? "{\"result\":{\"attempt_id\":\"a2\",\"browser_url\":\"https://example.test/login\"}}"
+                : "{\"result\":{\"state\":\"absent\"}}";
+            Assert.Equal(NearAILoginOutcome.Failed, await daemon.NearAILoginOutcome(default));
+            Assert.Equal("near_ai_credential_cancel", wire.Sent[^1].Method);
+            Assert.Equal("a2", (string)wire.Sent[^1].Params!["attempt_id"]!);
+        }
+        finally
+        {
+            OpensBrowser = true;
+        }
     }
 }

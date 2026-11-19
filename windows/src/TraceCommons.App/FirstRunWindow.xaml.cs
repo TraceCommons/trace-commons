@@ -88,6 +88,7 @@ public sealed partial class FirstRunWindow : Window
                 {
                     await _host.StartAsync(json).ConfigureAwait(true);
                     DaemonStarted?.Invoke();
+                    DispatcherQueue.TryEnqueue(async () => await RefreshOptionsAsync());
                     return true;
                 }
                 catch (TcException)
@@ -98,7 +99,8 @@ public sealed partial class FirstRunWindow : Window
             () => _host.IsRunning,
             MarkCompleteAsync,
             MarkWatchOnlyCompleteAsync,
-            _ => { });
+            _ => { },
+            async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
         _runner = new FirstRunRunner(new FirstRunState(), daemon);
         _runner.Changed += () => DispatcherQueue.TryEnqueue(Render);
         _model.Changed += OnModelChanged;
@@ -142,11 +144,20 @@ public sealed partial class FirstRunWindow : Window
 
     private double Scale() => Win32Dpi.ForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
 
-    /// <summary>A deep link's invite: held for Join; it fills and stops (no join without the person).</summary>
+    /// <summary>
+    /// A deep link's invite. Held and not sent: Join's invite card, which
+    /// shows the person what they would join, is not ported yet, and an
+    /// invite nobody was shown is never enrolled (checklist L5).
+    /// </summary>
     public void OfferInvite(string invite)
     {
-        _runner.State.Invite = invite;
+        _heldInvite = invite;
     }
+
+    private string? _heldInvite;
+
+    /// <summary>The held invite, for the invite card when it lands.</summary>
+    internal string? HeldInvite => _heldInvite;
 
     /// <summary>Health's Connect target: past Welcome, as Get started.</summary>
     public void GetStarted()
@@ -164,8 +175,15 @@ public sealed partial class FirstRunWindow : Window
         _runner.State.RecordDiscovery(rows);
         _model.SetRows(rows);
         _model.SetTracesTotal((ulong)_discovered.Where(c => c.Exists).Sum(c => (long)c.SessionCount));
-        DaemonResponse options = await _host.CallAsync(DaemonProtocol.Methods.ConsentOptions).ConfigureAwait(true);
-        _options = options.ResultAs<ConsentOptionsPayload>()?.Scopes ?? new List<ConsentOption>();
+        await RefreshOptionsAsync();
+        // An enrollment the daemon already holds is this first run's account
+        // (OnboardingNavigation.recordEnrolment), never joined again.
+        DaemonResponse status = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+        if (status.ResultAs<DaemonStatus>() is { LoggedIn: true })
+        {
+            _runner.State = FirstRunNavigation.RecordEnrolment(_runner.State);
+        }
+
         var fetched = await Task.Run(FetchedTerms.Fetch).ConfigureAwait(true);
         _terms = fetched.Terms;
         _termsLabel = fetched.Label;
@@ -173,6 +191,28 @@ public sealed partial class FirstRunWindow : Window
     }
 
     private string? RequiredScope => _options.FirstOrDefault(o => o.AlwaysOn)?.Name;
+
+    /// <summary>
+    /// <c>consent_options</c>, read again until the daemon answers: on a new
+    /// computer the daemon starts on Tools, after the window opened, and
+    /// Uses and Join wait on the required use.
+    /// </summary>
+    private async Task RefreshOptionsAsync()
+    {
+        if (_options.Count > 0 || !_host.IsRunning)
+        {
+            return;
+        }
+
+        DaemonResponse options = await _host.CallAsync(DaemonProtocol.Methods.ConsentOptions).ConfigureAwait(true);
+        _options = options.ResultAs<ConsentOptionsPayload>()?.Scopes ?? new List<ConsentOption>();
+        if (_options.Count > 0 && _runner.State.Step is FirstRunStep.Uses or FirstRunStep.Join)
+        {
+            _shownStep = (FirstRunStep)(-1);
+        }
+
+        Render();
+    }
 
     // ---- Markers ----------------------------------------------------------
 
@@ -382,6 +422,11 @@ public sealed partial class FirstRunWindow : Window
             }
 
             BuildThread(from, state.Step, now);
+            if (state.Step is FirstRunStep.Uses or FirstRunStep.Join && _options.Count == 0)
+            {
+                DispatcherQueue.TryEnqueue(async () => await RefreshOptionsAsync());
+            }
+
             ApplyMotions(_reduceMotion ? now + 1e6 : now);
             DispatcherQueue.TryEnqueue(MeasureGraphic);
         }

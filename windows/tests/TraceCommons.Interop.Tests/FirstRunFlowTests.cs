@@ -303,4 +303,23 @@ public class FirstRunFlowTests
         Assert.Null(runner.Failure);
         Assert.Equal(FirstRunStep.PrivateAI, runner.State.Step);
     }
+
+    [Fact]
+    public void AnEnrolmentTheDaemonHoldsIsRecordedNotJoinedAgain()
+    {
+        // OnboardingNavigation.swift:36-48.
+        FirstRunState s = Answered();
+        s.Account = AccountAnswer.None;
+        FirstRunState recorded = FirstRunNavigation.RecordEnrolment(s);
+        Assert.Equal(AccountAnswer.Enrolled, recorded.Account);
+        Assert.Equal("", recorded.EnrolledInvite);
+        Assert.Equal("", recorded.Invite);
+        Assert.True(recorded.HoldsEnrolment);
+        Assert.DoesNotContain(FirstRunPlan.Calls(recorded, CommitPoint.SignIn), c => c is FirstRunCall.Enroll or FirstRunCall.LookupInvite);
+        FirstRunState signedOut = Answered();
+        signedOut.SignedOutOfEnrolment = true;
+        Assert.Same(signedOut, FirstRunNavigation.RecordEnrolment(signedOut));
+        FirstRunState nearAI = Answered();
+        Assert.Equal(AccountAnswer.NearAI, FirstRunNavigation.RecordEnrolment(nearAI).Account);
+    }
 }

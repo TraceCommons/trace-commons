@@ -396,14 +396,28 @@ public sealed partial class MainWindow : Window
     /// </para>
     /// </remarks>
     /// <summary>
-    /// No session roots yet: the first run asks, on its Tools step, and
-    /// starts the daemon there, as the Mac's does (W7). The startup this
-    /// window could not finish resumes once it has.
+    /// No session roots yet. On a device never set up, the first run asks,
+    /// on its Tools step, and starts the daemon there, as the Mac's does
+    /// (W7); the startup this window could not finish resumes once it has.
+    /// A device set up before keeps the roots window.
     /// </summary>
-    private Task ShowSessionRootsAsync()
+    private async Task ShowSessionRootsAsync()
     {
-        OpenOnboarding(OnboardingState.Default(), automatic: true).Activate();
-        return Task.CompletedTask;
+        OnboardingState onboarding = OnboardingState.Default();
+        if (!onboarding.AnyComplete())
+        {
+            OpenOnboarding(onboarding, automatic: true).Activate();
+            return;
+        }
+
+        // Set up before, roots since withdrawn: only the roots are asked.
+        IReadOnlyList<SourceCandidate> candidates = await Task
+            .Run(SourceDiscovery.ProbeThisMachine)
+            .ConfigureAwait(true);
+
+        var roots = new SessionRootsWindow(_host, candidates);
+        roots.Declared += OnSessionRootsDeclared;
+        roots.Activate();
     }
 
     private async void OnSessionRootsDeclared()

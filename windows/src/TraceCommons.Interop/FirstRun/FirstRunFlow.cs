@@ -415,6 +415,31 @@ public static class FirstRunNavigation
         return r;
     }
 
+    /// <summary>
+    /// An enrollment the daemon reported after this first run began
+    /// (OnboardingNavigation.swift:36-48): the account is held, so nothing
+    /// is joined, signed in or created again. One the person signed out of
+    /// is not theirs again.
+    /// </summary>
+    public static FirstRunState RecordEnrolment(FirstRunState state)
+    {
+        if (state.EnrolledInvite is not null || state.SignedOutOfEnrolment)
+        {
+            return state;
+        }
+
+        FirstRunState recorded = state.Clone();
+        recorded.EnrolledInvite = "";
+        recorded.Invite = "";
+        recorded.IssuerHost = null;
+        if (recorded.Account is AccountAnswer.None or AccountAnswer.WatchOnly)
+        {
+            recorded.Account = AccountAnswer.Enrolled;
+        }
+
+        return recorded;
+    }
+
     /// <summary>Whether the current step's Continue (or Start, on Join) is enabled (FirstRunNavigation.swift:99-117).</summary>
     public static bool CanContinue(FirstRunState state, string? requiredScope) => state.Step switch
     {
