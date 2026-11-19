@@ -97,6 +97,38 @@ struct MonitorWindowView: View {
         requiresOnboarding ? .inference : tab
     }
 
+    /// The anonymous usage count for a tab coming on screen (#1920).
+    static func usageEvent(for shown: Tab) -> UsageEvent {
+        switch shown {
+        case .home: .tabHomeOpened
+        case .inference: .tabPrivateAiOpened
+        case .traces: .tabTracesOpened
+        case .insights: .tabInsightsOpened
+        }
+    }
+
+    /// The count for the tab drawn now (#1920), one rule for the window's
+    /// opening and every change after it: report the drawn tab when it is
+    /// not the one this window last reported (`lastReported`, `nil` until
+    /// the opening is counted). So the tab the window opens on counts once
+    /// -- opening the window is the person asking for a screen, as picking
+    /// a tab is -- and a destination landing as it opens counts once,
+    /// whichever of the two handlers runs first. Nothing is reported until
+    /// the window knows what it draws (`ready`: the core has said whether
+    /// onboarding is required, and there is a daemon to report to), nor
+    /// while a waiting destination is about to replace the tab. While
+    /// onboarding is required Inference is drawn whatever is picked, so a
+    /// pick changes nothing. Every change of `tab` counts, whoever made it:
+    /// the strip, Home's and Insights' links to another tab, and an
+    /// opener's destination (`land`) are each the person asking for that
+    /// screen. A redraw changes nothing and reports nothing.
+    static func usageReport(lastReported: Tab?, ready: Bool, destinationLandsNow: Bool,
+                            tab: Tab, requiresOnboarding: Bool) -> UsageEvent? {
+        guard ready, !destinationLandsNow else { return nil }
+        let drawn = shownTab(tab, requiresOnboarding: requiresOnboarding)
+        return drawn == lastReported ? nil : usageEvent(for: drawn)
+    }
+
     /// The NEAR AI payout rail's streams for Insights' NEAR AI card, read
     /// off the main actor. Any refusal (no account session, no rail, a
     /// daemon that predates streams) reads as none, so the card is drawn
@@ -289,6 +321,10 @@ struct MonitorWindowView: View {
     /// The popover notices closed with their X until this window opens
     /// again (`MonitorNotices`).
     @State private var closedNotices: Set<String> = []
+    /// The tab this window last reported as opened (#1920,
+    /// `reportDrawnTab`); `nil` until its opening is counted, so a new window
+    /// starts uncounted.
+    @State private var lastReportedTab: Tab?
 
     /// The Private AI state every dot in this window draws: the tab, the
     /// map's Private AI segment and the Private AI heading all read the
@@ -393,7 +429,8 @@ struct MonitorWindowView: View {
                                  }, openSkillsSettings: {
                                      navigation.requestSettings(at: .insights)
                                      openWindow(id: WindowID.settings)
-                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"))
+                                 }, isSkillsEnabled: model.featureIsEnabled("insights_skills"),
+                                 recordUsage: { model.recordUsage($0) })
                 }
             } footer: {
                 // Shared over kept under the tree (#1146 `GraphFooter`).
@@ -483,6 +520,12 @@ struct MonitorWindowView: View {
         // A destination this window could not show yet (before the core
         // said) is taken once it can.
         .onChange(of: model.onboardingKnown) { _, _ in consumePending() }
+        // The tab the window opens on counts as opened (#1920), once per
+        // opening of the window, as soon as the window knows what it draws
+        // (`usageReport`). Never on a redraw.
+        .onChange(of: model.onboardingKnown && model.daemonData != nil, initial: true) { _, _ in
+            reportDrawnTab()
+        }
         // Restored scene state cannot hold a mission page open while
         // missions are hidden.
         .onChange(of: model.missionsShown, initial: true) { _, shown in
@@ -530,6 +573,7 @@ struct MonitorWindowView: View {
         // #1146 `MonitorShell`: picking Inference shows the map's Private AI
         // view, picking Traces its Traces view; Home keeps the choice.
         .onChange(of: tab) { _, picked in
+            reportDrawnTab()
             if let view = Self.mapTab(for: picked) { mapTab = view }
             // Opening Traces is a new visit: the resume notice's Not now
             // from the last one no longer hides it.
@@ -562,6 +606,20 @@ struct MonitorWindowView: View {
             async let c: () = home.run()
             _ = await (a, b, c)
         }
+    }
+
+    /// Reports the drawn tab as opened (#1920) when `usageReport` says so.
+    private func reportDrawnTab() {
+        let landsNow = navigation.pending.map {
+            LaunchRouting.monitorConsumes($0, requiresOnboarding: model.requiresOnboarding,
+                                          onboardingKnown: model.onboardingKnown)
+        } ?? false
+        guard let event = Self.usageReport(
+            lastReported: lastReportedTab, ready: model.onboardingKnown && model.daemonData != nil,
+            destinationLandsNow: landsNow, tab: tab, requiresOnboarding: model.requiresOnboarding)
+        else { return }
+        lastReportedTab = Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding)
+        model.recordUsage(event)
     }
 
     /// Lands the waiting destination, if this window can show it now

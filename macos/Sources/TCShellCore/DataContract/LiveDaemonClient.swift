@@ -370,6 +370,14 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         _ = try await call("set_settings", params: [key: on], as: DaemonData.NudgeAck.self)
     }
 
+    /// `record_usage_event {event}`, fire-and-forget: any refusal, an
+    /// unreachable daemon or an unreadable reply is `false`, never an error.
+    public func recordUsageEvent(_ event: UsageEvent) async -> Bool {
+        let answer = try? await call(
+            "record_usage_event", params: ["event": event.rawValue], as: DaemonData.UsageEventRecorded.self)
+        return answer?.recorded == true
+    }
+
     public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
         try await call("insights_glance", params: ["tz": tzSeconds], as: DaemonData.InsightsGlance.self)
     }

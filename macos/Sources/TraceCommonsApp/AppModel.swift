@@ -1585,6 +1585,18 @@ final class AppModel: ObservableObject {
     /// Overview observes it; Settings reads metadata and saves consent.
     @Published private(set) var subscriptionUsageModel: SubscriptionUsageModel?
     var daemonData: (any DaemonDataClient)? { liveData }
+
+    /// Reports one anonymous usage count (`record_usage_event`, #1920,
+    /// approved by the owner 2026-11-16), fire-and-forget: nothing waits on
+    /// it and nothing is drawn from it. The daemon decides whether it is
+    /// counted (`share_usage_data` and the US-only region check); a refusal,
+    /// `recorded: false` or no daemon at all is dropped silently. Returns
+    /// the task only so tests can wait for the report to be sent.
+    @discardableResult
+    func recordUsage(_ event: UsageEvent) -> Task<Void, Never>? {
+        guard let client = daemonData else { return nil }
+        return Task.detached(priority: .utility) { _ = await client.recordUsageEvent(event) }
+    }
     private var undoTask: Task<Void, Never>?
 
     /// Client-side bookkeeping for the daemon's bounded preview scheduler --
@@ -3333,6 +3345,7 @@ final class AppModel: ObservableObject {
         self.client = client
     }
     func setDaemonSettingsForTesting(_ settings: DaemonSettingsView) { publishIfChanged(\.daemonSettings, settings) }
+    func setLiveDataForTesting(_ client: LiveDaemonClient?) { liveData = client }
     func setStartupForTesting(_ startup: Startup) { self.startup = startup }
     func setPrivateInferenceBusyForTesting(_ busy: Bool) { privateInferenceBusy = busy }
     func setHarnessesForTesting(_ harnesses: HarnessList) { publishIfChanged(\.harnesses, harnesses) }
@@ -5117,9 +5130,13 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// The first run finished; keep what it must still say for the main
-    /// window (`ShellNotices`), which outlives the first-run host.
+    /// window (`ShellNotices`), which outlives the first-run host. Both
+    /// endings (enrolled and watch-only) arrive here once, from
+    /// `FirstRunRunner.finish()`, so this is where `setup_finished` is
+    /// counted -- not `markOnboardingComplete`, which the self-test calls too.
     func firstRunFinished(notice: String?) {
         firstRunNotice = notice
+        recordUsage(.setupFinished)
     }
 
     /// Watching only: the marker is keyed by the config directory, since

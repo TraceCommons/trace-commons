@@ -687,6 +687,11 @@ extension DaemonData {
     /// to prove the daemon answered with a result.
     struct NudgeAck: Decodable, Sendable {}
 
+    /// `record_usage_event`'s reply: whether the daemon counted it.
+    struct UsageEventRecorded: Decodable, Sendable {
+        let recorded: Bool?
+    }
+
     /// `status.nudge.mark_text`: the mark's accessibility sentence and its
     /// tooltip clause.
     public struct NudgeMarkText: Codable, Equatable, Sendable {
