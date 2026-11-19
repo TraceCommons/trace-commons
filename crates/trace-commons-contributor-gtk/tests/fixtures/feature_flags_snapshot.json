@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "environment": "production",
+  "profile_digest": "b1d451599bdde445988e6f22f153f0d4abaa0dc5707d33301000b49b3e2d305d",
+  "instance_id": "40e8037a-85c5-42c2-a5e4-403e58fb9e66",
+  "generation": 1,
+  "sampled_at": "2026-11-19T17:15:11.153219Z",
+  "source": "default",
+  "revision": null,
+  "expires_at": null,
+  "fresh": false,
+  "flags": {
+    "claude_desktop_private_ai": {
+      "enabled": false,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    },
+    "insights_skills": {
+      "enabled": false,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    },
+    "red_team_sessions": {
+      "enabled": false,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    },
+    "skills_catalog_suggestions": {
+      "enabled": false,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    },
+    "skills_server_catalog": {
+      "enabled": false,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    }
+  },
+  "local_overrides": {},
+  "local_override_allowed": {
+    "claude_desktop_private_ai": true,
+    "insights_skills": true,
+    "red_team_sessions": true,
+    "skills_catalog_suggestions": false,
+    "skills_server_catalog": true
+  },
+  "environment_variable_overrides": {},
+  "environment_variable_error": null
+}

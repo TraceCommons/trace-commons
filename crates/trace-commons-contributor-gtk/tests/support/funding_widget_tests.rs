@@ -159,7 +159,10 @@ impl Fixture {
                 // refused, its menu offers nothing.
                 | "plan_project_modes"
                 // Home's Insights hero; refused, it draws its teaser.
-                | "insights_glance" => {
+                | "insights_glance"
+                // The window's feature flag read; refused, every flag
+                // reads off.
+                | "feature_flags_snapshot" => {
                     self.reply(id, Err("synthetic_read_refused".into()));
                 }
                 _ => panic!("unexpected billing-side operation: {method}"),
