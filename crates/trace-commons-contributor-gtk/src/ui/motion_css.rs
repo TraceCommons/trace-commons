@@ -268,4 +268,32 @@ mod tests {
         ));
         assert!(css(false).contains("filter: blur(8px) brightness(0.75);"));
     }
+
+    /// The chevrons the Mac turns with no animation snap here too: the
+    /// split button's (`menuOpen ? 180 : 0`), a tree row's (`expanded`) and
+    /// Projects' (`open`) have no `.animation` beside them, and the Linux
+    /// tree row swaps its icon (`traces_list::chevron`) with no transition
+    /// on it. Only an expander's chevron is turned by a transition here.
+    #[test]
+    fn the_chevrons_the_mac_snaps_snap() {
+        let projects = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/Settings/ProjectsSection.swift"
+        );
+        for (source, turn) in [
+            (CONTROLS, ".rotationEffect(.degrees(menuOpen ? 180 : 0))"),
+            (LIST_ROW, ".rotationEffect(.degrees(expanded ? 90 : 0))"),
+            (projects, ".rotationEffect(.degrees(open ? 90 : 0))"),
+        ] {
+            let at = source.find(turn).unwrap_or_else(|| panic!("{turn}"));
+            // The modifiers that follow it, up to the view's next line.
+            let after: String = source[at + turn.len()..].lines().skip(1).take(3).collect();
+            assert!(!after.contains(".animation("), "{turn} animates: {after}");
+        }
+        let tree = include_str!("monitor/traces_list.rs");
+        assert!(tree.contains("\"pan-down-symbolic\""));
+        assert!(tree.contains("\"pan-end-symbolic\""));
+        let css = css(true);
+        assert_eq!(css.matches("-gtk-icon-transform ").count(), 2, "only expanders turn");
+        assert!(!css.contains("tc-tree-chevron"));
+    }
 }
