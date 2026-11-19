@@ -155,20 +155,39 @@ pub fn has_moved(translation: f64) -> bool {
     translation.abs() >= DRAG_THRESHOLD
 }
 
+/// The person's tab order as stored, for every reader: the strip and the
+/// accelerators on the main thread, the tray's rows on its D-Bus thread.
+#[cfg(not(test))]
+static ORDER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(test)]
 thread_local! {
-    /// The person's tab order as stored, for every reader on the main
-    /// thread (the strip, the accelerators, the tray's rows).
+    /// Per test thread, so tests that set an order never see each other's.
     static ORDER: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 /// The tabs in the person's order now.
 pub fn current_order() -> Vec<Tab> {
-    ORDER.with(|order| ordered(&order.borrow()))
+    #[cfg(not(test))]
+    {
+        ordered(&ORDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+    #[cfg(test)]
+    {
+        ORDER.with(|order| ordered(&order.borrow()))
+    }
 }
 
 /// Records the person's order (`stored` form).
 pub fn set_current_order(order: &str) {
-    ORDER.with(|kept| *kept.borrow_mut() = order.to_string());
+    #[cfg(not(test))]
+    {
+        *ORDER.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = order.to_string();
+    }
+    #[cfg(test)]
+    {
+        ORDER.with(|kept| *kept.borrow_mut() = order.to_string());
+    }
 }
 
 fn insights_title() -> &'static str {
