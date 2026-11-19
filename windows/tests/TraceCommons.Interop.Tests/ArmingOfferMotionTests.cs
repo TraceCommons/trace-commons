@@ -112,4 +112,22 @@ public class ArmingOfferMotionTests
         Assert.Equal(2, ArmingOfferMotion.MarkStroke);
         Assert.Equal(2, ArmingOfferMotion.PulseStroke);
     }
+
+    // AppModel.swift:2252 removes the armed offer inside
+    // withAnimation(ArmingOfferMotion.exit), and the stack's own
+    // .transition(.opacity) (MonitorNotices.swift:76) runs inside it: when the
+    // armed offer is the last card, the whole stack fades on the exit spring.
+    // Any other last card, a declined offer, or reduce motion: it goes at once
+    // (NoticeMotion.Plan's remarks).
+    [Fact]
+    public void TheStackFadesOnTheExitSpringOnlyWhenTheArmedOfferWasTheLastCard()
+    {
+        string offer = NoticeCatalog.ArmingOffer("p-api").Id;
+        Assert.True(ArmingOfferMotion.StackFadesOut(offer, null, leftArmed: true, animationsEnabled: true));
+        Assert.False(ArmingOfferMotion.StackFadesOut(offer, null, leftArmed: true, animationsEnabled: false));
+        Assert.False(ArmingOfferMotion.StackFadesOut(offer, null, leftArmed: false, animationsEnabled: true));
+        Assert.False(ArmingOfferMotion.StackFadesOut(offer, "update", leftArmed: true, animationsEnabled: true));
+        Assert.False(ArmingOfferMotion.StackFadesOut("update", null, leftArmed: true, animationsEnabled: true));
+        Assert.False(ArmingOfferMotion.StackFadesOut(null, null, leftArmed: true, animationsEnabled: true));
+    }
 }

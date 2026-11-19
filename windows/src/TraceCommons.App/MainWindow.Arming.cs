@@ -33,6 +33,7 @@ public sealed partial class MainWindow
             }
         };
         ApplyArmingMark(animate: false);
+        ElementCompositionPreview.GetElementVisual(ArmingPulse).Opacity = 0;
     }
 
     private bool ArmingMotionAllowed => _uiSettings.AnimationsEnabled && _clockGate.MayTick;
@@ -171,6 +172,75 @@ public sealed partial class MainWindow
         ring.StopAnimation("Scale");
         ring.Opacity = 0;
         ring.Scale = Vector3.One;
+        EndArmingStackExit();
+    }
+
+    private FrameworkElement? _armingStackLeaving;
+    private int _armingStackExitToken;
+
+    /// <summary>
+    /// When the armed offer was the last card, the whole stack fades on the
+    /// exit spring rather than going at once (<see cref="ArmingOfferMotion.StackFadesOut"/>;
+    /// AppModel.swift:2252, MonitorNotices.swift:76). The card stays drawn
+    /// under the fading stack and takes no input; returns false, changing
+    /// nothing, for every other way the stack empties.
+    /// </summary>
+    private bool BeginArmingStackExit(string? previousFront, FrameworkElement? previousCard)
+    {
+        // A refresh while the stack is already leaving and still empty: the
+        // fade carries on, and the card the refresh collapsed is drawn again.
+        if (_armingStackLeaving is FrameworkElement leaving)
+        {
+            leaving.Visibility = Visibility.Visible;
+            return true;
+        }
+
+        if (previousCard != ArmingOfferCard
+            || !ArmingOfferMotion.StackFadesOut(previousFront, null, ArmingExitPending(), ArmingMotionAllowed))
+        {
+            return false;
+        }
+
+        _armingStackLeaving = ArmingOfferCard;
+        ArmingOfferCard.Visibility = Visibility.Visible;
+        NoticeStackHost.IsHitTestVisible = false;
+        int token = ++_armingStackExitToken;
+        Animate(NoticeStackHost, "Opacity", ArmingOfferMotion.ExitOpacity, () =>
+        {
+            if (token == _armingStackExitToken)
+            {
+                EndArmingStackExit();
+            }
+        }, ArmingOfferMotion.ExitSettling);
+        return true;
+    }
+
+    /// <summary>
+    /// Ends the stack's exit fade, early or on time: the stack whole again
+    /// for its next card, and collapsed if no card has come since.
+    /// </summary>
+    private void EndArmingStackExit()
+    {
+        if (_armingStackLeaving is not FrameworkElement card)
+        {
+            return;
+        }
+
+        _armingStackLeaving = null;
+        _armingStackExitToken++;
+        Visual host = ElementCompositionPreview.GetElementVisual(NoticeStackHost);
+        host.StopAnimation("Opacity");
+        host.Opacity = 1;
+        NoticeStackHost.IsHitTestVisible = true;
+        if (card != _frontCard)
+        {
+            card.Visibility = Visibility.Collapsed;
+        }
+
+        if (_frontCard is null)
+        {
+            NoticeStackHost.Visibility = Visibility.Collapsed;
+        }
     }
 
     private static void RunScale(Visual visual, Func<double, double> progress, double settling, double from)

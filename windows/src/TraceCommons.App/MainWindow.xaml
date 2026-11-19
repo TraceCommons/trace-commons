@@ -746,10 +746,13 @@
                                               HorizontalAlignment="Center"
                                               VerticalAlignment="Center"
                                               Opacity="0" />
+                                    <!-- Hidden on its visual by InitArmingMotion, not by an
+                                         Opacity here: with XAML Opacity 0 the pulse never
+                                         showed (box frames, 2026-11-19), while the check and
+                                         ring, whose visuals SetMarkAtRest writes first, did. -->
                                     <Ellipse x:Name="ArmingPulse"
                                              Stroke="{ThemeResource TcStatusOnBrush}"
-                                             StrokeThickness="2"
-                                             Opacity="0" />
+                                             StrokeThickness="2" />
                                 </Grid>
                                 <StackPanel Grid.Column="1" Spacing="8">
                                     <!-- Evidence first, question second: someone who reads

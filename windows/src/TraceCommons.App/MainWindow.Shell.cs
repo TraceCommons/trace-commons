@@ -929,6 +929,7 @@ public sealed partial class MainWindow
         string[] ids = shown.Select(card => card.Id).ToArray();
         NoticeKind? front = shown.Count == 0 ? null : shown[^1];
         FrameworkElement? previousCard = _frontCard;
+        string? previousFront = _frontNotice?.Id;
         FrameworkElement? frontCard = front is null ? null : elements[front.Id];
         bool frontChanged = front?.Id != _frontNotice?.Id;
         NoticeChange change = NoticeMotion.Plan(
@@ -952,10 +953,16 @@ public sealed partial class MainWindow
         _frontCard = frontCard;
         if (front is null || frontCard is null)
         {
-            NoticeStackHost.Visibility = Visibility.Collapsed;
+            // W9: an armed offer leaving last fades the stack (MainWindow.Arming.cs).
+            if (!BeginArmingStackExit(previousFront, previousCard))
+            {
+                NoticeStackHost.Visibility = Visibility.Collapsed;
+            }
+
             return;
         }
 
+        EndArmingStackExit();
         frontCard.Visibility = Visibility.Visible;
         Canvas.SetZIndex(frontCard, 1);
         if (frontChanged)

@@ -79,6 +79,20 @@ public static class ArmingOfferMotion
     public static bool Pulses(ArmingOfferStep? before, ArmingOfferStep? after, bool animationsEnabled) =>
         animationsEnabled && before != ArmingOfferStep.Armed && after == ArmingOfferStep.Armed;
 
+    /// <summary>
+    /// Whether the notice stack, emptied by the front card going from
+    /// <paramref name="previousFront"/> to <paramref name="nextFront"/>, fades
+    /// out on the exit spring instead of going at once: only when the card
+    /// that went was the arming offer and it left armed. AppModel.swift:2252
+    /// removes the armed offer inside <c>withAnimation(ArmingOfferMotion.exit)</c>,
+    /// and the stack's <c>.transition(.opacity)</c> (MonitorNotices.swift:76)
+    /// runs inside it; every other way a stack empties is unanimated on the
+    /// Mac (NoticeMotion.Plan's remarks).
+    /// </summary>
+    public static bool StackFadesOut(string? previousFront, string? nextFront, bool leftArmed, bool animationsEnabled) =>
+        animationsEnabled && leftArmed && nextFront is null && previousFront is not null
+        && previousFront.StartsWith(NoticeCatalog.ArmingOffer(string.Empty).Id, StringComparison.Ordinal);
+
     /// <summary>The mark change's progress <paramref name="seconds"/> in, overshooting as SwiftUI's does.</summary>
     public static double MarkProgress(double seconds) => MonitorMotion.Spring(MarkResponse, MarkDamping, seconds);
 
