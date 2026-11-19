@@ -126,6 +126,50 @@ public static class SettingsLegacyWords
     /// <summary><c>undecidedDropped</c> (:52-54): <c>{days}</c> filled.</summary>
     public static string UndecidedDropped(long days) => Fill(Word("undecided_dropped"), "days", days.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
+    /// <summary>The change log's heading (<c>SettingsContent.auditHeading</c>, SettingsView.swift:18).</summary>
+    public static string ChangesHeading => MonitorShellCopy.Shell("changes_heading");
+
+    /// <summary>The change log with nothing in it (<c>nothingChanged</c>, :111).</summary>
+    public static string NothingChanged => Word("nothing_changed");
+
+    /// <summary>
+    /// One change's sentence (<c>SettingsContent.auditSentence</c>,
+    /// SettingsView.swift:23-28): the core's sentence for the fixed action
+    /// label, or its generic one for a label this build does not know, then
+    /// the project's name when there is one. Empty without the table.
+    /// </summary>
+    public static string AuditSentence(string action, string? project) => AuditSentence(Table.Value, action, project);
+
+    internal static string AuditSentence(string? json, string action, string? project)
+    {
+        string sentence = MonitorWords.WordAt(json, "settings", "audit_changed");
+        if (string.IsNullOrEmpty(json))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("settings", out JsonElement settings)
+                && settings.ValueKind == JsonValueKind.Object
+                && settings.TryGetProperty("audit_actions", out JsonElement actions)
+                && actions.ValueKind == JsonValueKind.Object
+                && actions.TryGetProperty(action, out JsonElement known)
+                && known.ValueKind == JsonValueKind.String)
+            {
+                sentence = known.GetString() ?? sentence;
+            }
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+
+        return string.IsNullOrEmpty(project) ? sentence : sentence + " " + project;
+    }
+
     internal static string Fill(string template, string key, string value) =>
         template.Replace("{" + key + "}", value, StringComparison.Ordinal);
 }

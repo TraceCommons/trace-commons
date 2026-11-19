@@ -719,22 +719,36 @@
                 </StackPanel>
                 <TextBlock x:Name="RuleChanges" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyChanges" Spacing="12">
-                <TextBlock Text="Nothing has been changed."
-                           Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:AuditSettingViewModel">
-                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">
-                                <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
-                                           Style="{StaticResource TcMonoChipTextStyle}" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           TextWrapping="Wrap" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <!--
+                    The change log (ChangesSection.swift): the core's heading
+                    over the changes, newest first, each its time then the
+                    core's sentence for it; the core's line when there is none.
+                -->
+                <Border Style="{StaticResource SettingsCardStyle}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind interop:SettingsLegacyWords.ChangesHeading}"
+                                   Style="{StaticResource TcEyebrowTextStyle}" />
+                        <TextBlock Text="{x:Bind interop:SettingsLegacyWords.NothingChanged}"
+                                   Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}" />
+                        <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}" IsTabStop="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:AuditSettingViewModel">
+                                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3"
+                                          BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                                          BorderThickness="0,0,0,1" Padding="0,0,0,6">
+                                        <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
+                                                   Style="{StaticResource TcBodyTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
                 </StackPanel>
                 <TextBlock x:Name="RulePrivateAI" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyPrivateAI" Spacing="12">

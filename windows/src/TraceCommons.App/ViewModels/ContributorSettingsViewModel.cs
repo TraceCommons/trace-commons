@@ -2395,18 +2395,9 @@ public sealed class AuditSettingViewModel
     {
         ArgumentNullException.ThrowIfNull(entry);
         AtText = entry.At.ToLocalTime().ToString("MMM d, HH:mm", CultureInfo.CurrentCulture);
-        string sentence = entry.Action switch
-        {
-            "armed-auto-upload" => "Automatic contributing turned on for",
-            "disarmed-auto-upload" => "Automatic contributing turned off for",
-            "queue-bulk-approved" => "The whole queue was approved",
-            "consent-scopes-changed" => "Permissions changed",
-            "near-ai-notice-acknowledged" => "The extra privacy scan was confirmed",
-            _ => "Changed",
-        };
-        WhatText = string.IsNullOrWhiteSpace(entry.ProjectLabel)
-            ? sentence
-            : sentence + " " + entry.ProjectLabel;
+        // The core's sentence for the action, then the project
+        // (SettingsContent.auditSentence, SettingsView.swift:23-28).
+        WhatText = SettingsLegacyWords.AuditSentence(entry.Action, entry.ProjectLabel);
     }
 
     public string AtText { get; }
