@@ -259,6 +259,64 @@
   padding: 14px;
 }
 
+/* Home's stat tiles (`HomeStatTile`): the caption in the eyebrow type,
+   uppercase as the Mac draws it, in the tertiary ink; the figure bold and
+   tabular; the line under it in the secondary ink. */
+.tc-home-tile-caption {
+  text-transform: uppercase;
+  color: @tc_glass_ink_tertiary;
+}
+
+/* The Mac's eyebrow size, 10, whatever the desktop's base font: GNOME's
+   11 pt base set the eyebrow's 0.77em at 11.3 px and KDE's 10 pt at 10.3,
+   and "NOT CONTRIBUTED" and "NEAR AI BALANCE" wrapped in a third of the
+   440 pane. Adwaita Sans and Noto Sans set those words wider than SF Pro,
+   so the tracking is eased from the Mac's 0.8 to 0.5: measured with pango
+   at 10 px bold, both set "NOT CONTRIBUTED" in 105 px of the tile's 110. */
+label.tc-type-eyebrow.tc-home-tile-caption-type {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+
+.tc-home-tile-caption-ink {
+  color: @tc_glass_ink_tertiary;
+}
+
+.tc-home-tile-value {
+  font-weight: 700;
+  font-feature-settings: "tnum";
+}
+
+.tc-home-tile-detail {
+  color: @tc_glass_ink_secondary;
+}
+
+/* A third of the 440 pane: no generated 10em floor (the Insights
+   summary tile's), the Mac's 10 by 12 inside. */
+.tc-insights button.tc-insights-summary.tc-home-tile {
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+button.tc-home-link {
+  padding: 0;
+  min-height: 0;
+  color: @accent_color;
+}
+
+/* The Settings window (`SettingsModal`'s settingsGround): its own
+   ground under the header bar and the sections, and its cards' fill. In
+   Dark the card is the ground's own navy, so its hairline is its edge. */
+window.tc-settings-window,
+window.tc-settings-window headerbar,
+window.tc-settings-window .tc-root {
+  background-color: @tc_glass_settings_ground;
+}
+
+window.tc-settings-window .tc-card {
+  background-color: @tc_glass_settings_card;
+}
+
 .tc-card.tc-tool-card {
   background-color: @tc_surface_inset;
   border: none;
@@ -461,6 +519,15 @@ row:selected {
   color: @tc_glass_ink;
 }
 
+/* The legend's words at the map's foot: the Mac's `legendItem`,
+   `TypeScale.micro` at regular weight (10) in textTertiary, so the four
+   rules fit one line beside the zoom at a narrow pane, as on the Mac. */
+.tc-map-legend {
+  font-size: 10px;
+  font-weight: 400;
+  color: @tc_glass_ink_tertiary;
+}
+
 /* A node's card, on hover or keyboard focus: the node-card tier. */
 .tc-map-card {
   color: @tc_glass_ink;
@@ -579,6 +646,15 @@ window.tc-glass-window:backdrop .tc-glass-tabs {
 
 .tc-glass-tabs .tc-tab:checked label {
   font-weight: 600;
+}
+
+/* A lifted tab stands on a control's surface (`GlassRuleTabs`, owner
+   2026-11-05): `glassSurface(.control, radius: control)` with
+   `.shadow(color: .black.opacity(0.18), radius: 8, y: 3)`, a CSS blur of
+   twice SwiftUI's radius. `tab_motion::TabLift` fades it in with the lift. */
+.tc-glass-tabs .tc-tab-lift {
+  border-radius: 11px;
+  box-shadow: 0 3px 16px rgba(0, 0, 0, 0.18);
 }
 
 /* The toolbar's capsule holds the Graph, Map and Inspector toggles
@@ -1038,20 +1114,81 @@ window.tc-glass-window:backdrop .tc-tree-split-menu > button {
   color: @tc_glass_selected_ink;
 }
 
-/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
-   `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
-   slider, so a 17-wide slider in 2 of padding is 38 wide. */
-switch.tc-tree-switch {
-  min-width: 0;
-  min-height: 0;
-  padding: 2px;
-  border-radius: 999px;
+/* A control on a selected row: the Mac's `GlassGround.selection`, its own
+   fill over the selection (`controlOnSelection`) and the selection's ink
+   (`controlInk`), in and out of focus; the selection does not dim. */
+.tc-tree-row-selected .tc-tree-submit,
+.tc-tree-row-selected .tc-tree-split-menu > button,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-submit,
+window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-split-menu > button {
+  background-color: @tc_glass_control_on_selection;
+  color: @tc_glass_selected_ink;
 }
 
-switch.tc-tree-switch > slider {
-  min-width: 17px;
+.tc-tree-row-selected .tc-tree-submit:hover,
+.tc-tree-row-selected .tc-tree-split-menu > button:hover,
+.tc-tree-row-selected .tc-tree-kebab > button:hover {
+  background-color: @tc_glass_control_on_selection_hover;
+}
+
+/* Every switch is the Mac's flat `GlassToggleStyle(.settings)`: 40 by 24
+   (`toggleWidth`, `toggleHeight`), an 18-point round knob 3 in from the
+   track's end with no ring and no shadow. On, the track is
+   `toggleOnSettings` under a `textOnAccent` knob; off, `toggleOff` over
+   whatever it sits on under a `toggleKnobOff` knob (Light's off track is
+   lifted to hold 3:1, see `switch_off_track` in the generator). GTK sizes
+   a switch at twice its slider, so an 18-wide knob takes 2 of side padding
+   for a 40-wide track, and moves 1 inward to stand 3 in, as the Mac's. */
+switch {
+  min-width: 0;
+  min-height: 0;
+  padding: 3px 2px;
+  border-radius: 999px;
+  background-color: @tc_glass_toggle_off;
+  background-image: none;
+}
+
+switch:checked {
+  background-color: @tc_glass_toggle_on;
+  background-image: none;
+}
+
+switch > slider {
+  min-width: 18px;
   min-height: 18px;
   margin: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: @tc_glass_toggle_knob_off;
+  background-image: none;
+  box-shadow: none;
+  transform: translateX(1px);
+}
+
+switch:checked > slider {
+  background-color: @tc_glass_toggle_knob_on;
+  transform: translateX(-1px);
+}
+
+/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
+   `watchSwitchHeight`), its knob 2 in: 1 of side padding, then the same
+   1 inward. */
+switch.tc-tree-switch {
+  padding: 2px 1px;
+}
+
+/* The switch on a selected row: its knob in the selection's ink (the
+   Mac's knob on, `textOnAccent`, is that ink), on and off, and its track
+   on in the control-on-selection fill, so neither vanishes into the
+   selection (Omarchy: a white knob on the selection measured 2.52:1). */
+.tc-tree-row-selected switch.tc-tree-switch > slider {
+  background-color: @tc_glass_selected_ink;
+  background-image: none;
+  box-shadow: none;
+}
+
+.tc-tree-row-selected switch.tc-tree-switch:checked {
+  background-color: @tc_glass_control_on_selection;
 }
 
 .tc-tree-menu-current {
@@ -1206,6 +1343,12 @@ window.tc-edge-surface {
   background-color: alpha(@tc_glass_ink, 0.12);
 }
 
+/* A rail tile's name on hover, beside the tile (`attach_rail_tip`). */
+.tc-edge-rail-tip > contents {
+  padding: 4px 8px;
+  color: @tc_glass_ink;
+}
+
 .tc-edge-round {
   background: none;
   background-image: none;
@@ -1234,4 +1377,91 @@ window.tc-edge-surface {
 
 .tc-edge-row:hover {
   background-color: @tc_glass_row_hover;
+}
+
+/* ---- First-run motion (the Mac's curves and durations) ----------------
+   Each transition below is the Mac's own: the token curve
+   cubic-bezier(0.2, 0.8, 0.2, 1) at the Mac's duration and delay, pinned
+   by `first_run_stage::tests::the_first_runs_css_motion_is_the_macs`. GTK
+   runs no CSS transition with `gtk-enable-animations` off (no frame clock
+   for the style), as the Mac's Reduce Motion gives the last frame. Kept
+   apart for the motion-core stream to fold into its shared transition
+   variables. */
+
+/* The thread's current title lights 0.42 s after the step changes, over
+   0.3 s (`FirstRunStepThread.title`); the base glow is the lit one at no
+   alpha, so the shadow interpolates. */
+.tc-thread-title {
+  text-shadow: 0 0 14px alpha(@tc_first_run_glow, 0);
+  transition: color 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    text-shadow 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms,
+    font-weight 300ms cubic-bezier(0.2, 0.8, 0.2, 1) 420ms;
+}
+
+/* The segmented pill (`FirstRunSegmented`): Ask, Automatic and Never side
+   by side in a well, the chosen one's pill filling over 0.15 s. Real radio
+   buttons, their own circles cleared. */
+.tc-first-run-segmented {
+  padding: 2px;
+  border-radius: 999px;
+  background-color: @tc_first_run_well;
+}
+checkbutton.tc-first-run-segment {
+  padding: 0 10px;
+  min-height: 22px;
+  border-radius: 999px;
+  background-color: alpha(@tc_first_run_toggle_on, 0);
+  font-size: 0.85em;
+  font-weight: 500;
+  transition: background-color 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    color 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+checkbutton.tc-first-run-segment:hover {
+  background-color: @tc_first_run_control_hover;
+}
+checkbutton.tc-first-run-segment:checked {
+  background-color: @tc_first_run_toggle_on;
+  color: @tc_first_run_text_on_accent;
+}
+checkbutton.tc-first-run-segment > radio,
+checkbutton.tc-first-run-segment > check {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  -gtk-icon-source: none;
+  opacity: 0;
+}
+
+/* The small switch (`FirstRunSwitch`, 30 by 18): the check button's own
+   box is cleared and keeps the room the drawn track takes. */
+checkbutton.tc-first-run-switch {
+  padding: 0;
+  border-spacing: 10px;
+}
+checkbutton.tc-first-run-switch > check {
+  min-width: 30px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border-color: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  color: transparent;
+  -gtk-icon-source: none;
+}
+
+/* Join's account card, outlined in the accent once chosen, over the
+   standard 0.22 s (`JoinScreen.accountCard`). An inset ring, as the Mac's
+   `strokeBorder` takes no room. */
+.tc-card.tc-join-card {
+  box-shadow: inset 0 0 0 1.5px alpha(@tc_first_run_toggle_on, 0);
+  transition: box-shadow 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.tc-card.tc-join-card.tc-join-chosen {
+  box-shadow: inset 0 0 0 1.5px @tc_first_run_toggle_on;
 }

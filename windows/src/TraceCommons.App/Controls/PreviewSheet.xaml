@@ -80,7 +80,8 @@
                 -->
                 <StackPanel Spacing="2">
                     <TextBlock Text="Would send" Style="{StaticResource TcEyebrowTextStyle}" />
-                    <TextBlock Text="{x:Bind ViewModel.ProbabilitySummary, Mode=OneWay}" TextWrapping="Wrap" />
+                    <TextBlock Text="{x:Bind ViewModel.ProbabilitySummary, Mode=OneWay}" TextWrapping="Wrap"
+                               Visibility="{x:Bind ViewModel.HasProbabilitySummary, Mode=OneWay}" />
                     <TextBlock Text="{x:Bind ViewModel.WouldSendText, Mode=OneWay}"
                                Style="{StaticResource TcMonoFigureTextStyle}" />
                 </StackPanel>
@@ -552,6 +553,47 @@
                                 Click="OnCopyWholeTranscript"
                                 ToolTipService.ToolTip="Puts the whole redacted body on the clipboard. Selection inside the transcript covers one block at a time." />
                     </Grid>
+                    <!--
+                        W22: the turn index, the Mac's Turn index tab
+                        (PreviewSheet.swift:495-536): Load turns until the
+                        core's index for this exact body arrives, then one
+                        row per turn. The core's words throughout; a failed
+                        load says the core's request-failed line.
+                    -->
+                    <StackPanel x:Name="TurnIndexPanel" Spacing="6">
+                        <Button x:Name="LoadTurnsButton"
+                                Style="{StaticResource TcSecondaryButtonStyle}"
+                                Content="{x:Bind ViewModel.LoadTurnsWord}"
+                                AutomationProperties.Name="{x:Bind ViewModel.LoadTurnsWord}"
+                                Visibility="{x:Bind ViewModel.OffersLoadTurns, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CanLoadTurns, Mode=OneWay}"
+                                Click="OnLoadTurns" />
+                        <TextBlock Text="{x:Bind ViewModel.TurnsFailedLine, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasTurnsFailed, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcStatusOutsideTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.TurnIndexEyebrow}"
+                                   Visibility="{x:Bind ViewModel.HasTurnRows, Mode=OneWay}"
+                                   Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ItemsControl ItemsSource="{x:Bind ViewModel.TurnRows}"
+                                      Visibility="{x:Bind ViewModel.HasTurnRows, Mode=OneWay}"
+                                      IsTabStop="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:PreviewTurnRow">
+                                    <StackPanel Spacing="2" Margin="0,0,0,6">
+                                        <TextBlock Text="{x:Bind Title}"
+                                                   Style="{StaticResource TcTitleCardTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind Detail}"
+                                                   Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                   TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
                     <Border Background="{ThemeResource TcSurfaceCardBrush}"
                             BorderBrush="{ThemeResource TcHairlineBrush}"
                             BorderThickness="1"

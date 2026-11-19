@@ -43,10 +43,18 @@
 //! (`word_colour`) is opaque and raised, where it falls short, to 4.5:1 on
 //! the map's grounds.
 //!
+//! The pile opens in the Mac's stages, at its times and on its springs
+//! (taller, then wider, then the names fading in), and its coins re-lay,
+//! come to the front and grow on theirs (`map_motion::PileMotion`, drawn
+//! as a `PileFrame`). The field's shimmer and the light under the pointer
+//! move on the same clock (`field`). Those run at the display's rate while
+//! they move; the dashes keep their 30 frames a second, the arcs drawn
+//! again only when the dashes have moved (`ArcsKey`).
+//!
 //! Deliberate platform differences, each until a later slice of the
 //! 2026-11-16 spec:
-//! - The pile opens in the Mac's stages and at its times (taller, then
-//!   wider, then the names), but each stage is a step, not a spring.
+//! - A spring turned back while it moves starts again from rest where it
+//!   is; SwiftUI carries its velocity (`map_motion`).
 //! - The map style switch sits in Settings' Startup section: this shell
 //!   has no General section, where the Mac puts it.
 //! - A grown coin's glow is a soft radial halo; cairo has no blur filter.
@@ -68,6 +76,7 @@ use gtk::subclass::prelude::*;
 use trace_commons_contributor::preview_copy::monitor_screens_copy;
 
 use super::field;
+use super::map_motion::{self, Ease, PileMotion, Tween};
 use super::map_scene::{
     self, ArcStyle, CommonsGate, Contributions, HarnessRow, Lamp, MapGeometry, NodeKind, PileStage,
     Point, Scene, ScreenState, Size, ToolStack,
@@ -214,6 +223,118 @@ pub struct StillLayer {
     pub over: Option<gtk::gsk::RenderNode>,
 }
 
+/// What the arcs were last drawn from: a frame drawn for the pile, the
+/// shimmer or the pointer redraws them only when their dashes have moved.
+#[derive(Clone, PartialEq)]
+pub struct ArcsKey {
+    pub phase: f64,
+    pub healthy: bool,
+    pub scene: Scene,
+    pub fit: MapGeometry,
+    pub palette: Palette,
+}
+
+/// The pile as drawn at one moment (`MapToolPile`): how far its card is
+/// tall and wide, how opaque its fill and its names, how far its coins are
+/// laid open, and each coin's place and growth.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PileFrame {
+    pub tall: f64,
+    pub wide: f64,
+    pub opaque: f64,
+    pub names: f64,
+    pub lay: f64,
+    /// The pile laid open, as its coins head: every watched coin then
+    /// carries the lock.
+    pub open: bool,
+    /// Front first, in the order the coins head for.
+    pub coins: Vec<CoinFrame>,
+}
+
+/// One coin of a `PileFrame`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CoinFrame {
+    pub id: String,
+    /// Its place in the order it heads for.
+    pub slot: usize,
+    /// Where it is now, an index between two places while it moves.
+    pub at: f64,
+    /// How far grown: 0 at its size, 1 at `map_motion::GROWN`.
+    pub grow: f64,
+    /// A trace is in it: drawn over the rest.
+    pub grown: bool,
+}
+
+impl PileFrame {
+    /// The pile at rest at `stage`, its coins in `order`, those in
+    /// `grown` grown.
+    pub fn at_rest(order: &[String], grown: &[String], stage: PileStage) -> Self {
+        let one = |on: bool| if on { 1.0 } else { 0.0 };
+        Self {
+            tall: one(stage.tall),
+            wide: one(stage.wide),
+            opaque: one(stage.open()),
+            names: one(stage.tall && stage.names),
+            lay: one(stage.tall),
+            open: stage.tall,
+            coins: order
+                .iter()
+                .enumerate()
+                .map(|(slot, id)| CoinFrame {
+                    id: id.clone(),
+                    slot,
+                    at: slot as f64,
+                    grow: one(grown.contains(id)),
+                    grown: grown.contains(id),
+                })
+                .collect(),
+        }
+    }
+
+    /// The pile as `motion` has it at `now`, heading for `stage`. While a
+    /// trace moves (`moving`) the card keeps its closed size and shows no
+    /// names, at once: on the Mac that flip is in no animation.
+    pub fn moving(
+        motion: &PileMotion,
+        stage: PileStage,
+        moving: bool,
+        order: &[String],
+        grown: &[String],
+        now: f64,
+    ) -> Self {
+        let card = |tween: &Tween| if moving { 0.0 } else { tween.value(now) };
+        let wide = card(&motion.wide);
+        Self {
+            tall: card(&motion.tall),
+            wide,
+            // An open card is opaque: its fill turns with its width.
+            opaque: wide.clamp(0.0, 1.0),
+            names: card(&motion.names).clamp(0.0, 1.0),
+            lay: motion.lay.value(now),
+            open: stage.tall && !moving,
+            coins: order
+                .iter()
+                .enumerate()
+                .map(|(slot, id)| {
+                    let coin = motion.coin(id);
+                    CoinFrame {
+                        id: id.clone(),
+                        slot,
+                        at: coin.map_or(slot as f64, |c| c.index.value(now)),
+                        grow: coin.map_or(0.0, |c| c.grow.value(now)),
+                        grown: grown.contains(id),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// The coin at `index` of the order, where it is now.
+    pub fn coin(&self, id: &str) -> Option<&CoinFrame> {
+        self.coins.iter().find(|coin| coin.id == id)
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -263,6 +384,20 @@ mod imp {
         /// The map's field under everything, kept until its size or
         /// scheme changes.
         pub field: field::Field,
+        /// The pile as it moves toward `pile_stage` and the run's order.
+        pub pile_motion: RefCell<PileMotion>,
+        /// The light under the pointer: the last point it was at, and how
+        /// far it is faded in.
+        pub light: RefCell<(Option<(f64, f64)>, Tween)>,
+        /// When the shimmer's pass now crossing began, and the timer for
+        /// the next.
+        pub shimmer_start: Cell<Option<f64>>,
+        pub shimmer_timer: RefCell<Option<glib::SourceId>>,
+        /// The clock's time the dashes were last moved to, and their rate.
+        pub dash_time: Cell<f64>,
+        pub dash_interval: Cell<f64>,
+        /// The arcs, kept while their dashes have not moved.
+        pub arcs: RefCell<Option<(ArcsKey, gtk::gsk::RenderNode)>>,
     }
 
     #[glib::object_subclass]
@@ -342,15 +477,49 @@ mod imp {
                 }
             });
 
-            // The clock runs only while the map is mapped.
-            obj.connect_map(|obj| obj.update_clock());
-            obj.connect_unmap(|obj| obj.update_clock());
+            // The clock runs only while the map is mapped. The shimmer's
+            // first pass comes a second after the map is shown
+            // (`GlassMapShimmerHost`), and none comes while it is not.
+            obj.connect_map(|obj| {
+                obj.schedule_shimmer(map_motion::SHIMMER_FIRST);
+                obj.update_clock();
+            });
+            obj.connect_unmap(|obj| {
+                obj.stop_shimmer();
+                obj.update_clock();
+            });
+            // Minimised or suspended, the clock and the shimmer hold, as
+            // while unmapped; shown again, the shimmer starts over.
+            // Only a change in hidden counts: the window's other state
+            // changes (focus) leave the shimmer's pass where it is.
+            let weak = obj.downgrade();
+            let hidden = Cell::new(false);
+            crate::ui::glass_motion::on_window_state(&*obj, move |_| {
+                let Some(obj) = weak.upgrade() else { return };
+                let now = crate::ui::glass_motion::window_hidden(&obj);
+                match crate::ui::glass_motion::hidden_changed(&hidden, now) {
+                    Some(true) => obj.stop_shimmer(),
+                    Some(false) => obj.schedule_shimmer(map_motion::SHIMMER_FIRST),
+                    None => {}
+                }
+                obj.update_clock();
+            });
 
-            // Reduced motion stops the clock at once, and lets it run again.
+            // Reduced motion stops the clock at once and puts everything
+            // that moves at its end, and lets it run again: the shimmer
+            // starts over, as the Mac's task restarts on the setting.
             if let Some(settings) = gtk::Settings::default() {
                 let weak = obj.downgrade();
-                settings.connect_gtk_enable_animations_notify(move |_| {
+                settings.connect_gtk_enable_animations_notify(move |settings| {
                     if let Some(obj) = weak.upgrade() {
+                        if settings.is_gtk_enable_animations() {
+                            obj.schedule_shimmer(map_motion::SHIMMER_FIRST);
+                        } else {
+                            let imp = obj.imp();
+                            obj.stop_shimmer();
+                            imp.pile_motion.borrow_mut().settle();
+                            imp.light.borrow_mut().1.settle();
+                        }
                         obj.update_clock();
                         obj.queue_allocate();
                         obj.queue_draw();
@@ -362,6 +531,9 @@ mod imp {
         fn dispose(&self) {
             if let Some(tick) = self.tick.take() {
                 tick.remove();
+            }
+            if let Some(timer) = self.shimmer_timer.take() {
+                timer.remove();
             }
             for (_, button) in self.nodes.take() {
                 button.unparent();
@@ -400,18 +572,21 @@ mod imp {
             }
             let fit = self.geometry();
             let scene = self.scene.borrow();
-            let (order, open) = self.pile(&scene);
-            self.pile_at.replace((order.clone(), open));
+            self.pile_at.replace(self.pile(&scene));
+            // Each coin's button where the coin is drawn now.
+            let frame = self.pile_frame(&scene);
             for (id, button) in self.nodes.borrow().iter() {
                 let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
                     button.set_child_visible(false);
                     continue;
                 };
                 button.set_child_visible(true);
-                let at = order
-                    .iter()
-                    .position(|tool| tool == id)
-                    .and_then(|i| Some(scene.stack.as_ref()?.coin_center(i, open.tall)))
+                let at = frame
+                    .as_ref()
+                    .and_then(|frame| {
+                        let coin = frame.coin(id)?;
+                        Some(scene.stack.as_ref()?.coin_center_at(coin.at, frame.lay))
+                    })
                     .unwrap_or(node.at);
                 let centre = fit.point(at);
                 let side = 24.0_f64.max((node.radius * 2.0 + 8.0) * fit.scale);
@@ -494,22 +669,25 @@ mod imp {
             let palette = Palette::current(&*obj);
             let bounds = gtk::graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
             let reduce = reduce_motion();
-            // The field under both maps (`GlassMapField`).
+            let now = self.now();
+            // The field under both maps (`GlassMapField`), its shimmer and
+            // the light under the pointer over it.
             let dark = adw::StyleManager::default().is_dark();
             snapshot.append_node(self.field.node(width, height, dark, &palette.map));
-            // The arcs, redrawn on every tick: their dashes move.
-            let cr = snapshot.append_cairo(&bounds);
+            self.draw_field_light(snapshot, &bounds, now, dark);
+            // The arcs, drawn again when their dashes have moved.
             let healthy = self.inputs.borrow().gate.state.is_healthy();
-            let phase = transfers::dash_phase(self.now(), reduce);
-            draw_arcs(&cr, &scene, &fit, &palette, healthy, phase);
-            drop(cr);
+            let phase = transfers::dash_phase(self.dash_time.get(), reduce);
+            snapshot.append_node(self.arcs_node(&scene, &fit, &palette, healthy, phase, &bounds));
             // The nodes, their names and the pad: drawn again only when
             // what they are drawn from changes.
             let motion = self.motion();
             // At rest the pile, its words and the rocket on the pad are
-            // still too, so they join the still layer; during a run they
-            // move and are drawn on every frame.
-            let resting = motion.is_none().then(|| self.pile_stage.get());
+            // still too, so they join the still layer; during a run, or
+            // while the pile moves, they are drawn on every frame.
+            let frame = self.pile_frame(&scene);
+            let pile_moves = self.pile_motion.borrow().moving(now);
+            let resting = (motion.is_none() && !pile_moves).then(|| self.pile_stage.get());
             let still = self.still_layer(&scene, &fit, &palette, &bounds, resting);
             if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
                 snapshot.append_node(under);
@@ -534,7 +712,28 @@ mod imp {
                 snapshot.append_node(over);
             }
             if let Some((run, t)) = motion.as_ref() {
-                self.draw_moving(snapshot, &scene, run, *t, &fit, &palette, &bounds);
+                self.draw_moving(
+                    snapshot,
+                    &scene,
+                    run,
+                    *t,
+                    frame.as_ref(),
+                    &fit,
+                    &palette,
+                    &bounds,
+                );
+            } else if resting.is_none() {
+                // The pile moves with no run: the rocket on the pad, and
+                // the pile over it as it is now.
+                let cr = snapshot.append_cairo(&bounds);
+                map_transfers::resting_rocket(&cr, &scene, &fit, &palette, self.style.get());
+                if let (Some(stack), Some(frame)) = (scene.stack.as_ref(), frame.as_ref()) {
+                    draw_pile_frame(&cr, &scene, stack, frame, None, &fit, &palette);
+                }
+                drop(cr);
+                if let Some(frame) = frame.as_ref() {
+                    self.draw_pile_words(snapshot, &scene, frame, &fit, &palette);
+                }
             }
             for child in self.children() {
                 obj.snapshot_child(&child, snapshot);
@@ -611,6 +810,23 @@ mod imp {
         }
 
         pub(super) fn point_at(&self, pointer: Option<(f64, f64)>) {
+            // The light follows the pointer as it is, and fades in as it
+            // comes over the map and out where it left
+            // (`GlassMapMarkGlow`, `GlassMapLight`).
+            {
+                let now = self.now();
+                let ease = (!reduce_motion()).then(|| Ease::token(map_motion::FAST));
+                let mut light = self.light.borrow_mut();
+                match pointer {
+                    Some(point) => {
+                        light.0 = Some(point);
+                        light.1.retarget(1.0, now, ease);
+                    }
+                    None => light.1.retarget(0.0, now, ease),
+                }
+            }
+            self.obj().update_clock();
+            self.obj().queue_draw();
             let inside = {
                 let scene = self.scene.borrow();
                 let Some(stack) = scene.stack.as_ref() else {
@@ -631,6 +847,9 @@ mod imp {
             for (delay, step) in map_scene::pile_steps(inside, reduce_motion()) {
                 if delay == 0 {
                     self.pile_stage.set(self.pile_stage.get().with(step));
+                    self.pile_motion
+                        .borrow_mut()
+                        .step(step, self.now(), reduce_motion());
                     continue;
                 }
                 let weak = self.obj().downgrade();
@@ -643,6 +862,10 @@ mod imp {
                                 return;
                             }
                             imp.pile_stage.set(imp.pile_stage.get().with(step));
+                            imp.pile_motion
+                                .borrow_mut()
+                                .step(step, imp.now(), reduce_motion());
+                            obj.update_clock();
                             obj.queue_allocate();
                             obj.queue_draw();
                         }
@@ -650,8 +873,134 @@ mod imp {
                 );
             }
             let obj = self.obj();
+            obj.update_clock();
             obj.queue_allocate();
             obj.queue_draw();
+        }
+
+        /// The shimmer crossing the field and the light under the
+        /// pointer, over the field: nothing while neither shows.
+        fn draw_field_light(
+            &self,
+            snapshot: &gtk::Snapshot,
+            bounds: &gtk::graphene::Rect,
+            now: f64,
+            dark: bool,
+        ) {
+            let obj = self.obj();
+            let (width, height) = (obj.width(), obj.height());
+            let progress = self
+                .shimmer_start
+                .get()
+                .map_or(0.0, |start| map_motion::shimmer_progress(now - start));
+            let light = {
+                let light = self.light.borrow();
+                light
+                    .0
+                    .map(|point| (point, light.1.value(now).clamp(0.0, 1.0)))
+            }
+            .filter(|(_, opacity)| *opacity > 0.0);
+            if progress <= 0.0 && light.is_none() {
+                return;
+            }
+            let cr = snapshot.append_cairo(bounds);
+            if progress > 0.0
+                && let Some(mask) = self.field.tile_mask(width, height, obj.scale_factor())
+            {
+                field::draw_shimmer(
+                    &cr,
+                    &mask,
+                    f64::from(width),
+                    f64::from(height),
+                    progress,
+                    dark,
+                );
+            }
+            if let Some((point, opacity)) = light {
+                field::draw_light(
+                    &cr,
+                    f64::from(width),
+                    f64::from(height),
+                    point,
+                    opacity,
+                    dark,
+                );
+            }
+        }
+
+        /// The arcs, kept while their dashes, the scene and the colours
+        /// hold.
+        fn arcs_node(
+            &self,
+            scene: &Scene,
+            fit: &MapGeometry,
+            palette: &Palette,
+            healthy: bool,
+            phase: f64,
+            bounds: &gtk::graphene::Rect,
+        ) -> gtk::gsk::RenderNode {
+            if let Some((key, node)) = self.arcs.borrow().as_ref()
+                && key.phase == phase
+                && key.healthy == healthy
+                && key.fit == *fit
+                && key.scene == *scene
+                && key.palette == *palette
+            {
+                return node.clone();
+            }
+            let arcs = gtk::Snapshot::new();
+            let cr = arcs.append_cairo(bounds);
+            draw_arcs(&cr, scene, fit, palette, healthy, phase);
+            drop(cr);
+            let node = arcs
+                .to_node()
+                .unwrap_or_else(|| gtk::gsk::ContainerNode::new(&[]).upcast());
+            let key = ArcsKey {
+                phase,
+                healthy,
+                scene: scene.clone(),
+                fit: *fit,
+                palette: palette.clone(),
+            };
+            self.arcs.replace(Some((key, node.clone())));
+            node
+        }
+
+        /// The pile as drawn now, its coins following the run's order and
+        /// growth; `None` with no pile.
+        pub fn pile_frame(&self, scene: &Scene) -> Option<PileFrame> {
+            let stack = scene.stack.as_ref()?;
+            let now = self.now();
+            let stage = self.pile_stage.get();
+            let (order, moving, grown) = match self.motion() {
+                Some((run, t)) => (
+                    run.order(&stack.tools, t),
+                    run.moving(t),
+                    run.orbits(t).into_iter().map(|(id, _)| id).collect(),
+                ),
+                None => (stack.tools.clone(), false, Vec::new()),
+            };
+            let mut motion = self.pile_motion.borrow_mut();
+            motion.follow(now, stage.tall && !moving, &order, &grown, reduce_motion());
+            Some(PileFrame::moving(
+                &motion, stage, moving, &order, &grown, now,
+            ))
+        }
+
+        /// Whether anything drawn at the display's rate moves at `now`:
+        /// the pile, the shimmer, the light fading.
+        pub fn fine_motion(&self, now: f64) -> bool {
+            {
+                let scene = self.scene.borrow();
+                // The coins' targets first: a run's step or end moves them.
+                let _ = self.pile_frame(&scene);
+            }
+            self.pile_motion.borrow().moving(now)
+                || self.light.borrow().1.moving(now)
+                || self
+                    .shimmer_start
+                    .get()
+                    .is_some_and(|start| now - start < map_motion::SHIMMER_DURATION)
         }
 
         fn layout(&self, text: &str, size: f64, bold: bool) -> gtk::pango::Layout {
@@ -729,7 +1078,8 @@ mod imp {
         /// Whether the pile has moved since its buttons were allocated.
         pub fn pile_moved(&self) -> bool {
             let scene = self.scene.borrow();
-            *self.pile_at.borrow() != self.pile(&scene)
+            self.pile_motion.borrow().moving(self.now())
+                || *self.pile_at.borrow() != self.pile(&scene)
         }
 
         /// The still layer: kept while its key holds, drawn again when not.
@@ -773,22 +1123,16 @@ mod imp {
                 let over = gtk::Snapshot::new();
                 let cr = over.append_cairo(bounds);
                 map_transfers::resting_rocket(&cr, scene, fit, palette, self.style.get());
-                if let Some(stack) = scene.stack.as_ref() {
-                    draw_pile(
-                        &cr,
-                        scene,
-                        stack,
-                        &stack.tools,
-                        &[],
-                        None,
-                        fit,
-                        palette,
-                        open,
-                    );
+                let frame = scene
+                    .stack
+                    .as_ref()
+                    .map(|stack| PileFrame::at_rest(&stack.tools, &[], open));
+                if let (Some(stack), Some(frame)) = (scene.stack.as_ref(), frame.as_ref()) {
+                    draw_pile_frame(&cr, scene, stack, frame, None, fit, palette);
                 }
                 drop(cr);
-                if let Some(stack) = scene.stack.as_ref() {
-                    self.draw_pile_words(&over, scene, &stack.tools, open, fit, palette);
+                if let Some(frame) = frame.as_ref() {
+                    self.draw_pile_words(&over, scene, frame, fit, palette);
                 }
                 over.to_node()
             });
@@ -818,34 +1162,25 @@ mod imp {
             scene: &Scene,
             run: &Run,
             t: f64,
+            frame: Option<&PileFrame>,
             fit: &MapGeometry,
             palette: &Palette,
             bounds: &gtk::graphene::Rect,
         ) {
-            let (order, open) = self.pile(scene);
             let cr = snapshot.append_cairo(bounds);
             let dock = map_transfers::draw(&cr, scene, run, t, fit, palette);
             // Between contributions the rocket stands on the pad.
             if run.action() != Action::Contribute {
                 map_transfers::resting_rocket(&cr, scene, fit, palette, self.style.get());
             }
-            if let Some(stack) = scene.stack.as_ref() {
-                let grown: Vec<String> = run.orbits(t).into_iter().map(|(id, _)| id).collect();
+            if let (Some(stack), Some(frame)) = (scene.stack.as_ref(), frame) {
                 let glow = map_transfers::glow(Some(run.action()), palette);
-                draw_pile(
-                    &cr,
-                    scene,
-                    stack,
-                    &order,
-                    &grown,
-                    Some(&glow),
-                    fit,
-                    palette,
-                    open,
-                );
+                draw_pile_frame(&cr, scene, stack, frame, Some(&glow), fit, palette);
             }
             drop(cr);
-            self.draw_pile_words(snapshot, scene, &order, open, fit, palette);
+            if let Some(frame) = frame {
+                self.draw_pile_words(snapshot, scene, frame, fit, palette);
+            }
             // The light round a coin's rim, over the coins.
             if let Some(stack) = scene.stack.as_ref() {
                 let cr = snapshot.append_cairo(bounds);
@@ -974,8 +1309,7 @@ mod imp {
             &self,
             snapshot: &gtk::Snapshot,
             scene: &Scene,
-            order: &[String],
-            stage: PileStage,
+            frame: &PileFrame,
             fit: &MapGeometry,
             palette: &Palette,
         ) {
@@ -984,9 +1318,8 @@ mod imp {
                 return;
             };
             let s = fit.scale;
-            let open = stage.tall;
             let left = fit.point(stack.port_left());
-            let height = stack.height(open) * s;
+            let height = stack.height_at(frame.tall) * s;
             self.text(
                 snapshot,
                 &words.tools_heading.to_uppercase(),
@@ -996,15 +1329,15 @@ mod imp {
                 Anchor::Middle,
                 &word_colour(palette, Word::PileHeading),
             );
-            for (index, id) in order.iter().enumerate() {
-                let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
+            for coin in &frame.coins {
+                let Some(node) = scene.nodes.iter().find(|n| n.id == coin.id) else {
                     continue;
                 };
-                let centre = fit.point(stack.coin_center(index, open));
-                let shown = if node.dashed { 0.55 } else { 1.0 };
-                // The names show at their own stage, after the card has
-                // widened (`MapToolPile`'s `names`).
-                if !(open && stage.names) {
+                let centre = fit.point(stack.coin_center_at(coin.at, frame.lay));
+                // The names fade in at their own stage, after the card has
+                // widened, and out first (`MapToolPile`'s `names`).
+                let shown = if node.dashed { 0.55 } else { 1.0 } * frame.names;
+                if shown <= 0.0 {
                     continue;
                 }
                 // A coin's name and what waits from it, beside it once the
@@ -1128,42 +1461,39 @@ impl MapCanvas {
     }
 
     /// Runs the frame clock while something moves and stops it when
-    /// nothing does: the dashes at 30 frames a second, a run at 60, and
-    /// nothing at all under reduced motion (`FlowMapView.restingMotion`).
+    /// nothing does: the dashes at 30 frames a second, a run at 60, the
+    /// pile, the shimmer and the light at the display's rate while they
+    /// move, and nothing at all under reduced motion
+    /// (`FlowMapView.restingMotion`).
     fn update_clock(&self) {
         let imp = self.imp();
-        let reduce = reduce_motion();
-        let flows = imp.scene.borrow().flows();
-        let healthy = imp.inputs.borrow().gate.state.is_healthy();
-        // The Traces map's station turns at its own rate while nothing
-        // else moves.
-        let library = library_turns(&imp.scene.borrow());
-        let resting = transfers::resting_motion(reduce, flows, healthy, library);
-        let running = transfers::drawn_run(imp.run.borrow().as_ref(), reduce).is_some();
-        imp.interval.set(if running {
-            transfers::RUN_INTERVAL
-        } else {
-            resting.interval
-        });
-        // Only while the map can be seen: unmapped (hidden, or its pane
-        // collapsed) it draws nothing, so its clock stops, and mapping it
-        // again starts it (`GlassAnimationTimeline`'s visibility gate).
-        let needed = self.is_mapped() && (running || !resting.paused);
-        if !needed {
+        let Some(interval) = self.clock_wanted() else {
             if let Some(tick) = imp.tick.take() {
                 tick.remove();
             }
             return;
-        }
+        };
+        imp.interval.set(interval);
         if imp.tick.borrow().is_some() {
             return;
         }
         let tick = self.add_tick_callback(|canvas, clock| {
             let imp = canvas.imp();
             let now = clock.frame_time() as f64 / 1e6;
+            let Some(interval) = canvas.clock_wanted() else {
+                // Nothing moves any more: one last frame at rest.
+                imp.tick.take();
+                canvas.queue_allocate();
+                canvas.queue_draw();
+                return glib::ControlFlow::Break;
+            };
+            imp.interval.set(interval);
             // A little under the interval, so a frame that lands just early
             // is not skipped.
-            if now - imp.last_frame.get() >= imp.interval.get() * 0.9 {
+            if now - imp.dash_time.get() >= imp.dash_interval.get() * 0.9 {
+                imp.dash_time.set(now);
+            }
+            if now - imp.last_frame.get() >= interval * 0.9 {
                 imp.last_frame.set(now);
                 if imp.pile_moved() {
                     canvas.queue_allocate();
@@ -1173,6 +1503,86 @@ impl MapCanvas {
             glib::ControlFlow::Continue
         });
         imp.tick.replace(Some(tick));
+    }
+
+    /// The clock's rate while something moves; `None` when nothing does.
+    /// Only while the map can be seen: unmapped (hidden, or its pane
+    /// collapsed) it draws nothing, so its clock stops, and mapping it
+    /// again starts it (`GlassAnimationTimeline`'s visibility gate).
+    fn clock_wanted(&self) -> Option<f64> {
+        let imp = self.imp();
+        if !self.is_mapped() || crate::ui::glass_motion::window_hidden(self) {
+            return None;
+        }
+        let reduce = reduce_motion();
+        let flows = imp.scene.borrow().flows();
+        let healthy = imp.inputs.borrow().gate.state.is_healthy();
+        // The Traces map's station turns at its own rate while nothing
+        // else moves.
+        let library = library_turns(&imp.scene.borrow());
+        let resting = transfers::resting_motion(reduce, flows, healthy, library);
+        let running = transfers::drawn_run(imp.run.borrow().as_ref(), reduce).is_some();
+        let dashes = if running {
+            transfers::RUN_INTERVAL
+        } else {
+            resting.interval
+        };
+        imp.dash_interval.set(dashes);
+        if !reduce && imp.fine_motion(imp.now()) {
+            return Some(0.0);
+        }
+        (running || !resting.paused).then_some(dashes)
+    }
+
+    /// The shimmer's next pass `delay` seconds from now, and one every
+    /// `SHIMMER_EVERY` after it; none while the map is not shown or under
+    /// reduced motion.
+    fn schedule_shimmer(&self, delay: f64) {
+        let imp = self.imp();
+        if let Some(timer) = imp.shimmer_timer.take() {
+            timer.remove();
+        }
+        if !self.is_mapped() || reduce_motion() || crate::ui::glass_motion::window_hidden(self) {
+            return;
+        }
+        let weak = self.downgrade();
+        let timer =
+            glib::timeout_add_local_once(std::time::Duration::from_secs_f64(delay), move || {
+                let Some(canvas) = weak.upgrade() else { return };
+                let imp = canvas.imp();
+                // This timer has fired: forget it rather than remove it.
+                imp.shimmer_timer.take();
+                if !canvas.is_mapped()
+                    || reduce_motion()
+                    || crate::ui::glass_motion::window_hidden(&canvas)
+                {
+                    return;
+                }
+                imp.shimmer_start.set(Some(imp.now()));
+                canvas.update_clock();
+                canvas.queue_draw();
+                canvas.schedule_shimmer(map_motion::SHIMMER_EVERY);
+            });
+        imp.shimmer_timer.replace(Some(timer));
+    }
+
+    /// No shimmer now, and none to come.
+    fn stop_shimmer(&self) {
+        let imp = self.imp();
+        if let Some(timer) = imp.shimmer_timer.take() {
+            timer.remove();
+        }
+        imp.shimmer_start.set(None);
+    }
+
+    /// Whether a shimmer pass is due: its timer is set.
+    pub fn shimmer_scheduled(&self) -> bool {
+        self.imp().shimmer_timer.borrow().is_some()
+    }
+
+    /// The clock's rate now: 0 for every frame.
+    pub fn clock_interval(&self) -> f64 {
+        self.imp().interval.get()
     }
 
     pub fn scene(&self) -> Scene {
@@ -2376,6 +2786,7 @@ pub const LAPTOP_SCREEN_TOP: f64 = 36.0;
 /// The pile: its card, then its coins in `order`, front first. A coin a
 /// trace is in (`grown`) is drawn larger, over the rest, in the run's
 /// `glow`.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn draw_pile(
     cr: &gtk::cairo::Context,
@@ -2388,38 +2799,60 @@ fn draw_pile(
     palette: &Palette,
     stage: PileStage,
 ) {
+    let frame = PileFrame::at_rest(order, grown, stage);
+    draw_pile_frame(cr, scene, stack, &frame, glow, fit, palette);
+}
+
+/// The pile as `frame` has it: its card, then its coins, the back first.
+fn draw_pile_frame(
+    cr: &gtk::cairo::Context,
+    scene: &Scene,
+    stack: &ToolStack,
+    frame: &PileFrame,
+    glow: Option<&gtk::gdk::RGBA>,
+    fit: &MapGeometry,
+    palette: &Palette,
+) {
     let s = fit.scale;
-    let open = stage.tall;
-    let (x, y, w, h) = stack.card(fit, stage.tall, stage.wide);
+    let (x, y, w, h) = stack.card_at(fit, frame.tall, frame.wide);
     rounded(cr, x, y, w, h, 26.0 * s);
-    // An open card is opaque: nothing under it shows through.
-    let card = if stage.open() {
-        palette.map.pane_opaque
-    } else {
-        palette.map.well_fill
-    };
+    // An open card is opaque: nothing under it shows through. Its fill
+    // turns from the well's to the pane's as it widens.
+    let (well, pane) = (palette.map.well_fill, palette.map.pane_opaque);
+    let m = frame.opaque as f32;
+    let mix = |a: f32, b: f32| a + (b - a) * m;
+    let card = gtk::gdk::RGBA::new(
+        mix(well.red(), pane.red()),
+        mix(well.green(), pane.green()),
+        mix(well.blue(), pane.blue()),
+        mix(well.alpha(), pane.alpha()),
+    );
     source(cr, &card, 1.0);
     let _ = cr.fill();
     // The back of the pile first, so the front coin is drawn over the rest,
     // and a grown coin over them all.
-    let mut drawn: Vec<(usize, &String)> = order.iter().enumerate().rev().collect();
-    drawn.sort_by_key(|(_, id)| grown.contains(id));
-    for (index, id) in drawn {
-        let Some(node) = scene.nodes.iter().find(|n| n.id == *id) else {
+    let mut drawn: Vec<&CoinFrame> = frame.coins.iter().rev().collect();
+    drawn.sort_by_key(|coin| coin.grown);
+    for coin in drawn {
+        let Some(node) = scene.nodes.iter().find(|n| n.id == coin.id) else {
             continue;
         };
         let NodeKind::Tool { kind, off } = node.kind else {
             continue;
         };
-        let centre = fit.point(stack.coin_center(index, open));
-        let is_grown = grown.contains(id);
+        let index = coin.slot;
+        let open = frame.open;
+        let centre = fit.point(stack.coin_center_at(coin.at, frame.lay));
         // A grown coin is the whole coin larger (`scaleEffect`): its rim,
-        // its mark and its lock too.
-        let k = s * if is_grown { 1.3 } else { 1.0 };
+        // its mark and its lock too, on its spring.
+        let k = s * (1.0 + (map_motion::GROWN - 1.0) * coin.grow);
         let side = ToolStack::COIN * k;
         let radius = side / 2.0;
         let tint = palette.map.tint(tool_art::tool_art(kind).tint);
-        if is_grown && let Some(glow) = glow {
+        let glowing = coin.grow.clamp(0.0, 1.0);
+        if glowing > 0.0
+            && let Some(glow) = glow
+        {
             // The coin's glow (`shadow(radius: 9)`), as a soft halo.
             let halo = gtk::cairo::RadialGradient::new(
                 centre.x,
@@ -2434,7 +2867,7 @@ fn draw_pile(
                 f64::from(glow.green()),
                 f64::from(glow.blue()),
             );
-            halo.add_color_stop_rgba(0.0, r, g, b, 0.45);
+            halo.add_color_stop_rgba(0.0, r, g, b, 0.45 * glowing);
             halo.add_color_stop_rgba(1.0, r, g, b, 0.0);
             circle(cr, centre, radius + 9.0 * s);
             let _ = cr.set_source(&halo);
@@ -2530,8 +2963,7 @@ fn memory_legend_item() -> gtk::Box {
     let item = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let lock = lock_icon();
     let label = gtk::Label::new(Some(memory_legend_word()));
-    label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("tc-map-legend");
     item.append(&lock);
     item.append(&label);
     item
@@ -2574,12 +3006,26 @@ pub struct Transfers {
     shown: Cell<bool>,
     /// The ids of the cards drawn now, front first.
     drawn: RefCell<Vec<String>>,
+    /// The front card's id and its holder, kept while it stays in front.
+    front: RefCell<Option<(String, crate::ui::popover_stack::Slide)>>,
+    /// The plates peeking out above the front card: one for the stack's
+    /// life, so a change in the count moves them on the stack's spring.
+    plates: crate::ui::popover_stack::Plates,
+    /// Where the front card sits, under the plates.
+    place: gtk::Box,
 }
 
 impl Transfers {
     fn new(canvas: &MapCanvas) -> Rc<Self> {
         let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
         cards.set_visible(false);
+        // The plates sit flush on the card, whatever the column's gap.
+        let plates = crate::ui::popover_stack::Plates::hung_from_foot("tc-map-transfer-plate");
+        let place = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        stack.append(&plates);
+        stack.append(&place);
+        cards.append(&stack);
         Rc::new(Self {
             player: RefCell::new(Player::default()),
             feed: RefCell::new(Feed::default()),
@@ -2588,6 +3034,9 @@ impl Transfers {
             cards,
             shown: Cell::new(false),
             drawn: RefCell::new(Vec::new()),
+            front: RefCell::new(None),
+            plates,
+            place,
         })
     }
 
@@ -2670,37 +3119,90 @@ impl Transfers {
         // The cards drawn before: the front one now was among them when a
         // close revealed it, and was not when it has just arrived.
         let before = self.drawn.replace(ids);
-        while let Some(child) = self.cards.first_child() {
-            self.cards.remove(&child);
+        // The card in front until now: kept as it is while it stays in
+        // front, fading where it is beneath the new one once covered.
+        let old = self.front.take();
+        let kept: Option<gtk::Widget> = old
+            .as_ref()
+            .filter(|(id, _)| visible.first().is_some_and(|card| card.id == *id))
+            .map(|(_, slide)| slide.clone().upcast());
+        let mut child = self.place.first_child();
+        while let Some(card) = child {
+            child = card.next_sibling();
+            if Some(&card) != kept.as_ref() {
+                self.place.remove(&card);
+            }
         }
         let scene = self.canvas.scene();
         if let Some(transfer) = visible.first() {
-            let from_map = scene
-                .nodes
-                .iter()
-                .find(|node| node.id == format!("folder:{}", transfer.folder))
-                .map(|node| node.label.clone());
-            let weak = Rc::downgrade(self);
-            let id = transfer.id.clone();
-            let card = transfer_card::card(transfer, from_map.as_deref(), move || {
-                if let Some(transfers) = weak.upgrade() {
-                    transfers.player.borrow_mut().close(&id);
-                    transfers.sync();
+            let slide = match old {
+                Some((id, slide)) if id == transfer.id => slide,
+                old => {
+                    let from_map = scene
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == format!("folder:{}", transfer.folder))
+                        .map(|node| node.label.clone());
+                    let weak = Rc::downgrade(self);
+                    let id = transfer.id.clone();
+                    let card = transfer_card::card(transfer, from_map.as_deref(), move || {
+                        if let Some(transfers) = weak.upgrade() {
+                            transfers.player.borrow_mut().close(&id);
+                            transfers.sync();
+                        }
+                    });
+                    let slide = crate::ui::popover_stack::Slide::new(&card);
+                    // In place before it moves, so a window that is hidden
+                    // lands it at once, as the Mac's does.
+                    slide.set_valign(gtk::Align::End);
+                    self.place.append(&slide);
+                    if crate::ui::glass_motion::animations_enabled() {
+                        // The card it covers fades where it is beneath it,
+                        // on the stack's spring, drawn or not yet; it takes
+                        // no pointer or focus.
+                        slide.arrive_replacing(
+                            !before.contains(&transfer.id),
+                            true,
+                            old.as_ref().map(|(_, slide)| slide),
+                        );
+                    }
+                    slide
                 }
-            });
-            let plates = crate::ui::popover_stack::Plates::hung_from_foot("tc-map-transfer-plate");
-            plates.set_behind(visible.len().saturating_sub(1).min(2));
-            // The plates sit flush on the card, whatever the column's gap.
-            let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            stack.append(&plates);
-            let slide = crate::ui::popover_stack::Slide::new(&card);
-            stack.append(&slide);
-            self.cards.append(&stack);
-            if crate::ui::glass_motion::animations_enabled() {
-                slide.arrive(!before.contains(&transfer.id), true);
+            };
+            // At the stack's foot (`GlassPopoverStack`'s ZStack, anchor
+            // bottom).
+            slide.set_valign(gtk::Align::End);
+            if slide.parent().is_none() {
+                self.place.append(&slide);
             }
+            self.front.replace(Some((transfer.id.clone(), slide)));
         }
-        self.cards.set_visible(!visible.is_empty());
+        // The stack itself comes and goes at once, as on the Mac, where
+        // the cards change in no animation (`MapTransferPlayer`) and its
+        // `.transition(.opacity)` has none to run in.
+        // The plates move only while the stack stays shown: set while it
+        // is hidden, they are in place at once.
+        if visible.is_empty() {
+            self.cards.set_visible(false);
+            self.plates.set_behind(0);
+        } else {
+            self.plates
+                .set_behind(visible.len().saturating_sub(1).min(2));
+            self.cards.set_visible(true);
+        }
+    }
+
+    /// The cards in the stack's front place now: only the front card, the
+    /// one it covered fading as a picture inside it
+    /// (`popover_stack::Slide::covered_opacity`).
+    pub fn front_cards(&self) -> Vec<gtk::Widget> {
+        let mut cards = Vec::new();
+        let mut child = self.place.first_child();
+        while let Some(card) = child {
+            child = card.next_sibling();
+            cards.push(card);
+        }
+        cards
     }
 }
 
@@ -2716,7 +3218,10 @@ pub struct TraceMap {
     pub zoom_in: gtk::Button,
     stage: gtk::Stack,
     foot: gtk::Box,
-    spinner: gtk::Spinner,
+    /// `GlassSpinner(size: FlowMapView.loadingSpinner)`, shown while
+    /// `loading`.
+    spinner: gtk::DrawingArea,
+    loading: std::cell::Cell<bool>,
     reads: RefCell<Reads>,
     pub transfers: Rc<Transfers>,
 }
@@ -2754,7 +3259,7 @@ impl TraceMap {
 
         // Before the first reply the map is empty only because it is
         // unread: a spinner says so.
-        let spinner = gtk::Spinner::new();
+        let spinner = super::super::glass_feedback::spinner_sized(LOADING_SPINNER);
         spinner.set_halign(gtk::Align::Center);
         spinner.set_valign(gtk::Align::Center);
         spinner.set_can_target(false);
@@ -2870,6 +3375,7 @@ impl TraceMap {
             stage,
             foot,
             spinner,
+            loading: std::cell::Cell::new(false),
             reads: RefCell::new(Reads::default()),
             transfers,
         };
@@ -2908,8 +3414,7 @@ impl TraceMap {
         // The legend, the zoom and the spinner are the Traces map's: the
         // Mac's Private AI map has none of them.
         self.foot.set_visible(traces);
-        self.spinner
-            .set_visible(traces && self.spinner.is_spinning());
+        self.spinner.set_visible(traces && self.loading.get());
     }
 
     /// `harness_list`'s answer, or `None` after a failed or unreadable
@@ -3035,7 +3540,7 @@ impl TraceMap {
             app.shell.map_focus_tool(app),
         );
         let loading = inputs.gate.state == ScreenState::Loading;
-        self.spinner.set_spinning(loading);
+        self.loading.set(loading);
         self.spinner
             .set_visible(loading && self.stage.visible_child_name().as_deref() == Some("traces"));
         if self.canvas.imp().on_select_folder.borrow().is_none() {
@@ -3094,6 +3599,9 @@ impl TraceMap {
 /// The transfer cards' widest, as the Mac's.
 pub const TRANSFER_CARD_WIDTH: i32 = 460;
 
+/// The map's loading spinner, `FlowMapView.loadingSpinner`.
+const LOADING_SPINNER: f64 = 20.0;
+
 /// One legend item: a rule's dot, or the dashed ring of a tool that is not
 /// watched, and its word.
 fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
@@ -3122,8 +3630,7 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
         let _ = cr.stroke();
     });
     let label = gtk::Label::new(Some(word));
-    label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("tc-map-legend");
     item.append(&dot);
     item.append(&label);
     item
@@ -3133,6 +3640,7 @@ fn legend_item(word: &str, mode: Option<ProjectMode>) -> gtk::Box {
 mod tests {
 
     use super::*;
+    use crate::ui::monitor::map_scene::PileStep;
 
     const OPEN_PILE: PileStage = PileStage {
         tall: true,
@@ -3675,6 +4183,148 @@ mod tests {
         let pane = palette.map.pane_opaque;
         assert_eq!(open[3], 255, "the open card is opaque");
         assert!((f32::from(open[0]) - pane.red() * 255.0).abs() <= 2.0);
+    }
+
+    /// The card grows on the Mac's spring rather than in a step: 0.1 s
+    /// after the pointer comes over it, it is 61% of the way to its open
+    /// height (`spring(0.34, 0.84)`), drawn so; a moving trace closes it at
+    /// once, and its fill turns opaque only with its width.
+    #[test]
+    fn the_pile_card_grows_on_its_spring() {
+        let scene = traces_scene(&[
+            entry("a", "p", "claude-code"),
+            entry("b", "p", "codex"),
+            entry("c", "p", "cursor"),
+        ]);
+        let fit = MapGeometry::new(Size::new(580.0, 760.0), 1.0, None, scene.space);
+        let palette = Palette::fixed();
+        let stack = scene.stack.as_ref().unwrap();
+        let mut motion = PileMotion::default();
+        motion.follow(0.0, false, &stack.tools, &[], false);
+        let tall = PileStage {
+            tall: true,
+            ..PileStage::default()
+        };
+        motion.step(PileStep::Tall(true), 0.0, false);
+        motion.follow(0.0, true, &stack.tools, &[], false);
+        let frame = PileFrame::moving(&motion, tall, false, &stack.tools, &[], 0.1);
+        assert!((frame.tall - 0.609_732_579).abs() < 1e-6, "{}", frame.tall);
+        assert!((frame.lay - 0.582_676_783).abs() < 1e-6, "{}", frame.lay);
+        assert_eq!((frame.wide, frame.opaque), (0.0, 0.0));
+        // Drawn: filled to the spring's height, not to the open one.
+        let (x, closed_top, _, _) = stack.card(&fit, false, false);
+        let (_, open_top, _, _) = stack.card(&fit, true, false);
+        let (_, now_top, _, _) = stack.card_at(&fit, frame.tall, 0.0);
+        assert!(open_top + 4.0 < now_top && now_top + 4.0 < closed_top);
+        let alpha_at = |y: f64| {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 580, 760).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                draw_pile_frame(&cr, &scene, stack, &frame, None, &fit, &palette);
+            }
+            surface.flush();
+            let stride = surface.stride() as usize;
+            let data = surface.data().unwrap();
+            data[y as usize * stride + (x + 30.0) as usize * 4 + 3]
+        };
+        assert!(alpha_at(now_top + 2.0) > 0, "inside the growing card");
+        assert_eq!(alpha_at((open_top + now_top) / 2.0), 0, "past it");
+        // A trace moving: the card closed at once, the coins on their way.
+        let moving = PileFrame::moving(&motion, tall, true, &stack.tools, &[], 0.1);
+        assert_eq!((moving.tall, moving.wide, moving.names), (0.0, 0.0, 0.0));
+        assert!(!moving.open);
+        // Opaque only as wide as it is.
+        motion.step(PileStep::Wide(true), 0.26, false);
+        let wide = PileFrame::moving(&motion, tall, false, &stack.tools, &[], 0.36);
+        assert!(
+            (wide.opaque - 0.676_634_630).abs() < 1e-6,
+            "{}",
+            wide.opaque
+        );
+    }
+
+    /// Offscreen frames of what moves, for review beside the Mac's: the
+    /// pile opening, the shimmer crossing the field and the light under
+    /// the pointer, each at several times. Written only when
+    /// `TC_MOTION_RENDER_DIR` names a directory.
+    #[test]
+    fn write_motion_renders() {
+        let Ok(dir) = std::env::var("TC_MOTION_RENDER_DIR") else {
+            return;
+        };
+        let (w, h) = (440, 600);
+        let save = |name: &str, paint: &dyn Fn(&gtk::cairo::Context)| {
+            let surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).unwrap();
+            {
+                let cr = gtk::cairo::Context::new(&surface).unwrap();
+                paint(&cr);
+            }
+            surface.flush();
+            let stride = surface.stride();
+            let mut surface = surface;
+            let data = surface.data().unwrap().to_vec();
+            std::fs::write(format!("{dir}/{name}-{w}x{h}x{stride}.argb"), data).unwrap();
+        };
+        let scene = traces_scene(&[
+            entry("a", "p", "claude-code"),
+            entry("b", "p", "codex"),
+            entry("c", "p", "cursor"),
+        ]);
+        let fit = MapGeometry::new(
+            Size::new(f64::from(w), f64::from(h)),
+            1.0,
+            None,
+            scene.space,
+        );
+        let palette = Palette::fixed();
+        let colours = MapColours::scheme(true);
+        let ground = |cr: &gtk::cairo::Context| {
+            source(cr, &colours.pane_opaque, 1.0);
+            let _ = cr.paint();
+            field::draw(cr, f64::from(w), f64::from(h), &colours, true);
+        };
+        let stack = scene.stack.as_ref().unwrap();
+        let mut motion = PileMotion::default();
+        motion.follow(0.0, false, &stack.tools, &[], false);
+        let stage = PileStage {
+            tall: true,
+            wide: true,
+            names: true,
+        };
+        motion.step(PileStep::Tall(true), 0.0, false);
+        motion.step(PileStep::Wide(true), 0.26, false);
+        motion.step(PileStep::Names(true), 0.46, false);
+        motion.follow(0.0, true, &stack.tools, &[], false);
+        for t in [0.0, 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8] {
+            let frame = PileFrame::moving(&motion, stage, false, &stack.tools, &[], t);
+            save(&format!("pile-open-t{:03}", (t * 100.0) as i32), &|cr| {
+                ground(cr);
+                draw_pile_frame(cr, &scene, stack, &frame, None, &fit, &palette);
+            });
+        }
+        let mask = field::tile_mask(f64::from(w), f64::from(h), 1.0).unwrap();
+        for t in [0.1, 0.25, 0.4, 0.55, 0.7, 0.9] {
+            let progress = map_motion::shimmer_progress(t);
+            save(&format!("shimmer-t{:03}", (t * 100.0) as i32), &|cr| {
+                ground(cr);
+                field::draw_shimmer(cr, &mask, f64::from(w), f64::from(h), progress, true);
+            });
+        }
+        for opacity in [0.25, 0.5, 1.0] {
+            save(&format!("light-o{:03}", (opacity * 100.0) as i32), &|cr| {
+                ground(cr);
+                field::draw_light(
+                    cr,
+                    f64::from(w),
+                    f64::from(h),
+                    (220.0, 300.0),
+                    opacity,
+                    true,
+                );
+            });
+        }
     }
 
     fn private_rows() -> Vec<HarnessRow> {
@@ -4253,6 +4903,61 @@ mod tests {
         false
     }
 
+    /// The legend's four rule items on one line beside the zoom at the
+    /// map pane's width in the Omarchy screenshot (358 px), where "Not
+    /// watched" had wrapped: the Mac's legend type (`TypeScale.micro`,
+    /// regular, 10) and textTertiary, not the theme's larger caption.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_legend_fits_one_line_at_the_narrow_map_width() {
+        gtk::init().expect("GTK display");
+        crate::ui::style::install();
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(358)
+            .default_height(560)
+            .child(&map.root)
+            .build();
+        window.present();
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        let mut items = Vec::new();
+        let mut stack = vec![map.root.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = stack.pop() {
+            // Each rule item is its dot and its word. The lock's memory
+            // item shares the class and the flow but is not one of the
+            // four rules, so it is left out of the count.
+            let memory = widget
+                .downcast_ref::<gtk::Label>()
+                .is_some_and(|label| label.text() == memory_legend_word());
+            if widget.has_css_class("tc-map-legend") && !memory {
+                let item = widget.parent().expect("an item");
+                if item.is_visible() {
+                    items.push(item);
+                }
+            }
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                stack.push(next.clone());
+                child = next.next_sibling();
+            }
+        }
+        assert_eq!(items.len(), 4, "Automatic, Ask, Never and Not watched");
+        let first = items[0].clone();
+        settle_until(move || first.height() > 0);
+        let tops: Vec<f32> = items
+            .iter()
+            .map(|item| item.compute_bounds(&window).expect("laid out").y())
+            .collect();
+        assert!(
+            tops.iter().all(|top| (top - tops[0]).abs() < 1.0),
+            "the legend wrapped: {tops:?}"
+        );
+        window.close();
+    }
+
     #[test]
     #[ignore = "requires a GTK display; exercised by weston"]
     // Reduced motion: the map's slide-down revealer went with its Show/Hide
@@ -4713,6 +5418,168 @@ mod tests {
         window.close();
     }
 
+    /// A new card covers the front one, which fades where it is beneath
+    /// it on the stack's spring, as a picture that takes no pointer or
+    /// focus; the plates above are one widget for the stack's life and
+    /// move on the same spring when the count changes; a card staying in
+    /// front is not drawn anew; under reduced motion the covered card is
+    /// gone at once (`GlassPopoverStack`).
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_covered_transfer_card_fades_under_the_new_one() {
+        use crate::ui::popover_stack::Slide;
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![
+            entry("a", "p", "codex"),
+            entry("b", "p", "codex"),
+            entry("c", "p", "codex"),
+        ];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        map.set_cards_shown(true);
+        map.observe_transfers(&listed, None, None, None);
+        map.observe_transfers(&listed[1..], None, None, Some("a"));
+        settle();
+        assert_eq!(map.card_ids(), ["a"]);
+        let first = map.transfers.front_cards();
+        assert_eq!(first.len(), 1);
+        let plates = map.transfers.plates.clone();
+        assert_eq!(plates.behind(), 0);
+        map.observe_transfers(&listed[2..], None, None, Some("b"));
+        assert_eq!(map.card_ids(), ["b", "a"]);
+        let cards = map.transfers.front_cards();
+        assert_eq!(cards.len(), 1, "the covered card is drawn by the new one");
+        assert_ne!(cards[0], first[0]);
+        assert!(
+            first[0].parent().is_none(),
+            "the covered card's widget is gone"
+        );
+        assert_eq!(map.transfers.plates, plates, "the plates were made anew");
+        assert_eq!(plates.behind(), 1);
+        assert!(
+            plates.moving(),
+            "the plates did not move to their new count"
+        );
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
+        let seen = Rc::new(Cell::new(false));
+        {
+            let seen = seen.clone();
+            let front = front.clone();
+            settle_within(400, move || {
+                let o = front.covered_opacity();
+                if o > 0.05 && o < 0.95 {
+                    seen.set(true);
+                }
+                seen.get()
+            });
+        }
+        assert!(seen.get(), "the covered card never faded part-way");
+        {
+            let front = front.clone();
+            settle_within(1500, move || front.covered_opacity() == 0.0);
+        }
+        assert_eq!(front.covered_opacity(), 0.0, "then it goes");
+        // The front card stays itself while a card behind changes.
+        map.set_cards_shown(true);
+        assert_eq!(
+            map.transfers.front_cards()[0],
+            front.clone().upcast::<gtk::Widget>()
+        );
+        // Reduced motion: a covered card is gone at once.
+        settings.set_gtk_enable_animations(false);
+        map.observe_transfers(&[], None, None, Some("c"));
+        assert_eq!(map.card_ids()[0], "c");
+        let cards = map.transfers.front_cards();
+        assert_eq!(cards.len(), 1);
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
+        assert_eq!(front.covered_opacity(), 0.0);
+        assert!(!map.transfers.plates.moving());
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// A card covered before it was ever drawn, in the same turn of the
+    /// main loop that showed it, still fades beneath the new one on the
+    /// stack's spring and is drawn while it does, as the Mac's removal
+    /// transition runs whether or not a frame of the old card was shown.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_card_covered_before_it_is_drawn_still_fades() {
+        use crate::ui::popover_stack::Slide;
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "codex")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        map.set_cards_shown(true);
+        map.observe_transfers(&listed, None, None, None);
+        // "a" arrives and "b" covers it in one turn: no frame of "a".
+        map.observe_transfers(&listed[1..], None, None, Some("a"));
+        map.observe_transfers(&[], None, None, Some("b"));
+        assert_eq!(map.card_ids(), ["b", "a"]);
+        let cards = map.transfers.front_cards();
+        assert_eq!(cards.len(), 1, "the covered card is drawn by the new one");
+        let front = cards[0].clone().downcast::<Slide>().expect("a slide");
+        assert_eq!(
+            front.covered_opacity(),
+            1.0,
+            "the covered card starts whole"
+        );
+        let seen = Rc::new(Cell::new(false));
+        {
+            let seen = seen.clone();
+            let front = front.clone();
+            settle_within(400, move || {
+                let o = front.covered_opacity();
+                if o > 0.05 && o < 0.95 && front.drew_covered() {
+                    seen.set(true);
+                }
+                seen.get()
+            });
+        }
+        assert!(
+            seen.get(),
+            "the never-drawn covered card did not fade part-way"
+        );
+        {
+            let front = front.clone();
+            settle_within(1500, move || front.covered_opacity() == 0.0);
+        }
+        assert_eq!(front.covered_opacity(), 0.0, "then it goes");
+        front.queue_draw();
+        settle_within(200, || false);
+        assert!(!front.drew_covered(), "and is no longer drawn");
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
     /// Iterates the main loop until `done` holds or `millis` pass.
     fn settle_within(millis: u64, done: impl Fn() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(millis);
@@ -4773,6 +5640,87 @@ mod tests {
         map.set_style(MapStyle::Standard);
         assert_eq!(map.canvas.style(), MapStyle::Standard);
         assert_eq!(map.transfers.player.borrow().style, MapStyle::Standard);
+        settings.set_gtk_enable_animations(previous);
+        window.close();
+    }
+
+    /// The pile, the light and the shimmer move on the frame clock at the
+    /// display's rate while they move and stop it when done; under
+    /// reduced motion each is at its end at once, followed live; the
+    /// shimmer is due only while the map is shown with motion on.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_pile_light_and_shimmer_move_on_the_clock_and_stop() {
+        gtk::init().expect("GTK display");
+        let settings = gtk::Settings::default().expect("settings");
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let map = TraceMap::new();
+        map.set_pending_read(true);
+        map.set_projects_read(true);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(700)
+            .child(&map.root)
+            .build();
+        window.present();
+        let listed = vec![entry("a", "p", "codex"), entry("b", "p", "claude-code")];
+        map.canvas
+            .set_inputs(map.inputs(&listed, &[], None, None, None));
+        let canvas = map.canvas.clone();
+        settle_until(move || canvas.width() > 0);
+        assert!(map.canvas.shimmer_scheduled(), "the first pass is due");
+        let imp = map.canvas.imp();
+        let scene = map.canvas.scene();
+        let stack = scene.stack.as_ref().expect("the pile");
+        let (x, y, w, h) = stack.card(&imp.geometry(), false, false);
+        imp.point_at(Some((x + w / 2.0, y + h / 2.0)));
+        assert!(map.canvas.is_ticking());
+        assert_eq!(
+            map.canvas.clock_interval(),
+            0.0,
+            "every frame while it moves"
+        );
+        let seen_between = Rc::new(Cell::new(false));
+        {
+            let seen = seen_between.clone();
+            let canvas = map.canvas.clone();
+            settle_within(400, move || {
+                let tall = canvas
+                    .imp()
+                    .pile_motion
+                    .borrow()
+                    .tall
+                    .value(canvas.imp().now());
+                if tall > 0.05 && tall < 0.95 {
+                    seen.set(true);
+                }
+                seen.get()
+            });
+        }
+        assert!(seen_between.get(), "the card was never part-way open");
+        assert!(imp.light.borrow().1.target() == 1.0, "the light is in");
+        {
+            let canvas = map.canvas.clone();
+            settle_within(3000, move || {
+                !canvas.imp().pile_motion.borrow().moving(canvas.imp().now())
+            });
+        }
+        assert!(!imp.pile_motion.borrow().moving(imp.now()));
+        // Reduced motion: the pile closes at once and no shimmer is due.
+        settings.set_gtk_enable_animations(false);
+        assert!(!map.canvas.shimmer_scheduled());
+        imp.point_at(None);
+        assert!(!imp.pile_motion.borrow().moving(imp.now()));
+        assert_eq!(imp.light.borrow().1.value(imp.now()), 0.0);
+        settle_within(1000, || imp.pile_stage.get() == PileStage::default());
+        assert_eq!(imp.pile_motion.borrow().tall.value(imp.now()), 0.0);
+        // Motion back on: the shimmer is due again; hidden, it is not.
+        settings.set_gtk_enable_animations(true);
+        assert!(map.canvas.shimmer_scheduled());
+        map.root.set_visible(false);
+        assert!(!map.canvas.shimmer_scheduled(), "none while hidden");
+        assert!(!map.canvas.is_ticking());
         settings.set_gtk_enable_animations(previous);
         window.close();
     }

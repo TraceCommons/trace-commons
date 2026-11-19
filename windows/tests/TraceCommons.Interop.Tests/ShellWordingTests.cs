@@ -69,7 +69,6 @@ public class ShellWordingTests
             { "TraceCommons.Interop/ProjectIgnoreCopy.cs", 8 },
             { "TraceCommons.Interop/PublicProfileCopy.cs", 44 },
             { "TraceCommons.Interop/RedactionLabels.cs", 3 },
-            { "TraceCommons.Interop/RedactionSummary.cs", 7 },
             { "TraceCommons.Interop/ScrubDetectorCopy.cs", 6 },
             { "TraceCommons.Interop/ScrubbingCaveatCopy.cs", 3 },
             { "TraceCommons.Interop/SessionRootsCopy.cs", 14 },
