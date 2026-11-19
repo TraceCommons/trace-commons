@@ -146,13 +146,10 @@ public sealed class LaunchArtView : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        try
+        // Followed live from Windows 10 2004; before it, read once here.
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
         {
             _settings.AnimationsEnabledChanged += OnAnimationsEnabledChanged;
-        }
-        catch (Exception)
-        {
-            // Older than Windows 10 2004: the setting is read once, here.
         }
 
         Visual visual = ElementCompositionPreview.GetElementVisual(_folder);
@@ -188,17 +185,15 @@ public sealed class LaunchArtView : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        try
+        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 19041))
         {
             _settings.AnimationsEnabledChanged -= OnAnimationsEnabledChanged;
-        }
-        catch (Exception)
-        {
         }
 
         Rest();
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows10.0.19041.0")]
     private void OnAnimationsEnabledChanged(UISettings sender, UISettingsAnimationsEnabledChangedEventArgs args)
     {
         if (!sender.AnimationsEnabled)
