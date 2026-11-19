@@ -1,4 +1,4 @@
-//! The NEAR AI "N", for the Linux app icon.
+//! The NEAR AI "N", for the Linux app icon and the Windows MSIX tiles.
 //!
 //! The Linux desktop shows the NEAR AI mark, not "The Turn" (owner,
 //! 2026-11-18). Its path data is the brand kit's, as the Mac carries it in
@@ -100,6 +100,249 @@ pub fn template_svg(ink: &str, size: u32) -> String {
         path = PATH,
         ink = ink,
     )
+}
+
+/// A point in the tile's own units.
+type Pt = (f64, f64);
+
+/// Line segments per cubic when the N is flattened. Fixed, so the polygon
+/// and therefore every pixel is the same on every runner.
+const CUBIC_STEPS: u32 = 24;
+
+/// Sub-scanlines per pixel row. Horizontal coverage along each one is exact
+/// (a span's overlap with the pixel); vertical coverage is this many samples.
+const SUB_ROWS: u32 = 16;
+
+/// The quarter-circle's Bezier handle: 4/3 (sqrt 2 - 1), written out, so no
+/// transcendental is called and the corners are the same everywhere.
+const KAPPA: f64 = 0.552_284_749_830_793_4;
+
+/// Parses [`PATH`]'s absolute `M L H V C Z` commands into closed polygons,
+/// cubics flattened at [`CUBIC_STEPS`]. Only `+`, `-`, `*` and `/` are used.
+fn path_polygons(data: &str) -> Vec<Vec<Pt>> {
+    let mut polys: Vec<Vec<Pt>> = Vec::new();
+    let mut current: Vec<Pt> = Vec::new();
+    let bytes = data.as_bytes();
+    let mut i = 0usize;
+    let mut cmd = b'M';
+    let mut at: Pt = (0.0, 0.0);
+    let number = |i: &mut usize| -> f64 {
+        while *i < bytes.len() && (bytes[*i] == b',' || bytes[*i] == b' ') {
+            *i += 1;
+        }
+        let start = *i;
+        while *i < bytes.len()
+            && (bytes[*i].is_ascii_digit() || bytes[*i] == b'.' || bytes[*i] == b'-')
+        {
+            *i += 1;
+        }
+        data[start..*i].parse().expect("path number")
+    };
+    loop {
+        while i < bytes.len() && (bytes[i] == b',' || bytes[i] == b' ') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        if bytes[i].is_ascii_alphabetic() {
+            cmd = bytes[i];
+            i += 1;
+        }
+        match cmd {
+            b'M' => {
+                if current.len() > 2 {
+                    polys.push(std::mem::take(&mut current));
+                }
+                current.clear();
+                at = (number(&mut i), number(&mut i));
+                current.push(at);
+                cmd = b'L';
+            }
+            b'L' => {
+                at = (number(&mut i), number(&mut i));
+                current.push(at);
+            }
+            b'H' => {
+                at = (number(&mut i), at.1);
+                current.push(at);
+            }
+            b'V' => {
+                at = (at.0, number(&mut i));
+                current.push(at);
+            }
+            b'C' => {
+                let c1 = (number(&mut i), number(&mut i));
+                let c2 = (number(&mut i), number(&mut i));
+                let end = (number(&mut i), number(&mut i));
+                flatten_cubic(&mut current, at, c1, c2, end);
+                at = end;
+            }
+            b'Z' => {
+                if current.len() > 2 {
+                    polys.push(std::mem::take(&mut current));
+                }
+            }
+            other => panic!("unsupported path command {}", other as char),
+        }
+    }
+    if current.len() > 2 {
+        polys.push(current);
+    }
+    polys
+}
+
+fn flatten_cubic(out: &mut Vec<Pt>, p0: Pt, p1: Pt, p2: Pt, p3: Pt) {
+    for k in 1..=CUBIC_STEPS {
+        let t = k as f64 / CUBIC_STEPS as f64;
+        let u = 1.0 - t;
+        let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        out.push((
+            a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0,
+            a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1,
+        ));
+    }
+}
+
+/// The tile's rounded square, [`SIDE`] across with corners of
+/// [`CORNER_SHARE`], each corner a quarter circle drawn as one cubic.
+fn tile_polygon() -> Vec<Pt> {
+    let r = SIDE * CORNER_SHARE;
+    let k = r * KAPPA;
+    let mut out = vec![(r, 0.0)];
+    let mut at = (SIDE - r, 0.0);
+    out.push(at);
+    for (c1, c2, end, next) in [
+        (
+            (SIDE - r + k, 0.0),
+            (SIDE, r - k),
+            (SIDE, r),
+            (SIDE, SIDE - r),
+        ),
+        (
+            (SIDE, SIDE - r + k),
+            (SIDE - r + k, SIDE),
+            (SIDE - r, SIDE),
+            (r, SIDE),
+        ),
+        (
+            (r - k, SIDE),
+            (0.0, SIDE - r + k),
+            (0.0, SIDE - r),
+            (0.0, r),
+        ),
+        ((0.0, r - k), (r - k, 0.0), (r, 0.0), (r, 0.0)),
+    ] {
+        flatten_cubic(&mut out, at, c1, c2, end);
+        out.push(next);
+        at = next;
+    }
+    out
+}
+
+/// Each pixel's coverage by `polys` (nonzero winding), `size` pixels across,
+/// with `scale` and the offsets taking the polygons' units to pixels.
+fn coverage(polys: &[Vec<Pt>], size: u32, scale: f64, tx: f64, ty: f64) -> Vec<f64> {
+    let n = size as usize;
+    let mut cover = vec![0.0f64; n * n];
+    let edges: Vec<(Pt, Pt)> = polys
+        .iter()
+        .flat_map(|poly| {
+            (0..poly.len()).map(move |i| {
+                let a = poly[i];
+                let b = poly[(i + 1) % poly.len()];
+                (
+                    (a.0 * scale + tx, a.1 * scale + ty),
+                    (b.0 * scale + tx, b.1 * scale + ty),
+                )
+            })
+        })
+        .collect();
+    let weight = 1.0 / SUB_ROWS as f64;
+    let mut crossings: Vec<(f64, i32)> = Vec::new();
+    for py in 0..n {
+        for sub in 0..SUB_ROWS {
+            let y = py as f64 + (sub as f64 + 0.5) / SUB_ROWS as f64;
+            crossings.clear();
+            for &((x0, y0), (x1, y1)) in &edges {
+                let (dir, lo, hi) = if y0 < y1 { (1, y0, y1) } else { (-1, y1, y0) };
+                if y0 == y1 || y < lo || y >= hi {
+                    continue;
+                }
+                let x = x0 + (y - y0) * (x1 - x0) / (y1 - y0);
+                crossings.push((x, dir));
+            }
+            crossings.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            // A span runs from where the winding leaves zero to where it
+            // returns to it (nonzero fill).
+            let mut open: Option<f64> = None;
+            let mut wind = 0;
+            for &(x, dir) in crossings.iter() {
+                let before = wind;
+                wind += dir;
+                if before == 0 && wind != 0 {
+                    open = Some(x);
+                } else if before != 0 && wind == 0 {
+                    if let Some(xa) = open.take() {
+                        add_span(&mut cover[py * n..(py + 1) * n], xa, x, weight);
+                    }
+                }
+            }
+        }
+    }
+    for c in &mut cover {
+        *c = c.clamp(0.0, 1.0);
+    }
+    cover
+}
+
+/// Adds `weight` times each pixel's overlap with the span `[xa, xb)` to `row`.
+fn add_span(row: &mut [f64], xa: f64, xb: f64, weight: f64) {
+    let n = row.len() as f64;
+    let (xa, xb) = (xa.max(0.0), xb.min(n));
+    if xb <= xa {
+        return;
+    }
+    let first = xa as usize;
+    let last = (xb as usize).min(row.len() - 1);
+    for (px, cell) in row.iter_mut().enumerate().take(last + 1).skip(first) {
+        let p = px as f64;
+        let overlap = xb.min(p + 1.0) - xa.max(p);
+        if overlap > 0.0 {
+            *cell += overlap * weight;
+        }
+    }
+}
+
+/// The app icon as straight RGBA, `size` pixels square: the brand tile with
+/// rounded corners in [`TILE`], the N in [`PAPER`] at the kit's proportion,
+/// over transparency. The same tile [`app_icon_svg`] describes, so the
+/// Windows tiles and the Linux icon are one drawing (owner decision G-3 (a),
+/// 2026-11-18: "the NEAR AI N everywhere ... and the MSIX tiles").
+pub fn render_tile(size: u32) -> Vec<u8> {
+    let px = size as f64 / SIDE;
+    let ground = coverage(&[tile_polygon()], size, px, 0.0, 0.0);
+    let (scale, tx, ty) = n_on_tile();
+    let mark = coverage(&path_polygons(PATH), size, scale * px, tx * px, ty * px);
+    let tile = crate::raster::parse_hex(TILE);
+    let paper = crate::raster::parse_hex(PAPER);
+    let mut out = Vec::with_capacity(ground.len() * 4);
+    for (g, m) in ground.iter().zip(mark.iter()) {
+        let mut pixel = crate::raster::over([0, 0, 0, 0], tile, *g);
+        // Straight alpha: the colour of a partly covered ground pixel is the
+        // tile's, not the tile's darkened toward transparent black.
+        if *g > 0.0 {
+            pixel = [tile[0], tile[1], tile[2], pixel[3]];
+        }
+        let inked = crate::raster::over(pixel, paper, *m);
+        out.extend_from_slice(&[inked[0], inked[1], inked[2], pixel[3]]);
+    }
+    out
+}
+
+/// [`render_tile`] as a PNG.
+pub fn tile_png(size: u32) -> Vec<u8> {
+    crate::raster::encode_png(&render_tile(size), size)
 }
 
 /// Four decimals at most, trailing zeros dropped: the same bytes on every
