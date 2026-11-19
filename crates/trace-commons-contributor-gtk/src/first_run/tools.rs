@@ -455,15 +455,25 @@ impl Tools {
             .filter_map(|f| f.total_bytes)
             .fold(0u64, u64::saturating_add)
     }
-    /// The found tools Private AI can connect (`PrivateAIScreenLayout.routable`).
+    /// The found tools Private AI can connect, in ring order: the Mac's
+    /// `PrivateAIScreenLayout.connectable`, what discovery found here that
+    /// is routable. A held row (a tool the attached daemon watches that
+    /// discovery missed) is not one, as the Mac has none.
     pub fn connectable(&self) -> Vec<Found> {
         const ROUTABLE: [&str; 3] = [SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_OPENCODE];
-        self.listed()
-            .into_iter()
-            .filter(|f| ROUTABLE.contains(&f.source.as_str()))
+        let found = self.discovered.as_deref().unwrap_or_default();
+        TOOL_ORDER
+            .iter()
+            .filter(|tool| ROUTABLE.contains(tool))
+            .filter_map(|tool| found.iter().find(|f| f.source == *tool && f.exists))
+            .cloned()
             .collect()
     }
-    /// How many tools discovery found here.
+    /// How many tools discovery found here: the Mac's
+    /// `PrivateAIScreenLayout.found`, the total of "N of M tools can
+    /// connect". Every tool [`connectable`] counts is in it.
+    ///
+    /// [`connectable`]: Self::connectable
     pub fn found_count(&self) -> usize {
         self.discovered
             .as_deref()
@@ -855,5 +865,27 @@ mod tests {
         let tools = discovered();
         assert_eq!(tools.connectable().len(), 2);
         assert_eq!(tools.found_count(), 2);
+    }
+
+    /// The Mac's two figures (`PrivateAIScreenLayout.connectable` and
+    /// `found`): both count only what discovery found on this computer, so
+    /// a tool the attached daemon watches that discovery missed (a held
+    /// row) is in neither. The KDE run's "2 of 1 tool can connect" came
+    /// from counting it in the first and not the second; the Mac says "1
+    /// of 1" there.
+    #[test]
+    fn a_held_tool_discovery_missed_is_in_neither_figure() {
+        let mut one = Tools::default();
+        one.record_discovery(vec![found(SOURCE_CLAUDE_CODE, true, 1)]);
+        one.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!(one.listed().len(), 2, "Tools still lists it");
+        assert_eq!((one.connectable().len(), one.found_count()), (1, 1));
+        let mut tools = discovered();
+        tools.record_held(held(&[SOURCE_CODEX]));
+        assert_eq!((tools.connectable().len(), tools.found_count()), (2, 2));
+        // A held tool discovery also found is counted once, as found.
+        let mut both = discovered();
+        both.record_held(held(&[SOURCE_CLAUDE_CODE]));
+        assert_eq!((both.connectable().len(), both.found_count()), (2, 2));
     }
 }

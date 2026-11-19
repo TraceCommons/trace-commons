@@ -538,13 +538,12 @@ fn put_rail_away(app: &Rc<App>) {
 }
 
 /// The Settings section a peek's Settings button opens
-/// (`EdgeRailSettings.section`): Private AI's own; for Traces the Mac's
-/// General, which holds the rail's switch, and this shell keeps that switch
-/// under Startup.
+/// (`EdgeRailSettings.section`): Private AI's own; for Traces General,
+/// which holds the rail's switch.
 fn settings_section(peek: Peek) -> Section {
     match peek {
         Peek::PrivateAi => Section::PrivateAI,
-        Peek::Traces => Section::Startup,
+        Peek::Traces => Section::General,
     }
 }
 
@@ -1086,17 +1085,105 @@ impl Rail {
     }
 }
 
-/// One rail tile: a glyph button on the control tiers (`GlassRailTile`).
+/// One rail tile: a glyph button on the control tiers (`GlassRailTile`),
+/// named for a screen reader and, on hover, beside it (`rail_tip`).
 fn tile(child: &gtk::Widget, name: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .child(child)
         .width_request(glass::size::EDGE_RAIL_TILE)
         .height_request(glass::size::EDGE_RAIL_TILE)
-        .tooltip_text(name)
         .build();
     button.add_css_class("tc-edge-rail-tile");
     button.update_property(&[gtk::accessible::Property::Label(name)]);
+    attach_rail_tip(&button, name);
     button
+}
+
+/// How long the pointer rests on a tile before its name shows: GTK's own
+/// tooltip hover delay (`HOVER_TIMEOUT` in gtktooltip.c), which the
+/// tooltip this replaces had.
+const RAIL_TIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The tile's name on hover, as the Mac's `.help(label)` gives it, drawn
+/// beside the tile on the side away from the screen edge. Not a GTK
+/// tooltip: GTK places one under its widget, and on KDE that covered the
+/// next tile down (shot 72: Traces' over the NEAR AI tile). The rail is a
+/// column, so beside it covers no tile. It takes no grab and the pointer
+/// passes through it; leaving or pressing the tile takes it away.
+fn attach_rail_tip(button: &gtk::Button, name: &str) {
+    let label = gtk::Label::new(Some(name));
+    label.add_css_class("tc-type-caption");
+    let tip = gtk::Popover::builder()
+        .child(&label)
+        .position(gtk::PositionType::Left)
+        .has_arrow(false)
+        .autohide(false)
+        .can_focus(false)
+        .can_target(false)
+        .build();
+    tip.add_css_class("tc-edge-rail-tip");
+    // The tile's name is already its accessible label; the tip is drawing.
+    tip.set_accessible_role(gtk::AccessibleRole::Presentation);
+    tip.set_parent(button);
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+    let hide = {
+        let tip = tip.downgrade();
+        let pending = pending.clone();
+        move || {
+            if let Some(id) = pending.take() {
+                id.remove();
+            }
+            if let Some(tip) = tip.upgrade() {
+                tip.popdown();
+            }
+        }
+    };
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter({
+        let tip = tip.downgrade();
+        let pending = pending.clone();
+        let hide = hide.clone();
+        move |_, _, _| {
+            hide();
+            let tip = tip.clone();
+            let shown = Rc::downgrade(&pending);
+            let id = glib::timeout_add_local_once(RAIL_TIP_DELAY, move || {
+                if let Some(pending) = shown.upgrade() {
+                    pending.take();
+                }
+                if let Some(tip) = tip.upgrade() {
+                    tip.popup();
+                }
+            });
+            pending.replace(Some(id));
+        }
+    });
+    motion.connect_leave({
+        let hide = hide.clone();
+        move |_| hide()
+    });
+    button.add_controller(motion);
+    button.connect_clicked({
+        let hide = hide.clone();
+        move |_| hide()
+    });
+    button.connect_destroy(move |_| {
+        hide();
+        tip.unparent();
+    });
+}
+
+/// The name tip `attach_rail_tip` gave a tile.
+#[cfg(test)]
+fn rail_tip(button: &gtk::Button) -> Option<gtk::Popover> {
+    let mut child = button.first_child();
+    while let Some(widget) = child {
+        if let Ok(tip) = widget.clone().downcast::<gtk::Popover>() {
+            return Some(tip);
+        }
+        child = widget.next_sibling();
+    }
+    None
 }
 
 /// The peek's title, with Private AI's word right after it, and the
@@ -1173,22 +1260,56 @@ fn traces_peek(app: &Rc<App>, body: &gtk::Box) {
         heading.add_css_class("tc-type-body-strong");
         heading.set_accessible_role(gtk::AccessibleRole::Heading);
         body.append(&heading);
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        for folder in &folders {
-            list.append(&folder_row(app, folder));
-        }
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_height(geometry::folder_list_height(folders.len()))
-            .max_content_height(geometry::folder_list_height(folders.len()))
-            .child(&list)
-            .build();
-        body.append(&scroller);
+        let rows: Vec<gtk::Button> = folders.iter().map(|f| folder_row(app, f)).collect();
+        body.append(&folder_list(&rows));
     }
     body.append(&graph(app).root);
 }
 
+/// The folder list: every row in full up to seven, then it scrolls. Sized
+/// once the rows are styled, from the tallest as drawn: a fixed pitch cut
+/// the second row's line on GNOME and KDE, whose fonts set the two lines
+/// taller than the Mac's row.
+fn folder_list(rows: &[gtk::Button]) -> gtk::ScrolledWindow {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    for row in rows {
+        list.append(row);
+    }
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&list)
+        .build();
+    let count = rows.len();
+    let first = geometry::folder_list_height(count, 0);
+    scroller.set_max_content_height(first);
+    scroller.set_min_content_height(first);
+    let rows: Vec<gtk::Button> = rows.to_vec();
+    scroller.connect_realize(move |scroller| {
+        let tallest = rows
+            .iter()
+            .map(|row| row.measure(gtk::Orientation::Vertical, -1).1)
+            .max()
+            .unwrap_or(0);
+        let height = geometry::folder_list_height(count, tallest);
+        scroller.set_max_content_height(height);
+        scroller.set_min_content_height(height);
+    });
+    scroller
+}
+
 fn folder_row(app: &Rc<App>, folder: &FolderNode) -> gtk::Button {
+    let row = folder_row_widget(folder);
+    let weak = Rc::downgrade(app);
+    row.connect_clicked(move |_| {
+        if let Some(app) = weak.upgrade() {
+            open(&app, Peek::Traces.screen());
+        }
+    });
+    row
+}
+
+/// A folder's row: its name over how many traces wait in it.
+fn folder_row_widget(folder: &FolderNode) -> gtk::Button {
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .height_request(glass::size::LIST_ROW)
@@ -1210,12 +1331,6 @@ fn folder_row(app: &Rc<App>, folder: &FolderNode) -> gtk::Button {
     column.append(&sub);
     let row = gtk::Button::builder().child(&column).build();
     row.add_css_class("tc-edge-row");
-    let weak = Rc::downgrade(app);
-    row.connect_clicked(move |_| {
-        if let Some(app) = weak.upgrade() {
-            open(&app, Peek::Traces.screen());
-        }
-    });
     row
 }
 
@@ -1496,16 +1611,20 @@ mod tests {
     }
 
     /// The Settings button in each peek opens the Mac's section
-    /// (`EdgeRailSettings.section`): Private AI's own, and for Traces the
-    /// Mac's General, whose rail switch this shell keeps under Startup.
+    /// (`EdgeRailSettings.section`): Private AI's own, and for Traces
+    /// General, where the rail's switch is, as on the Mac.
     #[test]
     fn each_peeks_settings_open_the_macs_section() {
         assert_eq!(settings_section(Peek::PrivateAi), Section::PrivateAI);
-        assert_eq!(settings_section(Peek::Traces), Section::Startup);
+        assert_eq!(settings_section(Peek::Traces), Section::General);
+        let mac = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/EdgeRail/EdgeRailView.swift"
+        );
+        assert!(mac.contains("peek == .privateAI ? .privateAI : .general"));
         let settings = include_str!("settings.rs");
         assert!(
-            settings.contains("sections.body(Section::Startup).append(&edge_rail.card)"),
-            "the rail's switch lives under Startup"
+            settings.contains("sections.body(Section::General).append(&edge_rail.card)"),
+            "the rail's switch lives under General"
         );
         assert!(body_of("peek_header").contains("open_settings(&app, settings_section(peek))"));
     }
@@ -1659,6 +1778,152 @@ mod tests {
         }
         dialog.destroy();
         main.destroy();
+    }
+
+    /// A rail tile names itself on hover, as the Mac's `.help(label)`
+    /// does: after GTK's own hover delay, beside the tile on the side away
+    /// from the screen edge, so it covers no tile above or below it. GTK's
+    /// own tooltip is placed under its widget, and on KDE it covered the
+    /// next tile (shot 72: Traces' over the NEAR AI tile); the round before
+    /// this one dropped the name instead. Leaving the tile, or pressing it,
+    /// takes the name away.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_rail_tile_names_itself_beside_it_after_the_hover_delay() {
+        gtk::init().expect("GTK display");
+        let context = glib::MainContext::default();
+        let wait = |ms: u64| {
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < end {
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let column = gtk::Box::new(gtk::Orientation::Vertical, glass::space::S1);
+        let names = [Peek::PrivateAi.name(), Peek::Traces.name(), "Open"];
+        let tiles: Vec<gtk::Button> = names
+            .iter()
+            .map(|name| tile(&gtk::Label::new(None).upcast(), name))
+            .collect();
+        for tile in &tiles {
+            column.append(tile);
+        }
+        let window = gtk::Window::builder().child(&column).build();
+        window.present();
+        wait(100);
+        for (tile, name) in tiles.iter().zip(names) {
+            assert!(
+                !tile.has_tooltip(),
+                "{name}: no GTK tooltip, which GTK places under the tile"
+            );
+            assert_eq!(
+                tile.accessible_role(),
+                gtk::AccessibleRole::Button,
+                "{name}"
+            );
+            let tip = rail_tip(tile).unwrap_or_else(|| panic!("{name} has a name tip"));
+            let label = tip
+                .child()
+                .and_downcast::<gtk::Label>()
+                .expect("the tip is a label");
+            assert_eq!(label.text(), name);
+            assert_eq!(
+                tip.position(),
+                gtk::PositionType::Left,
+                "{name}: beside the tile, toward the peek, never under it"
+            );
+            assert!(!tip.has_arrow());
+            assert!(!tip.is_autohide(), "{name}: it takes no grab");
+            assert!(!tip.can_target(), "{name}: the pointer passes through it");
+
+            let motion = tile
+                .observe_controllers()
+                .into_iter()
+                .filter_map(|c| c.ok())
+                .find_map(|c| c.downcast::<gtk::EventControllerMotion>().ok())
+                .expect("the tile watches the pointer");
+            motion.emit_by_name::<()>("enter", &[&4.0f64, &4.0f64]);
+            wait(RAIL_TIP_DELAY.as_millis() as u64 / 2);
+            assert!(!tip.is_visible(), "{name}: not before the hover delay");
+            wait(RAIL_TIP_DELAY.as_millis() as u64);
+            assert!(tip.is_visible(), "{name}: shown after the hover delay");
+            motion.emit_by_name::<()>("leave", &[]);
+            wait(50);
+            assert!(!tip.is_visible(), "{name}: gone when the pointer leaves");
+
+            // A press takes it away too, and a pending one never shows.
+            motion.emit_by_name::<()>("enter", &[&4.0f64, &4.0f64]);
+            tile.emit_clicked();
+            wait(RAIL_TIP_DELAY.as_millis() as u64 * 2);
+            assert!(!tip.is_visible(), "{name}: a press cancels it");
+            motion.emit_by_name::<()>("leave", &[]);
+        }
+        window.destroy();
+    }
+
+    /// The Traces peek's folder list draws every row whole, its name and
+    /// the line under it, at the peek's width on this desktop's fonts. On
+    /// the branch before this fix the list was a fixed 42 a row, and the
+    /// second row's line was cut under the graph's chips (GNOME shot 79,
+    /// KDE shot 72).
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_folder_list_draws_every_row_whole() {
+        adw::init().expect("GTK display");
+        style::install();
+        let session = |id: &str| crate::model::QueueEntry {
+            entry_id: id.into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        let mut api = FolderNode::new("api", "api", Some(ProjectMode::Ask));
+        api.sessions = vec![session("a"), session("b")];
+        let mut web = FolderNode::new(
+            "web",
+            "trace-commons-contributor-web",
+            Some(ProjectMode::Ask),
+        );
+        web.sessions = vec![session("c")];
+        let rows: Vec<gtk::Button> = [&api, &web].into_iter().map(folder_row_widget).collect();
+        let list = folder_list(&rows);
+        let peek = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        peek.add_css_class("tc-glass-window");
+        peek.append(&list);
+        // What sits under the list in the peek, as the graph's chips do.
+        peek.append(&gtk::Label::new(Some("shared")));
+        let window = gtk::Window::builder()
+            .default_width(geometry::OPEN_WIDTH)
+            .child(&peek)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+        }
+        let shown = list.height() as f32;
+        for row in &rows {
+            let at = row.compute_bounds(&list).expect("laid out");
+            assert!(
+                at.y() + at.height() <= shown,
+                "a row reaches {} of a list {shown} tall",
+                at.y() + at.height()
+            );
+            let sub = row
+                .child()
+                .and_then(|column| column.last_child())
+                .expect("the line under the name");
+            let line = sub.compute_bounds(&list).expect("its line is laid out");
+            assert!(
+                sub.is_mapped() && line.y() + line.height() <= shown,
+                "its line is cut"
+            );
+        }
+        window.destroy();
     }
 
     #[test]
