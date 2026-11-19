@@ -33,7 +33,7 @@ set -euo pipefail
 RG="${TC_AZ_RG:-tc-win-azure}"
 NAME="${TC_AZ_VM:-tc-win-az}"
 KEY="${TC_AZ_KEY:-$HOME/.ssh/tc-win-az}"
-KNOWN_HOSTS="${TC_AZ_KNOWN_HOSTS:-$HOME/.ssh/tc-win-az.known_hosts}"
+KNOWN_HOSTS="${TC_AZ_KNOWN_HOSTS:-$HOME/.ssh/${NAME}.known_hosts}"
 USER_NAME="${TC_AZ_USER:-tcdev}"
 
 usage() {

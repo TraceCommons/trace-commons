@@ -21,7 +21,7 @@
 # When your address changes, run `allow-my-ip`.
 #
 # The admin password is generated here, stored in the macOS Keychain
-# (service tc-win-az, account tcdev), and never printed. sshd on the box
+# (service = the VM's name, account tcdev), and never printed. sshd on the box
 # refuses passwords; the password is only for RDP and console auto-logon.
 #
 # COST. Compute and the Windows licence bill while the VM is running. `stop`
@@ -31,6 +31,15 @@
 #
 #   ./provision-azure-vm.sh stop
 #   ./provision-azure-vm.sh status
+#
+# SEVERAL BOXES. TC_AZ_VM picks the box (default tc-win-az); every per-box
+# name derives from it: the NIC, NSG, public IP, VNet, OS disk, the pinned
+# known_hosts file (~/.ssh/<vm>.known_hosts) and the Keychain service. All
+# boxes share one resource group and one SSH key. TC_AZ_LOCATION picks the
+# region a NEW box is created in; the group's own region does not limit it.
+#
+#   TC_AZ_VM=tc-win-az3 TC_AZ_LOCATION=westus2 ./provision-azure-vm.sh create
+#   ./provision-azure-vm.sh list      # every box tagged purpose=windows-parity-testing
 #
 set -euo pipefail
 
@@ -44,27 +53,32 @@ DISK_GB="${TC_AZ_DISK_GB:-128}"
 ADMIN_USER="${TC_AZ_USER:-tcdev}"
 IMAGE="${TC_AZ_IMAGE:-MicrosoftWindowsServer:WindowsServer:2025-datacenter-g2:latest}"
 KEY="${TC_AZ_KEY:-$HOME/.ssh/tc-win-az}"
-KNOWN_HOSTS="${TC_AZ_KNOWN_HOSTS:-$HOME/.ssh/tc-win-az.known_hosts}"
+KNOWN_HOSTS="${TC_AZ_KNOWN_HOSTS:-$HOME/.ssh/${NAME}.known_hosts}"
 # Optional guard: set to the account you expect `az` to be signed in as, and
 # every command refuses to run under any other.
 EXPECTED_ACCOUNT="${TC_AZ_EXPECTED_ACCOUNT:-}"
 # Local wall-clock time for the nightly auto-shutdown safety net.
 SHUTDOWN_LOCAL="${TC_AZ_SHUTDOWN_LOCAL:-0100}"
 
-KEYCHAIN_SERVICE="$NAME"
+KEYCHAIN_SERVICE="${TC_AZ_KEYCHAIN_SERVICE:-$NAME}"
 VNET="${NAME}-vnet"
 SUBNET="default"
 NSG="${NAME}-nsg"
 NSG_RULE="ssh-from-operator"
 PIP="${NAME}-ip"
 NIC="${NAME}-nic"
-TAG="purpose=windows-parity-testing"
+TAG_KEY="purpose"
+TAG_VALUE="windows-parity-testing"
+TAG="${TAG_KEY}=${TAG_VALUE}"
+# az vm auto-shutdown names its schedule after the VM; looked up by that name
+# so one box's schedule is never mistaken for another's.
+SCHEDULE="shutdown-computevm-${NAME}"
 # HostKeyAlias, so the pinned key is tied to the box rather than to an IP.
 HOST_ALIAS="$NAME"
 
 usage() {
   cat <<'USAGE'
-Usage: provision-azure-vm.sh <command>
+Usage: [TC_AZ_VM=<vm>] [TC_AZ_LOCATION=<region>] provision-azure-vm.sh <command>
 
   create        Create the VM (network, NSG, VM, SSH, auto-shutdown)
   bootstrap     Start the toolchain install on the box (detached; poll it)
@@ -76,7 +90,13 @@ Usage: provision-azure-vm.sh <command>
   rdp           Tunnel the box's 3389 to localhost:13389 over SSH
   allow-my-ip   Point the NSG's SSH rule at this machine's current address
   resize SIZE   Deallocate, change the VM size, and start it again
-  delete        Delete the whole resource group
+  list          Every VM tagged purpose=windows-parity-testing, in any group
+                or region, with its size and power state (via the API)
+  delete        Delete THIS VM and its own disk, NIC, public IP, NSG, VNet and
+                shutdown schedule; never the group or another box
+
+TC_AZ_VM selects the box (default tc-win-az). TC_AZ_LOCATION sets the region
+for create (default eastus).
 USAGE
 }
 
@@ -111,7 +131,8 @@ preflight() {
   fi
   echo "account:      $account"
   echo "subscription: $sub"
-  echo "group:        $RG ($LOCATION)"
+  echo "group:        $RG"
+  echo "vm:           $NAME"
 }
 
 public_ip() {
@@ -181,8 +202,13 @@ check_nsg() {
 
 ensure_network() {
   local ip="$1"
-  az_q group create -n "$RG" -l "$LOCATION" --tags "$TAG" -o none
-  echo "resource group $RG ready"
+  # The group holds several boxes in several regions. Re-running `group
+  # create` against an existing group with a different -l is an error, so
+  # create it only when it is missing.
+  if [ "$(az_q group exists -n "$RG")" != "true" ]; then
+    az_q group create -n "$RG" -l "$LOCATION" --tags "$TAG" -o none
+  fi
+  echo "resource group $RG ready; this box goes in $LOCATION"
 
   if ! az_q network nsg show -g "$RG" -n "$NSG" -o none 2>/dev/null; then
     az_q network nsg create -g "$RG" -n "$NSG" -l "$LOCATION" --tags "$TAG" -o none
@@ -294,10 +320,13 @@ ensure_autoshutdown() {
   utc="$(shutdown_utc)"
   az_q vm auto-shutdown -g "$RG" -n "$NAME" --time "$utc" -o none
   local sched_id
-  sched_id="$(az_q resource list -g "$RG" --resource-type Microsoft.DevTestLab/schedules --query '[0].id' -o tsv)"
-  if [ -n "$sched_id" ]; then
-    az_q resource tag --ids "$sched_id" --tags "$TAG" -o none
+  sched_id="$(az_q resource list -g "$RG" --resource-type Microsoft.DevTestLab/schedules \
+    --query "[?name=='${SCHEDULE}'].id | [0]" -o tsv)"
+  if [ -z "$sched_id" ]; then
+    echo "auto-shutdown schedule $SCHEDULE not found after creating it" >&2
+    exit 1
   fi
+  az_q resource tag --ids "$sched_id" --tags "$TAG" -i -o none
   echo "auto-shutdown: daily at ${utc} UTC (${SHUTDOWN_LOCAL} local today)"
   az_q resource show --ids "$sched_id" \
     --query '{status:properties.status,time:properties.dailyRecurrence.time,tz:properties.timeZoneId}' -o tsv
@@ -471,6 +500,15 @@ allow_my_ip() {
   check_nsg
 }
 
+# Read from the API, not from this machine's files: every VM in the
+# subscription with the purpose tag, whichever group or region it is in.
+# `az vm list -d` fetches each VM's instance view, so the power state is live.
+list_vms() {
+  preflight
+  az_q vm list -d -o table --query \
+    "[?tags.${TAG_KEY}=='${TAG_VALUE}'].{name:name, group:resourceGroup, region:location, size:hardwareProfile.vmSize, power:powerState, ip:publicIps}"
+}
+
 resize() {
   local size="${1:-}"
   if [ -z "$size" ]; then
@@ -488,10 +526,25 @@ resize() {
   status
 }
 
+# Deletes this one box. The group holds every box, so deleting the group --
+# which this command once did -- would take the others with it.
 delete() {
   preflight
-  echo "Deleting resource group $RG and everything in it."
-  az_q group delete -n "$RG" --yes
+  if ! az_q vm show -g "$RG" -n "$NAME" -o none 2>/dev/null; then
+    echo "no VM $NAME in $RG" >&2
+    exit 1
+  fi
+  echo "Deleting VM $NAME and its own resources: ${NAME}-osdisk, $NIC, $PIP, $NSG, $VNET, $SCHEDULE."
+  # The OS disk was created with --os-disk-delete-option Delete and goes with
+  # the VM. The NIC was made first and passed with --nics, so it does not.
+  az_q vm delete -g "$RG" -n "$NAME" --yes
+  az_q disk delete -g "$RG" -n "${NAME}-osdisk" --yes 2>/dev/null || true
+  az_q resource delete -g "$RG" -n "$SCHEDULE" \
+    --resource-type Microsoft.DevTestLab/schedules 2>/dev/null || true
+  az_q network nic delete -g "$RG" -n "$NIC"
+  az_q network public-ip delete -g "$RG" -n "$PIP"
+  az_q network nsg delete -g "$RG" -n "$NSG"
+  az_q network vnet delete -g "$RG" -n "$VNET"
   echo "Deleted. The Keychain entry (service $KEYCHAIN_SERVICE) and $KNOWN_HOSTS remain;"
   echo "remove them if the box is not coming back."
 }
@@ -507,6 +560,7 @@ case "${1:-}" in
   rdp) rdp ;;
   allow-my-ip) allow_my_ip ;;
   resize) shift; resize "${1:-}" ;;
+  list) list_vms ;;
   delete) delete ;;
   *) usage; exit 1 ;;
 esac
