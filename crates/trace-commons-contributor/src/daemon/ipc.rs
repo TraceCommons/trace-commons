@@ -3094,6 +3094,7 @@ impl DaemonShared {
             "schema_version": IPC_SCHEMA,
             "logged_in": logged_in,
             "setup_complete": super::setup_completion::is_complete(&self.store, cfg.as_ref(), logged_in, setup_roots_declared),
+            "setup_scope": cfg.as_ref().map(super::setup_completion::scope),
             "account_scope": account_scope,
             // Enrollment-owned observation date, independent of history pages.
             "first_trace_at": first_trace_at,

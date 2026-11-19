@@ -36,7 +36,7 @@ enum OnboardingNavigation {
     static func recordEnrolment(_ state: FirstRunState) -> FirstRunState {
         // An enrollment the person signed out of on Join is not their
         // account again just because the daemon still reports it.
-        guard state.enrolledInvite == nil, !state.signedOutOfEnrolment else { return state }
+        guard state.enrolledInvite == nil, !state.nearAIEnrolled, !state.signedOutOfEnrolment else { return state }
         var recorded = state
         recorded.enrolledInvite = ""
         recorded.invite = ""
@@ -44,6 +44,19 @@ enum OnboardingNavigation {
         if recorded.account == .none || recorded.account == .watchOnly {
             recorded.account = .enrolled
         }
+        return recorded
+    }
+
+    /// Replace the unknown enrollment placeholder after the daemon
+    /// confirms a connected NEAR AI account.
+    static func recordConnectedNearAI(_ state: FirstRunState, session: NativeAccountSession) -> FirstRunState {
+        guard session.signsInWithNearAI, session.signedIn == true,
+              state.enrolledInvite == "", !state.signedOutOfEnrolment else { return state }
+        var recorded = state
+        recorded.enrolledInvite = nil
+        recorded.account = .nearAI
+        recorded.nearAIEnrolled = true
+        recorded.signedIn = true
         return recorded
     }
 

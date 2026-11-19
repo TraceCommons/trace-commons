@@ -405,4 +405,13 @@ public class NearAiBalanceTests
         Assert.Equal(
             string.Empty, NearAiBalanceSurface.ObservedLine(now.AddMinutes(5), now));
     }
+
+    // After a spending switch the balance is read past the cache, as the Mac
+    // reads it (DaemonClient.swift:631, AppModel.swift:1093).
+    [Fact]
+    public void AFreshReadAsksPastTheCache()
+    {
+        Assert.Equal("{\"fresh\":true}", NearAiBalanceSurface.ReadParams(true));
+        Assert.Equal("{}", NearAiBalanceSurface.ReadParams(false));
+    }
 }

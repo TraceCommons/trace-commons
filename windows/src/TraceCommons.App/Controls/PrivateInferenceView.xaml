@@ -23,122 +23,251 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels"
+    xmlns:local="using:TraceCommons.App.Controls"
+    xmlns:interop="using:TraceCommons.Interop"
+    xmlns:shell="using:TraceCommons.Interop.Shell"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
-    <Grid RowDefinitions="Auto,*">
+    <Grid>
 
-        <StackPanel Grid.Row="0"
-                    Spacing="2"
-                    Padding="20,9"
-                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                    BorderThickness="0,0,0,1">
-            <TextBlock Text="{x:Bind ViewModel.Title, Mode=OneWay}"
-                       Style="{StaticResource TcTitleScreenTextStyle}" />
-            <TextBlock Text="{x:Bind ViewModel.Subtitle, Mode=OneWay}"
-                       Style="{StaticResource TcCaptionTextStyle}"
-                       TextWrapping="Wrap" />
-        </StackPanel>
+        <ScrollViewer Padding="22,16,22,16">
+            <StackPanel Spacing="10" MaxWidth="640" HorizontalAlignment="Left">
+                <!--
+                    How Private AI works (spec W19, PrivateAIGuideCard,
+                    InferenceViews.swift:369-405): first on the tab until it is
+                    closed with its X, in the managed table's words. Drawn as
+                    GetStartedCard draws it: a title, a line, numbered steps
+                    each in a card of its own. No step has a link. The Mac's
+                    pixel field behind it is not ported yet (listed in the PR).
+                -->
+                <Border x:Name="GuideCard"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(Guide.IsShown)}">
+                    <StackPanel Spacing="20">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="{x:Bind Guide.Title}"
+                                           AutomationProperties.HeadingLevel="Level1"
+                                           FontSize="22" FontWeight="ExtraBold" LineHeight="28"
+                                           Foreground="{ThemeResource TcInkPrimaryBrush}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind Guide.Lead}"
+                                           Style="{StaticResource TcBodyTextStyle}"
+                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Button Grid.Column="1"
+                                    Width="20" Height="20" Padding="0"
+                                    VerticalAlignment="Top"
+                                    Background="Transparent" BorderThickness="0"
+                                    AutomationProperties.Name="{x:Bind Guide.CloseName}"
+                                    ToolTipService.ToolTip="{x:Bind Guide.CloseName}"
+                                    Click="OnCloseGuide">
+                                <FontIcon Glyph="&#xE711;" FontSize="10" />
+                            </Button>
+                        </Grid>
+                        <ItemsControl ItemsSource="{x:Bind Guide.Steps}" IsTabStop="False">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><StackPanel Spacing="6" /></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:GuideStep">
+                                    <Border Background="{ThemeResource TcSurfaceInsetBrush}"
+                                            CornerRadius="{StaticResource TcCardCornerRadius}"
+                                            Padding="12,8">
+                                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                            <Grid Width="18" Height="18" VerticalAlignment="Top">
+                                                <Ellipse Fill="{ThemeResource TcSurfaceCardBrush}" />
+                                                <TextBlock Text="{x:Bind NumberText}" FontSize="10" FontWeight="Bold"
+                                                           Foreground="{ThemeResource TcAccentTextBrush}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                            </Grid>
+                                            <StackPanel Grid.Column="1" Spacing="2">
+                                                <TextBlock Text="{x:Bind Title}" FontSize="12" FontWeight="SemiBold"
+                                                           Foreground="{ThemeResource TcInkPrimaryBrush}" TextWrapping="Wrap" />
+                                                <TextBlock Text="{x:Bind Line}" FontSize="12" LineHeight="16"
+                                                           Foreground="{ThemeResource TcInkSecondaryBrush}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
 
-        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
-            <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+                <!--
+                    The tab's heading row (PrivateAIInspectorView.summary,
+                    InferenceViews.swift:444-472; GlassTabHeading and GlassChip):
+                    the status title in the card-title face, the state's one
+                    word in a pill with its dot right after it, the core's
+                    full sentence as the row's tooltip and help text, and the
+                    subtitle under it in body type, secondary ink.
+                -->
+                <StackPanel Spacing="4" Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Orientation="Horizontal" Spacing="8" MinHeight="28"
+                                ToolTipService.ToolTip="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}"
+                                AutomationProperties.HelpText="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}">
+                        <!-- A StackPanel has no automation peer, so the sentence rides on the title. -->
+                        <TextBlock Text="{x:Bind ViewModel.Heading.Title, Mode=OneWay}"
+                                   AutomationProperties.HelpText="{x:Bind ViewModel.Heading.Sentence, Mode=OneWay}"
+                                   AutomationProperties.HeadingLevel="Level2"
+                                   FontSize="13" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TcInkPrimaryBrush}"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                        <Border CornerRadius="{StaticResource TcPillCornerRadius}" Padding="9,3" VerticalAlignment="Center"
+                                Background="{ThemeResource TcSurfaceInsetBrush}">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOnBrush}"
+                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.On), Mode=OneWay}" />
+                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusAskBrush}"
+                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Ask), Mode=OneWay}" />
+                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOutsideBrush}"
+                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Outside), Mode=OneWay}" />
+                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOffBrush}"
+                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Off), Mode=OneWay}" />
+                                <TextBlock Text="{x:Bind ViewModel.Heading.Word, Mode=OneWay}"
+                                           Style="{StaticResource TcMonoChipTextStyle}"
+                                           Foreground="{x:Bind local:PrivateInferenceView.DotInk(ViewModel.Heading.Dot), Mode=OneWay}" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                    <TextBlock Text="{x:Bind ViewModel.Heading.Subtitle, Mode=OneWay}"
+                               Style="{StaticResource TcBodyTextStyle}"
+                               Foreground="{ThemeResource TcInkSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <!--
+                    Choose a spending organization (spec W19-D2 (a),
+                    SpendOrganizationPrompt.swift): only when the daemon asks,
+                    in its words. The action opens Settings; Not now keeps the
+                    organization in use.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(SpendPrompt.IsShown), Mode=OneWay}">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Bind SpendPrompt.Title, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind SpendPrompt.Line, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <Button Content="{x:Bind SpendPrompt.Action, Mode=OneWay}"
+                                    AutomationProperties.Name="{x:Bind SpendPrompt.ActionName, Mode=OneWay}"
+                                    Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Click="OnSpendPromptAction" />
+                            <HyperlinkButton Content="{x:Bind SpendPrompt.Dismiss, Mode=OneWay}"
+                                             AutomationProperties.Name="{x:Bind SpendPrompt.DismissName, Mode=OneWay}"
+                                             Click="OnSpendPromptDismiss" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
                 <ContentControl x:Name="ManagedContent" />
 
                 <!--
-                    The credential this computer answers calls with, and it
-                    comes before the tool list: without one, a connect has
-                    nothing to offer, and a screen that hid the control
-                    without saying why would leave a contributor pressing a
-                    button that is not there.
-
-                    Nothing on this card renders a key, a prefix, an id or an
-                    account name. The payload carries no hole for one.
-
-                    One button, and which one it is comes from the shared
-                    table across the ABI rather than from anything decided
-                    here. The sentence above it is the consequence of
-                    pressing it, drawn from the same call that chose it, so a
-                    button that opens a browser and mints a key at a third
-                    party can never appear without the line saying so.
+                    The ledger (spec W19, InferenceTabView.ledgerSections,
+                    InferenceViews.swift:91-117): a failed read in the core's
+                    words, the window and its totals, then the calls. An
+                    unreadable ledger draws nothing, never an empty table.
                 -->
+                <!--
+                    GlassNotice(tone: .outside) (Containers.swift:755-812):
+                    the tone's warning icon in its colour, the title beside
+                    it, on the tone's colour at 0.14, padded 10 all round.
+                -->
+                <Grid Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.HasFailure), Mode=OneWay}">
+                    <Border CornerRadius="{StaticResource TcCardCornerRadius}"
+                            Background="{ThemeResource TcStatusOutsideBrush}" Opacity="0.14" />
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" Padding="10">
+                        <FontIcon Glyph="&#xE7BA;" FontSize="13" VerticalAlignment="Top" Margin="0,1,0,0"
+                                  Foreground="{ThemeResource TcStatusOutsideBrush}" AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind Ledger.FailureLine, Mode=OneWay}"
+                                   FontSize="12" FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TcInkPrimaryBrush}"
+                                   TextWrapping="Wrap"
+                                   AutomationProperties.LiveSetting="Polite" />
+                    </Grid>
+                </Grid>
+                <ProgressRing IsActive="{x:Bind Ledger.Loading, Mode=OneWay}"
+                              Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.Loading), Mode=OneWay}"
+                              Width="16" Height="16" HorizontalAlignment="Center" />
+                <StackPanel Spacing="4"
+                            Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.ShowsHeader), Mode=OneWay}">
+                    <TextBlock Text="{x:Bind Ledger.WindowLine, Mode=OneWay}"
+                               Style="{StaticResource TcCaptionTextStyle}"
+                               Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.CallsWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.CallsFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.VerifiedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcStatusOnTextBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.VerifiedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                        <StackPanel Spacing="2" MinWidth="72">
+                            <TextBlock Text="{x:Bind Ledger.PricedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
+                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind Ledger.PricedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12"
-                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
-                    <StackPanel Spacing="10">
-                        <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleSectionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.HasCredentialWhat, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <!--
-                            One line per tone, chosen from the tone and never
-                            from the text, exactly as the listener row below
-                            is. Only the clear one, which is the one meaning a
-                            key is kept here, is green.
-                        -->
-                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.CredentialIsNeutral, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.CredentialIsHeld, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcBlueBrandBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.CredentialIsClear, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcGreenTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.CredentialIsRefused, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcCoralTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <!--
-                            F10: the last NEAR AI sign-in was refused as
-                            another account, in the approved mismatch words.
-                            The account section in Settings offers what to do.
-                        -->
-                        <TextBlock Text="{x:Bind ViewModel.LoginMismatchLine, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.HasLoginMismatchLine, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   Foreground="{ThemeResource TcCoralTextBrush}"
-                                   TextWrapping="Wrap" />
-                        <!--
-                            What pressing the button below costs, or what
-                            forgetting does not do. Bound to the same action
-                            the button is, so neither can be drawn without
-                            the other.
-                        -->
-                        <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
-                                Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
-                                ToolTipService.ToolTip="{x:Bind ViewModel.SignInTooltip, Mode=OneWay}"
-                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
-                                Style="{StaticResource TcPrimaryButtonStyle}"
-                                HorizontalAlignment="Left"
-                                Click="OnCredentialAction" />
-                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
-                                Visibility="{x:Bind ViewModel.ShowCredentialOtherAction, Mode=OneWay}"
-                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
-                                HorizontalAlignment="Left"
-                                Click="OnCredentialAction" />
+                        Visibility="{x:Bind local:PrivateInferenceView.Shown(Ledger.ShowsCalls), Mode=OneWay}">
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{x:Bind Ledger.CallsWord, Mode=OneWay}" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ItemsControl ItemsSource="{x:Bind Ledger.Calls, Mode=OneWay}" IsTabStop="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="interop:LedgerCallRow">
+                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Padding="0,6"
+                                          BorderBrush="{ThemeResource TcHairlineDividerBrush}" BorderThickness="0,1,0,0"
+                                          AutomationProperties.Name="{x:Bind AccessibleName}">
+                                        <TextBlock Text="{x:Bind Time}" MinWidth="56"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcInkTertiaryBrush}" />
+                                        <StackPanel Grid.Column="1" Spacing="1">
+                                            <TextBlock Text="{x:Bind Tool}" FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="{ThemeResource TcInkPrimaryBrush}" />
+                                            <TextBlock Text="{x:Bind Model}" Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{x:Bind TokenLine}" Style="{StaticResource TcMonoChipTextStyle}"
+                                                       Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       Visibility="{x:Bind local:PrivateInferenceView.Shown(HasTokens)}" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="2" Text="{x:Bind Priced}" Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}" />
+                                        <TextBlock Grid.Column="3" Text="{x:Bind Proof.Text}" Style="{StaticResource TcCaptionTextStyle}"
+                                                   Foreground="{x:Bind local:PrivateInferenceView.ToneBrush(Proof.Tone)}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
                     </StackPanel>
                 </Border>
 
                 <!--
-                    What is left in that account, and it sits directly beneath
-                    the sign-in it describes.
+                    What is left in that account, after the calls and before
+                    the card that opens Settings, where billing is
+                    (InferenceTabView.ledger, InferenceViews.swift:83-84).
 
                     THIS CARD JUDGES NO AMOUNT. There is no threshold here, no
                     low balance colour and no warning: a figure this app
@@ -261,6 +390,133 @@
                         <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.Funding.Enabled, Mode=OneWay}"
                                 HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    The card that opens Settings (InferenceAccountSection,
+                    PrivateAISettingsLinkCard, InferenceAccount.swift:125-145):
+                    a gear, the core's settings title and Home's chevron; the
+                    whole card is the button, its help text the core's.
+                -->
+                <Button x:Name="SettingsLinkCard"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                        Padding="14,12"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind ViewModel.SettingsLinkTitle, Mode=OneWay}"
+                        AutomationProperties.HelpText="{x:Bind ViewModel.SettingsLinkHelp, Mode=OneWay}"
+                        Click="OnSettingsLink">
+                    <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                        <FontIcon Glyph="&#xE713;" FontSize="14" Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                  AutomationProperties.AccessibilityView="Raw" />
+                        <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.SettingsLinkTitle, Mode=OneWay}"
+                                   FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   Foreground="{ThemeResource TcInkPrimaryBrush}" TextWrapping="Wrap" />
+                        <FontIcon Grid.Column="2" Glyph="&#xE76C;" FontSize="10" FontWeight="SemiBold"
+                                  Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                  AutomationProperties.AccessibilityView="Raw" />
+                    </Grid>
+                </Button>
+
+                <!--
+                    INTERIM, listed in the PR: on the Mac the sign-in, the
+                    tools and the switch below live in Settings' Private AI
+                    section (PrivateAISettingsPanels). Settings is being
+                    rebuilt in another slice (W16), so they stay here, after
+                    the Mac's sections, until that section lands there.
+                -->
+                <!--
+                    The credential this computer answers calls with, and it
+                    comes before the tool list: without one, a connect has
+                    nothing to offer, and a screen that hid the control
+                    without saying why would leave a contributor pressing a
+                    button that is not there.
+
+                    Nothing on this card renders a key, a prefix, an id or an
+                    account name. The payload carries no hole for one.
+
+                    One button, and which one it is comes from the shared
+                    table across the ABI rather than from anything decided
+                    here. The sentence above it is the consequence of
+                    pressing it, drawn from the same call that chose it, so a
+                    button that opens a browser and mints a key at a third
+                    party can never appear without the line saying so.
+                -->
+                <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12"
+                        Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                    <StackPanel Spacing="10">
+                        <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
+                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialWhat, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            One line per tone, chosen from the tone and never
+                            from the text, exactly as the listener row below
+                            is. Only the clear one, which is the one meaning a
+                            key is kept here, is green.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsNeutral, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsHeld, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcBlueBrandBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsClear, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.CredentialIsRefused, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            F10: the last NEAR AI sign-in was refused as
+                            another account, in the approved mismatch words.
+                            The account section in Settings offers what to do.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.LoginMismatchLine, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasLoginMismatchLine, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                   TextWrapping="Wrap" />
+                        <!--
+                            What pressing the button below costs, or what
+                            forgetting does not do. Bound to the same action
+                            the button is, so neither can be drawn without
+                            the other.
+                        -->
+                        <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
+                                ToolTipService.ToolTip="{x:Bind ViewModel.SignInTooltip, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                Style="{StaticResource TcPrimaryButtonStyle}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
+                        <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                                Visibility="{x:Bind ViewModel.ShowCredentialOtherAction, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                                HorizontalAlignment="Left"
+                                Click="OnCredentialAction" />
                     </StackPanel>
                 </Border>
 
