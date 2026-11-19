@@ -356,7 +356,7 @@ public sealed partial class FirstRunWindow : Window
         {
             double now = Now;
             bool first = (int)_shownStep < 0;
-            Outgoing.Content = first ? null : Current.Content;
+            OutgoingStep.Content = first ? null : CurrentStep.Content;
             _motions.Clear();
             _model.SetStep(state.Step, now);
             if (state.Step == FirstRunStep.Tools && _model.ToolsScanned)
@@ -366,13 +366,13 @@ public sealed partial class FirstRunWindow : Window
 
             FirstRunStep? from = first ? null : _shownStep;
             _shownStep = state.Step;
-            Current.Content = BuildStep(state.Step);
-            if (Outgoing.Content is UIElement leaving)
+            CurrentStep.Content = BuildStep(state.Step);
+            if (OutgoingStep.Content is UIElement leaving)
             {
-                _motions.Add((t => { double p = FirstRunMotion.Crossfade(t - now, false); leaving.Opacity = 1 - p; if (p >= 1) { Outgoing.Content = null; } }, t => t - now < FirstRunStageLayout.SpatialSettle));
+                _motions.Add((t => { double p = FirstRunMotion.Crossfade(t - now, false); leaving.Opacity = 1 - p; if (p >= 1) { OutgoingStep.Content = null; } }, t => t - now < FirstRunStageLayout.SpatialSettle));
             }
 
-            if (Current.Content is UIElement arriving && !first)
+            if (CurrentStep.Content is UIElement arriving && !first)
             {
                 _motions.Add((t => arriving.Opacity = FirstRunMotion.Crossfade(t - now, false), t => t - now < FirstRunStageLayout.SpatialSettle));
             }

@@ -24,8 +24,8 @@
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
-            <ContentPresenter x:Name="Outgoing" Grid.Row="0" IsHitTestVisible="False" IsTabStop="False" />
-            <ContentPresenter x:Name="Current" Grid.Row="0" />
+            <ContentPresenter x:Name="OutgoingStep" Grid.Row="0" IsHitTestVisible="False" IsTabStop="False" />
+            <ContentPresenter x:Name="CurrentStep" Grid.Row="0" />
             <StackPanel x:Name="Thread" Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Center"
                         VerticalAlignment="Top" Margin="0,14,0,0" Height="28">
                 <StackPanel.RenderTransform>
