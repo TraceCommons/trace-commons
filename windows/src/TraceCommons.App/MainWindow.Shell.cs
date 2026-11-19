@@ -24,7 +24,8 @@ using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
 using Windows.Graphics;
-using Windows.System;
+using VirtualKey = Windows.System.VirtualKey;
+using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 using Windows.UI.ViewManagement;
 
 namespace TraceCommons.App;
