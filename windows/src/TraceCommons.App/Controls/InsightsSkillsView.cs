@@ -60,6 +60,13 @@ public sealed class InsightsSkillsView : UserControl
     private string? _selectedSkillId, _selectedUsageId, _selectedCatalogId, _selectedCatalogInstallationId;
     private bool _rendering;
 
+    /// <summary>
+    /// The follow control a save started from. Saving disables it, which
+    /// moves keyboard focus away; once the reply is drawn, focus returns to
+    /// the same publisher's control, whatever it now says.
+    /// </summary>
+    private string? _refocusId;
+
     public InsightsSkillsView(InsightsSkillsModel model, Action? reviewSettings)
     {
         _model = model;
@@ -256,6 +263,17 @@ public sealed class InsightsSkillsView : UserControl
 
             DispatcherQueue?.TryEnqueue(ApplyScrollMotion);
             if (focused.Name is { Length: > 0 } name) DispatcherQueue?.TryEnqueue(() => Refocus(name, focused.Kind, focused.Caret));
+            if (_refocusId is { } follow)
+            {
+                DispatcherQueue?.TryEnqueue(() =>
+                {
+                    if (FindId(_page, follow) is Control { IsEnabled: true } control)
+                    {
+                        control.Focus(FocusState.Keyboard);
+                        if (!_model.Busy) _refocusId = null;
+                    }
+                });
+            }
         }
         finally
         {
@@ -285,6 +303,18 @@ public sealed class InsightsSkillsView : UserControl
         }
 
         if (Find(_page, name, kind) is Control control) control.Focus(FocusState.Programmatic);
+    }
+
+    private static DependencyObject? FindId(DependencyObject root, string id)
+    {
+        if (root is FrameworkElement element && AutomationProperties.GetAutomationId(element) == id) return root;
+        int count = VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < count; i++)
+        {
+            if (FindId(VisualTreeHelper.GetChild(root, i), id) is { } found) return found;
+        }
+
+        return null;
     }
 
     private static DependencyObject? Find(DependencyObject root, string name, Type? kind)
@@ -1074,7 +1104,11 @@ public sealed class InsightsSkillsView : UserControl
             var flyout = new MenuFlyout();
             var unfollow = new MenuFlyoutItem { Text = T("skills_unfollow") };
             AutomationProperties.SetName(unfollow, T("skills_unfollow_accessibility", "publisher", publisher.Name));
-            unfollow.Click += async (_, _) => await _model.SetFollowAsync(publisher.Id, false);
+            unfollow.Click += async (_, _) =>
+            {
+                _refocusId = "skills-follow-" + publisher.Id;
+                await _model.SetFollowAsync(publisher.Id, false);
+            };
             flyout.Items.Add(unfollow);
             control = new DropDownButton { Content = label, Flyout = flyout };
             AutomationProperties.SetName(control, T("skills_following_accessibility", "publisher", publisher.Name));
@@ -1082,11 +1116,16 @@ public sealed class InsightsSkillsView : UserControl
         else
         {
             control = new Button { Content = label };
-            control.Click += async (_, _) => await _model.SetFollowAsync(publisher.Id, true);
+            control.Click += async (_, _) =>
+            {
+                _refocusId = "skills-follow-" + publisher.Id;
+                await _model.SetFollowAsync(publisher.Id, true);
+            };
             AutomationProperties.SetName(control, T("skills_follow_accessibility", "publisher", publisher.Name));
         }
 
         control.IsEnabled = _model.CanFollow;
+        AutomationProperties.SetAutomationId(control, "skills-follow-" + publisher.Id);
         if (pending) AutomationProperties.SetHelpText(control, T("skills_follow_saving_accessibility", "publisher", publisher.Name));
         panel.Children.Add(control);
         if (failed)
