@@ -3861,8 +3861,9 @@ mod tests {
         card.set_valign(gtk::Align::Start);
         card.set_margin_top(24);
         card.set_margin_start(24);
-        let settings_on = gtk::Switch::builder().active(true).build();
-        let settings_off = gtk::Switch::builder().active(false).build();
+        // The app's own switch (`GlassSwitch`), as Settings builds it.
+        let settings_on = crate::ui::glass_switch::GlassSwitch::with_active(true);
+        let settings_off = crate::ui::glass_switch::GlassSwitch::with_active(false);
         for switch in [&settings_on, &settings_off] {
             switch.set_valign(gtk::Align::Center);
             card.append(switch);
@@ -3873,10 +3874,9 @@ mod tests {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         row.set_halign(gtk::Align::Center);
         row.set_valign(gtk::Align::Center);
-        let watch_on = gtk::Switch::builder().active(true).build();
-        let watch_off = gtk::Switch::builder().active(false).build();
+        let watch_on = crate::ui::glass_switch::GlassSwitch::watch(true);
+        let watch_off = crate::ui::glass_switch::GlassSwitch::watch(false);
         for switch in [&watch_on, &watch_off] {
-            switch.add_css_class("tc-tree-switch");
             switch.set_valign(gtk::Align::Center);
             row.append(switch);
         }
