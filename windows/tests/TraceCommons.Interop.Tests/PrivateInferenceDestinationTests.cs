@@ -398,8 +398,8 @@ public class PrivateInferenceDestinationTests
 
         foreach (string bound in new[]
         {
-            "ViewModel.Title",
-            "ViewModel.Subtitle",
+            "ViewModel.Heading.Title",
+            "ViewModel.Heading.Subtitle",
             "ViewModel.Exposure",
             "ViewModel.ToggleText",
             "ViewModel.StateText",

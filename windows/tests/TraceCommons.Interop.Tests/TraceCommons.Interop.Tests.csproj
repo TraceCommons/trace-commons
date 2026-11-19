@@ -271,6 +271,9 @@
     <None Include="$(MSBuildThisFileDirectory)../../../macos/Sources/TCShellCore/DataContract/RecordedSamples/**/*.json"
           Link="RecordedSamples/%(RecursiveDir)%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MSBuildThisFileDirectory)../../src/TraceCommons.Interop/SampleExtras/**/*.json"
+          Link="SampleExtras/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <!--
     The interop project file, for the Debug-only recordings copy, and the two

@@ -131,6 +131,13 @@ public sealed partial class MainWindow : Window
                 (InsightsPane.Content as InsightsView)?.Deactivate();
             if (change.PropertyName == nameof(MainViewModel.ShowingMissionDrafts) && !ViewModel.ShowingMissionDrafts)
                 (MissionDraftsPane.Content as MissionDraftsView)?.Deactivate();
+            // The Private AI tab reads and follows the ledger only while shown (W19).
+            if (change.PropertyName is null or "" or nameof(MainViewModel.ShowingPrivateInference)
+                && PrivateInferencePane.Content is PrivateInferenceView privateAI)
+            {
+                if (ViewModel.ShowingPrivateInference) privateAI.ActivateMacSections();
+                else privateAI.DeactivateMacSections();
+            }
         };
 
         // Found once the template is realized, not here: the ScrollViewer
@@ -158,6 +165,7 @@ public sealed partial class MainWindow : Window
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
+        _tray.AboutRequested += OnTrayAboutRequested;
         _tray.PrivateInferenceRequested += OnTrayPrivateInferenceRequested;
         _tray.PrivateInferenceStopRequested += OnTrayPrivateInferenceStopRequested;
         _tray.PauseRequested += OnTrayPauseRequested;
@@ -375,8 +383,25 @@ public sealed partial class MainWindow : Window
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         Activated -= OnFirstActivated;
+#if DEBUG
+        // A recorded sample opens on the contribution panes, as it always has
+        // (the captures' opening tab, win-capture-samples.ps1); its Insights
+        // opens from the tab, over the sample service (CreateInsightsModel).
+        if (_host.IsSample)
+        {
+            OpenSampleLanding();
+            return;
+        }
+#endif
         ShowInsightsPane();
     }
+
+#if DEBUG
+    private async void OpenSampleLanding()
+    {
+        if (await StartContributionsAsync()) ViewModel.ShowQueue();
+    }
+#endif
 
     private bool _contributionStartupAttempted;
     private bool _contributionStartupBusy;
@@ -1185,19 +1210,9 @@ public sealed partial class MainWindow : Window
 
     private async void ShowInsightsPane()
     {
-#if DEBUG
-        // Recorded samples open the contribution panes, never local Insights,
-        // which reads this machine's own sessions (as on Linux, #2161).
-        if (_host.IsSample)
-        {
-            if (await StartContributionsAsync()) ViewModel.ShowQueue();
-            return;
-        }
-#endif
-
         if (InsightsPane.Content is not InsightsView)
         {
-            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this), CreateInsightsModel());
             page.ContributionSetupRequested += async (_, _) =>
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
@@ -1206,6 +1221,24 @@ public sealed partial class MainWindow : Window
         }
         ViewModel.ShowInsights();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
+    }
+
+    /// <summary>
+    /// Insights' state. A recorded sample never reads this machine's own
+    /// sessions (as on Linux, #2161): its service refuses every request
+    /// (<see cref="SampleInsights"/>) and Benchmarks draws the Mac's sample
+    /// (<c>InsightsSample</c>). Otherwise the local store and the daemon's
+    /// <c>insights_benchmarks</c>.
+    /// </summary>
+    private InsightsViewModel CreateInsightsModel()
+    {
+#if DEBUG
+        if (_host.IsSample)
+        {
+            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
+        }
+#endif
+        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
@@ -1238,8 +1271,18 @@ public sealed partial class MainWindow : Window
 
     private void ShowPrivateInferencePane()
     {
-        PrivateInferencePane.Content ??= new PrivateInferenceView(_host);
+        if (PrivateInferencePane.Content is null)
+        {
+            var page = new PrivateInferenceView(_host, SpendOrganizations);
+            // The Private AI Settings card opens Settings; the spending
+            // prompt's action opens it at the organization picker (W19-D2).
+            page.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
+            page.ChooseSpendOrganizationRequested += (_, _) => ShowSpendOrganizationSettings();
+            PrivateInferencePane.Content = page;
+        }
+
         ViewModel.ShowPrivateInference();
+        (PrivateInferencePane.Content as PrivateInferenceView)?.ActivateMacSections();
     }
 
     /// <summary>
@@ -1800,6 +1843,7 @@ public sealed partial class MainWindow : Window
         _clockGate.SetClosed();
         StopMoveTicks();
         _settingsWindow?.Close();
+        _aboutWindow?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;

@@ -1482,3 +1482,43 @@ async fn an_active_key_entry_is_settled_not_parked() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].key_id, "key-theirs");
 }
+
+/// The Windows app's Debug-only spending-organization sample
+/// (`windows/src/TraceCommons.Interop/SampleExtras/spendOrganizations/`,
+/// opted into with `TRACE_COMMONS_SAMPLE_EXTRA=spendOrganizations`) is this
+/// listing exactly: two throwaway organizations, the first current, nothing
+/// chosen, so the prompt and the picker both draw, in the words this crate
+/// writes. A word or key changed here fails until the file is updated, so
+/// the sample never draws a sentence the daemon would not send.
+#[test]
+fn the_windows_spend_organization_sample_is_this_listing() {
+    let report = OrganizationsReport::Listed {
+        organizations: vec![
+            AccountOrganization {
+                id: "org-sample-a".into(),
+                name: "Sample organization A".into(),
+                role: "owner".into(),
+            },
+            AccountOrganization {
+                id: "org-sample-b".into(),
+                name: "Sample organization B".into(),
+                role: "member".into(),
+            },
+        ],
+        current: Some("org-sample-a".into()),
+        explicit: false,
+        chosen: false,
+        revoke_pending: false,
+    };
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../windows/src/TraceCommons.Interop/SampleExtras/spendOrganizations/near_ai_spend_organizations.json",
+    );
+    let recorded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        recorded,
+        report.to_value(),
+        "update {} to:\n{}",
+        path.display(),
+        serde_json::to_string_pretty(&report.to_value()).unwrap()
+    );
+}
