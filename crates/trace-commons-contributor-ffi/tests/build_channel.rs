@@ -12,8 +12,8 @@ use std::ffi::{CStr, c_char};
 
 use trace_commons_contributor::{channel, health_copy};
 use trace_commons_contributor_ffi::{
-    tc_build_channel_json, tc_channel_mismatch_line, tc_channel_window_label, tc_resolve_state_dir,
-    tc_state_dir_override_refused_line, tc_string_free,
+    tc_app_name, tc_build_channel_json, tc_channel_mismatch_line, tc_channel_window_label,
+    tc_resolve_state_dir, tc_state_dir_override_refused_line, tc_string_free,
 };
 
 fn take_owned(out: *mut c_char) -> String {
@@ -136,6 +136,14 @@ fn the_window_label_is_the_core_word_on_staging_and_empty_on_production() {
         label.is_empty(),
         channel::CHANNEL == "production",
         "only a staging build shows a label"
+    );
+}
+
+#[test]
+fn the_app_name_is_the_brand_name() {
+    assert_eq!(
+        take_owned(tc_app_name()),
+        trace_commons_contributor::brand::APP_NAME
     );
 }
 

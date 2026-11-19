@@ -1228,12 +1228,35 @@ internal static class NativeMethods
 
     /// <summary>
     /// The monitor's other screens' words
-    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object.
-    /// This shell reads only <c>shell</c> from it today
+    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object:
+    /// its top-level words and its <c>shell</c> table
     /// (<see cref="MonitorShellCopy"/>). NULL only on a caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_monitor_screens_copy_json();
+
+    /// <summary>
+    /// The app's name (<c>brand::APP_NAME</c>), for the titles of the windows
+    /// Alt-Tab and the taskbar name. Owned; NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_app_name();
+
+    /// <summary>
+    /// The label marking a staging build in the window's toolbar row
+    /// (<c>health_copy::window_label</c>): the core's word on staging, empty
+    /// on production. Owned; NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_channel_window_label();
+
+    /// <summary>
+    /// The shared Insights words (<c>insights::service::ui_copy</c>) as an
+    /// owned JSON object, without opening a store. The Insights tab's title is
+    /// its <c>title</c>, as on the Mac. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_insights_copy_json();
 
     /// <summary>
     /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)

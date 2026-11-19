@@ -928,6 +928,18 @@ pub extern "C" fn tc_channel_window_label() -> *mut c_char {
     })
 }
 
+/// The app's name ([`trace_commons_contributor::brand::APP_NAME`]), for a
+/// shell that titles a window the system names it by (the Windows main and
+/// Settings windows in Alt-Tab and the taskbar). The name is written once,
+/// in `brand.rs`; no shell holds its own copy.
+///
+/// Returns an owned string; free it with [`tc_string_free`]. NULL only on a
+/// caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_app_name() -> *mut c_char {
+    guarded_string_no_err(|| Ok(to_owned_cstring(trace_commons_contributor::brand::APP_NAME)))
+}
+
 /// The state directory the contributor crate's `ConfigStore::resolve` would
 /// pick (`config::resolve_state_dir`), so a shell that chooses its own
 /// directory still gets the core's refusal of the other channel's.
