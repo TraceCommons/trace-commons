@@ -269,6 +269,8 @@ else
     ui::edge_surfaces::tests::mounted_detection_reads_this_sessions_backend \
     ui::edge_surfaces::tests::mounted_the_popovers_private_ai_card_follows_the_mac \
     ui::edge_surfaces::tests::mounted_an_open_dialog_leaves_the_rail_and_panel_their_keys \
+    ui::edge_surfaces::tests::mounted_the_folder_list_draws_every_row_whole \
+    ui::edge_surfaces::tests::mounted_a_peek_tile_has_no_tooltip_its_peek_names_it \
     edge::gnome::tests::mounted_the_placed_windows_carry_their_marker_and_the_brand_name \
     ui::first_run::dark_tests::the_scoped_stage_leaves_the_main_window_light \
     ui::first_run_screens::mounted_tests::welcome_offers_get_started_and_the_agent_prompt \

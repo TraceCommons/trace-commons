@@ -732,7 +732,7 @@ impl Rail {
                 Peek::PrivateAi => glyph::icon(glyphs::SHIELD).upcast(),
                 Peek::Traces => trace_nodes_icon(geometry::MARK_SIDE).upcast(),
             };
-            let tile = tile(&child, peek.name());
+            let tile = peek_tile(&child, peek);
             inner.append(&tile);
             tiles.push((peek, tile));
         }
@@ -1085,6 +1085,16 @@ impl Rail {
     }
 }
 
+/// A peek's rail tile: named for a screen reader, with no tooltip. A
+/// pointer over it opens its peek, whose title names it; a tooltip said it
+/// again and, set under the pointer as GTK places it, covered the tile
+/// below (KDE shot 72: Traces' over the NEAR AI tile).
+fn peek_tile(child: &gtk::Widget, peek: Peek) -> gtk::Button {
+    let button = tile(child, peek.name());
+    button.set_tooltip_text(None);
+    button
+}
+
 /// One rail tile: a glyph button on the control tiers (`GlassRailTile`).
 fn tile(child: &gtk::Widget, name: &str) -> gtk::Button {
     let button = gtk::Button::builder()
@@ -1172,22 +1182,56 @@ fn traces_peek(app: &Rc<App>, body: &gtk::Box) {
         heading.add_css_class("tc-type-body-strong");
         heading.set_accessible_role(gtk::AccessibleRole::Heading);
         body.append(&heading);
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        for folder in &folders {
-            list.append(&folder_row(app, folder));
-        }
-        let scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_height(geometry::folder_list_height(folders.len()))
-            .max_content_height(geometry::folder_list_height(folders.len()))
-            .child(&list)
-            .build();
-        body.append(&scroller);
+        let rows: Vec<gtk::Button> = folders.iter().map(|f| folder_row(app, f)).collect();
+        body.append(&folder_list(&rows));
     }
     body.append(&graph(app).root);
 }
 
+/// The folder list: every row in full up to seven, then it scrolls. Sized
+/// once the rows are styled, from the tallest as drawn: a fixed pitch cut
+/// the second row's line on GNOME and KDE, whose fonts set the two lines
+/// taller than the Mac's row.
+fn folder_list(rows: &[gtk::Button]) -> gtk::ScrolledWindow {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    for row in rows {
+        list.append(row);
+    }
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&list)
+        .build();
+    let count = rows.len();
+    let first = geometry::folder_list_height(count, 0);
+    scroller.set_max_content_height(first);
+    scroller.set_min_content_height(first);
+    let rows: Vec<gtk::Button> = rows.to_vec();
+    scroller.connect_realize(move |scroller| {
+        let tallest = rows
+            .iter()
+            .map(|row| row.measure(gtk::Orientation::Vertical, -1).1)
+            .max()
+            .unwrap_or(0);
+        let height = geometry::folder_list_height(count, tallest);
+        scroller.set_max_content_height(height);
+        scroller.set_min_content_height(height);
+    });
+    scroller
+}
+
 fn folder_row(app: &Rc<App>, folder: &FolderNode) -> gtk::Button {
+    let row = folder_row_widget(folder);
+    let weak = Rc::downgrade(app);
+    row.connect_clicked(move |_| {
+        if let Some(app) = weak.upgrade() {
+            open(&app, Peek::Traces.screen());
+        }
+    });
+    row
+}
+
+/// A folder's row: its name over how many traces wait in it.
+fn folder_row_widget(folder: &FolderNode) -> gtk::Button {
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .height_request(glass::size::LIST_ROW)
@@ -1209,12 +1253,6 @@ fn folder_row(app: &Rc<App>, folder: &FolderNode) -> gtk::Button {
     column.append(&sub);
     let row = gtk::Button::builder().child(&column).build();
     row.add_css_class("tc-edge-row");
-    let weak = Rc::downgrade(app);
-    row.connect_clicked(move |_| {
-        if let Some(app) = weak.upgrade() {
-            open(&app, Peek::Traces.screen());
-        }
-    });
     row
 }
 
@@ -1662,6 +1700,96 @@ mod tests {
         }
         dialog.destroy();
         main.destroy();
+    }
+
+    /// A pointer over a peek's tile shows its peek, titled with the
+    /// tile's name, and no tooltip under the pointer to cover the tile
+    /// below it; the app's tile, with no peek, keeps its tooltip.
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_a_peek_tile_has_no_tooltip_its_peek_names_it() {
+        gtk::init().expect("GTK display");
+        for peek in Peek::ALL {
+            let child: gtk::Widget = gtk::Label::new(None).upcast();
+            let button = peek_tile(&child, peek);
+            assert_eq!(button.tooltip_text(), None, "{peek:?}");
+            assert_eq!(
+                button.accessible_role(),
+                gtk::AccessibleRole::Button,
+                "{peek:?}"
+            );
+        }
+        let source = include_str!("edge_surfaces.rs");
+        assert!(source.contains("let tile = peek_tile(&child, peek);"));
+        assert!(
+            source.contains(".label(peek.name())"),
+            "the peek's title is its name"
+        );
+        let app_tile = tile(&gtk::Label::new(None).upcast(), "Open");
+        assert_eq!(app_tile.tooltip_text().as_deref(), Some("Open"));
+    }
+
+    /// The Traces peek's folder list draws every row whole, its name and
+    /// the line under it, at the peek's width on this desktop's fonts. On
+    /// the branch before this fix the list was a fixed 42 a row, and the
+    /// second row's line was cut under the graph's chips (GNOME shot 79,
+    /// KDE shot 72).
+    #[test]
+    #[ignore = "requires a GTK display; exercised by weston"]
+    fn mounted_the_folder_list_draws_every_row_whole() {
+        adw::init().expect("GTK display");
+        style::install();
+        let session = |id: &str| crate::model::QueueEntry {
+            entry_id: id.into(),
+            state: "pending".into(),
+            ..Default::default()
+        };
+        let mut api = FolderNode::new("api", "api", Some(ProjectMode::Ask));
+        api.sessions = vec![session("a"), session("b")];
+        let mut web = FolderNode::new(
+            "web",
+            "trace-commons-contributor-web",
+            Some(ProjectMode::Ask),
+        );
+        web.sessions = vec![session("c")];
+        let rows: Vec<gtk::Button> = [&api, &web].into_iter().map(folder_row_widget).collect();
+        let list = folder_list(&rows);
+        let peek = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        peek.add_css_class("tc-glass-window");
+        peek.append(&list);
+        // What sits under the list in the peek, as the graph's chips do.
+        peek.append(&gtk::Label::new(Some("shared")));
+        let window = gtk::Window::builder()
+            .default_width(geometry::OPEN_WIDTH)
+            .child(&peek)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        while std::time::Instant::now() < end {
+            while context.pending() {
+                context.iteration(false);
+            }
+        }
+        let shown = list.height() as f32;
+        for row in &rows {
+            let at = row.compute_bounds(&list).expect("laid out");
+            assert!(
+                at.y() + at.height() <= shown,
+                "a row reaches {} of a list {shown} tall",
+                at.y() + at.height()
+            );
+            let sub = row
+                .child()
+                .and_then(|column| column.last_child())
+                .expect("the line under the name");
+            let line = sub.compute_bounds(&list).expect("its line is laid out");
+            assert!(
+                sub.is_mapped() && line.y() + line.height() <= shown,
+                "its line is cut"
+            );
+        }
+        window.destroy();
     }
 
     #[test]
