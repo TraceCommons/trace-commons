@@ -302,4 +302,103 @@ public class PublicRunTests
         Assert.Equal(StatusTone.Ask, HistoryInspection.Tone("submitted"));
         Assert.Equal(StatusTone.Neutral, HistoryInspection.Tone("rejected"));
     }
+
+    private static PublicRunPage Page(string json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        return PublicRunJson.Page(doc.RootElement)!;
+    }
+
+    /// <summary>
+    /// W21 spec: a refused publish leaves the record private and unchanged
+    /// (AppModel.swift:4292-4295; SessionPublicationTests.swift:390-436).
+    /// </summary>
+    [Fact]
+    public void ARefusedPublishLeavesTheRecordPrivate()
+    {
+        var state = new HistoryDetailState();
+        state.ReadSucceeded(Detail(MacDetail));
+        state.PublicationStarted();
+        state.PublicationFailed("public-run-conflict");
+        Assert.Null(state.Detail!.Publication);
+        Assert.Equal(0, state.Detail.PublicationVersion);
+        Assert.Equal(Copy["publication_conflict"], state.PublicationError);
+    }
+
+    /// <summary>
+    /// W21 spec: unpublish returns the run to its earlier, private state at
+    /// the version the daemon names (AppModel.swift:4312-4317).
+    /// </summary>
+    [Fact]
+    public void UnpublishReturnsTheRunToPrivateAtTheDaemonsVersion()
+    {
+        var state = new HistoryDetailState();
+        state.ReadSucceeded(Detail(MacDetail));
+        state.Published(Page(MacPage));
+        Assert.Equal("bounded-retry", state.Detail!.Publication!.Slug);
+        Assert.Equal(1, state.Detail.PublicationVersion);
+        Assert.Null(state.PublicationError);
+        state.Unpublished(2, null);
+        Assert.Null(state.Detail!.Publication);
+        Assert.Equal(2, state.Detail.PublicationVersion);
+        Assert.Null(state.PublicationError);
+    }
+
+    /// <summary>
+    /// SessionPublicationTests.swift:438-470: a committed change stays on
+    /// screen when the credential could not be stored, and the core says so.
+    /// </summary>
+    [Fact]
+    public void ACredentialWarningKeepsTheCommittedChangeAndSaysSo()
+    {
+        var state = new HistoryDetailState();
+        state.ReadSucceeded(Detail(MacDetail));
+        string warned = MacPage.Replace("\"variations\":[]", "\"variations\":[],\"credential_warning\":\"commons_credential_storage_unavailable\"");
+        state.Published(Page(warned));
+        Assert.NotNull(state.Detail!.Publication);
+        Assert.Equal(PublicRunErrors.PublicationLine("commons_credential_storage_unavailable"), state.PublicationError);
+        Assert.Equal(Copy["credential_storage_warning"], state.PublicationError);
+    }
+
+    /// <summary>
+    /// SessionPublicationTests.swift:483-575 and AppModel.swift:4228-4238: a
+    /// failed reload keeps the detail it holds, unless its label ends the
+    /// account, which clears it; a failed read says the core's line.
+    /// </summary>
+    [Fact]
+    public void AFailedReadKeepsTheDetailUnlessItEndsTheAccount()
+    {
+        var state = new HistoryDetailState();
+        state.ReadSucceeded(Detail(MacDetail));
+        state.ReadFailed("synthetic-test-failure");
+        Assert.NotNull(state.Detail);
+        Assert.Equal(PublicRunErrors.SessionDetailLine("synthetic-test-failure"), state.ReadError);
+        foreach (string label in HistoryDetailState.AccountEndingLabels)
+        {
+            state.ReadSucceeded(Detail(MacDetail));
+            state.ReadFailed(label);
+            Assert.Null(state.Detail);
+            Assert.Equal(PublicRunErrors.SessionDetailLine(label), state.ReadError);
+        }
+
+        Assert.Equal(new[] { "account-session-required", "session-detail-not-found", "session-owner-changed" }, HistoryDetailState.AccountEndingLabels);
+    }
+
+    /// <summary>
+    /// AppModel.swift:4243-4249: a read under another account replaces what
+    /// the earlier account's read left, its publication error included.
+    /// </summary>
+    [Fact]
+    public void AReadUnderAnotherAccountReplacesWhatWasHeld()
+    {
+        var state = new HistoryDetailState();
+        state.ReadSucceeded(Detail(MacDetail));
+        state.PublicationFailed("public-run-conflict");
+        Assert.NotNull(state.PublicationError);
+        state.ReadSucceeded(Detail(MacDetail.Replace("sha256:owner-a", "sha256:owner-b")));
+        Assert.Null(state.PublicationError);
+        state.PublicationFailed("public-run-conflict");
+        state.ReadSucceeded(Detail(MacDetail.Replace("sha256:owner-a", "sha256:owner-b")));
+        Assert.NotNull(state.PublicationError);
+    }
 }

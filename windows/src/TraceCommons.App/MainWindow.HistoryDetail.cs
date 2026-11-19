@@ -33,7 +33,22 @@ public sealed partial class MainWindow
         view.RecordOpened += OpenHistoryRecord;
         view.ViewModel.OpenFolderRecords.CollectionChanged += OnHistoryRecordsChanged;
         ViewModel.PropertyChanged += OnHistoryShellChanged;
+        Activated += OnHistoryWindowActivated;
         return view;
+    }
+
+    /// <summary>
+    /// Coming back to the window reads the shown detail again, as the Mac
+    /// does when the app becomes active (SessionDetailView.swift:51-53).
+    /// </summary>
+    private async void OnHistoryWindowActivated(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState != WindowActivationState.Deactivated
+            && _historyDetail is { } detail
+            && _historyInspectorHost?.Visibility == Visibility.Visible)
+        {
+            await detail.LoadAsync();
+        }
     }
 
     private void OpenHistoryRecord(HistoryRecordViewModel record)

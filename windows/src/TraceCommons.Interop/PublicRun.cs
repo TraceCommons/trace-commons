@@ -728,3 +728,106 @@ public enum StatusTone
     On,
     Ask,
 }
+
+/// <summary>
+/// An opened record's detail and the outcome of its reads and publication
+/// requests: the Mac's <c>AppModel</c> transitions for one record
+/// (<c>loadSessionDetail</c>, <c>publishPublicRun</c>,
+/// <c>unpublishPublicRun</c>, AppModel.swift:4195-4327), so the inspector's
+/// rules are tested off Windows. Every line is the core's.
+/// </summary>
+public sealed class HistoryDetailState
+{
+    /// <summary>
+    /// The labels after which nothing read under the account may stay on
+    /// screen (AppModel.swift:4230-4237): the account ended, the record is not
+    /// this account's, or the account changed under the read.
+    /// </summary>
+    public static readonly IReadOnlyList<string> AccountEndingLabels = new[]
+    {
+        "account-session-required", "session-detail-not-found", "session-owner-changed",
+    };
+
+    private string? _ownerScope;
+
+    /// <summary>The detail held, kept across a failed reload unless the failure ends the account.</summary>
+    public SessionDetail? Detail { get; private set; }
+
+    /// <summary>The core's line for the last failed read; null after a good one.</summary>
+    public string? ReadError { get; private set; }
+
+    /// <summary>The core's line for the last failed or warned publication request.</summary>
+    public string? PublicationError { get; private set; }
+
+    /// <summary>A read is starting: its earlier error goes.</summary>
+    public void ReadStarted() => ReadError = null;
+
+    /// <summary>
+    /// A read answered. A detail under a different account than the one held
+    /// replaces everything held (<c>reconcileAccountOwnedContent</c>, :4243-4249).
+    /// </summary>
+    public void ReadSucceeded(SessionDetail detail)
+    {
+        ArgumentNullException.ThrowIfNull(detail);
+        if (detail.OwnerScopeSha256 is { } scope)
+        {
+            if (_ownerScope is { } previous && previous != scope)
+            {
+                Clear();
+            }
+
+            _ownerScope = scope;
+        }
+
+        Detail = detail;
+        ReadError = null;
+    }
+
+    /// <summary>A read failed: the core's line, and an account-ending label clears what was held.</summary>
+    public void ReadFailed(string? label)
+    {
+        if (label is not null && AccountEndingLabels.Contains(label))
+        {
+            Clear();
+        }
+
+        ReadError = PublicRunErrors.SessionDetailLine(label);
+    }
+
+    /// <summary>A publication request is starting: its earlier error goes.</summary>
+    public void PublicationStarted() => PublicationError = null;
+
+    /// <summary>Published: the record now carries the page at its version; a credential warning is said.</summary>
+    public void Published(PublicRunPage page)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        if (Detail is { } detail)
+        {
+            Detail = detail with { Publication = page, PublicationVersion = page.Version };
+        }
+
+        PublicationError = page.CredentialWarning is { } warning ? PublicRunErrors.PublicationLine(warning) : null;
+    }
+
+    /// <summary>Unpublished: back to private, at the version the next publish must expect.</summary>
+    public void Unpublished(int expectedPublicationVersion, string? credentialWarning)
+    {
+        if (Detail is { } detail)
+        {
+            Detail = detail with { Publication = null, PublicationVersion = expectedPublicationVersion };
+        }
+
+        PublicationError = credentialWarning is null ? null : PublicRunErrors.PublicationLine(credentialWarning);
+    }
+
+    /// <summary>A refused publish or unpublish: the record stays exactly as it was; the core's line is said.</summary>
+    public void PublicationFailed(string? label) => PublicationError = PublicRunErrors.PublicationLine(label);
+
+    private void Clear()
+    {
+        _ownerScope = null;
+        Detail = null;
+        ReadError = null;
+        PublicationError = null;
+    }
+}

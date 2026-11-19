@@ -44,12 +44,12 @@ public sealed class HistoryDetailInspector : UserControl
     private readonly DaemonHost _host;
     private readonly StackPanel _root = new() { Spacing = 16 };
 
-    private SessionDetail? _detail;
+    private readonly HistoryDetailState _state = new();
     private bool _loading;
-    private string? _readError;
     private bool _working;
-    private string? _publishError;
     private string? _dismissedError;
+
+    private SessionDetail? CurrentDetail => _state.Detail;
 
     // The editor's state (SessionDetailView.swift:183-197).
     private bool _configured;
@@ -121,7 +121,7 @@ public sealed class HistoryDetailInspector : UserControl
         }
 
         _loading = true;
-        _readError = null;
+        _state.ReadStarted();
         Render();
         DaemonResponse response = await _host
             .CallAsync(DaemonProtocol.Methods.HistoryDetail, PublicRunEditor.SubmissionParams(Record.SubmissionId))
@@ -129,7 +129,7 @@ public sealed class HistoryDetailInspector : UserControl
         _loading = false;
         if (response.IsError || response.Result is not JsonElement result)
         {
-            _readError = PublicRunErrors.SessionDetailLine(response.Error?.Message);
+            _state.ReadFailed(response.Error?.Message);
         }
         else if (SessionDetail.Parse(result) is { } detail)
         {
@@ -137,7 +137,7 @@ public sealed class HistoryDetailInspector : UserControl
         }
         else
         {
-            _readError = PublicRunErrors.SessionDetailLine("session-detail-unavailable");
+            _state.ReadFailed("session-detail-unavailable");
         }
 
         Render();
@@ -145,8 +145,8 @@ public sealed class HistoryDetailInspector : UserControl
 
     private void SetDetail(SessionDetail detail)
     {
-        int? before = _detail?.Publication?.Version;
-        _detail = detail;
+        int? before = CurrentDetail?.Publication?.Version;
+        _state.ReadSucceeded(detail);
         if (detail.Publication is not null && detail.Publication.Version != before)
         {
             _reviewDraft = null;
@@ -200,7 +200,7 @@ public sealed class HistoryDetailInspector : UserControl
         {
             _root.Children.Add(Caption(copy["reading_record"], "TcInkSecondaryBrush"));
         }
-        else if (_readError is { } error)
+        else if (_state.ReadError is { } error)
         {
             var notice = Card();
             var inner = new StackPanel { Spacing = 8 };
@@ -212,7 +212,7 @@ public sealed class HistoryDetailInspector : UserControl
             _root.Children.Add(notice);
         }
 
-        if (_detail is { } detail)
+        if (CurrentDetail is { } detail)
         {
             Overview(copy, detail);
             bool completed = ContributionGate.WithdrawalCompleted(Record.Status, Record.WithdrawnHere);
@@ -235,10 +235,10 @@ public sealed class HistoryDetailInspector : UserControl
     {
         var panel = new StackPanel { Spacing = 6 };
         panel.Children.Add(Caption(Record.SubmittedText, "TcInkTertiaryBrush"));
-        if (HistoryInspection.TagsStatus(recordResolves: true, _detail)
-            && HistoryInspection.StatusWord(copy, _detail?.ContributionStatus ?? Record.Status) is { } word)
+        if (HistoryInspection.TagsStatus(recordResolves: true, CurrentDetail)
+            && HistoryInspection.StatusWord(copy, CurrentDetail?.ContributionStatus ?? Record.Status) is { } word)
         {
-            panel.Children.Add(StatusTag(word, HistoryInspection.Tone(_detail?.ContributionStatus ?? Record.Status)));
+            panel.Children.Add(StatusTag(word, HistoryInspection.Tone(CurrentDetail?.ContributionStatus ?? Record.Status)));
         }
 
         return panel;
@@ -340,7 +340,7 @@ public sealed class HistoryDetailInspector : UserControl
 
         // A failed request, under the buttons it is about, with a Dismiss
         // link after it (SessionDetailView.swift:207-216).
-        if (_publishError is { } error && error != _dismissedError)
+        if (_state.PublicationError is { } error && error != _dismissedError)
         {
             var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
             row.Children.Add(Text(error, "TcCaptionTextStyle", "TcStatusOutsideTextBrush"));
@@ -627,10 +627,10 @@ public sealed class HistoryDetailInspector : UserControl
         _workflow = page.Workflow;
         _includeCorrection = page.CorrectionExcerpt is not null;
         _permission = page.ReusePermission;
-        _source = page.SourceSlug ?? _detail?.RetainedSourceSlug ?? string.Empty;
-        _evidence = _detail is null
+        _source = page.SourceSlug ?? CurrentDetail?.RetainedSourceSlug ?? string.Empty;
+        _evidence = CurrentDetail is null
             ? new HashSet<string>(StringComparer.Ordinal)
-            : PublicRunEditor.Restore(_detail.Evidence, page.Evidence);
+            : PublicRunEditor.Restore(CurrentDetail.Evidence, page.Evidence);
         _reviewDraft = null;
     }
 
@@ -638,14 +638,14 @@ public sealed class HistoryDetailInspector : UserControl
 
     private async Task PublishAsync(PublicRunDraft draft)
     {
-        if (_working || _loading || _detail is not { } detail
+        if (_working || _loading || CurrentDetail is not { } detail
             || PublicRunEditor.PublishParams(Record.SubmissionId, draft, detail) is not { } request)
         {
             return;
         }
 
         _working = true;
-        _publishError = null;
+        _state.PublicationStarted();
         _dismissedError = null;
         Render();
         DaemonResponse response = await _host
@@ -654,16 +654,14 @@ public sealed class HistoryDetailInspector : UserControl
         _working = false;
         if (!response.IsError && response.Result is JsonElement result && PublicRunJson.Page(result) is { } page)
         {
-            SetDetail(_detail! with { Publication = page, PublicationVersion = page.Version });
-            if (page.CredentialWarning is { } warning)
-            {
-                _publishError = PublicRunErrors.PublicationLine(warning);
-            }
+            _state.Published(page);
+            _reviewDraft = null;
+            _editingPublished = false;
         }
         else
         {
             // Refused: the record stays as it was, private if it was.
-            _publishError = PublicRunErrors.PublicationLine(response.Error?.Message);
+            _state.PublicationFailed(response.Error?.Message);
         }
 
         Render();
@@ -671,13 +669,13 @@ public sealed class HistoryDetailInspector : UserControl
 
     private async Task UnpublishAsync()
     {
-        if (_working || _loading || _detail is null)
+        if (_working || _loading || CurrentDetail is null)
         {
             return;
         }
 
         _working = true;
-        _publishError = null;
+        _state.PublicationStarted();
         _dismissedError = null;
         Render();
         DaemonResponse response = await _host
@@ -687,17 +685,13 @@ public sealed class HistoryDetailInspector : UserControl
         if (!response.IsError && response.Result is JsonElement result
             && PublicRunJson.Unpublished(result) is { } unpublished)
         {
-            _detail = _detail! with { Publication = null, PublicationVersion = unpublished.ExpectedPublicationVersion };
+            _state.Unpublished(unpublished.ExpectedPublicationVersion, unpublished.CredentialWarning);
             _editingPublished = false;
             _reviewDraft = null;
-            if (unpublished.CredentialWarning is { } warning)
-            {
-                _publishError = PublicRunErrors.PublicationLine(warning);
-            }
         }
         else
         {
-            _publishError = PublicRunErrors.PublicationLine(response.Error?.Message);
+            _state.PublicationFailed(response.Error?.Message);
         }
 
         Render();
@@ -839,7 +833,7 @@ public sealed class HistoryDetailInspector : UserControl
         box.TextChanged += (_, _) =>
         {
             set(box.Text);
-            if (Copy is { } copy && _detail is { } detail)
+            if (Copy is { } copy && CurrentDetail is { } detail)
             {
                 UpdateVerdict(copy, detail);
             }
