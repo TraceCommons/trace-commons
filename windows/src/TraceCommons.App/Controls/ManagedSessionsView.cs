@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
 
@@ -23,6 +24,9 @@ public sealed class ManagedSessionsView : UserControl
     private bool _busy;
     private bool _reading;
     private bool _unsupportedVersion;
+    /// <summary>The launch button a closed dialog hands focus back to: the
+    /// dialog's own return can land after the rebuild, or nowhere.</summary>
+    private (string Name, int Index)? _returnFocus;
     private string? _unsupportedTool;
     /// <summary>Begins the NEAR AI sign-in as the Private AI page does; null
     /// where this view is hosted without one.</summary>
@@ -150,7 +154,51 @@ public sealed class ManagedSessionsView : UserControl
         finally { _busy = false; await RefreshAsync(); }
     }
 
+    /// <summary>
+    /// Rebuilds the view, keeping keyboard focus on the same button: every
+    /// read rebuilds it, so without this the 10 s poll, or closing the launch
+    /// dialog, dropped focus to the window's first control (box, 2026-11-19).
+    /// </summary>
     private void Render()
+    {
+        if (_snapshot is null) return;
+        // While a dialog is open (busy) a poll's rebuild keeps the return.
+        var focused = FocusedButtonKey() ?? (_busy ? null : _returnFocus);
+        if (!_busy) _returnFocus = null;
+        RenderContent();
+        if (focused is { } key) RestoreFocus(key);
+    }
+
+    private static string ButtonName(Button button) =>
+        AutomationProperties.GetName(button) is { Length: > 0 } name ? name : button.Content as string ?? string.Empty;
+
+    private static IEnumerable<Button> Buttons(Panel panel)
+    {
+        foreach (var child in panel.Children)
+        {
+            if (child is Button button) yield return button;
+            else if (child is Panel inner) foreach (var nested in Buttons(inner)) yield return nested;
+        }
+    }
+
+    /// <summary>The focused button's name and its place among buttons of that name, or null.</summary>
+    private (string Name, int Index)? FocusedButtonKey()
+    {
+        if (XamlRoot is null || FocusManager.GetFocusedElement(XamlRoot) is not Button focused) return null;
+        var buttons = Buttons(_root).ToList();
+        int at = buttons.IndexOf(focused);
+        if (at < 0) return null;
+        string name = ButtonName(focused);
+        return (name, buttons.Take(at).Count(b => ButtonName(b) == name));
+    }
+
+    private void RestoreFocus((string Name, int Index) key)
+    {
+        if (Buttons(_root).Where(b => ButtonName(b) == key.Name).Skip(key.Index).FirstOrDefault() is not Button match) return;
+        DispatcherQueue?.TryEnqueue(() => match.Focus(FocusState.Programmatic));
+    }
+
+    private void RenderContent()
     {
         if (_snapshot is null) return;
         _root.Children.Clear();
@@ -289,7 +337,11 @@ public sealed class ManagedSessionsView : UserControl
         face.Children.Add(new TextBlock { Text = T(tool), MaxLines = 1, VerticalAlignment = VerticalAlignment.Center });
         var button = new Button { Content = face, IsEnabled = !_busy };
         AutomationProperties.SetName(button, T(startKey));
-        button.Click += async (_, _) => await RunAsync(() => StartAsync(tool));
+        button.Click += async (_, _) =>
+        {
+            _returnFocus = (T(startKey), 0);
+            await RunAsync(() => StartAsync(tool));
+        };
         return button;
     }
 
