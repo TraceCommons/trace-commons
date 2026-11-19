@@ -223,6 +223,8 @@ else
     ui::monitor::shell::tests::mounted_weston_offers_no_blur_so_the_window_stays_painted \
     ui::monitor::shell::tests::mounted_translucent_sheet_clears_the_gaps_and_tints_the_panes \
     ui::monitor::shell::tests::mounted_settings_and_a_sheet_take_the_monitors_palette \
+    ui::monitor::shell::tests::mounted_every_switch_is_the_macs_flat_switch \
+    ui::history::tests::mounted_the_waiting_glyph_is_the_macs_secondary_ink \
     ui::style::tests::gtk_resolves_a_redefined_colour_to_its_last_definition \
     ui::monitor::summary::tests::mounted_summary_is_the_macs_cards \
     ui::monitor::shell::tests::mounted_window_has_a_window_handle_the_desktops_controls_and_no_header_bar \
