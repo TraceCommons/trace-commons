@@ -1122,20 +1122,50 @@ window.tc-glass-window:backdrop .tc-tree-row-selected .tc-tree-split-menu > butt
   background-color: @tc_glass_control_on_selection_hover;
 }
 
-/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
-   `watchSwitchHeight`), its knob 2 in. GTK sizes a switch at twice its
-   slider, so a 17-wide slider in 2 of padding is 38 wide. */
-switch.tc-tree-switch {
+/* Every switch is the Mac's flat `GlassToggleStyle(.settings)`: 40 by 24
+   (`toggleWidth`, `toggleHeight`), an 18-point round knob 3 in from the
+   track's end with no ring and no shadow. On, the track is
+   `toggleOnSettings` under a `textOnAccent` knob; off, `toggleOff` over
+   whatever it sits on under a `toggleKnobOff` knob (Light's off track is
+   lifted to hold 3:1, see `switch_off_track` in the generator). GTK sizes
+   a switch at twice its slider, so an 18-wide knob takes 2 of side padding
+   for a 40-wide track, and moves 1 inward to stand 3 in, as the Mac's. */
+switch {
   min-width: 0;
   min-height: 0;
-  padding: 2px;
+  padding: 3px 2px;
   border-radius: 999px;
+  background-color: @tc_glass_toggle_off;
+  background-image: none;
 }
 
-switch.tc-tree-switch > slider {
-  min-width: 17px;
+switch:checked {
+  background-color: @tc_glass_toggle_on;
+  background-image: none;
+}
+
+switch > slider {
+  min-width: 18px;
   min-height: 18px;
   margin: 0;
+  border: none;
+  border-radius: 999px;
+  background-color: @tc_glass_toggle_knob_off;
+  background-image: none;
+  box-shadow: none;
+  transform: translateX(1px);
+}
+
+switch:checked > slider {
+  background-color: @tc_glass_toggle_knob_on;
+  transform: translateX(-1px);
+}
+
+/* `GlassToggleStyle(.watch)`: 38 by 22 (`watchSwitchWidth`,
+   `watchSwitchHeight`), its knob 2 in: 1 of side padding, then the same
+   1 inward. */
+switch.tc-tree-switch {
+  padding: 2px 1px;
 }
 
 /* The switch on a selected row: its knob in the selection's ink (the
