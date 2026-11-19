@@ -129,6 +129,38 @@ Start-Process -FilePath $git -ArgumentList '/VERYSILENT', '/NORESTART', '/NOCANC
 Write-Log 'Git installed'
 
 # ---------------------------------------------------------------------------
+# Console-session hygiene, for window captures.
+#
+# win-capture.ps1 launches the app in the auto-logged-on console session and
+# captures its window there. Anything that opens in that session on its own
+# can take the foreground or cover the app. Server Manager opens at every
+# admin logon on Windows Server, and the network discovery prompt opens on
+# first logon. Both are switched off machine-wide.
+# ---------------------------------------------------------------------------
+Write-Log 'Disabling Server Manager at logon and the network discovery prompt'
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\ServerManager' -Name DoNotOpenServerManagerAtLogon `
+    -Value 1 -PropertyType DWord -Force | Out-Null
+Get-ScheduledTask -TaskName 'ServerManager' -ErrorAction SilentlyContinue |
+    Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
+New-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff' -Force | Out-Null
+# Windows Server 2025 opens a full-screen "Send diagnostic data to Microsoft"
+# page at a user's first logon, on top of everything, so the app launched by
+# the first capture opens behind it and never gets the foreground. This policy skips it without
+# answering it on anyone's behalf.
+New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience `
+    -Value 1 -PropertyType DWord -Force | Out-Null
+
+# Sysinternals Autologon, which auto-logon at the console needs. It stores the
+# credential as an encrypted LSA secret rather than plaintext in the registry.
+# Downloaded only; configuring it needs the password, which this script never
+# sees (see docs/dev-vm.md).
+Write-Log 'Downloading Sysinternals Autologon'
+$autologonZip = Get-Installer 'https://download.sysinternals.com/files/AutoLogon.zip' 'AutoLogon.zip'
+Expand-Archive -Path $autologonZip -DestinationPath (Join-Path $downloads 'autologon') -Force
+Write-Log 'Autologon downloaded'
+
+# ---------------------------------------------------------------------------
 # PATH for every future interactive session.
 #
 # Set at machine scope so an RDP login inherits it. The current SYSTEM session
