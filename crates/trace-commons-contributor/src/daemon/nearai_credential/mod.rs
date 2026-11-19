@@ -9,11 +9,17 @@
 //! of the flow, it is the beginning of one:
 //!
 //! ```text
-//! browser sign in  ->  rt_ refresh token + session JWT   (loopback)
+//! browser sign in  ->  one-time code + state             (loopback)
+//!                  ->  POST /v1/auth/native/token + verifier -> session
 //!                  ->  GET  /v1/organizations            -> org
 //!                  ->  GET  /v1/organizations/{org}/workspaces -> workspace
 //!                  ->  POST /v1/workspaces/{ws}/api-keys -> sk- key  [store this]
 //! ```
+//!
+//! OAuth uses app-held S256 PKCE and client ID `trace-commons`. The verifier
+//! stays in the attempt; the callback carries no bearer token. Legacy token
+//! fragments are refused, so rollout requires the paired Cloud Platform
+//! endpoint. The public client ID does not authenticate the app binary.
 //!
 //! The last call returns the plaintext key once and accepts an omitted
 //! `expires_at`, so the credential inference uses does not expire and needs no

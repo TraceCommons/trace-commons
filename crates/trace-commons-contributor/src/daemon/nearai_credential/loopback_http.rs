@@ -1,5 +1,5 @@
 //! One strict HTTP/1.1 request reader for the sign-in's loopback listeners:
-//! the login chooser, the OAuth bounce and the NEAR wallet page.
+//! the login chooser, the OAuth code callback and the NEAR wallet page.
 //!
 //! Each listener used to carry its own reader, and each hardened the same
 //! edge cases a little differently. This is the wallet's, the strictest:

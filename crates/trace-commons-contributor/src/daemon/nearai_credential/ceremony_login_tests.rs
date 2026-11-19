@@ -31,7 +31,7 @@ fn minted(key_id: &str) -> super::super::api::MintedKey {
 #[tokio::test]
 async fn a_real_pick_reaches_the_attempts_progress() {
     use super::super::chooser::{CHOOSE_PATH, PAGE_PATH};
-    use super::super::loopback::{CALLBACK_PATH, DEPOSIT_PATH};
+    use super::super::loopback::CALLBACK_PATH;
     let picked = *crate::channel::NEAR_AI_SIGN_IN_PROVIDERS
         .iter()
         .find(|tag| **tag != "near")
@@ -46,7 +46,22 @@ async fn a_real_pick_reaches_the_attempts_progress() {
         account_login: None,
         offered: crate::channel::NEAR_AI_SIGN_IN_PROVIDERS,
     };
-    let api = CloudApi::live().unwrap();
+    let token_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let token_address = token_server.local_addr().unwrap();
+    let api = CloudApi::for_test(&format!("http://{token_address}")).unwrap();
+    let token_task = tokio::spawn(async move {
+        let router = axum::Router::new().route("/v1/auth/native/token", axum::routing::post(
+            |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| async move {
+                assert!(!headers.contains_key("authorization"));
+                assert_eq!(headers["user-agent"], super::super::api::USER_AGENT);
+                assert_eq!(body["code"], "synthetic-code");
+                assert_eq!(body["client_id"], "trace-commons");
+                assert_eq!(body["code_verifier"].as_str().unwrap().len(), 43);
+                axum::Json(serde_json::json!({"access_token":"jwt", "refresh_token":"rt_x",
+                    "refresh_token_expiration": (Utc::now() + chrono::Duration::days(7)).to_rfc3339()}))
+            }));
+        axum::serve(token_server, router).await.unwrap();
+    });
     let progress = Progress::new();
     assert_eq!(failure_provider(&progress), "not_chosen");
     let handed_on = std::sync::Mutex::new(None);
@@ -73,35 +88,27 @@ async fn a_real_pick_reaches_the_attempts_progress() {
         )
         .await;
         assert!(redirect.starts_with("HTTP/1.1 303"), "{redirect}");
-        let bounce = send(
-            port,
-            format!("GET {CALLBACK_PATH} HTTP/1.1\r\nHost: {authority}\r\n\r\n"),
-        )
-        .await;
-        let deposit_state = bounce
-            .split("body: \"state=")
-            .nth(1)
-            .and_then(|rest| rest.split('&').next())
+        let location = redirect
+            .lines()
+            .find_map(|line| line.strip_prefix("Location: "))
+            .unwrap();
+        let url = reqwest::Url::parse(location).unwrap();
+        let oauth_state = url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
             .unwrap()
-            .to_owned();
-        let deposit =
-            format!("state={deposit_state}&ua=Mozilla%2F5.0%20Test&token=jwt&refresh_token=rt_x");
-        let done = send(
-            port,
-            format!(
-                "POST {DEPOSIT_PATH} HTTP/1.1\r\nHost: {authority}\r\nContent-Length: {}\r\n\r\n{deposit}",
-                deposit.len()
-            ),
-        )
-        .await;
+            .1
+            .into_owned();
+        let done = send(port, format!("GET {CALLBACK_PATH}?code=synthetic-code&state={oauth_state} HTTP/1.1\r\nHost: {authority}\r\n\r\n")).await;
         assert!(done.starts_with("HTTP/1.1 200"), "{done}");
     };
     let (finished, ()) = tokio::join!(finishing, browser);
     finished.unwrap();
     assert_eq!(
         handed_on.into_inner().unwrap(),
-        Some(("rt_x".to_owned(), "Mozilla/5.0 Test".to_owned()))
+        Some(("rt_x".to_owned(), super::super::api::USER_AGENT.to_owned()))
     );
+    token_task.abort();
     assert_eq!(progress.provider(), Some(picked));
     assert_eq!(failure_provider(&progress), picked);
 }
