@@ -33,6 +33,19 @@ public sealed partial class MainWindow : ITracesTreeHost
         (IReadOnlyList<string> order, bool arranged) = LoadFolderOrder();
         _tree = new TracesTreeView(new TracesTreeState(order, arranged), this);
         TracesTreeHost.Child = _tree;
+
+        // The Windows sections that sat in rows of their own beside the
+        // folder list now follow the tree in its scroll, so the tree has the
+        // tab's room as on the Mac (round 2, box: at 615 px they left it none).
+        foreach (FrameworkElement section in new FrameworkElement[] { CertificateSection, ScrubCaveatLine, WeekBandSection })
+        {
+            if (section.Parent is Panel parent)
+            {
+                parent.Children.Remove(section);
+            }
+
+            _tree.AddFooter(section);
+        }
         _tree.Scroller.ViewChanged += OnQueueScrollViewChanged;
         map.SnapshotRead += snapshot =>
         {

@@ -1113,7 +1113,7 @@
                         the choice between the two readings is behind the ABI: no
                         shell decides it. Nothing here is typed out.
                     -->
-                    <StackPanel Grid.Row="1"
+                    <StackPanel x:Name="CertificateSection" Grid.Row="1"
                                 Spacing="6"
                                 Margin="22,0,22,12">
                         <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
@@ -1188,7 +1188,7 @@
                         and on a long one alike.
                     -->
 
-                    <TextBlock Grid.Row="4"
+                    <TextBlock x:Name="ScrubCaveatLine" Grid.Row="4"
                                Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap"
@@ -1217,7 +1217,7 @@
                         glyphs the sibling screen does not have would read as two
                         designs rather than one.
                     -->
-                    <StackPanel Grid.Row="5" Padding="22,4,22,16" Spacing="8">
+                    <StackPanel x:Name="WeekBandSection" Grid.Row="5" Padding="22,4,22,16" Spacing="8">
                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
                             <TextBlock Grid.Column="0"
                                        Text="{x:Bind ViewModel.ThisWeekLabel}"

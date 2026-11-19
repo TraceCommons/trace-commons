@@ -71,6 +71,8 @@ internal sealed class TracesTreeView : UserControl
     private readonly Grid _root = new();
     private readonly ScrollViewer _scroller = new();
     private readonly StackPanel _rows = new() { Spacing = 2 };
+    private readonly StackPanel _content = new();
+    private readonly StackPanel _footer = new() { Margin = new Thickness(-14, 12, -14, 0) };
     private readonly TextBlock _empty = new();
     private readonly Button _searchButton = new();
     private readonly Grid _searchField = new();
@@ -114,7 +116,9 @@ internal sealed class TracesTreeView : UserControl
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _root.Children.Add(Heading());
 
-        _scroller.Content = _rows;
+        _content.Children.Add(_rows);
+        _content.Children.Add(_footer);
+        _scroller.Content = _content;
         _scroller.HorizontalScrollMode = ScrollMode.Disabled;
         _scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
         _scroller.IsTabStop = false;
@@ -137,6 +141,13 @@ internal sealed class TracesTreeView : UserControl
         ActualThemeChanged += (_, _) => Render();
         Unloaded += (_, _) => StopTicking();
     }
+
+    /// <summary>
+    /// The window's own sections that follow the folders (the certificate
+    /// list, the scrubbing caveat, the week band): they scroll with the tree
+    /// rather than take its room.
+    /// </summary>
+    public void AddFooter(UIElement section) => _footer.Children.Add(section);
 
     /// <summary>The tree's state, as read and arranged.</summary>
     public TracesTreeState State => _state;
