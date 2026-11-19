@@ -30,9 +30,13 @@ Set-Location (git rev-parse --show-toplevel)
 $cargoArgs = @('test', '-p', 'trace-commons-contributor', '--lib', '--',
   '--ignored', '--exact', '--nocapture', '--test-threads=1',
   'managed::terminal::windows_tests::real_windows_terminals_receive_the_folder_and_every_argument')
+# Windows PowerShell 5.1 turns a native program's stderr into an error
+# record, which 'Stop' would end the script on: cargo writes its progress
+# there.
+$ErrorActionPreference = 'Continue'
 if ($Log) {
-  & cargo @cargoArgs *> $Log
+  & cargo @cargoArgs 2>&1 | ForEach-Object { "$_" } | Set-Content -Encoding UTF8 $Log
 } else {
-  & cargo @cargoArgs
+  & cargo @cargoArgs 2>&1 | ForEach-Object { "$_" }
 }
 exit $LASTEXITCODE
