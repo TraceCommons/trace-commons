@@ -27,52 +27,69 @@ public sealed partial class SettingsWindow : Window
         InitializeComponent();
         Title = MonitorWords.SettingsTitle;
         SettingsHost.Content = view;
-        view.Loaded += FocusFirstOnce;
+        Activated += FocusTopOnce;
     }
 
     /// <summary>
-    /// Focus starts on the first control in reading order, at the top of the
-    /// window, as an AppKit window's initial key view is its first. Left to
-    /// itself WinUI put it on a button far down the page, off-screen and
-    /// with no ring to show where it was (box, 2026-11-19). The first in Tab
-    /// order is no better: Settings' Tab order is not its reading order, and
-    /// its first stop is off-screen too (box, 2026-11-19), so the visual tree
-    /// is walked in drawing order instead. Programmatic, so no ring is drawn
-    /// until a key is pressed.
+    /// Focus starts on the topmost control the window shows, as an AppKit
+    /// window's initial key view is its first. Left to itself WinUI put it
+    /// on a button far down the page, off-screen and with no ring to show
+    /// where it was; the first Tab stop is off-screen too, because Settings'
+    /// Tab order is not its reading order (box, 2026-11-19). Run once, after
+    /// the first activation has laid the page out and WinUI has placed its
+    /// own focus. Programmatic, so no ring is drawn until a key is pressed.
     /// </summary>
-    private static void FocusFirstOnce(object sender, RoutedEventArgs e)
+    private void FocusTopOnce(object sender, WindowActivatedEventArgs e)
     {
-        var view = (FrameworkElement)sender;
-        view.Loaded -= FocusFirstOnce;
-        if (FirstInReadingOrder(view) is Control first)
+        if (e.WindowActivationState == WindowActivationState.Deactivated)
         {
-            first.Focus(FocusState.Programmatic);
+            return;
         }
+
+        Activated -= FocusTopOnce;
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (SettingsHost.Content is FrameworkElement view && Topmost(view, view) is Control top)
+            {
+                top.Focus(FocusState.Programmatic);
+            }
+        });
     }
 
-    private static Control? FirstInReadingOrder(DependencyObject root)
+    /// <summary>The visible, enabled Tab stop nearest the top of <paramref name="root"/>'s on-screen area, leftmost on a tie.</summary>
+    private static Control? Topmost(FrameworkElement root, DependencyObject scope)
     {
-        int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
-        for (int i = 0; i < count; i++)
+        Control? best = null;
+        double bestY = double.MaxValue, bestX = double.MaxValue;
+        void Walk(DependencyObject node)
         {
-            DependencyObject child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
-            if (child is UIElement { Visibility: not Visibility.Visible })
+            int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(node);
+            for (int i = 0; i < count; i++)
             {
-                continue;
-            }
+                DependencyObject child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(node, i);
+                if (child is UIElement { Visibility: not Visibility.Visible })
+                {
+                    continue;
+                }
 
-            if (child is Control { IsTabStop: true, IsEnabled: true, ActualHeight: > 0 } control)
-            {
-                return control;
-            }
+                if (child is Control { IsTabStop: true, IsEnabled: true, ActualHeight: > 0 } control)
+                {
+                    Windows.Foundation.Point at = control.TransformToVisual(root).TransformPoint(default);
+                    bool onScreen = at.Y >= 0 && at.Y + control.ActualHeight <= root.ActualHeight;
+                    if (onScreen && (at.Y < bestY || (at.Y == bestY && at.X < bestX)))
+                    {
+                        best = control;
+                        bestY = at.Y;
+                        bestX = at.X;
+                    }
+                }
 
-            if (FirstInReadingOrder(child) is Control found)
-            {
-                return found;
+                Walk(child);
             }
         }
 
-        return null;
+        Walk(scope);
+        return best;
     }
 
     /// <summary>
