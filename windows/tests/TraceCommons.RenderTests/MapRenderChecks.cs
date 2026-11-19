@@ -189,12 +189,13 @@ public static partial class RenderChecks
             return (period, thick);
         }
 
-        // The flowing arc's line is drawn at 0.35 under its dash: read the dash alone.
-        (double flowPeriod, int flowThick) = Measure(MapArcStyle.Flowing, 200);
+        // The flowing arc's line is drawn at 0.35 alpha under its dash, below
+        // the 50% the dash is read at: the dash alone.
+        (double flowPeriod, int flowThick) = Measure(MapArcStyle.Flowing, 128);
         (double dashPeriod, int dashThick) = Measure(MapArcStyle.Dashed, 128);
         string numbers = $"flowing period={flowPeriod:F2} thick={flowThick}; dashed period={dashPeriod:F2} thick={dashThick}";
-        if (Math.Abs(flowPeriod - 48) > 1 || Math.Abs(flowThick - 7.28) > 1.5
-            || Math.Abs(dashPeriod - 40) > 1 || Math.Abs(dashThick - 5.6) > 1.5)
+        if (Math.Abs(flowPeriod - 48) > 1 || Math.Abs(flowThick - 7.28) > 1
+            || Math.Abs(dashPeriod - 40) > 1 || Math.Abs(dashThick - 5.6) > 1)
         {
             throw new InvalidOperationException(numbers + " (want 48 and ~7.3; 40 and ~5.6)");
         }
