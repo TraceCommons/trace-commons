@@ -29,6 +29,7 @@ use adw::prelude::*;
 
 use super::App;
 use super::community_brand;
+use super::glass_switch::GlassSwitch;
 use super::style::{self, Tone, space};
 use crate::copy;
 use crate::copy::SourceTool;
@@ -120,12 +121,12 @@ pub struct SettingsView {
     filling_knobs: std::cell::Cell<bool>,
     autostart_body: gtk::Label,
     autostart_row: gtk::Box,
-    autostart_switch: gtk::Switch,
+    autostart_switch: GlassSwitch,
     /// The Traces map's style: on, the rocket and station.
-    map_style_switch: gtk::Switch,
+    map_style_switch: GlassSwitch,
     /// Home's "Show promotions" (the Mac's General section): off, Home's
     /// campaign card never shows.
-    pub promotions_switch: gtk::Switch,
+    pub promotions_switch: GlassSwitch,
     /// The edge rail's switch (`ui::edge_surfaces`).
     pub(crate) edge_rail: super::edge_surfaces::RailSwitch,
     /// Scrolls Settings to a section, for the edge rail's and the
@@ -152,7 +153,7 @@ pub struct SettingsView {
     /// reason the knobs are -- a refresh runs on every daemon event, and
     /// rebuilding these would take the port field out from under whoever
     /// is typing into it.
-    routing_switch: gtk::Switch,
+    routing_switch: GlassSwitch,
     /// What the machine already knows, before anything it is asked.
     ///
     /// One sentence, from the shared source, for both states: a pointer was
@@ -360,7 +361,8 @@ impl SettingsView {
             .hexpand(true)
             .build();
         routing_switch_label.add_css_class("tc-body");
-        let routing_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        let routing_switch = GlassSwitch::new();
+        routing_switch.set_halign(gtk::Align::End);
         routing_switch.set_valign(gtk::Align::Center);
         routing_switch.update_property(&[gtk::accessible::Property::Label(copy::IRONWIRE_TOGGLE)]);
         routing_row.append(&routing_switch_label);
@@ -392,6 +394,7 @@ impl SettingsView {
         // port. Where it has not they are the only way to answer, and
         // `render_routing` opens this.
         let routing_override = gtk::Expander::new(Some(copy::IRONWIRE_OVERRIDE_TITLE));
+        super::glass_motion::expander(&routing_override);
         let routing_override_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         routing_override.set_child(Some(&routing_override_box));
         routing_card.append(&routing_override);
@@ -499,6 +502,7 @@ impl SettingsView {
         // every refusing state: a card that says nothing is being sent must
         // not fold the thing that ends that out of sight.
         let witness_form = gtk::Expander::new(Some(copy::WITNESS_CONFIGURE));
+        super::glass_motion::expander(&witness_form);
         let witness_form_box = gtk::Box::new(gtk::Orientation::Vertical, space::S);
         witness_form.set_child(Some(&witness_form_box));
         witness_card.append(&witness_form);
@@ -653,7 +657,8 @@ impl SettingsView {
             .hexpand(true)
             .build();
         autostart_switch_label.add_css_class("tc-body");
-        let autostart_switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        let autostart_switch = GlassSwitch::new();
+        autostart_switch.set_halign(gtk::Align::End);
         // The switch is reachable by keyboard; the label beside it is not a
         // control, so it is pointed at the switch for a screen reader
         // rather than left as loose text.
@@ -705,11 +710,10 @@ impl SettingsView {
             .hexpand(true)
             .build();
         promotions_label.add_css_class("tc-body");
-        let promotions_switch = gtk::Switch::builder()
-            .halign(gtk::Align::End)
-            .valign(gtk::Align::Center)
-            .active(crate::home_cards::HomePrefs::load().shows_promotions)
-            .build();
+        let promotions_switch =
+            GlassSwitch::with_active(crate::home_cards::HomePrefs::load().shows_promotions);
+        promotions_switch.set_halign(gtk::Align::End);
+        promotions_switch.set_valign(gtk::Align::Center);
         promotions_switch.update_property(&[gtk::accessible::Property::Label(
             home_words.promotions_toggle,
         )]);
@@ -824,7 +828,7 @@ impl SettingsView {
 /// The Traces map's style card, as the Mac's General section draws it
 /// (`GeneralSection.mapStyleCard`): its title, the switch, on for the
 /// rocket and station, and the caption under it. All in shared copy.
-pub(crate) fn map_style_card() -> (gtk::Box, gtk::Switch) {
+pub(crate) fn map_style_card() -> (gtk::Box, GlassSwitch) {
     let flow = trace_commons_contributor::preview_copy::monitor_screens_copy().flow_map;
     let card = style::card(gtk::Orientation::Vertical, space::M);
     card.append(&style::eyebrow(flow.style_title));
@@ -835,11 +839,9 @@ pub(crate) fn map_style_card() -> (gtk::Box, gtk::Switch) {
         .hexpand(true)
         .build();
     label.add_css_class("tc-body");
-    let switch = gtk::Switch::builder()
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Center)
-        .active(true)
-        .build();
+    let switch = GlassSwitch::with_active(true);
+    switch.set_halign(gtk::Align::End);
+    switch.set_valign(gtk::Align::Center);
     switch.update_property(&[gtk::accessible::Property::Label(flow.style_toggle)]);
     row.append(&label);
     row.append(&switch);
@@ -2757,11 +2759,9 @@ fn public_opt_in_row(app: &Rc<App>) -> gtk::Box {
     label.add_css_class("tc-body");
     // Off. §7.3: nothing optional is pre-checked, and this is the most
     // optional thing in the window.
-    let toggle = gtk::Switch::builder()
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Center)
-        .active(false)
-        .build();
+    let toggle = GlassSwitch::with_active(false);
+    toggle.set_halign(gtk::Align::End);
+    toggle.set_valign(gtk::Align::Center);
     toggle.update_property(&[gtk::accessible::Property::Label(copy::LIST_HANDLE_PUBLICLY)]);
     row.append(&label);
     row.append(&toggle);
@@ -2890,7 +2890,7 @@ fn bio_counter(bio: &str) -> String {
 /// body is a brand surface: a message dialog would set the prose in the
 /// native palette, and the whole point of this screen is that the public
 /// surface does not look like the window around it.
-fn offer_going_public(app: &Rc<App>, toggle: gtk::Switch) {
+fn offer_going_public(app: &Rc<App>, toggle: GlassSwitch) {
     let dialog = adw::Window::builder()
         .transient_for(&app.window)
         .modal(true)

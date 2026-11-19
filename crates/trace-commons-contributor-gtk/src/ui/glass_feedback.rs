@@ -8,21 +8,22 @@
 //!   (0.8 s) at up to 60 frames a second.
 //! - `Skeleton`: a faint bar (ink 0.08, the control radius, 12 points
 //!   tall) whose opacity breathes to `skeletonDim` (0.5) and back over
-//!   `motion.pulse` (1.6 s) on the token curve.
+//!   `motion.pulse` (1.6 s) on the token curve, every frame.
 //! - `Turn`: holds a refresh button's icon and turns it once, over
-//!   `motion.spin`, when it is pressed, at up to 30 frames a second.
+//!   `motion.spin`, when it is pressed, and on and on while a read is out
+//!   (`set_refreshing`), at up to 30 frames a second.
 //!
-//! All three stand still with `gtk-enable-animations` off, and none ticks
-//! while it is not shown: GTK runs a widget's frame clock only while it is
-//! mapped.
+//! All three stand still with `gtk-enable-animations` off, following it
+//! live, and none ticks while it is not shown or its window is minimised
+//! or suspended (`glass_motion::keep_ticking`).
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
-use super::glass_motion::{self, Driver};
+use super::glass_motion::{self, keep_ticking};
 use super::style::brand_tokens::{map, tile};
 use super::tool_tile::{self, Colour};
 
@@ -61,9 +62,38 @@ pub fn refresh_angle(seconds: f64, reduce_motion: bool) -> f64 {
     (seconds.max(0.0) / tile::SPIN).min(1.0) * 360.0
 }
 
+/// `GlassRefreshButton.angle`: `elapsed` seconds after the press (or since
+/// the read began, with no press), one turn per `motion.spin`; while
+/// `refreshing` it keeps turning, otherwise it stops after one.
+pub fn refresh_turn(elapsed: f64, refreshing: bool, reduce_motion: bool) -> f64 {
+    if reduce_motion {
+        return 0.0;
+    }
+    let turns = elapsed.max(0.0) / tile::SPIN;
+    (if refreshing {
+        turns.fract()
+    } else {
+        turns.min(1.0)
+    }) * 360.0
+}
+
+/// `GlassRefreshButton.animates`: while a read is out, or the press's
+/// first turn is still completing.
+pub fn refresh_animates(refreshing: bool, completing_click: bool, reduce_motion: bool) -> bool {
+    !reduce_motion && (refreshing || completing_click)
+}
+
+/// The refresh icon's frame interval: the Mac's 30 fps timeline.
+pub const REFRESH_INTERVAL: f64 = 1.0 / 30.0;
+
 /// Draws the spinner at `angle` degrees, its top-left at the origin.
 pub fn draw_spinner(cr: &gtk::cairo::Context, angle: f64, dark: bool) {
-    let side = tile::SPINNER;
+    draw_spinner_sized(cr, tile::SPINNER, angle, dark);
+}
+
+/// Draws a `side`-point spinner (`GlassSpinner(size:)`): the ring grows,
+/// the stroke stays `spinnerStroke`.
+pub fn draw_spinner_sized(cr: &gtk::cairo::Context, side: f64, angle: f64, dark: bool) {
     let stroke = tile::SPINNER_STROKE;
     let centre = side / 2.0;
     let radius = (side - stroke) / 2.0;
@@ -107,71 +137,17 @@ pub fn draw_skeleton(cr: &gtk::cairo::Context, width: f64, dark: bool) {
     let _ = cr.fill();
 }
 
-/// Runs `frame(seconds)` on `widget`'s clock while it is shown and motion
-/// is wanted, at most once per `interval`; stopped, it draws `frame(0)`.
-fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + 'static) {
-    let frame = std::rc::Rc::new(frame);
-    let tick: std::rc::Rc<RefCell<Option<gtk::TickCallbackId>>> = Default::default();
-    let start = {
-        let frame = std::rc::Rc::clone(&frame);
-        let tick = std::rc::Rc::clone(&tick);
-        move |widget: &gtk::Widget| {
-            if let Some(id) = tick.borrow_mut().take() {
-                id.remove();
-            }
-            if !glass_motion::animations_enabled() {
-                frame(0.0);
-                return;
-            }
-            let frame = std::rc::Rc::clone(&frame);
-            let began = Cell::new(None::<i64>);
-            let last = Cell::new(f64::NEG_INFINITY);
-            *tick.borrow_mut() = Some(widget.add_tick_callback(move |_, clock| {
-                let now = clock.frame_time();
-                let start = *began.get().get_or_insert(now);
-                began.set(Some(start));
-                let seconds = (now - start) as f64 / 1_000_000.0;
-                if seconds - last.get() >= interval {
-                    last.set(seconds);
-                    frame(seconds);
-                }
-                glib::ControlFlow::Continue
-            }));
-        }
-    };
-    let on_map = start.clone();
-    widget.connect_map(move |widget| on_map(widget));
-    let stop = std::rc::Rc::clone(&tick);
-    widget.connect_unmap(move |_| {
-        if let Some(id) = stop.borrow_mut().take() {
-            id.remove();
-        }
-    });
-    if let Some(settings) = gtk::Settings::default() {
-        let weak = widget.downgrade();
-        let id = settings.connect_gtk_enable_animations_notify(move |_| {
-            if let Some(widget) = weak.upgrade()
-                && widget.is_mapped()
-            {
-                start(&widget);
-            }
-        });
-        let settings = settings.downgrade();
-        let id = RefCell::new(Some(id));
-        widget.connect_destroy(move |_| {
-            if let (Some(settings), Some(id)) = (settings.upgrade(), id.borrow_mut().take()) {
-                settings.disconnect(id);
-            }
-        });
-    }
-}
-
 /// The Mac's spinner as a widget. To assistive tech it is a progress bar
 /// with no value, as the stock spinner was.
 pub fn spinner() -> gtk::DrawingArea {
+    spinner_sized(tile::SPINNER)
+}
+
+/// `GlassSpinner(size:)`: the spinner on a `side`-point ring.
+pub fn spinner_sized(side: f64) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
-    area.set_content_width(tile::SPINNER as i32);
-    area.set_content_height(tile::SPINNER as i32);
+    area.set_content_width(side as i32);
+    area.set_content_height(side as i32);
     area.set_halign(gtk::Align::Start);
     area.set_valign(gtk::Align::Center);
     area.set_accessible_role(gtk::AccessibleRole::ProgressBar);
@@ -179,7 +155,9 @@ pub fn spinner() -> gtk::DrawingArea {
     let angle = std::rc::Rc::new(Cell::new(0.0));
     {
         let angle = std::rc::Rc::clone(&angle);
-        area.set_draw_func(move |_, cr, _, _| draw_spinner(cr, angle.get(), tool_tile::dark()));
+        area.set_draw_func(move |_, cr, _, _| {
+            draw_spinner_sized(cr, side, angle.get(), tool_tile::dark())
+        });
     }
     let weak = area.downgrade();
     keep_ticking(area.upcast_ref(), 1.0 / 60.0, move |seconds| {
@@ -190,6 +168,10 @@ pub fn spinner() -> gtk::DrawingArea {
     });
     area
 }
+
+/// The skeleton's frame interval: every frame. The Mac's pulse is a
+/// repeating Core Animation, which runs at the display's rate.
+pub const SKELETON_INTERVAL: f64 = 0.0;
 
 /// The Mac's skeleton bar, `width` wide, or the width offered for `None`.
 /// Hidden from assistive tech: the words beside it say what is loading.
@@ -206,9 +188,7 @@ pub fn skeleton(width: Option<i32>) -> gtk::DrawingArea {
     area.set_accessible_role(gtk::AccessibleRole::Presentation);
     area.set_draw_func(|_, cr, w, _| draw_skeleton(cr, f64::from(w), tool_tile::dark()));
     let weak = area.downgrade();
-    // The Mac's pulse is a repeating animation; 30 frames a second is
-    // plenty for an opacity this slow.
-    keep_ticking(area.upcast_ref(), 1.0 / 30.0, move |seconds| {
+    keep_ticking(area.upcast_ref(), SKELETON_INTERVAL, move |seconds| {
         if let Some(area) = weak.upgrade() {
             area.set_opacity(skeleton_opacity(
                 seconds,
@@ -225,7 +205,13 @@ mod turn {
     #[derive(Default)]
     pub struct Turn {
         pub angle: Cell<f64>,
-        pub driver: Driver,
+        /// The press, in frame-clock microseconds.
+        pub clicked: Cell<Option<i64>>,
+        /// Whether a read is out, and since when.
+        pub refreshing: Cell<bool>,
+        pub since: Cell<i64>,
+        pub tick: std::cell::RefCell<Option<gtk::TickCallbackId>>,
+        pub last: Cell<f64>,
     }
 
     #[glib::object_subclass]
@@ -236,6 +222,31 @@ mod turn {
     }
 
     impl ObjectImpl for Turn {
+        fn constructed(&self) {
+            self.parent_constructed();
+            // A read still out when the window comes back, or motion is
+            // turned back on, starts the icon turning again.
+            let obj = self.obj();
+            let weak = obj.downgrade();
+            glass_motion::on_window_state(&*obj, move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+            let weak = obj.downgrade();
+            glass_motion::on_animations_changed(&*obj, move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+            let weak = obj.downgrade();
+            obj.connect_map(move |_| {
+                if let Some(turn) = weak.upgrade() {
+                    turn.run();
+                }
+            });
+        }
+
         fn dispose(&self) {
             while let Some(child) = self.obj().first_child() {
                 child.unparent();
@@ -281,21 +292,93 @@ impl Turn {
 
     /// One turn, from the press.
     pub fn spin(&self) {
-        let weak = self.downgrade();
-        self.imp().driver.start(
-            self,
-            tile::SPIN,
-            1.0 / 30.0,
-            move |seconds| {
-                let Some(turn) = weak.upgrade() else { return };
-                // A full turn is where it began.
-                let angle = refresh_angle(seconds, false) % 360.0;
-                turn.imp().angle.set(angle);
-                turn.queue_allocate();
-            },
-            || {},
-        );
+        self.imp().clicked.set(Some(gtk::glib::monotonic_time()));
+        self.run();
     }
+
+    /// While `on`, the icon keeps turning (`isRefreshing`); off, it comes
+    /// to rest once any press's first turn is done.
+    pub fn set_refreshing(&self, on: bool) {
+        let imp = self.imp();
+        if imp.refreshing.replace(on) == on {
+            return;
+        }
+        if on {
+            imp.since.set(gtk::glib::monotonic_time());
+        }
+        self.run();
+    }
+
+    fn show(&self, angle: f64) {
+        if self.imp().angle.replace(angle) != angle {
+            self.queue_allocate();
+        }
+    }
+
+    /// Ticks at 30 fps while the icon should turn, in a window that can be
+    /// seen; otherwise rests.
+    fn run(&self) {
+        let imp = self.imp();
+        if imp.tick.borrow().is_some() {
+            return;
+        }
+        if !imp.refreshing.get() && imp.clicked.get().is_none() {
+            return;
+        }
+        if !glass_motion::animations_enabled() || glass_motion::window_hidden(self) {
+            imp.clicked.set(None);
+            self.show(0.0);
+            return;
+        }
+        imp.last.set(f64::NEG_INFINITY);
+        let id = self.add_tick_callback(|turn, clock| {
+            let imp = turn.imp();
+            let now = clock.frame_time();
+            let refreshing = imp.refreshing.get();
+            let elapsed = match imp.clicked.get() {
+                Some(at) => (now - at) as f64 / 1_000_000.0,
+                None if refreshing => (now - imp.since.get()) as f64 / 1_000_000.0,
+                None => 0.0,
+            };
+            let completing = imp.clicked.get().is_some() && elapsed < tile::SPIN;
+            let reduce = !glass_motion::animations_enabled() || glass_motion::window_hidden(turn);
+            if !refresh_animates(refreshing, completing, reduce) {
+                imp.clicked.set(None);
+                imp.tick.borrow_mut().take();
+                turn.show(0.0);
+                return gtk::glib::ControlFlow::Break;
+            }
+            if elapsed - imp.last.get() >= REFRESH_INTERVAL {
+                imp.last.set(elapsed);
+                // A full turn is where it began.
+                turn.show(refresh_turn(elapsed, refreshing, false) % 360.0);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+        *imp.tick.borrow_mut() = Some(id);
+    }
+}
+
+/// The Mac's refresh pill (`GlassRefreshPill`): the word, then the icon
+/// that turns. `title` is the word drawn, `name` its tooltip and
+/// accessible name; both are the caller's, from shared copy.
+pub fn refresh_pill(title: &str, name: &str) -> (gtk::Button, Turn) {
+    let icon = gtk::Image::from_icon_name("view-refresh-symbolic");
+    icon.set_accessible_role(gtk::AccessibleRole::Presentation);
+    let turn: Turn = glib::Object::new();
+    icon.set_parent(&turn);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    row.append(&gtk::Label::new(Some(title)));
+    row.append(&turn);
+    let button = gtk::Button::new();
+    button.set_child(Some(&row));
+    // A word and an icon: the toolkit's padding for one.
+    button.add_css_class("image-text-button");
+    button.set_tooltip_text(Some(name));
+    button.update_property(&[gtk::accessible::Property::Label(name)]);
+    let spinning = turn.clone();
+    button.connect_clicked(move |_| spinning.spin());
+    (button, turn)
 }
 
 /// A flat refresh button whose icon turns once when it is pressed. `name`
@@ -423,5 +506,155 @@ mod tests {
         assert_eq!(turn.angle(), 0.0);
         window.destroy();
         settings.set_gtk_enable_animations(true);
+    }
+
+    /// The Mac's map spinner is `GlassSpinner(size: 20)`: the same 1.5
+    /// stroke on a 20-point ring (`FlowMapView.loadingSpinner`).
+    #[test]
+    fn a_sized_spinner_keeps_the_stroke_on_a_larger_ring() {
+        let swift = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/Monitor/FlowMapView.swift"
+        );
+        assert!(swift.contains("static let loadingSpinner: CGFloat = 20"));
+        let s = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 80, 80).unwrap();
+        {
+            let cr = gtk::cairo::Context::new(&s).unwrap();
+            cr.scale(4.0, 4.0);
+            Colour::token(map::light::PANE_OPAQUE).set(&cr);
+            let _ = cr.paint();
+            draw_spinner_sized(&cr, 20.0, 0.0, false);
+        }
+        let mut s = s;
+        let stride = s.stride() as usize;
+        let data = s.data().unwrap();
+        let px = |x: f64, y: f64| {
+            let at = (y * 4.0) as usize * stride + (x * 4.0) as usize * 4;
+            [data[at + 2], data[at + 1], data[at]]
+        };
+        // Nine o'clock on the 9.25-point radius: the ring.
+        let ring = px(0.75, 10.0);
+        assert!(
+            ring.iter()
+                .zip([198, 199, 202])
+                .all(|(a, b)| a.abs_diff(b) <= 12),
+            "{ring:?}"
+        );
+        // Inside the ring: the ground, so the stroke stayed 1.5.
+        let inside = px(2.5, 10.0);
+        assert!(
+            inside
+                .iter()
+                .zip([242, 243, 246])
+                .all(|(a, b)| a.abs_diff(b) <= 3),
+            "{inside:?}"
+        );
+        // Just past three o'clock, clockwise: the arc.
+        let arc = px(19.0, 11.5);
+        assert!(
+            arc.iter()
+                .zip([60, 60, 67])
+                .all(|(a, b)| a.abs_diff(b) <= 40),
+            "{arc:?}"
+        );
+    }
+
+    /// No stock spinner is left where the Mac draws its own: the map's
+    /// loading spinner and the first run's Customize card.
+    #[test]
+    fn the_map_and_customize_use_the_glass_spinner() {
+        for (name, source) in [
+            ("first_run.rs", include_str!("first_run.rs")),
+            ("monitor/map.rs", include_str!("monitor/map.rs")),
+        ] {
+            assert!(
+                !source.contains("gtk::Spinner"),
+                "{name} still uses gtk::Spinner"
+            );
+        }
+    }
+
+    /// `GlassSkeleton`'s pulse is a repeating Core Animation, drawn at the
+    /// display's rate, so the bar's opacity is set every frame.
+    #[test]
+    fn the_skeleton_breathes_at_the_display_rate() {
+        assert_eq!(SKELETON_INTERVAL, 0.0);
+    }
+
+    /// `GlassRefreshButton.angle`: a fast answer still completes the
+    /// click's turn; while a read is out it keeps turning, a turn per
+    /// 0.8 s; none under reduced motion (Swift's own formula, read here).
+    #[test]
+    fn a_refresh_keeps_turning_while_it_reads() {
+        let swift = include_str!("../../../../macos/Sources/TCDesign/Components/Containers.swift");
+        assert!(swift.contains(
+            "return (isRefreshing ? turns.truncatingRemainder(dividingBy: 1) : min(turns, 1)) * 360"
+        ));
+        assert!(swift.contains("GlassAnimationTimeline(minimumInterval: 1 / 30,"));
+        assert_eq!(REFRESH_INTERVAL, 1.0 / 30.0);
+        assert!((refresh_turn(0.4, true, false) - 180.0).abs() < 1e-9);
+        assert!((refresh_turn(1.0, true, false) - 90.0).abs() < 1e-9);
+        assert!((refresh_turn(2.0, true, false) - 180.0).abs() < 1e-9);
+        assert_eq!(refresh_turn(1.0, false, false), 360.0);
+        assert_eq!(refresh_turn(1.0, true, true), 0.0);
+        assert!(refresh_animates(true, false, false));
+        assert!(refresh_animates(false, true, false));
+        assert!(!refresh_animates(false, false, false));
+        assert!(!refresh_animates(true, true, true));
+    }
+
+    /// The Mac's seven refresh controls that have a Linux surface turn
+    /// their icon: Managed sessions, Mission drafts and Settings' uses.
+    #[test]
+    fn the_refresh_controls_turn_their_icon() {
+        for (name, source) in [
+            ("managed_sessions.rs", include_str!("managed_sessions.rs")),
+            ("mission_drafts.rs", include_str!("mission_drafts.rs")),
+            ("consent_settings.rs", include_str!("consent_settings.rs")),
+        ] {
+            assert!(
+                source.contains("glass_feedback::refresh_button(")
+                    || source.contains("glass_feedback::refresh_pill("),
+                "{name} has no turning refresh"
+            );
+        }
+    }
+
+    /// While a read is out the icon keeps turning; when it ends the icon
+    /// comes to rest; with motion off it never turns.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_a_refresh_turns_until_its_read_ends() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let (button, turn) = refresh_pill("Refresh", "Refresh the list");
+        let window = gtk::Window::new();
+        window.set_child(Some(&button));
+        window.present();
+        let context = gtk::glib::MainContext::default();
+        let pump_for = |ms: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < until {
+                context.iteration(false);
+            }
+        };
+        turn.set_refreshing(true);
+        let mut angles = std::collections::BTreeSet::new();
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while std::time::Instant::now() < until {
+            context.iteration(false);
+            angles.insert((turn.angle() / 30.0) as i32);
+        }
+        assert!(angles.len() >= 6, "it did not keep turning: {angles:?}");
+        turn.set_refreshing(false);
+        pump_for(200);
+        assert_eq!(turn.angle(), 0.0, "it did not come to rest");
+        settings.set_gtk_enable_animations(false);
+        turn.set_refreshing(true);
+        pump_for(200);
+        assert_eq!(turn.angle(), 0.0, "motion off: still");
+        turn.set_refreshing(false);
+        settings.set_gtk_enable_animations(true);
+        window.destroy();
     }
 }

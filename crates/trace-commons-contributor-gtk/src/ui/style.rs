@@ -449,6 +449,9 @@ pub fn install() {
     // The Appearance choice. With Standard -- the default -- this changes
     // nothing above.
     super::appearance::start();
+
+    // The Mac's modal fade and scrim, on every confirmation the shell raises.
+    super::modal_motion::install();
 }
 
 thread_local! {
@@ -533,10 +536,11 @@ fn stylesheet_for(dark: bool, translucent: bool) -> String {
         brand_tokens::INSIGHTS_LIGHT_CSS
     };
     let mut sheet = format!(
-        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}",
+        "{brand}\n{glass}\n{tokens}\n{}\n{}\n{insights}\n{}\n{}",
         first_run_glow_css(),
         include_str!("style.css"),
-        super::hero_art::css()
+        super::hero_art::css(),
+        super::motion_css::css(dark)
     );
     if translucent {
         let (glass, insights) = if dark {
@@ -619,13 +623,14 @@ pub(crate) fn omarchy_stylesheet(palette: &omarchy::Palette) -> String {
         palette.tertiary.hex(),
     );
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{scoped}\n{}",
         define(brand),
         define(glass),
         define(tokens),
         define(&first_run_glow_css()),
         include_str!("style.css"),
         recolour_insights(insights, palette, dark),
+        super::motion_css::css(dark),
     )
 }
 

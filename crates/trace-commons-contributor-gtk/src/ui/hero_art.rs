@@ -151,9 +151,26 @@ pub fn gradient_points(angle: f64, width: f64, height: f64) -> ((f64, f64), (f64
     )
 }
 
+/// The hover wash's alpha `amount` of the way in: heroInk at `card::HOVER`
+/// when whole (`HeroCard.swift`'s wash fading in over `motion.fast`).
+pub fn wash_alpha(amount: f64) -> f64 {
+    card::HOVER * amount.clamp(0.0, 1.0)
+}
+
 /// The card's ground: its gradient, and under the pointer heroInk at
 /// `card::HOVER` over it. The caller clips to the card first.
 pub fn paint_ground(cr: &cairo::Context, width: f64, height: f64, ground: Ground, hover: bool) {
+    paint_ground_washed(cr, width, height, ground, if hover { 1.0 } else { 0.0 });
+}
+
+/// The ground with the hover wash `wash` of the way in (0 to 1).
+pub fn paint_ground_washed(
+    cr: &cairo::Context,
+    width: f64,
+    height: f64,
+    ground: Ground,
+    wash: f64,
+) {
     let (angle, stops) = ground.token();
     let ((x0, y0), (x1, y1)) = gradient_points(angle as f64, width, height);
     let gradient = cairo::LinearGradient::new(x0, y0, x1, y1);
@@ -164,8 +181,8 @@ pub fn paint_ground(cr: &cairo::Context, width: f64, height: f64, ground: Ground
     let _ = cr.set_source(&gradient);
     cr.rectangle(0.0, 0.0, width, height);
     let _ = cr.fill();
-    if hover {
-        Rgb::hex(tokens::HERO_INK).source(cr, card::HOVER);
+    if wash > 0.0 {
+        Rgb::hex(tokens::HERO_INK).source(cr, wash_alpha(wash));
         cr.rectangle(0.0, 0.0, width, height);
         let _ = cr.fill();
     }
@@ -176,9 +193,23 @@ pub fn paint_ground(cr: &cairo::Context, width: f64, height: f64, ground: Ground
 /// not the pixel glyph (the Insights hero's bars, which are widgets).
 pub fn paint_card(
     cr: &cairo::Context,
-    (width, height): (f64, f64),
+    size: (f64, f64),
     ground: Ground,
     hover: bool,
+    mask: Option<&glyph::Mask>,
+    dark: bool,
+    time: f64,
+) {
+    let wash = if hover { 1.0 } else { 0.0 };
+    paint_card_washed(cr, size, ground, wash, mask, dark, time);
+}
+
+/// `paint_card` with the hover wash `wash` of the way in (0 to 1).
+pub fn paint_card_washed(
+    cr: &cairo::Context,
+    (width, height): (f64, f64),
+    ground: Ground,
+    wash: f64,
     mask: Option<&glyph::Mask>,
     dark: bool,
     time: f64,
@@ -186,7 +217,7 @@ pub fn paint_card(
     let _ = cr.save();
     rounded(cr, 0.0, 0.0, width, height, card::RADIUS);
     cr.clip();
-    paint_ground(cr, width, height, ground, hover);
+    paint_ground_washed(cr, width, height, ground, wash);
     if let Some(mask) = mask {
         glyph::paint_symbol(cr, width, height, mask, dark, time);
     }

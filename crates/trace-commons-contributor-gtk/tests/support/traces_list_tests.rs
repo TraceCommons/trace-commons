@@ -308,7 +308,7 @@ fn mounted_the_folder_list_is_the_macs() {
     seen.clear();
     let switch = with_class(&with_class(&page, "tc-tree-row")[0], "tc-tree-switch").remove(0);
     switch
-        .downcast_ref::<gtk::Switch>()
+        .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
         .unwrap()
         .set_active(true);
     settle(&context);
@@ -323,7 +323,10 @@ fn mounted_the_folder_list_is_the_macs() {
     );
     let switch = with_class(&with_class(&page, "tc-tree-row")[0], "tc-tree-switch").remove(0);
     assert!(
-        !switch.downcast_ref::<gtk::Switch>().unwrap().is_active(),
+        !switch
+            .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+            .unwrap()
+            .is_active(),
         "the switch shows the daemon's mode"
     );
 

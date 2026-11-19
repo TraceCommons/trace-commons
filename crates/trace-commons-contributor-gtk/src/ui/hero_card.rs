@@ -29,6 +29,8 @@ use super::style::brand_tokens::glass::space;
 struct Paint {
     ground: Ground,
     hover: Cell<bool>,
+    /// The hover wash, 0 to 1, fading over `HOVER_FADE`.
+    wash: super::glass_motion::Tween,
     mask: RefCell<Option<Mask>>,
     /// The clock's first frame, so the graphic's time starts at 0.
     epoch: Cell<Option<i64>>,
@@ -58,6 +60,26 @@ pub struct HeroCard {
     words: glib::WeakRef<gtk::Box>,
 }
 
+/// How long the hover wash takes: `GlassMotion.fast`.
+pub const HOVER_FADE: f64 = super::style::brand_tokens::motion::FAST;
+
+/// The pointer entering or leaving: the wash fades on the token curve.
+fn fade_hover(paint: &Paint, canvas: &gtk::DrawingArea, hover: bool) {
+    paint.hover.set(hover);
+    let weak = canvas.downgrade();
+    paint.wash.to(
+        canvas,
+        if hover { 1.0 } else { 0.0 },
+        HOVER_FADE,
+        super::glass_motion::curve,
+        move |_| {
+            if let Some(canvas) = weak.upgrade() {
+                canvas.queue_draw();
+            }
+        },
+    );
+}
+
 /// Whether this desktop wants motion.
 pub fn animations_enabled() -> bool {
     gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations())
@@ -74,6 +96,7 @@ impl HeroCard {
         let paint = Rc::new(Paint {
             ground,
             hover: Cell::new(false),
+            wash: super::glass_motion::Tween::new(0.0),
             mask: RefCell::new(None),
             epoch: Cell::new(None),
             last: Cell::new(0),
@@ -90,11 +113,11 @@ impl HeroCard {
             canvas.set_draw_func(move |area, cr, width, height| {
                 let dark = adw::StyleManager::default().is_dark();
                 let _ = area;
-                hero_art::paint_card(
+                hero_art::paint_card_washed(
                     cr,
                     (width as f64, height as f64),
                     paint.ground,
-                    paint.hover.get(),
+                    paint.wash.value(),
                     paint.mask.borrow().as_ref(),
                     dark,
                     paint.time.get(),
@@ -178,18 +201,12 @@ impl HeroCard {
         {
             let paint = Rc::clone(&paint);
             let canvas = canvas.clone();
-            motion.connect_enter(move |_, _, _| {
-                paint.hover.set(true);
-                canvas.queue_draw();
-            });
+            motion.connect_enter(move |_, _, _| fade_hover(&paint, &canvas, true));
         }
         {
             let paint = Rc::clone(&paint);
             let canvas = canvas.clone();
-            motion.connect_leave(move |_| {
-                paint.hover.set(false);
-                canvas.queue_draw();
-            });
+            motion.connect_leave(move |_| fade_hover(&paint, &canvas, false));
         }
         button.add_controller(motion);
 
@@ -261,10 +278,23 @@ impl HeroCard {
         self.graphic.borrow().clone()
     }
 
-    /// Hover as the pointer leaves it: for a test or a capture.
+    /// Hover as the pointer leaves it, at once: for a test or a capture.
     pub fn set_hover(&self, hover: bool) {
         self.paint.hover.set(hover);
-        self.canvas.queue_draw();
+        let canvas = self.canvas.clone();
+        self.paint
+            .wash
+            .set(if hover { 1.0 } else { 0.0 }, move |_| canvas.queue_draw());
+    }
+
+    /// Hover as the pointer gives it: the wash fades.
+    pub fn hover_to(&self, hover: bool) {
+        fade_hover(&self.paint, &self.canvas, hover);
+    }
+
+    /// How far the hover wash is in, 0 to 1.
+    pub fn wash(&self) -> f64 {
+        self.paint.wash.value()
     }
 
     pub fn is_hovered(&self) -> bool {
@@ -292,7 +322,13 @@ impl HeroCard {
                 if let Some(id) = timer.borrow_mut().take() {
                     id.remove();
                 }
-                if !area.is_mapped() || !animations_enabled() || paint.mask.borrow().is_none() {
+                // Held, too, while its window is minimised or suspended:
+                // the Mac's timelines stop when their window cannot be seen.
+                if !area.is_mapped()
+                    || !animations_enabled()
+                    || paint.mask.borrow().is_none()
+                    || super::glass_motion::window_hidden(&area)
+                {
                     paint.time.set(0.0);
                     paint.epoch.set(None);
                     area.queue_draw();
@@ -323,6 +359,10 @@ impl HeroCard {
         {
             let start = Rc::clone(&start);
             self.canvas.connect_map(move |_| start());
+        }
+        {
+            let start = Rc::clone(&start);
+            super::glass_motion::on_window_state(&self.canvas, move |_| start());
         }
         {
             let timer = Rc::clone(&timer);
@@ -480,5 +520,59 @@ mod tests {
         assert!(!hero.is_ticking());
         window.close();
         settings.set_gtk_enable_animations(previous);
+    }
+
+    /// `GlassHeroCard`: the hover wash fades over `motion.fast` on the
+    /// token curve (`withAnimation(GlassMotion.fast) { hovering = inside }`),
+    /// its amount `card::HOVER` (6%) of heroInk at the end.
+    #[test]
+    fn the_hover_wash_fades_over_the_macs_fast_curve() {
+        let swift = include_str!("../../../../macos/Sources/TCDesign/Components/HeroCard.swift");
+        assert!(
+            swift.contains("withAnimation(GlassMotion.fast(reduceMotion)) { hovering = inside }")
+        );
+        assert!(swift.contains("shape.fill(GlassTokens.Color.heroInk.color.opacity(0.06))"));
+        assert_eq!(HOVER_FADE, super::super::style::brand_tokens::motion::FAST);
+        assert_eq!(hero_art::wash_alpha(0.0), 0.0);
+        assert!((hero_art::wash_alpha(1.0) - 0.06).abs() < 1e-12);
+        assert!((hero_art::wash_alpha(0.5) - 0.03).abs() < 1e-12);
+    }
+
+    /// Entering fades the wash through the middle to whole; with motion off
+    /// it is whole at once.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_hover_wash_fades_in_and_out() {
+        gtk::init().unwrap();
+        let settings = gtk::Settings::default().unwrap();
+        settings.set_gtk_enable_animations(true);
+        let hero = HeroCard::new(Ground::Campaign, "Title", None, Some("Act"), None);
+        let window = gtk::Window::new();
+        window.set_child(Some(&hero.root));
+        window.present();
+        let context = glib::MainContext::default();
+        let pump_until = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !done() && std::time::Instant::now() < deadline {
+                context.iteration(false);
+            }
+        };
+        pump_until(&|| hero.canvas.is_mapped());
+        hero.hover_to(true);
+        let between = Cell::new(false);
+        pump_until(&|| {
+            let w = hero.wash();
+            between.set(between.get() || (w > 0.0 && w < 1.0));
+            w == 1.0
+        });
+        assert!(between.get(), "the wash snapped on");
+        hero.hover_to(false);
+        pump_until(&|| hero.wash() == 0.0);
+        assert_eq!(hero.wash(), 0.0);
+        settings.set_gtk_enable_animations(false);
+        hero.hover_to(true);
+        assert_eq!(hero.wash(), 1.0, "motion off: at once");
+        settings.set_gtk_enable_animations(true);
+        window.destroy();
     }
 }

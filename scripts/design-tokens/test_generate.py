@@ -594,5 +594,46 @@ class FirstRunStageTokensTests(unittest.TestCase):
         self.assertIn("pub const EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0];", rendered)
 
 
+class MotionTokensTests(unittest.TestCase):
+    """`brand_tokens::motion`: every `GlassTokens.Motion` value and the two
+    springs `GlassMotion.swift` hard-codes, so the GTK shell's motion reads
+    the Mac's numbers rather than copies of them."""
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+
+    def test_motion_module_is_the_macs(self):
+        rendered = "\n".join(generate.render_motion_rust(
+            self.tokens, generate.parse_springs(generate.GLASS_MOTION.read_text())))
+        for line in ("FAST: f64 = 0.15", "STANDARD: f64 = 0.22", "SLOW: f64 = 0.3",
+                     "REVEAL: f64 = 0.18", "SLIDE: f64 = 0.25", "SPIN: f64 = 0.8",
+                     "PULSE: f64 = 1.6",
+                     "EASE: [f64; 4] = [0.2, 0.8, 0.2, 1.0]",
+                     "SPATIAL: (f64, f64) = (0.9, 0.04)",
+                     "EXPRESSIVE: (f64, f64) = (0.78, 0.32)"):
+            self.assertIn(f"pub const {line};", rendered)
+        self.assertIn('pub const EASE_CSS: &str = "cubic-bezier(0.2, 0.8, 0.2, 1)";', rendered)
+        self.assertIn("pub mod motion {", rendered)
+
+    def test_springs_are_read_from_the_swift(self):
+        springs = generate.parse_springs(generate.GLASS_MOTION.read_text())
+        self.assertEqual(springs, {"spatial": (0.9, 0.04), "expressive": (0.78, 0.32)})
+
+    def test_a_spring_missing_from_the_swift_is_refused(self):
+        source = generate.GLASS_MOTION.read_text().replace("func expressive", "func renamed")
+        with self.assertRaisesRegex(generate.TokenError, "expressive"):
+            generate.parse_springs(source)
+
+    def test_the_modal_scrim_it_fades_is_the_flat_themes(self):
+        rendered = "\n".join(generate.render_motion_rust(
+            self.tokens, generate.parse_springs(generate.GLASS_MOTION.read_text())))
+        self.assertIn("pub const MODAL_SCRIM_BLUR: f64 = 8.0;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_LIGHT: f64 = 0.25;", rendered)
+        self.assertIn("pub const MODAL_SCRIM_DARK: f64 = 0.4;", rendered)
+
+    def test_the_gtk_output_carries_the_motion_module(self):
+        self.assertIn("pub mod motion {", generate.render_gtk(self.tokens))
+
+
 if __name__ == '__main__':
     unittest.main()

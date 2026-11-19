@@ -97,7 +97,7 @@ pub struct PrivateInferenceView {
     pub funding: crate::ui::funding::FundingSection,
     /// What was asked for. Insensitive until the daemon's own answer has
     /// arrived, so a press cannot write a value nothing confirmed.
-    switch: gtk::Switch,
+    switch: super::glass_switch::GlassSwitch,
     /// What the listener is actually doing: one toned sentence, and the
     /// serving line under it when there is a port. Rebuilt on each render.
     status: gtk::Box,
@@ -180,7 +180,8 @@ impl PrivateInferenceView {
             .hexpand(true)
             .build();
         label.add_css_class("tc-body");
-        let switch = gtk::Switch::builder().halign(gtk::Align::End).build();
+        let switch = super::glass_switch::GlassSwitch::new();
+        switch.set_halign(gtk::Align::End);
         switch.set_sensitive(false);
         switch.set_valign(gtk::Align::Center);
         switch.update_property(&[gtk::accessible::Property::Label(
@@ -213,6 +214,7 @@ impl PrivateInferenceView {
             .label(copy::PRIVATE_INFERENCE_TITLE)
             .child(&card)
             .build();
+        super::glass_motion::expander(&expander);
         service.append(&expander);
         service.append(&status);
         content.append(&service);
@@ -523,6 +525,7 @@ fn harness_card(app: &Rc<App>, row: &crate::model::Harness) -> gtk::Box {
         .label(copy::HARNESS_PREVIEW_TITLE)
         .expanded(false)
         .build();
+    super::glass_motion::expander(&details);
     let settings = gtk::Box::new(gtk::Orientation::Vertical, space::M);
     settings.set_margin_top(space::S);
     for text in row

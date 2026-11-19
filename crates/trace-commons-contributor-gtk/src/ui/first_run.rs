@@ -879,8 +879,9 @@ impl Coordinator {
         }
         self.update_uses_action();
         clear(&self.customize_box);
-        let spinner = gtk::Spinner::new();
-        spinner.start();
+        // Centred, where the stock spinner it replaced drew.
+        let spinner = super::glass_feedback::spinner();
+        spinner.set_halign(gtk::Align::Center);
         self.customize_box.append(&spinner);
         self.sync_tools();
         self.commit(
@@ -1004,6 +1005,7 @@ impl Coordinator {
                         .label(copy.rules.past_sessions)
                         .child(&history)
                         .build();
+                    super::glass_motion::disclosure(&more);
                     more.connect_expanded_notify({
                         let weak = Rc::downgrade(&c);
                         let id = project.project_id.clone();

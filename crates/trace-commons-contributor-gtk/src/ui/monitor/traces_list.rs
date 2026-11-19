@@ -707,9 +707,7 @@ pub fn folder_row(app: &Rc<App>, folder: &FolderNode, open: bool, selected: bool
     // The Automatic switch, or its empty column so every Submit lines up.
     match automatic_switch(folder) {
         Some(on) => {
-            let switch = gtk::Switch::new();
-            switch.set_active(on);
-            switch.add_css_class("tc-tree-switch");
+            let switch = super::super::glass_switch::GlassSwitch::watch(on);
             switch.set_valign(gtk::Align::Center);
             let name = words
                 .tree
