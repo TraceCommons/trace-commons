@@ -129,12 +129,13 @@ Start-Process -FilePath $git -ArgumentList '/VERYSILENT', '/NORESTART', '/NOCANC
 Write-Log 'Git installed'
 
 # ---------------------------------------------------------------------------
-# Console-session hygiene, for screen captures.
+# Console-session hygiene, for window captures.
 #
-# win-capture.ps1 photographs the auto-logged-on console session, so anything
-# that opens there on its own ends up in every capture. Server Manager opens at
-# every admin logon on Windows Server, and the network discovery prompt opens
-# on first logon. Both are switched off machine-wide.
+# win-capture.ps1 launches the app in the auto-logged-on console session and
+# captures its window there. Anything that opens in that session on its own
+# can take the foreground or cover the app. Server Manager opens at every
+# admin logon on Windows Server, and the network discovery prompt opens on
+# first logon. Both are switched off machine-wide.
 # ---------------------------------------------------------------------------
 Write-Log 'Disabling Server Manager at logon and the network discovery prompt'
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\ServerManager' -Name DoNotOpenServerManagerAtLogon `
@@ -143,8 +144,8 @@ Get-ScheduledTask -TaskName 'ServerManager' -ErrorAction SilentlyContinue |
     Disable-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
 New-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\NewNetworkWindowOff' -Force | Out-Null
 # Windows Server 2025 opens a full-screen "Send diagnostic data to Microsoft"
-# page at a user's first logon, on top of everything, so the first capture
-# photographs that page instead of the app. This policy skips it without
+# page at a user's first logon, on top of everything, so the app launched by
+# the first capture opens behind it and never gets the foreground. This policy skips it without
 # answering it on anyone's behalf.
 New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Force | Out-Null
 New-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OOBE' -Name DisablePrivacyExperience `
