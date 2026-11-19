@@ -74,6 +74,9 @@ pub struct PrivateInferenceView {
     /// The terminal the last managed snapshot named, for the line a launch
     /// refused as not found shows.
     pub(super) managed_destination: std::cell::RefCell<Option<String>>,
+    /// Managed sessions' refresh glyph, kept across the list's rebuilds so
+    /// the turn a press starts is not cut off when the answer redraws it.
+    pub(super) managed_refresh: std::cell::OnceCell<gtk::Button>,
     /// What today's calls cost, and what that figure leaves out. Emptied
     /// and refilled on every render for the same reason the list is: an
     /// amount a later read could not measure must go, not linger.
@@ -239,6 +242,7 @@ impl PrivateInferenceView {
             managed_revision: std::cell::Cell::new(0),
             near_ai_signed_in: std::cell::Cell::new(None),
             managed_destination: std::cell::RefCell::new(None),
+            managed_refresh: std::cell::OnceCell::new(),
             spend,
             harnesses,
             credential,

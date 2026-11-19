@@ -183,6 +183,7 @@ else
     ui::service_dialog::tests::mounted_commands_wrap_without_a_drawn_hyphen \
     ui::service_dialog::tests::mounted_a_narrow_command_fits_and_wraps_only_between_runs \
     ui::managed_sessions::mounted_tests::mounted_sandbox_start_area_shows_unavailable_and_set_up \
+    ui::managed_sessions::mounted_tests::mounted_the_refresh_glyph_keeps_its_turn_across_a_rebuild \
     ui::home::tests::home_links_and_failed_reads_preserve_unknowns \
     ui::home::tests::the_heroes_show_and_close_as_the_macs_do \
     ui::home::tests::mounted_home_draws_the_macs_tiles \

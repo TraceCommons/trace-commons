@@ -624,6 +624,65 @@ mod tests {
         }
     }
 
+    /// The Mac keeps an icon turning only where it passes `isRefreshing`:
+    /// Insights' per-login subscription refresh and the inference
+    /// balance card, neither of which has a Linux surface yet. Its
+    /// Managed sessions, Mission drafts and Consent buttons turn once per
+    /// press, so the Linux ones do too: none of them holds a read open.
+    #[test]
+    fn only_the_macs_long_reads_keep_turning() {
+        for (name, swift, call) in [
+            (
+                "ManagedSessionsView.swift",
+                include_str!(
+                    "../../../../macos/Sources/TraceCommonsApp/Views/ManagedSessionsView.swift"
+                ),
+                "GlassRefreshButton(model.managedText(\"refresh\"))",
+            ),
+            (
+                "MissionDraftsView.swift",
+                include_str!(
+                    "../../../../macos/Sources/TraceCommonsApp/Views/MissionDraftsView.swift"
+                ),
+                "GlassRefreshButton(model.text(\"refresh\")",
+            ),
+            (
+                "ConsentSection.swift",
+                include_str!(
+                    "../../../../macos/Sources/TraceCommonsApp/Views/Settings/ConsentSection.swift"
+                ),
+                "GlassRefreshButton(SettingsLegacyWords.refreshUses",
+            ),
+        ] {
+            let line = swift
+                .lines()
+                .find(|line| line.contains(call))
+                .unwrap_or_else(|| panic!("{name} has no {call}"));
+            assert!(
+                !line.contains("isRefreshing"),
+                "{name} now keeps turning: {line}"
+            );
+        }
+        for (name, source) in [
+            ("managed_sessions.rs", include_str!("managed_sessions.rs")),
+            ("mission_drafts.rs", include_str!("mission_drafts.rs")),
+            ("consent_settings.rs", include_str!("consent_settings.rs")),
+        ] {
+            assert!(
+                !source.contains("set_refreshing("),
+                "{name} keeps turning, the Mac's does not"
+            );
+        }
+        let usage = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/InsightsUsageCards.swift"
+        );
+        assert!(usage.contains("isRefreshing: subscriptions?.isRefreshing("));
+        let balance = include_str!(
+            "../../../../macos/Sources/TraceCommonsApp/Views/Monitor/InferenceAccount.swift"
+        );
+        assert!(balance.contains("isRefreshing: model.balanceRefreshing"));
+    }
+
     /// While a read is out the icon keeps turning; when it ends the icon
     /// comes to rest; with motion off it never turns.
     #[test]
