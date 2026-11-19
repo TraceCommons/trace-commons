@@ -18,8 +18,9 @@ namespace TraceCommons.App.Controls;
 /// In the notice stack the stack's own X closes it; at the map's foot it
 /// carries its own.
 /// </summary>
-internal sealed class TransferCardView : Border
+internal sealed class TransferCardView : UserControl
 {
+    private readonly Border _frame = new();
     private readonly ToolMarkView _coin = new();
     private readonly TextBlock _title = new() { FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _tag = new() { VerticalAlignment = VerticalAlignment.Center };
@@ -39,9 +40,11 @@ internal sealed class TransferCardView : Border
 
     public TransferCardView(Style? closeStyle)
     {
-        BorderThickness = new Thickness(1);
-        CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"];
-        Padding = new Thickness(14, 12, 14, 12);
+        IsTabStop = false;
+        _frame.BorderThickness = new Thickness(1);
+        _frame.CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"];
+        _frame.Padding = new Thickness(14, 12, 14, 12);
+        Content = _frame;
 
         _title.Style = Style("TcBodyTextStyle");
         _tag.Style = Style("TcCaptionTextStyle");
@@ -110,7 +113,7 @@ internal sealed class TransferCardView : Border
         _details.Header = MonitorWords.NoticeDetails;
         _details.Content = new StackPanel { Spacing = 8, Children = { _memory, _note } };
 
-        Child = new StackPanel { Spacing = 8, Children = { head, summary, _details } };
+        _frame.Child = new StackPanel { Spacing = 8, Children = { head, summary, _details } };
         ApplyBrushes();
         ActualThemeChanged += (_, _) => ApplyBrushes();
     }
@@ -120,8 +123,8 @@ internal sealed class TransferCardView : Border
     /// <summary>The theme's brushes, again on a theme change (code cannot hold a ThemeResource).</summary>
     private void ApplyBrushes()
     {
-        Background = Brush("TcSurfaceCardBrush");
-        BorderBrush = Brush("TcHairlineBrush");
+        _frame.Background = Brush("TcSurfaceCardBrush");
+        _frame.BorderBrush = Brush("TcHairlineBrush");
         _eyebrow.Foreground = Brush("TcInkTertiaryBrush");
         _time.Foreground = Brush("TcInkSecondaryBrush");
         _stays.Foreground = Brush("TcInkSecondaryBrush");
