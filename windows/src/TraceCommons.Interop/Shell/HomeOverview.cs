@@ -17,10 +17,18 @@ public enum HomeLink
     MissionDrafts,
     Insights,
     Campaign,
+    MissionCatalogue,
+    Settings,
 }
 
 /// <summary>A hero card as Home draws it.</summary>
 public sealed record HomeHero(HomeGround Ground, string Title, string? Subtitle, string? Action, string? Symbol, bool Closes, HomeLink Link);
+
+/// <summary>A Home line with one action, as the no-credit reminder draws it (NoCreditNotice.swift).</summary>
+public sealed record HomeNotice(string Line, string Action);
+
+/// <summary>A Home card that is a way into a screen (<c>hostedCard</c>, HomeViews.swift:313-321): its title and the core's subtitle.</summary>
+public sealed record HomeCard(string Title, string? Subtitle, HomeLink Link);
 
 /// <summary>Which hero ground, mirrored from <see cref="HeroGround"/> so the record stays a plain value.</summary>
 public enum HomeGround
@@ -41,11 +49,10 @@ public enum HomeGround
 /// the account total under it, Credit pending, the NEAR AI balance), then the
 /// three hero cards on the Mac's solid navy grounds (the compiled campaign,
 /// Missions while missions are on, Insights once its heading has loaded).
-/// Not drawn, and listed for the owner because each would be a card or line
-/// new to Windows: the walkthrough card (W11-D2 (a): left out), the Private
-/// AI section's row and sign-in card, the Account heading's sign-in, the
-/// no-credit line, the sent-traces training line and the mission catalogue
-/// card.
+/// Also the no-credit line under the Traces heading and the mission
+/// catalogue's card, ported with the Mac's conditions (cards new to Windows,
+/// approved as a class 2026-11-19). The walkthrough card is left out
+/// (W11-D2 (a)).
 /// </remarks>
 public sealed record HomeOverviewModel(
     string TracesHeading,
@@ -54,7 +61,9 @@ public sealed record HomeOverviewModel(
     IReadOnlyList<HomeTile> AccountTiles,
     IReadOnlyList<HomeHero> Heroes,
     IReadOnlyList<GlanceBar> InsightsBars,
-    string? InsightsLine)
+    string? InsightsLine,
+    HomeNotice? NoCredit = null,
+    HomeCard? Catalogue = null)
 {
     /// <summary>The figure rules, the core's (<c>tc_count_figure</c>, <c>tc_credit_figure</c>), handed in so tests need no library.</summary>
     public sealed record Figures(Func<ulong, string?> Count, Func<double, string?> Credit, Func<long?, byte?, string> Amount);
@@ -72,7 +81,11 @@ public sealed record HomeOverviewModel(
         bool MissionsOn,
         int? MissionDrafts,
         string? InsightsHeading,
-        string? InsightsIntro);
+        string? InsightsIntro,
+        bool CatalogueRead = false);
+
+    /// <summary>The data use that earns credit (<c>SentTracesTrainingState.scope</c>).</summary>
+    public const string ModelTrainingScope = "model_training";
 
     /// <summary>States that have left, or are leaving, this machine (HomeViews.swift:1889).</summary>
     private static readonly HashSet<string> Gone = new(StringComparer.Ordinal) { "uploading", "uploaded" };
@@ -133,6 +146,23 @@ public sealed record HomeOverviewModel(
                 : NonEmpty(home("insights_today"))?.Replace("{total}", Compact(bars.Aggregate(0UL, (sum, b) => sum + b.Tokens)), StringComparison.Ordinal);
         }
 
+        // Under the Traces heading while Train coding models is off, for a
+        // signed-in account (NoCreditNotice.showsOnHome, HomeViews.swift:448-453).
+        HomeNotice? noCredit = null;
+        if (reads.Status is { LoggedIn: true } status
+            && !status.ConsentScopes.Contains(ModelTrainingScope)
+            && NonEmpty(home("no_credit_body")) is string line
+            && NonEmpty(home("no_credit_open_settings")) is string openSettings)
+        {
+            noCredit = new HomeNotice(line, openSettings);
+        }
+
+        // After the heroes, the catalogue's way in, while missions are on and
+        // the catalogue was read (HomeViews.swift:274-277).
+        HomeCard? catalogue = reads.MissionsOn && reads.CatalogueRead && HomeFacts.CardHeading(home("mission_catalogue")) is string title
+            ? new HomeCard(title, NonEmpty(home("catalogue_subtitle")), HomeLink.MissionCatalogue)
+            : null;
+
         return new HomeOverviewModel(
             home("section_traces"),
             home("section_account"),
@@ -140,7 +170,9 @@ public sealed record HomeOverviewModel(
             accountTiles,
             heroes,
             bars,
-            insightsLine);
+            insightsLine,
+            noCredit,
+            catalogue);
     }
 
     /// <summary>
@@ -154,6 +186,8 @@ public sealed record HomeOverviewModel(
         && TracesHeading == other.TracesHeading
         && AccountHeading == other.AccountHeading
         && InsightsLine == other.InsightsLine
+        && NoCredit == other.NoCredit
+        && Catalogue == other.Catalogue
         && TraceTiles.SequenceEqual(other.TraceTiles)
         && AccountTiles.SequenceEqual(other.AccountTiles)
         && Heroes.SequenceEqual(other.Heroes)

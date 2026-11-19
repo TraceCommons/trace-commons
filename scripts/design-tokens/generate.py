@@ -1704,7 +1704,7 @@ def render_windows_home_tray(tokens: dict) -> str:
     out.append("    public static class Measures")
     out.append("    {")
     for section, names in (("radius", ["card", "cardQuiet", "control", "pill"]),
-                           ("space", ["s1", "s2", "s3", "s4", "cardGap", "cardPaddingHorizontal", "panePadding"])):
+                           ("space", ["s1", "s2", "s3", "s4", "s5", "cardGap", "cardPaddingHorizontal", "panePadding"])):
         for name in names:
             value = flat_value(tokens, section, name, "dark")
             if value != flat_value(tokens, section, name, "light"):

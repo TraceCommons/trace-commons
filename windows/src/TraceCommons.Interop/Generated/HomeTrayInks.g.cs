@@ -37,6 +37,7 @@ public static class HomeTrayInks
         public const double S2 = 4.0;
         public const double S3 = 6.0;
         public const double S4 = 8.0;
+        public const double S5 = 10.0;
         public const double CardGap = 10.0;
         public const double CardPaddingHorizontal = 14.0;
         public const double PanePadding = 12.0;

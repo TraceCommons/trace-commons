@@ -101,6 +101,13 @@ public sealed partial class MainWindow
         ApplyEdgeRail();
     }
 
+    /// <summary>Whether the commons' catalogue was read and decodes, as main's way in on Home asks (<see cref="ApplyMissionCatalogueEntry"/>).</summary>
+    private bool MissionCatalogueRead()
+    {
+        (MissionRead read, string? json) = _host.MissionCatalogue();
+        return MissionPage.Settle(read, json, MonitorShellCopy.Top).Catalogue is not null;
+    }
+
     private void OnHomeLink(HomeLink link)
     {
         switch (link)
@@ -119,6 +126,14 @@ public sealed partial class MainWindow
                 break;
             case HomeLink.MissionDrafts:
                 OnShowMissionDrafts(this, new RoutedEventArgs());
+                break;
+            case HomeLink.MissionCatalogue:
+                OnShowMissions(this, new RoutedEventArgs());
+                break;
+            case HomeLink.Settings:
+                // The Mac opens Settings at the data uses; this shell's
+                // Settings window has no section to open at yet.
+                ShowSettingsWindow();
                 break;
             case HomeLink.Campaign:
                 if (_campaign is Campaign campaign && Uri.TryCreate(campaign.ActionUrl, UriKind.Absolute, out Uri? url))
@@ -222,7 +237,8 @@ public sealed partial class MainWindow
             ViewModel.MissionsShown,
             null,
             _insightsHeading,
-            _insightsIntro);
+            _insightsIntro,
+            ViewModel.MissionsShown && MissionCatalogueRead());
         PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
         _homeModel = HomeOverviewModel.From(
             reads,

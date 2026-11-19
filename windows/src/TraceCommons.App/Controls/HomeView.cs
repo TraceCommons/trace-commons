@@ -151,7 +151,7 @@ public sealed class HomeView : UserControl
         _balanceValue = null;
         _balanceTile = null;
 
-        AddSection(model.TracesHeading, model.TraceTiles, HomeLink.Traces, balanceIndex: -1);
+        AddSection(model.TracesHeading, model.TraceTiles, HomeLink.Traces, balanceIndex: -1, model.NoCredit is HomeNotice notice ? BuildNotice(notice) : null);
         AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2);
 
         foreach (HomeHero hero in model.Heroes)
@@ -159,11 +159,16 @@ public sealed class HomeView : UserControl
             _column.Children.Add(BuildHero(hero, model));
         }
 
+        if (model.Catalogue is HomeCard catalogue)
+        {
+            _column.Children.Add(BuildHostedCard(catalogue));
+        }
+
         DrawGlyphs();
         UpdateClocks();
     }
 
-    private void AddSection(string heading, IReadOnlyList<HomeTile> tiles, HomeLink link, int balanceIndex)
+    private void AddSection(string heading, IReadOnlyList<HomeTile> tiles, HomeLink link, int balanceIndex, UIElement? underHeading = null)
     {
         if (heading.Length > 0)
         {
@@ -173,6 +178,11 @@ public sealed class HomeView : UserControl
                 Style = (Style)Application.Current.Resources["TcTitleSectionTextStyle"],
                 Margin = new Thickness(0, HomeTrayInks.Measures.S4, 0, 0),
             });
+        }
+
+        if (underHeading is not null)
+        {
+            _column.Children.Add(underHeading);
         }
 
         var grid = new Grid { ColumnSpacing = HomeTrayInks.Measures.S3 };
@@ -197,6 +207,107 @@ public sealed class HomeView : UserControl
         }
 
         _column.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// The no-credit reminder (<c>NoCreditNotice</c>, NoCreditNotice.swift):
+    /// one slim line on the ask status at 12%, never red, the ask mark, the
+    /// core's sentence, and Open Settings at its end. No X: it goes once the
+    /// use is on.
+    /// </summary>
+    private UIElement BuildNotice(HomeNotice notice)
+    {
+        var row = new Grid
+        {
+            ColumnSpacing = HomeTrayInks.Measures.S3,
+            Padding = new Thickness(HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3, HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3),
+            CornerRadius = new CornerRadius(HomeTrayInks.Measures.ControlRadius),
+            Background = new SolidColorBrush(Faded((Brush)Application.Current.Resources["TcStatusAskBrush"], 0.12)),
+        };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var mark = new FontIcon
+        {
+            Glyph = "\uE814",
+            FontSize = 14,
+            Foreground = (Brush)Application.Current.Resources["TcStatusAskBrush"],
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetAccessibilityView(mark, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        row.Children.Add(mark);
+        var line = new TextBlock
+        {
+            Text = notice.Line,
+            Style = (Style)Application.Current.Resources["TcBodyTextStyle"],
+            TextWrapping = TextWrapping.WrapWholeWords,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        Grid.SetColumn(line, 1);
+        row.Children.Add(line);
+        var open = new Button
+        {
+            Content = notice.Action,
+            Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetHelpText(open, notice.Line);
+        open.Click += (_, _) => LinkRequested?.Invoke(HomeLink.Settings);
+        Grid.SetColumn(open, 2);
+        row.Children.Add(open);
+        return row;
+    }
+
+    /// <summary>
+    /// A way into a screen (<c>hostedCard</c>, HomeViews.swift:313-321):
+    /// the title over the core's subtitle on the card fill, and a chevron;
+    /// the whole card opens the screen.
+    /// </summary>
+    private FrameworkElement BuildHostedCard(HomeCard card)
+    {
+        var grid = new Grid { ColumnSpacing = HomeTrayInks.Measures.S4 };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var words = new StackPanel { Spacing = HomeTrayInks.Measures.S1 };
+        words.Children.Add(new TextBlock { Text = card.Title, Style = (Style)Application.Current.Resources["TcTitleCardTextStyle"] });
+        if (card.Subtitle is string subtitle)
+        {
+            words.Children.Add(new TextBlock
+            {
+                Text = subtitle,
+                Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
+                TextWrapping = TextWrapping.WrapWholeWords,
+            });
+        }
+
+        grid.Children.Add(words);
+        var chevron = new FontIcon { Glyph = "\uE76C", FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetAccessibilityView(chevron, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        Grid.SetColumn(chevron, 1);
+        grid.Children.Add(chevron);
+        var button = new Button
+        {
+            Content = grid,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 12, HomeTrayInks.Measures.CardPaddingHorizontal, 12),
+            CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
+            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+        };
+        AutomationProperties.SetName(button, card.Title);
+        if (card.Subtitle is string help)
+        {
+            AutomationProperties.SetHelpText(button, help);
+        }
+
+        button.Click += (_, _) => LinkRequested?.Invoke(card.Link);
+        return button;
+    }
+
+    private static Color Faded(Brush brush, double alpha)
+    {
+        Color c = brush is SolidColorBrush solid ? solid.Color : Microsoft.UI.Colors.Transparent;
+        return Color.FromArgb((byte)Math.Round(255 * alpha * c.A / 255.0), c.R, c.G, c.B);
     }
 
     /// <summary>
