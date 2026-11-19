@@ -1221,19 +1221,30 @@ pub(crate) const POWERSHELL_HELPER_ENV: &str = "NEAR_AI_LAUNCH_HELPER";
 pub(crate) const POWERSHELL_CONFIG_ENV: &str = "NEAR_AI_LAUNCH_CONFIG";
 #[cfg(any(windows, target_os = "linux", test))]
 pub(crate) const POWERSHELL_SESSION_ENV: &str = "NEAR_AI_LAUNCH_SESSION";
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_FOLDER_ENV: &str = "NEAR_AI_LAUNCH_FOLDER";
 
 /// The one script Windows PowerShell runs, the same on every launch: nothing
-/// is ever written into it. It reads the helper's path, the config folder
-/// and the session from its own environment into variables, removes those
-/// variables, and calls the helper with them as arguments, so no folder,
-/// path or ticket is parsed as PowerShell. The ticket is removed from the
-/// window's environment once the helper returns; the helper has already
-/// removed it from the tool's.
+/// is ever written into it. It moves to the folder by `-LiteralPath`, read
+/// from its own environment; reads the helper's path, the config folder and
+/// the session from there into variables; removes those variables; and
+/// calls the helper with them as arguments, so no folder, path or ticket is
+/// parsed as PowerShell. The ticket is removed from the window's
+/// environment once the helper returns; the helper has already removed it
+/// from the tool's.
+///
+/// The `Set-Location` is not redundant with the process's working folder:
+/// measured on Windows Server 2025 (2026-11-19), Windows PowerShell 5.1
+/// started in a folder named `$(whoami) @{a=1} [b] & c` read the brackets
+/// as a wildcard and began in its own folder,
+/// `C:\Windows\System32\WindowsPowerShell\v1.0`. If the move fails, the
+/// script stops there (`-ErrorAction Stop`) and no tool is started.
 #[cfg(any(windows, target_os = "linux", test))]
-pub(crate) const POWERSHELL_SCRIPT: &str = "$nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
+pub(crate) const POWERSHELL_SCRIPT: &str = "Set-Location -LiteralPath $env:NEAR_AI_LAUNCH_FOLDER -ErrorAction Stop; \
+$nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
 $nearAiConfig = $env:NEAR_AI_LAUNCH_CONFIG; \
 $nearAiSession = $env:NEAR_AI_LAUNCH_SESSION; \
-Remove-Item Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
+Remove-Item Env:NEAR_AI_LAUNCH_FOLDER, Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
 & $nearAiHelper --config-dir $nearAiConfig redeem-launch --session-id $nearAiSession; \
 Remove-Item Env:NEAR_AI_LAUNCH_TICKET -ErrorAction SilentlyContinue";
 
@@ -1286,6 +1297,7 @@ fn powershell_plan(
         .collect(),
         cwd: Some(cwd.to_path_buf()),
         env: vec![
+            (POWERSHELL_FOLDER_ENV.into(), cwd.as_os_str().to_owned()),
             (POWERSHELL_HELPER_ENV.into(), helper.as_os_str().to_owned()),
             (POWERSHELL_CONFIG_ENV.into(), config.as_os_str().to_owned()),
             (POWERSHELL_SESSION_ENV.into(), session.to_string().into()),
@@ -3669,10 +3681,11 @@ mod tests {
                 "-NoProfile",
                 "-NoExit",
                 "-Command",
-                "$nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
+                "Set-Location -LiteralPath $env:NEAR_AI_LAUNCH_FOLDER -ErrorAction Stop; \
+                 $nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
                  $nearAiConfig = $env:NEAR_AI_LAUNCH_CONFIG; \
                  $nearAiSession = $env:NEAR_AI_LAUNCH_SESSION; \
-                 Remove-Item Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
+                 Remove-Item Env:NEAR_AI_LAUNCH_FOLDER, Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
                  & $nearAiHelper --config-dir $nearAiConfig redeem-launch --session-id $nearAiSession; \
                  Remove-Item Env:NEAR_AI_LAUNCH_TICKET -ErrorAction SilentlyContinue",
             ]
@@ -3689,6 +3702,7 @@ mod tests {
         assert_eq!(
             env,
             [
+                ("NEAR_AI_LAUNCH_FOLDER", r"C:\Users\x\My Projects\app"),
                 (
                     "NEAR_AI_LAUNCH_HELPER",
                     r"C:\Program Files\NEAR AI\near-ai.exe"
@@ -3726,6 +3740,7 @@ mod tests {
             let plan = powershell(cwd).unwrap_or_else(|e| panic!("{cwd:?}: {e:?}"));
             assert_eq!(plan.args, script, "{cwd:?}");
             assert_eq!(plan.cwd.as_deref(), Some(Path::new(cwd)), "{cwd:?}");
+            assert_eq!(plan.env[0].1, std::ffi::OsString::from(cwd), "{cwd:?}");
         }
         for cwd in [r"C:proj", r"\proj", r"proj\sub"] {
             assert_eq!(powershell(cwd), Err(ManagedError::InvalidRequest), "{cwd}");

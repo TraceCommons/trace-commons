@@ -242,7 +242,7 @@ fn main() {
         GetConsoleMode(GetStdHandle(-10i32 as u32), &mut mode) != 0
     };
     let ticket = std::env::var("NEAR_AI_LAUNCH_TICKET").unwrap_or_default();
-    let leaked = ["NEAR_AI_LAUNCH_HELPER", "NEAR_AI_LAUNCH_CONFIG", "NEAR_AI_LAUNCH_SESSION"]
+    let leaked = ["NEAR_AI_LAUNCH_FOLDER", "NEAR_AI_LAUNCH_HELPER", "NEAR_AI_LAUNCH_CONFIG", "NEAR_AI_LAUNCH_SESSION"]
         .iter()
         .any(|k| std::env::var_os(k).is_some());
     let mut body = format!("{cwd}\n{raw}\n{console} {leaked} {ticket}\n{}\n", args.len());
