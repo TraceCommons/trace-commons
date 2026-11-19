@@ -101,9 +101,22 @@ tools whose executable availability is not checked.
   are not executed by this resolver; an installed wrapper alone is unavailable.
 - App sessions open in the terminal chosen at Settings > Private AI > **Open
   sessions in** (see "Terminal choice" below). The packaged `near-ai` helper
-  must be present. Flatpak host-terminal launching is unavailable; it requires
-  an explicit host bridge, so under Flatpak the picker offers nothing and is
-  not drawn. Show brings a session's Terminal tab to the front on macOS; a
+  must be present. A daemon inside a Flatpak sandbox cannot open a host
+  terminal, so there the picker offers nothing and is not drawn. When the
+  contributor daemon is installed on the host (the CLI installer and its
+  systemd user unit), the Flatpak window attaches to it over the host link,
+  `$XDG_RUNTIME_DIR/trace-commons/daemon.sock`, and the host daemon opens
+  host terminals as on any Linux install; its snapshot then carries
+  `capabilities.daemon_on_host: true`. Without a host daemon the Flatpak runs
+  its own daemon in the sandbox as before, with the unavailable line and a
+  "Set up" button; Launch opens the background-service dialog (install,
+  start or update the host daemon) until "Not now". First setup asks once,
+  before the folders screen, when the service is not running; an ordinary
+  start never does. Installing it while the dialog is open switches the
+  window over to the host daemon by itself, and uninstalling it later sends
+  the window back to its sandboxed daemon. See "No host daemon installed" in
+  `docs/superpowers/specs/2026-11-17-linux-flatpak-host-daemon-design.md`;
+  not yet run on Linux. Show brings a session's Terminal tab to the front on macOS; a
   session opened in another terminal app cannot be shown.
 - Each NEAR AI session owns an isolated IronWire proxy and key, pinned to the
   NEAR AI backend only, never to a model. It never changes the standard proxy

@@ -264,6 +264,9 @@ mod tests {
     /// Read at compile time so a sweep cannot pass over a file that moved.
     const SOURCE: &str = include_str!("eligibility.rs");
     const QUEUE_SOURCE: &str = include_str!("ui/queue.rs");
+    /// The Traces tab's folder list, where the folder's bulk controls are
+    /// built since the Mac's tree replaced the folder cards.
+    const FOLDER_LIST_SOURCE: &str = include_str!("ui/monitor/traces_list.rs");
     const PREVIEW_SOURCE: &str = include_str!("ui/preview.rs");
 
     /// Build an entry the way the daemon does: through the real
@@ -1021,20 +1024,30 @@ mod tests {
     #[test]
     fn neither_group_control_is_built_when_nothing_can_be_sent() {
         let row = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
         );
-        for control in ["submit_all", "submit_all_as"] {
+        // Submit all and Submit all as are built together, under the one
+        // answer, or not at all.
+        let gated = row
+            .find("ifsubmits{")
+            .expect("the folder's Submit is gated on the shared answer");
+        let built = &row[gated..];
+        let end = built
+            .find("//TheAutomaticswitch")
+            .expect("the gated block ends");
+        let built = &built[..end];
+        for control in ["split.append(&pill);", "split.append(&more);"] {
             assert!(
-                row.contains(&format!(
-                    "ifsendable{{style::wrap_append(&actions,&{control});}}"
-                )),
-                "{control} is not gated on the group having something to send"
+                built.contains(control),
+                "{control} is built outside the gate on the group having something to send"
             );
+        }
+        for control in ["pill", "more"] {
             assert!(
-                !row.contains(&format!("{control}.set_sensitive(")),
+                !row.contains(&format!("{control}.set_sensitive(false)")),
                 "{control} is drawn and disabled; it should not be drawn at all"
             );
         }
@@ -1044,18 +1057,14 @@ mod tests {
         // reading that as zero would take the control away from somebody
         // whose sessions are all sendable.
         assert!(
-            row.contains("crate::eligibility::group_offers_send(waitingasu64,contributable)"),
+            row.contains("crate::eligibility::group_offers_send(waiting,contributable)"),
             "the group control is decided here instead of asked for"
         );
         assert_eq!(
-            row.matches("letsendable=crate::eligibility::group_offers_send(")
+            row.matches("crate::eligibility::group_offers_send(")
                 .count(),
             1,
             "the two controls do not share one computed answer"
-        );
-        assert!(
-            !row.contains("!group.eligible.is_empty()"),
-            "the group control is re-derived from an emptiness test"
         );
         // And it is decided from the DAEMON's count, not from a total the
         // shell could have filtered itself.
@@ -1133,16 +1142,16 @@ mod tests {
                 "a derived contributable count survives: {removed}"
             );
         }
-        // The queue asks for it and computes nothing.
+        // The folder list asks for it and computes nothing.
         let queue = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
         );
         assert!(
             queue.contains(
-                "crate::eligibility::group_contributable(&app.projects.borrow(),project_id)"
+                "crate::eligibility::group_contributable(&app.projects.borrow(),&folder.id)"
             ),
             "the folder does not read the daemon's count"
         );
@@ -1261,7 +1270,7 @@ mod tests {
     #[test]
     fn the_folder_says_what_its_submit_leaves_behind() {
         let row = squashed(
-            QUEUE_SOURCE
+            FOLDER_LIST_SOURCE
                 .split("#[cfg(test)]")
                 .next()
                 .expect("production code above the tests"),
@@ -1306,7 +1315,7 @@ mod tests {
             .find("fn submit_group(")
             .expect("the group submit exists");
         let group_end = production[group..]
-            .find("\n/// The head of a folder")
+            .find("\n/// A folder opened or closed by its chevron")
             .expect("submit_group ends")
             + group;
         let inside = &production[group..group_end];
@@ -1334,8 +1343,17 @@ mod tests {
             "a bulk control builds the project-wide call outside submit_group, which is \
              the one place the rule is enforced"
         );
+        // The folder list's bulk controls build no call of their own.
+        let list = FOLDER_LIST_SOURCE
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production code above the tests");
+        assert!(
+            !list.contains("ApproveTarget::Project") && !list.contains("approve_params("),
+            "the folder list builds the project-wide call outside submit_group"
+        );
         assert_eq!(
-            production.matches("submit_group(").count(),
+            production.matches("submit_group(").count() + list.matches("submit_group(").count(),
             3,
             "expected the definition plus both bulk handlers to reach submit_group"
         );

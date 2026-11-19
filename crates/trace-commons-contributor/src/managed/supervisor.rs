@@ -149,6 +149,40 @@ async fn run_native(
     login: bool,
 ) -> anyhow::Result<i32> {
     let row = &context.session;
+    if row.tool == super::ToolId::RedTeam {
+        if login {
+            return Err(ManagedError::InvalidRequest.into());
+        }
+        let running = LifecycleReport {
+            model: row.model.clone(),
+            collection: None,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: SessionState::Running,
+            process_id: Some(std::process::id()),
+            process_identity: Some(format!("{}:red-team", std::process::id())),
+            exit_code: None,
+        };
+        let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(running));
+        let outcome = super::red_team::run(store, context).await?;
+        *spawned = true;
+        let report = LifecycleReport {
+            model: row.model.clone(),
+            collection: outcome.collection,
+            session_id: row.id,
+            proof: context.proof.clone(),
+            state: outcome.state,
+            process_id: None,
+            process_identity: None,
+            exit_code: Some(outcome.exit_code),
+        };
+        let _ = super::sessions::persist_exit(store, &report);
+        let response: anyhow::Result<Value> = call(store, "managed_session_report", json!(report));
+        if response.is_ok() {
+            super::sessions::clear_exit(store, row.id);
+        }
+        return Ok(outcome.exit_code);
+    }
     let account = AccountView {
         id: row.account_id,
         tool: row.tool,
@@ -249,13 +283,18 @@ async fn run_native(
     if opencode.is_some() && !login {
         command.args(&context.cli_options);
     }
+    if !login && let Some(prompt) = context.initial_prompt.as_deref() {
+        command.args(initial_prompt_args(row.tool, prompt));
+    }
     if opencode.is_none() {
         match row.connection {
             ConnectionKind::Subscription => {}
             ConnectionKind::ApiKey => {
                 let key = SecretStore::new(store).get(account.id)?;
                 match row.tool {
-                    super::ToolId::Opencode => return Err(ManagedError::InvalidRequest.into()),
+                    super::ToolId::Opencode | super::ToolId::RedTeam => {
+                        return Err(ManagedError::InvalidRequest.into());
+                    }
                     super::ToolId::Claude => {
                         command.env("ANTHROPIC_API_KEY", key.expose());
                     }
@@ -546,6 +585,23 @@ fn resume_for(
     Ok(Some(Resume { root, codex_thread }))
 }
 
+/// Command-line arguments that pass an initial prompt to `tool`.
+///
+/// Verified against each pinned tool's `--help` output:
+/// - `claude --help`: `Usage: claude [options] [command] [prompt]` -> `["--", prompt]`
+/// - `codex --help`: `Usage: codex [OPTIONS] [PROMPT]` -> `["--", prompt]`
+/// - `opencode --help`: `--prompt string  Prompt to use` -> `["--prompt", prompt]`
+/// - `red_team`: passed via `LaunchSpec.initial_prompt`, not argv.
+pub fn initial_prompt_args(tool: super::ToolId, prompt: &str) -> Vec<String> {
+    match tool {
+        super::ToolId::Claude | super::ToolId::Codex => {
+            vec!["--".to_owned(), prompt.to_owned()]
+        }
+        super::ToolId::Opencode => vec!["--prompt".to_owned(), prompt.to_owned()],
+        super::ToolId::RedTeam => Vec::new(),
+    }
+}
+
 /// Arguments straight after the tool's executable, before any option:
 /// Codex continues a conversation through `resume <thread id>`, which takes
 /// the same options and `-c` overrides as a fresh launch.
@@ -766,7 +822,9 @@ fn near_ai_route(
         .filter(|id| models.iter().any(|m| m.id == *id))
         .unwrap_or(default);
     match tool {
-        super::ToolId::Opencode => return Err(ManagedError::InvalidRequest),
+        super::ToolId::Opencode | super::ToolId::RedTeam => {
+            return Err(ManagedError::InvalidRequest);
+        }
         super::ToolId::Claude => {
             command
                 .env("ANTHROPIC_BASE_URL", format!("{base}/anthropic"))

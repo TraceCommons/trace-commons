@@ -43,4 +43,16 @@
     <InternalsVisibleTo Include="TraceCommons.Interop.Tests" />
   </ItemGroup>
 
+  <!--
+    The macOS app's recorded samples, copied beside a Debug build for
+    SampleDaemon.cs (TRACE_COMMONS_SAMPLE). A build-time copy of the one
+    source, not a second recording; Release copies nothing and compiles the
+    client out.
+  -->
+  <ItemGroup Condition="'$(Configuration)' == 'Debug'">
+    <None Include="$(MSBuildThisFileDirectory)../../../macos/Sources/TCShellCore/DataContract/RecordedSamples/**/*.json"
+          Link="RecordedSamples/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

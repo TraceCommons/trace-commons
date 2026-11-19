@@ -690,6 +690,15 @@ public sealed partial class MainWindow : Window
     /// </remarks>
     private async Task ShowOnboardingIfNeededAsync()
     {
+#if DEBUG
+        // Recorded samples: first run would read and write this machine's
+        // own onboarding state, and every call it makes is refused anyway.
+        if (_host.IsSample)
+        {
+            return;
+        }
+#endif
+
         var state = OnboardingState.Default();
 
         DaemonResponse status = await _host
@@ -1091,6 +1100,11 @@ public sealed partial class MainWindow : Window
     {
         if (!ViewModel.MissionsShown)
             return;
+#if DEBUG
+        // Mission drafts read the local store too; recorded samples never do.
+        if (_host.IsSample)
+            return;
+#endif
         if (MissionDraftsPane.Content is not MissionDraftsView)
             MissionDraftsPane.Content = new MissionDraftsView(WinRT.Interop.WindowNative.GetWindowHandle(this));
         ViewModel.ShowMissionDrafts();
@@ -1099,6 +1113,16 @@ public sealed partial class MainWindow : Window
 
     private async void ShowInsightsPane()
     {
+#if DEBUG
+        // Recorded samples open the contribution panes, never local Insights,
+        // which reads this machine's own sessions (as on Linux, #2161).
+        if (_host.IsSample)
+        {
+            if (await StartContributionsAsync()) ViewModel.ShowQueue();
+            return;
+        }
+#endif
+
         if (InsightsPane.Content is not InsightsView)
         {
             var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this));

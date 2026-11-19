@@ -11,12 +11,13 @@
 //! `notices`, `prefs`, `traces_tree`, `map_scene`, `transfers`,
 //! `tool_art`) build no widget and are tested without a display.
 //! `three_pane`, `graph_footer`, `inspector`, `map`, `map_transfers`,
-//! `transfer_card` and `shell` are the widgets and their drawing;
-//! `glyph`, `station` and `orb` are drawings (the Mac's glyphs and logos,
-//! the library's station and orb), tested offscreen with cairo.
+//! `transfer_card`, `traces_list` and `shell` are the widgets and their
+//! drawing; `glyph`, `station` and `orb` are drawings (the Mac's glyphs and
+//! logos, the library's station and orb), tested offscreen with cairo.
 
 pub mod demand;
 pub mod field;
+pub mod glass_paint;
 pub mod glyph;
 pub mod graph_footer;
 pub mod graph_model;
@@ -30,9 +31,11 @@ pub mod pane_layout;
 pub mod prefs;
 pub mod shell;
 pub mod station;
+pub mod summary;
 pub mod tabs;
 pub mod three_pane;
 pub mod tool_art;
+pub mod traces_list;
 pub mod traces_tree;
 pub mod transfer_card;
 pub mod transfers;

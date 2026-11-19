@@ -74,9 +74,7 @@ fn prefs_file() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .map(|dir| dir.join("trace-commons").join("appearance.json"))
+    crate::shell_state_file("appearance.json")
 }
 
 /// The development hook `TRACE_COMMONS_APPEARANCE` (see `style::install`):
