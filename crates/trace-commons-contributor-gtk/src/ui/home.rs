@@ -1028,7 +1028,13 @@ mod tests {
             for tile in tiles {
                 let bounds = at(tile);
                 assert_eq!(bounds.y(), first.y(), "{what}: {tiles:?} share a row");
-                assert_eq!(bounds.width(), first.width(), "{what}: equal columns");
+                // Equal columns, to the pixel the grid hands the remainder.
+                assert!(
+                    (bounds.width() - first.width()).abs() <= 1.0,
+                    "{what}: columns {} and {}",
+                    bounds.width(),
+                    first.width()
+                );
                 assert!(
                     bounds.x() + bounds.width() <= PANE as f32,
                     "{what}: inside the pane"
@@ -1131,7 +1137,7 @@ mod tests {
         assert!(wide.y() > first.y(), "a row of its own");
         assert_eq!(wide.x(), first.x());
         assert!(
-            (wide.width() - (2.0 * first.width() + TILE_GAP as f32)).abs() <= 1.0,
+            (wide.width() - (2.0 * first.width() + TILE_GAP as f32)).abs() <= 2.0,
             "two columns: {} against {}",
             wide.width(),
             first.width()
