@@ -31,7 +31,11 @@ public sealed partial class PrivateInferenceView : UserControl
                 await ViewModel.StartCredentialAsync()));
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
-        Unloaded += (_, _) => ViewModel.Funding.Deactivate();
+        Unloaded += (_, _) =>
+        {
+            ViewModel.Funding.Deactivate();
+            DetachReads();
+        };
 
         // F10: the mismatch line follows status, as the account section's
         // block does. Never unsubscribed: this page lives as long as the

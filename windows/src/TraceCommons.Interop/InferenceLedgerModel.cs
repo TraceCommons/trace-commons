@@ -97,7 +97,18 @@ public sealed class InferenceLedgerModel : INotifyPropertyChanged
         foreach ((string method, DaemonResponse? response) in reads)
         {
             JsonElement? result = response is { IsError: false, Result: { } r } ? r : null;
-            if (result is null)
+            // A reply that does not decode is a failed request, as the Mac's
+            // `.undecodable` is (LiveDaemonClient.swift:611-618,
+            // ScreenState.swift:36): its value is nil, so the last page stays
+            // under the core's failed-request line.
+            object? parsed = result is not { } value ? null : method switch
+            {
+                "inference_calls" => InferenceLedger.ParsePage(value),
+                "inference_summary" => InferenceLedger.ParseNetworkSummary(value),
+                "tool_destinations" => InferenceLedger.ParseDestinations(value),
+                _ => null,
+            };
+            if (parsed is null)
             {
                 // No core to ask is the core down; any other refusal, or a
                 // reply that did not parse, is a failed request
@@ -113,14 +124,15 @@ public sealed class InferenceLedgerModel : INotifyPropertyChanged
             switch (method)
             {
                 case "inference_calls":
-                    if (result is { } page && InferenceLedger.ParsePage(page) is { } parsed) _page = parsed;
+                    // A failed read keeps the last page (InferenceStore.swift loadCalls).
+                    if (parsed is InferenceCallPage page) _page = page;
                     break;
                 case "inference_summary":
                     // Only a readable network summary stands (InferenceStore.swift:240).
-                    _network = result is { } n && InferenceLedger.ParseNetworkSummary(n) is { Readable: true } network ? network : null;
+                    _network = parsed is NetworkInferenceSummary { Readable: true } network ? network : null;
                     break;
                 case "tool_destinations":
-                    _destinations = result is { } d ? InferenceLedger.ParseDestinations(d) : null;
+                    _destinations = parsed as DestinationCallCounts;
                     break;
             }
         }

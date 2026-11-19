@@ -155,7 +155,7 @@ public sealed class SpendOrganizationsTests
         var daemon = new Daemon();
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }));
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }, @explicit: true));
-        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection);
+        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, new CredentialActivity());
         await model.RefreshAsync();
         Assert.True(model.IsShown);
         Assert.Equal(("PROMPT-TITLE", "PROMPT-LINE", "PROMPT-ACTION", "PROMPT-ACTION-AX", "PROMPT-DISMISS", "PROMPT-DISMISS-AX"),
@@ -174,7 +174,7 @@ public sealed class SpendOrganizationsTests
     {
         var daemon = new Daemon { SelectReply = """{"id":1,"error":{"code":"unavailable","message":"near_ai_spend_org_refused"}}""" };
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }));
-        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection);
+        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, new CredentialActivity());
         await model.RefreshAsync();
         // The prompt never leaves, not even until the re-read lands.
         var shown = new List<bool>();
@@ -189,7 +189,7 @@ public sealed class SpendOrganizationsTests
     {
         var daemon = new Daemon();
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", false), ("org-b", false) }, current: null));
-        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection);
+        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, new CredentialActivity());
         await model.RefreshAsync();
         await model.DismissAsync();
         Assert.DoesNotContain(daemon.Calls, c => c.Method == SpendOrganizationPromptModel.SelectMethod);
@@ -203,7 +203,7 @@ public sealed class SpendOrganizationsTests
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }));
         var model = new SpendOrganizationPromptModel(
             async (method, parameters) => { DaemonResponse r = await daemon.Call(method, parameters); daemon.Connection++; return r; },
-            () => daemon.Connection);
+            () => daemon.Connection, new CredentialActivity());
         await model.RefreshAsync();
         Assert.False(model.IsShown);
     }
@@ -215,13 +215,13 @@ public sealed class SpendOrganizationsTests
     {
         var daemon = new Daemon();
         daemon.Listings.Enqueue(Payload(new[] { ("org-a", true), ("org-b", false) }));
-        bool busy = true;
-        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, () => busy);
+        var credential = new CredentialActivity { Busy = true };
+        var model = new SpendOrganizationPromptModel(daemon.Call, () => daemon.Connection, credential);
         await model.RefreshAsync();
         await model.DismissAsync();
         Assert.DoesNotContain(daemon.Calls, c => c.Method == SpendOrganizationPromptModel.SelectMethod);
         Assert.True(model.IsShown);
-        busy = false;
+        credential.Busy = false;
         await model.DismissAsync();
         Assert.Contains(daemon.Calls, c => c.Method == SpendOrganizationPromptModel.SelectMethod);
     }

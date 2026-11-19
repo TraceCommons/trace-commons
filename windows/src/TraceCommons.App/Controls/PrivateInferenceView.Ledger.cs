@@ -3,6 +3,7 @@ using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -28,7 +29,7 @@ public sealed partial class PrivateInferenceView
 
     public SpendOrganizationPromptModel SpendPrompt => _spendPrompt ??=
         new SpendOrganizationPromptModel(
-            (m, p) => _host.CallAsync(m, p), () => _host.ConnectionGeneration, () => !ViewModel.ControlsEnabled);
+            (m, p) => _host.CallAsync(m, p), () => _host.ConnectionGeneration, ViewModel.Credential);
 
     private InferenceLedgerModel CreateLedger()
     {
@@ -50,19 +51,45 @@ public sealed partial class PrivateInferenceView
             CultureInfo.CurrentCulture);
     }
 
-    private bool _ledgerActive;
+    private VisibleReads? _reads;
+
+    /// <summary>
+    /// Reads follow the daemon only while this tab is chosen and the window
+    /// can be seen (<see cref="VisibleReads"/>, one-pass 13): hidden to the
+    /// tray or minimised, nothing reads; shown again, everything is read
+    /// afresh, as the Mac's <c>.task</c> restarts when the view reappears
+    /// (InferenceViews.swift:48-56).
+    /// </summary>
+    private VisibleReads Reads
+    {
+        get
+        {
+            if (_reads is null)
+            {
+                _reads = new VisibleReads();
+                _reads.SetWindowShown(WindowClocks.Running);
+                _reads.Changed += OnReadsChanged;
+                WindowClocks.Changed += _reads.SetWindowShown;
+            }
+
+            return _reads;
+        }
+    }
 
     /// <summary>
     /// The pane is only collapsed when another tab is chosen, so Loaded fires
     /// once; the window calls this and its pair as the tab shows and hides.
-    /// The tab came into view: read everything again and follow new calls and
-    /// status changes, as the Mac's <c>.task</c> does while the tab is shown
-    /// (InferenceViews.swift:48-56).
     /// </summary>
-    public async void ActivateMacSections()
+    public void ActivateMacSections() => Reads.SetTabShown(true);
+
+    /// <summary>The tab left view: nothing reads while it is hidden (one-pass 13).</summary>
+    public void DeactivateMacSections() => Reads.SetTabShown(false);
+
+    private async void OnReadsChanged(bool reading)
     {
-        if (_ledgerActive) return;
-        _ledgerActive = true;
+        _host.InferenceCallAdded -= OnLedgerWorthyChange;
+        _host.StatusChanged -= OnLedgerWorthyChange;
+        if (!reading) return;
         _host.InferenceCallAdded += OnLedgerWorthyChange;
         _host.StatusChanged += OnLedgerWorthyChange;
         try
@@ -73,16 +100,18 @@ public sealed partial class PrivateInferenceView
         }
         catch (Exception)
         {
-            System.Diagnostics.Trace.TraceWarning(nameof(ActivateMacSections));
+            System.Diagnostics.Trace.TraceWarning(nameof(OnReadsChanged));
         }
     }
 
-    /// <summary>The tab left view: nothing reads while it is hidden (one-pass 13).</summary>
-    public void DeactivateMacSections()
+    /// <summary>The window is closing: stop following and let the clocks go.</summary>
+    private void DetachReads()
     {
-        _ledgerActive = false;
-        _host.InferenceCallAdded -= OnLedgerWorthyChange;
-        _host.StatusChanged -= OnLedgerWorthyChange;
+        if (_reads is null) return;
+        WindowClocks.Changed -= _reads.SetWindowShown;
+        _reads.SetTabShown(false);
+        _reads.Changed -= OnReadsChanged;
+        _reads = null;
     }
 
     private async void OnLedgerWorthyChange()
@@ -103,6 +132,8 @@ public sealed partial class PrivateInferenceView
         GuideCard.Visibility = Visibility.Collapsed;
     }
 
+    private void OnSettingsLink(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
+
     private void OnSpendPromptAction(object sender, RoutedEventArgs e) => OpenSettingsRequested?.Invoke(this, EventArgs.Empty);
 
     private async void OnSpendPromptDismiss(object sender, RoutedEventArgs e) => await SpendPrompt.DismissAsync();
@@ -114,6 +145,18 @@ public sealed partial class PrivateInferenceView
         LedgerTone.Ask => "TcStatusAskTextBrush",
         LedgerTone.Failed => "TcCoralTextBrush",
         LedgerTone.Outside => "TcStatusOutsideTextBrush",
+        _ => "TcInkSecondaryBrush",
+    }];
+
+    /// <summary>The heading chip's one dot for <paramref name="status"/>.</summary>
+    public static Visibility DotShown(DotStatus dot, DotStatus status) => Shown(dot == status);
+
+    /// <summary>The chip's word in its status ink (<c>GlassChip</c>: <c>status.textColor</c>, else secondary).</summary>
+    public static Brush DotInk(DotStatus dot) => (Brush)Application.Current.Resources[dot switch
+    {
+        DotStatus.On => "TcStatusOnTextBrush",
+        DotStatus.Ask => "TcStatusAskTextBrush",
+        DotStatus.Outside => "TcStatusOutsideTextBrush",
         _ => "TcInkSecondaryBrush",
     }];
 

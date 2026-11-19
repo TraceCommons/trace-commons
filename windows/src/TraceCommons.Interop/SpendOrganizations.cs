@@ -118,20 +118,20 @@ public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
 
     private readonly Func<string, string, Task<DaemonResponse>> _call;
     private readonly Func<long> _connection;
-    private readonly Func<bool> _credentialBusy;
+    private readonly CredentialActivity _credential;
     private long _reads;
     private bool _dismissing;
 
-    /// <param name="credentialBusy">
-    /// Whether a sign-in or credential action is in flight; Not now waits for
-    /// it, as the Mac's does (AppModel.swift:1104).
+    /// <param name="credential">
+    /// The sign-in or credential action in flight, shared with the credential
+    /// card; Not now waits for it, as the Mac's does (AppModel.swift:1104).
     /// </param>
     public SpendOrganizationPromptModel(
-        Func<string, string, Task<DaemonResponse>> call, Func<long> connection, Func<bool>? credentialBusy = null)
+        Func<string, string, Task<DaemonResponse>> call, Func<long> connection, CredentialActivity credential)
     {
         _call = call;
         _connection = connection;
-        _credentialBusy = credentialBusy ?? (() => false);
+        _credential = credential;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -178,7 +178,7 @@ public sealed class SpendOrganizationPromptModel : INotifyPropertyChanged
     /// </summary>
     public async Task DismissAsync()
     {
-        if (_dismissing || _credentialBusy() || Status.CurrentOrganizationId is not { } current) return;
+        if (_dismissing || _credential.Busy || Status.CurrentOrganizationId is not { } current) return;
         _dismissing = true;
         long connection = _connection();
         bool confirmed;

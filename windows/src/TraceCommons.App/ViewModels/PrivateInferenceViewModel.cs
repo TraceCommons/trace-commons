@@ -78,6 +78,20 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
 
     public string Subtitle => _copy?.Subtitle ?? string.Empty;
 
+    /// <summary>
+    /// The tab's heading row as the Mac draws it (spec W19-D1 (a),
+    /// <c>PrivateAIInspectorView</c>): the status title, the state's chip and
+    /// sentence, and the subtitle. Empty words until the core's arrive.
+    /// </summary>
+    /// <summary>The card that opens Settings: the core's title and help text (InferenceAccount.swift:125-145).</summary>
+    public string SettingsLinkTitle => _copy?.PanelSettingsTitle ?? string.Empty;
+
+    public string SettingsLinkHelp => _copy?.PanelSettingsOpenAccessibility ?? string.Empty;
+
+    public PrivateAIHeading Heading => _copy is null
+        ? new PrivateAIHeading(string.Empty, string.Empty, TraceCommons.Interop.Shell.DotStatus.None, string.Empty, string.Empty)
+        : PrivateAIHeading.For(_state, _copy);
+
     public string What => _copy?.OfferWhat ?? string.Empty;
 
     /// <summary>
@@ -427,7 +441,17 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     /// </summary>
     private string? _attemptId;
 
-    private bool _credentialBusy;
+    /// <summary>
+    /// The credential action in flight, shared with the spending prompt
+    /// (<see cref="CredentialActivity"/>), which waits for it.
+    /// </summary>
+    public CredentialActivity Credential { get; } = new();
+
+    private bool _credentialBusy
+    {
+        get => Credential.Busy;
+        set => Credential.Busy = value;
+    }
 
     public string CredentialTitle => _copy?.CredentialTitle ?? string.Empty;
 
@@ -1257,6 +1281,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     {
         Raise(nameof(Enabled));
         Raise(nameof(StateText));
+        Raise(nameof(Heading));
         Raise(nameof(ServingText));
         Raise(nameof(HasServingText));
         Raise(nameof(IsWorking));
