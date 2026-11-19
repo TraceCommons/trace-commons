@@ -1503,6 +1503,21 @@ mod feature_flag_tests {
         declare(dir.path(), Some("claude"), Some("codex"));
         let backend = Backend::open(dir.path().to_path_buf()).expect("hosts");
         let snapshot = snapshot_of(&backend);
+        // Whichever flag this build lets a person choose: a production
+        // build no longer lists insights_skills among its capabilities
+        // (#2242), so the test must not name one.
+        let raw = backend
+            .call(feature_flags::METHOD_SNAPSHOT, serde_json::json!({}))
+            .expect("the daemon answers its snapshot");
+        let overridable = raw["local_override_allowed"]
+            .as_object()
+            .and_then(|allowed| {
+                allowed
+                    .iter()
+                    .find(|(_, v)| v.as_bool() == Some(true))
+                    .map(|(id, _)| id.clone())
+            })
+            .expect("this build allows a local choice for some flag");
         let socket = ConfigStore::open(dir.path().to_path_buf())
             .unwrap()
             .daemon_path(DAEMON_SOCK_FILE);
@@ -1524,7 +1539,7 @@ mod feature_flag_tests {
                 .call(
                     "feature_flags_override_set",
                     serde_json::json!({
-                        "id": "insights_skills",
+                        "id": overridable,
                         "value": attempt % 2 == 0,
                         "environment": snapshot.environment.as_str(),
                         "profile_digest": snapshot.profile_digest,
