@@ -270,25 +270,28 @@ async fn corrupt_saved_binding_and_port_conflict_do_not_pick_another_port() {
         "unavailable"
     );
     call(&shared, "claude_desktop_disconnect", json!({})).await;
+    // The conflict is a port this test holds throughout. Rebinding the port
+    // the route had just released raced on Windows: there the OS can keep it
+    // listening for a moment after the listener-stopped acknowledgement.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let taken = listener.local_addr().unwrap().port();
     configure(&shared).await;
-    let binding = shared
-        .claude_desktop
-        .lock()
-        .unwrap()
-        .binding
-        .clone()
-        .unwrap();
     stop(&shared, false).await;
     finish_drains(&shared).await;
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, binding.port))
-        .await
+    let mut binding = load(&store).unwrap().unwrap();
+    assert_ne!(binding.port, taken);
+    binding.port = taken;
+    store
+        .write_daemon_file(FILE, &serde_json::to_vec(&binding).unwrap())
         .unwrap();
+    shared.claude_desktop.lock().unwrap().binding = Some(binding.clone());
     reconcile(&shared).await;
     assert_eq!(
         call(&shared, "claude_desktop_status", json!({})).await["state"],
         "unavailable"
     );
-    assert_eq!(load(&store).unwrap().unwrap().port, binding.port);
+    assert!(shared.claude_desktop.lock().unwrap().route.is_none());
+    assert!(load(&store).unwrap().unwrap() == binding);
     drop(listener);
     call(&shared, "claude_desktop_disconnect", json!({})).await;
     task.abort();
@@ -1395,6 +1398,25 @@ fn the_status_copy_carries_the_setup_prompt_words() {
             copy[key]
                 .as_str()
                 .is_some_and(|word| !word.trim().is_empty()),
+            "{key}"
+        );
+    }
+}
+
+/// The setup sheet's intro and steps; the shell falls back to
+/// `instructions` without them.
+#[test]
+fn the_status_copy_carries_the_setup_steps() {
+    let copy = copy();
+    for key in [
+        "sheet_intro",
+        "sheet_step_models",
+        "sheet_step_copy",
+        "sheet_step_environment",
+        "sheet_step_session",
+    ] {
+        assert!(
+            copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),
             "{key}"
         );
     }

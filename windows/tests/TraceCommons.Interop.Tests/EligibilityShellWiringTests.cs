@@ -57,11 +57,14 @@ public class EligibilityShellWiringTests
     {
         string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
 
-        // The one place CanContribute is allowed to appear: the Submit
-        // button's own visibility.
-        Assert.Single(Regex.Matches(markup, @"\{x:Bind CanContribute[^}]*\}"));
+        // The one place eligibility is allowed to appear: the Submit
+        // button's own visibility, through MaySubmit, the tree's gate,
+        // which is CanContribute and also signed in, not ignored and not
+        // held (TraceSubmitGateTests). CanContribute itself binds nowhere.
+        Assert.Empty(Regex.Matches(markup, @"\{x:Bind CanContribute[^}]*\}"));
+        Assert.Single(Regex.Matches(markup, @"\{x:Bind MaySubmit[^}]*\}"));
         Assert.Contains(
-            "Visibility=\"{x:Bind CanContribute, Mode=OneWay}\"",
+            "Visibility=\"{x:Bind MaySubmit, Mode=OneWay}\"",
             markup,
             StringComparison.Ordinal);
 

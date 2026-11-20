@@ -33,6 +33,17 @@ public struct ClaudeDesktopStatus: Decodable, Equatable, Sendable {
     /// The Private AI tab's setup notice (`ClaudeDesktopPrompt`). Optional:
     /// a daemon without them draws no notice, and the row still works.
     public static let promptCopyKeys = ["prompt_title", "prompt_line", "prompt_dismiss"]
+    /// The setup sheet's steps, in order (`sheetSteps`). Optional: without
+    /// them the sheet shows `instructions`, as before.
+    public static let sheetStepKeys = ["sheet_step_models", "sheet_step_copy", "sheet_step_environment", "sheet_step_session"]
+
+    /// The setup sheet's steps in order, or none when the daemon sends
+    /// any of them empty (an older daemon), so the sheet never shows half
+    /// a list.
+    public var sheetSteps: [String] {
+        let steps = Self.sheetStepKeys.map(text)
+        return steps.contains(where: \.isEmpty) ? [] : steps
+    }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)

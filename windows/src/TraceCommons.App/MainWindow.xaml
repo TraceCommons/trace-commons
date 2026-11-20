@@ -1973,8 +1973,12 @@
                                                         Click="OnNotThisOne" />
                                                 <!--
                                                     Drawn only where the
-                                                    shared crate says a send
-                                                    may be offered. Hidden
+                                                    tree's gate says a send
+                                                    may be offered
+                                                    (MaySubmit: the shared
+                                                    crate's answer, signed
+                                                    in, not ignored, not
+                                                    held). Hidden
                                                     rather than disabled: a
                                                     greyed button invites
                                                     hunting for the setting
@@ -1987,7 +1991,7 @@
                                                 <Button Style="{StaticResource TcSecondaryButtonStyle}"
                                                         Content="Submit"
                                                         Tag="{x:Bind}"
-                                                        Visibility="{x:Bind CanContribute, Mode=OneWay}"
+                                                        Visibility="{x:Bind MaySubmit, Mode=OneWay}"
                                                         ToolTipService.ToolTip="Sends this trace without opening it. Scrubbing still runs, and Undo follows for a few seconds."
                                                         Click="OnSubmitEntry" />
                                             </StackPanel>

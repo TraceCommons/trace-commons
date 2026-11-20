@@ -116,3 +116,24 @@ final class ClaudeDesktopPromptTests: XCTestCase {
         XCTAssertEqual(mode(try status("ready", model: "main", promptCopy: false)), .connected)
     }
 }
+
+/// The setup sheet explains itself: an intro, then the steps in order,
+/// from choosing models to starting a session in Claude Desktop.
+final class ClaudeDesktopSheetStepsTests: XCTestCase {
+    private func status(steps: Bool) throws -> ClaudeDesktopStatus {
+        var copy = Dictionary(uniqueKeysWithValues: ClaudeDesktopStatus.copyKeys.map { ($0, $0) })
+        if steps { for key in ClaudeDesktopStatus.sheetStepKeys + ["sheet_intro"] { copy[key] = key } }
+        let fields: [String: Any] = ["state": "disconnected", "observed": false, "copy": copy]
+        return try JSONDecoder().decode(ClaudeDesktopStatus.self, from: JSONSerialization.data(withJSONObject: fields))
+    }
+
+    func testTheStepsComeInOrder() throws {
+        let s = try status(steps: true)
+        XCTAssertEqual(s.sheetSteps, ["sheet_step_models", "sheet_step_copy", "sheet_step_environment", "sheet_step_session"])
+        XCTAssertEqual(s.text("sheet_intro"), "sheet_intro")
+    }
+
+    func testAnOlderDaemonFallsBackToItsInstructions() throws {
+        XCTAssertEqual(try status(steps: false).sheetSteps, [])
+    }
+}
