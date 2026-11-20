@@ -27,8 +27,10 @@ pub const TURN_SECONDS: f64 = 26.0;
 /// The angle the station rests at, and starts from.
 pub const REST_ANGLE: f64 = 0.6;
 /// The station's own frame rate: one turn in 26 seconds moves the solar
-/// arrays' tips about a point a frame at 20 frames a second.
-pub const FRAME_INTERVAL: f64 = 1.0 / 20.0;
+/// arrays' tips about a point and a third a frame at 15 frames a second.
+/// Each frame rebuilds, sorts and fills the whole mesh, so this rate is
+/// most of what the Traces map costs while it is on screen.
+pub const FRAME_INTERVAL: f64 = 1.0 / 15.0;
 /// The glow's radius on the Mac (`.shadow(radius: 6)`), in points.
 pub const GLOW_RADIUS: f64 = 6.0;
 /// The same glow as a GSK shadow's blur radius. The two read a radius
@@ -39,6 +41,9 @@ pub const GSK_GLOW_RADIUS: f64 = 16.0;
 pub const TILT: f64 = 42.0 * std::f64::consts::PI / 180.0;
 pub const LEAN: f64 = -14.0 * std::f64::consts::PI / 180.0;
 pub const CAMERA_DISTANCE: f64 = 240.0;
+/// The ring's radius and its tube's, in mesh units.
+pub const RING_RADIUS: f64 = 36.0;
+pub const RING_TUBE: f64 = 3.6;
 /// The NEAR AI brand blue, #0091fd: the campaign gradient's light stop.
 pub const BRAND_BLUE: [f64; 3] = [0.0, 145.0 / 255.0, 253.0 / 255.0];
 
@@ -54,12 +59,12 @@ pub struct Face {
     pub mark: bool,
 }
 
-/// A face as one frame draws it: its corners turned, its fill, and the
-/// depth it is sorted by. `index` is its place in `mesh()`.
-#[derive(Clone, Debug, PartialEq)]
+/// A face as one frame draws it: its shading, its fill, and the depth it
+/// is sorted by. `index` is its place in `mesh()`; its corners are
+/// `indexed().face(index)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Drawn {
     pub index: usize,
-    pub points: Vec<Vec3>,
     pub shade: f64,
     pub spec: f64,
     pub depth: f64,
@@ -275,7 +280,7 @@ fn build() -> Vec<Face> {
 
     // The ring: a torus round the mark, in the same plane; metal with a
     // little of the brand blue in it.
-    let (ring_radius, tube, around, across) = (36.0, 3.6, 40, 8);
+    let (ring_radius, tube, around, across) = (RING_RADIUS, RING_TUBE, 40, 8);
     let torus = |u: i32, v: i32| -> Vec3 {
         let a = f64::from(u) / f64::from(around) * 2.0 * std::f64::consts::PI;
         let b = f64::from(v) / f64::from(across) * 2.0 * std::f64::consts::PI;
@@ -381,19 +386,79 @@ pub fn project(q: Vec3, width: f64, height: f64) -> (f64, f64) {
     (width / 2.0 + q[0] * s, height / 2.0 - q[1] * s)
 }
 
-/// The faces at `angle`, sorted far to near, each with its fill.
-pub fn frame(angle: f64) -> Vec<Drawn> {
+/// The mesh as shared corners and the faces that index them, so a frame
+/// turns and projects each corner once rather than once per face that
+/// meets there (each of the ring's corners is shared by four).
+pub struct IndexedMesh {
+    /// Every distinct corner of the mesh.
+    pub vertices: Vec<Vec3>,
+    /// Face `f`'s corners are `corners[starts[f]..starts[f + 1]]`, indices
+    /// into `vertices`, in the face's own order.
+    pub starts: Vec<usize>,
+    pub corners: Vec<usize>,
+}
+
+impl IndexedMesh {
+    /// Face `f`'s corners, as indices into `vertices`.
+    pub fn face(&self, f: usize) -> &[usize] {
+        &self.corners[self.starts[f]..self.starts[f + 1]]
+    }
+}
+
+fn index(mesh: &[Face]) -> IndexedMesh {
+    let mut lookup: std::collections::HashMap<[u64; 3], usize> = std::collections::HashMap::new();
+    let mut vertices: Vec<Vec3> = Vec::new();
+    let mut starts = vec![0];
+    let mut corners: Vec<usize> = Vec::new();
+    for face in mesh {
+        for &point in &face.points {
+            let key = point.map(f64::to_bits);
+            let at = *lookup.entry(key).or_insert_with(|| {
+                vertices.push(point);
+                vertices.len() - 1
+            });
+            corners.push(at);
+        }
+        starts.push(corners.len());
+    }
+    IndexedMesh {
+        vertices,
+        starts,
+        corners,
+    }
+}
+
+/// The mesh indexed, built once.
+pub fn indexed() -> &'static IndexedMesh {
+    static INDEXED: OnceLock<IndexedMesh> = OnceLock::new();
+    INDEXED.get_or_init(|| index(mesh()))
+}
+
+/// The mesh's corners turned by `angle`, and its faces at that angle,
+/// sorted far to near, each with its fill. Each corner is turned once,
+/// and a face is a handful of numbers, not a list of its turned corners:
+/// a frame allocates two arrays, not one per face. The faces, their order
+/// and their fills are what turning face by face gave.
+fn turn(angle: f64) -> (Vec<Vec3>, Vec<Drawn>) {
     let light = light();
+    let mesh = mesh();
+    let indexed = indexed();
     let (cy, sy) = (angle.cos(), angle.sin());
-    let mut drawn: Vec<Drawn> = Vec::with_capacity(mesh().len());
+    let turned: Vec<Vec3> = indexed
+        .vertices
+        .iter()
+        .map(|&p| turned_by(p, cy, sy))
+        .collect();
+    let mut drawn: Vec<Drawn> = Vec::with_capacity(mesh.len());
     let mut caps: Vec<usize> = Vec::new();
     let (mut mark_near, mut mark_far) = (f64::NEG_INFINITY, f64::INFINITY);
-    for (index, face) in mesh().iter().enumerate() {
-        let q: Vec<Vec3> = face.points.iter().map(|&p| turned_by(p, cy, sy)).collect();
-        if q.len() < 3 {
+    for (index, face) in mesh.iter().enumerate() {
+        let corners = indexed.face(index);
+        if corners.len() < 3 {
             continue;
         }
-        let mut n = cross(sub(q[1], q[0]), sub(q[2], q[0]));
+        let q = |k: usize| turned[corners[k]];
+        let mut n = cross(sub(q(1), q(0)), sub(q(2), q(0)));
         let l = length(n);
         n = if l > 0.0 {
             [n[0] / l, n[1] / l, n[2] / l]
@@ -406,11 +471,11 @@ pub fn frame(angle: f64) -> Vec<Drawn> {
         }
         let lambert = dot(n, light).max(0.0);
         let spec = (n[2] * 0.5 + lambert * 0.5).max(0.0).powf(18.0) * 0.35;
-        let depth = q.iter().fold(0.0, |sum, p| sum + p[2]) / q.len() as f64;
+        let depth = corners.iter().fold(0.0, |sum, &c| sum + turned[c][2]) / corners.len() as f64;
         if face.mark {
-            for p in &q {
-                mark_near = mark_near.max(p[2]);
-                mark_far = mark_far.min(p[2]);
+            for &c in corners {
+                mark_near = mark_near.max(turned[c][2]);
+                mark_far = mark_far.min(turned[c][2]);
             }
         }
         if face.mark_cap {
@@ -424,7 +489,6 @@ pub fn frame(angle: f64) -> Vec<Drawn> {
         ];
         drawn.push(Drawn {
             index,
-            points: q,
             shade,
             spec,
             depth,
@@ -442,26 +506,35 @@ pub fn frame(angle: f64) -> Vec<Drawn> {
             mark_far - 0.01
         };
     }
+    // Far to near; the sort is stable, so equal depths keep the mesh's
+    // order.
     drawn.sort_by(|a, b| a.depth.total_cmp(&b.depth));
-    drawn
+    (turned, drawn)
+}
+
+/// The faces at `angle`, sorted far to near, each with its fill.
+pub fn frame(angle: f64) -> Vec<Drawn> {
+    turn(angle).1
 }
 
 /// Draws the station at `angle` into a frame `width` by `height` at the
 /// context's origin: each face filled, then stroked in the same colour,
-/// which closes the seams between faces.
+/// which closes the seams between faces. Each corner is projected once.
 pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64) {
+    let indexed = indexed();
+    let (turned, drawn) = turn(angle);
+    let projected: Vec<(f64, f64)> = turned.iter().map(|&q| project(q, width, height)).collect();
     let _ = cr.save();
     cr.set_line_width(0.6);
     cr.set_line_join(gtk::cairo::LineJoin::Round);
-    for face in frame(angle) {
+    for face in drawn {
         cr.new_path();
-        for (index, &point) in face.points.iter().enumerate() {
-            let (x, y) = project(point, width, height);
-            if index == 0 {
-                cr.move_to(x, y);
-            } else {
-                cr.line_to(x, y);
-            }
+        let corners = indexed.face(face.index);
+        let (x, y) = projected[corners[0]];
+        cr.move_to(x, y);
+        for &c in &corners[1..] {
+            let (x, y) = projected[c];
+            cr.line_to(x, y);
         }
         cr.close_path();
         cr.set_source_rgb(face.fill[0], face.fill[1], face.fill[2]);
@@ -471,14 +544,124 @@ pub fn draw(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64) {
     let _ = cr.restore();
 }
 
-/// The station at `angle` with its glow, as a render node over the frame
-/// `width` by `height` whose top-left is `origin`.
+/// The ring's outline in a frame `width` by `height`: its outer and inner
+/// edges, as a path to fill even-odd. The ring lies in the plane the
+/// station turns in, so its outline is the same at every angle of the
+/// turn, and the glow drawn from it can be drawn once.
+pub fn ring_outline(cr: &gtk::cairo::Context, width: f64, height: f64) {
+    let steps = 96;
+    for radius in [RING_RADIUS + RING_TUBE, RING_RADIUS - RING_TUBE] {
+        for step in 0..=steps {
+            let a = f64::from(step) / f64::from(steps) * TAU;
+            let (x, y) = project(
+                turned([radius * a.cos(), 0.0, radius * a.sin()], 0.0),
+                width,
+                height,
+            );
+            if step == 0 {
+                cr.move_to(x, y);
+            } else {
+                cr.line_to(x, y);
+            }
+        }
+        cr.close_path();
+    }
+}
+
+/// Room round the station's frame, in points, for its glow to fade out
+/// in: past the farthest the glow's blur reaches.
+pub const GLOW_MARGIN: f64 = GSK_GLOW_RADIUS * 1.5;
+
+/// The station's glow: a soft brand-blue light round its ring, for a
+/// frame `width` by `height` drawn at `scale` device pixels a point, as
+/// an image `GLOW_MARGIN` larger on each side. Drawn once per size, scale
+/// and strength (`LibraryArt`) and then shown as that image. It used to
+/// be a shadow on the turning mesh, blurred again on every frame; it
+/// keeps that shadow's colour, strength and radius, cast from the ring
+/// alone. `None` for an empty frame.
+pub fn glow_texture(width: f64, height: f64, scale: f64, lit: bool) -> Option<gtk::gdk::Texture> {
+    use gtk::prelude::*;
+    use gtk::{gdk, glib};
+    let surface = glow_surface(width, height, scale, lit)?;
+    let (w, h, stride) = (surface.width(), surface.height(), surface.stride());
+    let mut surface = surface;
+    let bytes = glib::Bytes::from(&*surface.data().ok()?);
+    // Cairo's ARGB32 is premultiplied B, G, R, A in memory on a
+    // little-endian machine, A, R, G, B on a big-endian one.
+    let format = if cfg!(target_endian = "little") {
+        gdk::MemoryFormat::B8g8r8a8Premultiplied
+    } else {
+        gdk::MemoryFormat::A8r8g8b8Premultiplied
+    };
+    Some(gdk::MemoryTexture::new(w, h, format, &bytes, stride as usize).upcast())
+}
+
+/// `glow_texture`'s pixels, as a cairo surface.
+pub fn glow_surface(
+    width: f64,
+    height: f64,
+    scale: f64,
+    lit: bool,
+) -> Option<gtk::cairo::ImageSurface> {
+    use gtk::gsk::prelude::IsRenderNode;
+    use gtk::{cairo, graphene, gsk};
+    if !(width > 0.0 && height > 0.0 && scale > 0.0) {
+        return None;
+    }
+    let w = ((width + GLOW_MARGIN * 2.0) * scale).ceil() as i32;
+    let h = ((height + GLOW_MARGIN * 2.0) * scale).ceil() as i32;
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).ok()?;
+    {
+        let cr = cairo::Context::new(&surface).ok()?;
+        cr.scale(scale, scale);
+        cr.translate(GLOW_MARGIN, GLOW_MARGIN);
+        // Only the shadow is wanted: the ring is filled far off the image
+        // and its shadow cast back onto it.
+        let away = (width + GLOW_MARGIN * 2.0) * 4.0;
+        let ring = gsk::CairoNode::new(&graphene::Rect::new(
+            away as f32,
+            0.0,
+            width as f32,
+            height as f32,
+        ));
+        {
+            let ring_cr = ring.draw_context();
+            ring_cr.translate(away, 0.0);
+            ring_outline(&ring_cr, width, height);
+            ring_cr.set_fill_rule(cairo::FillRule::EvenOdd);
+            ring_cr.set_source_rgb(0.0, 0.0, 0.0);
+            let _ = ring_cr.fill();
+        }
+        let blue = gtk::gdk::RGBA::new(
+            BRAND_BLUE[0] as f32,
+            BRAND_BLUE[1] as f32,
+            BRAND_BLUE[2] as f32,
+            glow(lit) as f32,
+        );
+        let shadow = gsk::ShadowNode::new(
+            &ring,
+            &[gsk::Shadow::new(
+                blue,
+                -away as f32,
+                0.0,
+                GSK_GLOW_RADIUS as f32,
+            )],
+        );
+        shadow.upcast().draw(&cr);
+    }
+    surface.flush();
+    Some(surface)
+}
+
+/// The station at `angle` over its glow, as a render node over the frame
+/// `width` by `height` whose top-left is `origin`. `glow` is
+/// `glow_texture`'s image for this frame's size.
 pub fn node(
     origin: (f64, f64),
     width: f64,
     height: f64,
     angle: f64,
-    lit: bool,
+    glow: Option<&gtk::gdk::Texture>,
 ) -> gtk::gsk::RenderNode {
     use gtk::gsk::prelude::IsRenderNode;
     use gtk::{graphene, gsk};
@@ -494,17 +677,19 @@ pub fn node(
         cr.translate(origin.0, origin.1);
         draw(&cr, width, height, angle);
     }
-    let blue = gtk::gdk::RGBA::new(
-        BRAND_BLUE[0] as f32,
-        BRAND_BLUE[1] as f32,
-        BRAND_BLUE[2] as f32,
-        glow(lit) as f32,
+    let Some(glow) = glow else {
+        return mesh.upcast();
+    };
+    let glowing = gsk::TextureNode::new(
+        glow,
+        &graphene::Rect::new(
+            (origin.0 - GLOW_MARGIN) as f32,
+            (origin.1 - GLOW_MARGIN) as f32,
+            (width + GLOW_MARGIN * 2.0) as f32,
+            (height + GLOW_MARGIN * 2.0) as f32,
+        ),
     );
-    let glowing = gsk::ShadowNode::new(
-        &mesh,
-        &[gsk::Shadow::new(blue, 0.0, 0.0, GSK_GLOW_RADIUS as f32)],
-    );
-    glowing.upcast()
+    gsk::ContainerNode::new(&[glowing.upcast(), mesh.upcast()]).upcast()
 }
 
 #[cfg(test)]
@@ -689,7 +874,7 @@ mod tests {
     fn it_turns_once_in_twenty_six_seconds_and_rests_without_animations() {
         assert_eq!(TURN_SECONDS, 26.0);
         assert_eq!(REST_ANGLE, 0.6);
-        assert_eq!(FRAME_INTERVAL, 1.0 / 20.0);
+        assert_eq!(FRAME_INTERVAL, 1.0 / 15.0);
         near(angle(13.0, false), 3.741592653589793, "half a turn");
         near(angle(30.0, false), 1.5666438934122442, "past one turn");
         assert_eq!(angle(1234.5, true), REST_ANGLE);
@@ -707,20 +892,299 @@ mod tests {
         near(light[2], 0.6611912172532104, "light z");
     }
 
+    /// The station as it was drawn before its corners were indexed: each
+    /// face's corners turned and projected on their own, one list per
+    /// face, sorted as structs. Kept as the oracle the indexed frame must
+    /// match.
+    fn face_by_face(angle: f64) -> Vec<(Drawn, Vec<Vec3>)> {
+        let light = light();
+        let (cy, sy) = (angle.cos(), angle.sin());
+        let mut drawn: Vec<(Drawn, Vec<Vec3>)> = Vec::new();
+        let mut caps: Vec<usize> = Vec::new();
+        let (mut mark_near, mut mark_far) = (f64::NEG_INFINITY, f64::INFINITY);
+        for (index, face) in mesh().iter().enumerate() {
+            let q: Vec<Vec3> = face.points.iter().map(|&p| turned_by(p, cy, sy)).collect();
+            if q.len() < 3 {
+                continue;
+            }
+            let mut n = cross(sub(q[1], q[0]), sub(q[2], q[0]));
+            let l = length(n);
+            n = if l > 0.0 {
+                [n[0] / l, n[1] / l, n[2] / l]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            if n[2] < 0.0 {
+                n = [-n[0], -n[1], -n[2]];
+            }
+            let lambert = dot(n, light).max(0.0);
+            let spec = (n[2] * 0.5 + lambert * 0.5).max(0.0).powf(18.0) * 0.35;
+            let depth = q.iter().fold(0.0, |sum, p| sum + p[2]) / q.len() as f64;
+            if face.mark {
+                for p in &q {
+                    mark_near = mark_near.max(p[2]);
+                    mark_far = mark_far.min(p[2]);
+                }
+            }
+            if face.mark_cap {
+                caps.push(drawn.len());
+            }
+            let shade = 0.3 + 0.7 * lambert;
+            let fill = [
+                (face.color[0] * shade + spec).min(1.0),
+                (face.color[1] * shade + spec).min(1.0),
+                (face.color[2] * shade + spec).min(1.0),
+            ];
+            drawn.push((
+                Drawn {
+                    index,
+                    shade,
+                    spec,
+                    depth,
+                    fill,
+                },
+                q,
+            ));
+        }
+        let middle = (mark_near + mark_far) / 2.0;
+        for cap in caps {
+            let face = &mut drawn[cap].0;
+            face.depth = if face.depth > middle {
+                mark_near + 0.01
+            } else {
+                mark_far - 0.01
+            };
+        }
+        drawn.sort_by(|a, b| a.0.depth.total_cmp(&b.0.depth));
+        drawn
+    }
+
+    fn draw_face_by_face(cr: &gtk::cairo::Context, width: f64, height: f64, angle: f64) {
+        let _ = cr.save();
+        cr.set_line_width(0.6);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        for (face, points) in face_by_face(angle) {
+            cr.new_path();
+            for (index, &point) in points.iter().enumerate() {
+                let (x, y) = project(point, width, height);
+                if index == 0 {
+                    cr.move_to(x, y);
+                } else {
+                    cr.line_to(x, y);
+                }
+            }
+            cr.close_path();
+            cr.set_source_rgb(face.fill[0], face.fill[1], face.fill[2]);
+            let _ = cr.fill_preserve();
+            let _ = cr.stroke();
+        }
+        let _ = cr.restore();
+    }
+
+    /// Raw pixels of `paint` into a `w` by `h` surface.
+    fn pixels(w: i32, h: i32, paint: impl Fn(&gtk::cairo::Context)) -> (usize, Vec<u8>) {
+        use gtk::cairo;
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+        {
+            let cr = cairo::Context::new(&surface).unwrap();
+            paint(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride() as usize;
+        (stride, surface.data().unwrap().to_vec())
+    }
+
+    /// The indexed mesh a frame draws from is the mesh itself: every face
+    /// gets back its own corners in its own order, and the corners faces
+    /// share are stored once.
+    #[test]
+    fn the_indexed_mesh_is_the_mesh() {
+        let mesh = mesh();
+        let indexed = indexed();
+        assert_eq!(indexed.starts.len(), mesh.len() + 1);
+        for (f, face) in mesh.iter().enumerate() {
+            let corners: Vec<Vec3> = indexed
+                .face(f)
+                .iter()
+                .map(|&c| indexed.vertices[c])
+                .collect();
+            assert_eq!(corners, face.points, "face {f} changed");
+        }
+        let all: usize = mesh.iter().map(|f| f.points.len()).sum();
+        assert!(
+            indexed.vertices.len() < all / 2,
+            "{} distinct corners of {all}",
+            indexed.vertices.len()
+        );
+    }
+
+    /// Turning each corner once gives the same faces, in the same order,
+    /// with the same depths and fills, and the same pixels, as turning
+    /// each face's corners on their own.
+    #[test]
+    fn a_frame_is_the_same_as_drawing_face_by_face() {
+        for step in 0..48 {
+            let angle = REST_ANGLE + f64::from(step) / 48.0 * TAU;
+            let expected: Vec<Drawn> = face_by_face(angle).into_iter().map(|(d, _)| d).collect();
+            assert_eq!(frame(angle), expected, "the frame at {angle} changed");
+        }
+        for angle in [0.0, REST_ANGLE, 1.7, 3.9, 5.2] {
+            let paint = |indexed: bool| {
+                pixels(300, 260, move |cr| {
+                    cr.scale(2.0, 2.0);
+                    if indexed {
+                        draw(cr, 150.0, 130.0, angle);
+                    } else {
+                        draw_face_by_face(cr, 150.0, 130.0, angle);
+                    }
+                })
+            };
+            assert!(
+                paint(true) == paint(false),
+                "the station's pixels at {angle} changed"
+            );
+        }
+    }
+
+    /// The ring lies in the plane the station turns in, so every turn of
+    /// it projects onto the same outline: what lets its glow be drawn once.
+    #[test]
+    fn the_rings_outline_is_the_same_at_every_angle() {
+        let (w, h) = (150.0, 130.0);
+        let mut a = 0.0;
+        while a < TAU {
+            for radius in [RING_RADIUS + RING_TUBE, RING_RADIUS - RING_TUBE] {
+                let p = [radius * f64::cos(a), 0.0, radius * f64::sin(a)];
+                let (x, y) = project(turned(p, 1.3), w, h);
+                let on_ring = (0..720).any(|step| {
+                    let b = f64::from(step) / 720.0 * TAU;
+                    let (qx, qy) =
+                        project(turned([radius * b.cos(), 0.0, radius * b.sin()], 0.0), w, h);
+                    (qx - x).hypot(qy - y) < 0.5
+                });
+                assert!(on_ring, "a turned point of the ring left its outline");
+            }
+            a += 0.37;
+        }
+    }
+
+    /// The glow is an image with room for its blur: lit round the ring,
+    /// clear over the mark at the centre and at its own corners.
+    #[test]
+    fn the_glow_is_drawn_round_the_ring() {
+        let (w, h, scale) = (150.0, 130.0, 2.0);
+        let mut surface = glow_surface(w, h, scale, true).unwrap();
+        assert_eq!(surface.width(), ((w + GLOW_MARGIN * 2.0) * scale) as i32);
+        assert_eq!(surface.height(), ((h + GLOW_MARGIN * 2.0) * scale) as i32);
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap().to_vec();
+        let alpha = |x: f64, y: f64| {
+            let (px, py) = (
+                ((x + GLOW_MARGIN) * scale) as usize,
+                ((y + GLOW_MARGIN) * scale) as usize,
+            );
+            data[py * stride + px * 4 + 3]
+        };
+        // The ring's outer edge at the top of its outline.
+        let (_, top) = project(turned([0.0, 0.0, -(RING_RADIUS + RING_TUBE)], 0.0), w, h);
+        assert!(alpha(w / 2.0, top - 2.0) > 0, "no glow past the ring");
+        assert_eq!(alpha(w / 2.0, h / 2.0), 0, "the glow covers the mark");
+        assert_eq!(
+            alpha(-GLOW_MARGIN + 0.5, -GLOW_MARGIN + 0.5),
+            0,
+            "the glow runs off the image"
+        );
+        // The arrays reach the frame's sides; the glow does not follow them.
+        assert_eq!(alpha(4.0, h / 2.0), 0, "the glow follows the arrays");
+        assert!(glow_surface(0.0, 130.0, 2.0, true).is_none());
+        assert!(glow_surface(150.0, 130.0, 0.0, true).is_none());
+    }
+
+    /// The glow keeps the old shadow's colour, strength and radius, cast
+    /// from the ring alone: outside the ring it is, pixel for pixel, the
+    /// GSK shadow the station used to carry, put on the ring's outline;
+    /// and it is blue.
+    #[test]
+    fn the_glow_is_the_old_shadow_cast_from_the_ring() {
+        use gtk::gsk::prelude::IsRenderNode;
+        use gtk::{cairo, graphene, gsk};
+        let (w, h) = (150.0, 130.0);
+        let m = GLOW_MARGIN;
+        let (sw, sh) = ((w + m * 2.0) as i32, (h + m * 2.0) as i32);
+        for lit in [true, false] {
+            let ring = || {
+                let node = gsk::CairoNode::new(&graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
+                let cr = node.draw_context();
+                ring_outline(&cr, w, h);
+                cr.set_fill_rule(cairo::FillRule::EvenOdd);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                let _ = cr.fill();
+                drop(cr);
+                node
+            };
+            // The old shadow, as the station carried it, on the ring.
+            let (stride, old) = pixels(sw, sh, |cr| {
+                cr.translate(m, m);
+                let blue = gtk::gdk::RGBA::new(
+                    BRAND_BLUE[0] as f32,
+                    BRAND_BLUE[1] as f32,
+                    BRAND_BLUE[2] as f32,
+                    glow(lit) as f32,
+                );
+                gsk::ShadowNode::new(
+                    ring(),
+                    &[gsk::Shadow::new(blue, 0.0, 0.0, GSK_GLOW_RADIUS as f32)],
+                )
+                .upcast()
+                .draw(cr);
+            });
+            // The ring itself, to leave out.
+            let (_, covered) = pixels(sw, sh, |cr| {
+                cr.translate(m, m);
+                ring().upcast().draw(cr);
+            });
+            let mut glow_image = glow_surface(w, h, 1.0, lit).unwrap();
+            let new = glow_image.data().unwrap().to_vec();
+            let (mut compared, mut lit_pixels, mut worst) = (0, 0, 0);
+            for y in 0..sh as usize {
+                for x in 0..sw as usize {
+                    let i = y * stride + x * 4;
+                    if covered[i + 3] > 0 {
+                        continue;
+                    }
+                    compared += 1;
+                    worst = worst.max((i32::from(old[i + 3]) - i32::from(new[i + 3])).abs());
+                    if new[i + 3] > 0 {
+                        lit_pixels += 1;
+                        // The brand blue, premultiplied B, G, R: no red.
+                        assert!(
+                            new[i] >= new[i + 1] && new[i + 2] == 0,
+                            "the glow is not blue"
+                        );
+                    }
+                }
+            }
+            assert!(
+                compared > 10_000 && lit_pixels > 2_000,
+                "{compared} {lit_pixels}"
+            );
+            assert!(
+                worst <= 1,
+                "the glow is {worst}/255 from the old shadow (lit {lit})"
+            );
+        }
+    }
+
     #[test]
     fn the_glow_spreads_past_the_mesh_in_the_brand_blue() {
-        use gtk::cairo;
-        let (w, h) = (150, 130);
+        let (w, h) = (150.0, 130.0);
+        let m = GLOW_MARGIN;
+        let (sw, sh) = ((w + m * 2.0) as i32, (h + m * 2.0) as i32);
         let render = |lit: bool| {
-            let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
-            {
-                let cr = cairo::Context::new(&surface).unwrap();
-                node((0.0, 0.0), f64::from(w), f64::from(h), REST_ANGLE, lit).draw(&cr);
-            }
-            surface.flush();
-            let stride = surface.stride() as usize;
-            let data = surface.data().unwrap().to_vec();
-            (stride, data)
+            let texture = glow_texture(w, h, 1.0, lit).unwrap();
+            pixels(sw, sh, |cr| {
+                node((m, m), w, h, REST_ANGLE, Some(&texture)).draw(cr);
+            })
         };
         let (stride, lit) = render(true);
         let (_, dim) = render(false);
@@ -728,8 +1192,8 @@ mod tests {
         // lit.
         let mut glow_lit = 0u32;
         let mut glow_dim = 0u32;
-        for y in 0..h as usize {
-            for x in 0..w as usize {
+        for y in 0..sh as usize {
+            for x in 0..sw as usize {
                 let i = y * stride + x * 4;
                 // Partly covered pixels: the glow, and the mesh's own
                 // anti-aliased rim, which is blue-grey too.
@@ -745,6 +1209,13 @@ mod tests {
             glow_dim < glow_lit,
             "the glow is softer before anything is contributed"
         );
+        // Without its image the station is the mesh alone.
+        let (_, bare) = pixels(sw, sh, |cr| node((m, m), w, h, REST_ANGLE, None).draw(cr));
+        let (_, mesh) = pixels(sw, sh, |cr| {
+            cr.translate(m, m);
+            draw(cr, w, h, REST_ANGLE);
+        });
+        assert!(bare == mesh, "the station without a glow is its mesh");
     }
 
     #[test]
@@ -771,6 +1242,50 @@ mod tests {
         assert!(
             b > r + 60 && g > r,
             "the centre is blue, not ({r}, {g}, {b})"
+        );
+    }
+
+    /// What one frame of the station costs on the CPU, as the cairo
+    /// renderer (software rendering) pays it: the mesh alone, and the
+    /// station's whole node, glow and all, at twice the size. Prints
+    /// microseconds a frame over a full turn.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_station_cost() {
+        use gtk::cairo;
+        let (w, h) = (340, 300);
+        let frames = 390;
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+        let glow = glow_texture(150.0, 130.0, 2.0, true);
+        let time = |surface: &mut cairo::ImageSurface, whole: bool| {
+            let start = std::time::Instant::now();
+            for i in 0..frames {
+                let angle = REST_ANGLE + f64::from(i) / f64::from(frames) * TAU;
+                let cr = cairo::Context::new(&*surface).unwrap();
+                cr.set_operator(cairo::Operator::Clear);
+                let _ = cr.paint();
+                cr.set_operator(cairo::Operator::Over);
+                cr.scale(2.0, 2.0);
+                if whole {
+                    node((10.0, 10.0), 150.0, 130.0, angle, glow.as_ref()).draw(&cr);
+                } else {
+                    cr.translate(10.0, 10.0);
+                    draw(&cr, 150.0, 130.0, angle);
+                }
+            }
+            start.elapsed().as_secs_f64() * 1e6 / f64::from(frames)
+        };
+        // Warm up, then measure.
+        time(&mut surface, true);
+        let mesh = time(&mut surface, false);
+        let whole = time(&mut surface, true);
+        let start = std::time::Instant::now();
+        for i in 0..frames {
+            std::hint::black_box(frame(f64::from(i) * 0.01));
+        }
+        let geometry = start.elapsed().as_secs_f64() * 1e6 / f64::from(frames);
+        eprintln!(
+            "station cost: geometry {geometry:.1} us, mesh {mesh:.1} us, whole node {whole:.1} us a frame"
         );
     }
 
@@ -802,7 +1317,8 @@ mod tests {
                         );
                         let _ = cr.paint();
                         cr.scale(2.0, 2.0);
-                        node((10.0, 10.0), 150.0, 130.0, angle, lit).draw(&cr);
+                        let glow = glow_texture(150.0, 130.0, 2.0, lit);
+                        node((10.0, 10.0), 150.0, 130.0, angle, glow.as_ref()).draw(&cr);
                     }
                     surface.flush();
                     let name = format!(
