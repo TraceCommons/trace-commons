@@ -116,6 +116,37 @@ public static class RunAtLogin
     }
 
     /// <summary>
+    /// Rewrites this executable's entry when it is ours but not what
+    /// <see cref="AutostartCommand.For"/> writes now: one saved before the
+    /// login argument existed would open the window at every login. Adds
+    /// nothing, and leaves another copy's entry alone.
+    /// </summary>
+    public static void Refresh()
+    {
+        string? executable = Environment.ProcessPath;
+        if (!IsSupported || string.IsNullOrEmpty(executable))
+        {
+            return;
+        }
+
+        try
+        {
+            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(AutostartCommand.RunKeyPath, writable: true);
+            string? stored = key?.GetValue(AutostartCommand.ValueName) as string;
+            if (key is not null
+                && AutostartCommand.PointsAt(stored, executable)
+                && !AutostartCommand.IsCurrent(stored, executable))
+            {
+                key.SetValue(AutostartCommand.ValueName, AutostartCommand.For(executable), RegistryValueKind.String);
+            }
+        }
+        catch (Exception e) when (e is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            Debug.WriteLine("tracecommons run-at-login refresh skipped: no HKCU write access");
+        }
+    }
+
+    /// <summary>
     /// Asks Windows to start this app at login, or stops asking.
     /// </summary>
     /// <returns>

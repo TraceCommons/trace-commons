@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using System.Collections.Generic;
 using TraceCommons.Interop.Shell;
 using Xunit;
@@ -134,6 +136,38 @@ public class MonitorPaneLayoutTests
         // ThreePane.swift:194-202, including a second monitor whose work area
         // starts at x = 1440 (its origin is part of the clamp).
         Assert.Equal(want, MonitorPaneLayout.WindowFrame(frame, width, visible));
+    }
+
+    public static IEnumerable<object[]> FirstFrames() => new[]
+    {
+        // The test box, 2026-11-20: Windows put a 745x615 window at y = 156 on
+        // a 1024x768 display whose work area ends at 720 (the taskbar), so
+        // its bottom 51 pixels, the graph's controls, sat under the taskbar.
+        new object[] { new LayoutRect(163, 156, 1000, 500), 745.0, 615.0, new LayoutRect(0, 0, 1024, 720), new LayoutRect(163, 105, 745, 615) },
+        // Room enough: the top stays where Windows put it.
+        new object[] { new LayoutRect(100, 50, 1000, 500), 743.0, 614.0, new LayoutRect(0, 0, 1440, 875), new LayoutRect(100, 50, 743, 614) },
+        // Taller than the work area: held to it, from its top.
+        new object[] { new LayoutRect(100, 50, 1000, 500), 743.0, 900.0, new LayoutRect(0, 0, 1440, 875), new LayoutRect(100, 0, 743, 875) },
+        // A second monitor below the first: its own work area's origin counts.
+        new object[] { new LayoutRect(100, 1600, 1000, 500), 743.0, 614.0, new LayoutRect(0, 1080, 1920, 1040), new LayoutRect(100, 1506, 743, 614) },
+        // Above the work area: moved down onto it.
+        new object[] { new LayoutRect(100, -40, 1000, 500), 743.0, 614.0, new LayoutRect(0, 0, 1440, 875), new LayoutRect(100, 0, 743, 614) },
+    };
+
+    [Theory]
+    [MemberData(nameof(FirstFrames))]
+    public void TheFirstFrameIsWhollyOnTheWorkArea(LayoutRect frame, double width, double height, LayoutRect work, LayoutRect want)
+    {
+        Assert.Equal(want, MonitorPaneLayout.FirstFrame(frame, width, height, work));
+    }
+
+    [Fact]
+    public void TheFirstActivationPlacesTheWindowWithTheFirstFrame()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.Shell.cs.txt");
+        string source = File.ReadAllText(path);
+        Assert.Contains("MonitorPaneLayout.FirstFrame(", source);
+        Assert.DoesNotContain("frame with { Height = Math.Min(height, work.Height) }", source);
     }
 
     [Theory]

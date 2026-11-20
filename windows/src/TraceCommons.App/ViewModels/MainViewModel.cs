@@ -430,9 +430,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     public string QueueCountText => TrayModel.DecisionCountText(_decisionsOwed);
 
-    public string QueueCountToolTip => _decisionsOwed is null
-        ? TrayModel.DecisionCountUnavailable
-        : string.Empty;
+    public string? QueueCountToolTip => TrayModel.DecisionCountToolTip(_decisionsOwed);
 
     /// <summary>
     /// The Traces tab's text equivalent for its badge: the core's

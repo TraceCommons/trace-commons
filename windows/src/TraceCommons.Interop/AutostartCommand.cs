@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace TraceCommons.Interop;
 
@@ -51,13 +53,22 @@ public static class AutostartCommand
     public const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     /// <summary>
-    /// The command to store, for an executable path.
+    /// The argument the entry starts the app with, so the launch knows it
+    /// is at login and opens no window: the Mac's quiet login-item launch
+    /// (<c>LaunchRouting.launchKind</c>, MonitorNavigation.swift). Windows
+    /// tells an unpackaged app nothing about why it started; the packaged
+    /// build's startup task says so through its activation kind instead.
+    /// </summary>
+    public const string LoginArgument = "--at-login";
+
+    /// <summary>
+    /// The command to store, for an executable path: the quoted path and
+    /// <see cref="LoginArgument"/>.
     /// </summary>
     /// <remarks>
-    /// No arguments are appended. A launch at login is an ordinary launch:
-    /// the app has no "started by Windows" behaviour to switch on, and an
-    /// argument here would be a second code path that only ever runs on a
-    /// contributor's machine and never in a test.
+    /// The argument is the only difference between a launch at login and
+    /// any other, and <see cref="IsLoginLaunch"/> and
+    /// <see cref="OpensWindow"/> decide what it changes, off Windows.
     /// </remarks>
     public static string For(string executablePath)
     {
@@ -76,7 +87,41 @@ public static class AutostartCommand
             throw new ArgumentException("executable path contains a quote", nameof(executablePath));
         }
 
-        return $"\"{executablePath}\"";
+        return $"\"{executablePath}\" {LoginArgument}";
+    }
+
+    /// <summary>
+    /// Whether this launch is at login: the entry's argument after the
+    /// program (<paramref name="args"/> as
+    /// <c>Environment.GetCommandLineArgs</c> gives them), or the packaged
+    /// build's startup task.
+    /// </summary>
+    public static bool IsLoginLaunch(IReadOnlyList<string> args, bool startupTaskActivation)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        return startupTaskActivation
+            || args.Skip(1).Any(a => string.Equals(a, LoginArgument, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Whether the launch opens the window. A launch at login stays in the
+    /// tray, unless there is no tray icon to reach the app by or the launch
+    /// carries an invite the person just followed.
+    /// </summary>
+    public static bool OpensWindow(bool loginLaunch, bool trayPresent, bool hasInvite) =>
+        !loginLaunch || !trayPresent || hasInvite;
+
+    /// <summary>
+    /// Whether a stored value is exactly what <see cref="For"/> writes for
+    /// this executable today. An entry written before the argument existed
+    /// still points here (<see cref="PointsAt"/>) but would open the window
+    /// at every login, so the app rewrites it.
+    /// </summary>
+    public static bool IsCurrent(string? storedValue, string executablePath)
+    {
+        ArgumentNullException.ThrowIfNull(executablePath);
+        return PointsAt(storedValue, executablePath)
+            && string.Equals(Arguments(storedValue!), LoginArgument, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -98,8 +143,34 @@ public static class AutostartCommand
         }
 
         return string.Equals(
-            storedValue.Trim().Trim('"'),
+            Program(storedValue),
             executablePath.Trim().Trim('"'),
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The program part of a stored command: inside its quotes, or the whole value unquoted.</summary>
+    private static string Program(string stored)
+    {
+        string value = stored.Trim();
+        if (value.StartsWith('"'))
+        {
+            int close = value.IndexOf('"', 1);
+            return close > 0 ? value[1..close] : value.Trim('"');
+        }
+
+        return value;
+    }
+
+    /// <summary>What follows the quoted program in a stored command, trimmed.</summary>
+    private static string Arguments(string stored)
+    {
+        string value = stored.Trim();
+        if (!value.StartsWith('"'))
+        {
+            return string.Empty;
+        }
+
+        int close = value.IndexOf('"', 1);
+        return close > 0 ? value[(close + 1)..].Trim() : string.Empty;
     }
 }

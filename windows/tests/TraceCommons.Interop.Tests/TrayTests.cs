@@ -331,6 +331,31 @@ public class TrayMenuModelTests
             TrayModel.Compute(menu.DecisionsOwed, false, true).State);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    public void AKnownCountHasNoBadgeTooltip(int decisions)
+    {
+        // Null, not empty: WinUI draws an empty string as an empty bubble
+        // over the Traces tab's badge (seen on the test box, 2026-11-20).
+        Assert.Null(TrayModel.DecisionCountToolTip(decisions));
+    }
+
+    [Fact]
+    public void AnUnknownCountExplainsItsQuestionMark()
+    {
+        Assert.Equal(TrayModel.DecisionCountUnavailable, TrayModel.DecisionCountToolTip(null));
+    }
+
+    [Fact]
+    public void TheTracesBadgeTakesItsTooltipFromTheModel()
+    {
+        string path = System.IO.Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App/ViewModels/MainViewModel.cs.txt");
+        string source = System.IO.File.ReadAllText(path);
+        Assert.Contains("public string? QueueCountToolTip => TrayModel.DecisionCountToolTip(_decisionsOwed);", source);
+    }
+
     [Fact]
     public void AnOlderDaemonDoesNotInventAnExactDecisionCount()
     {
@@ -395,16 +420,74 @@ public class AutostartCommandTests
     public void TheCommandIsQuotedSoASpaceInThePathCannotSplitIt()
     {
         Assert.Equal(
-            "\"C:\\Users\\Ada Lovelace\\Trace Commons\\TraceCommons.exe\"",
+            "\"C:\\Users\\Ada Lovelace\\Trace Commons\\TraceCommons.exe\" --at-login",
             AutostartCommand.For("C:\\Users\\Ada Lovelace\\Trace Commons\\TraceCommons.exe"));
     }
 
     [Fact]
-    public void NoArgumentsAreAppended()
+    public void TheEntrySaysTheLaunchIsAtLogin()
     {
-        // A launch at login is an ordinary launch. An argument here would be
-        // a code path that only ever runs on a contributor's machine.
-        Assert.Equal("\"C:\\a\\b.exe\"", AutostartCommand.For("C:\\a\\b.exe"));
+        // Windows tells an unpackaged app nothing about why it started, and a
+        // launch at login opens no window (the Mac's quiet login-item launch,
+        // LaunchRouting.launchKind), so the entry carries it.
+        Assert.Equal("\"C:\\a\\b.exe\" --at-login", AutostartCommand.For("C:\\a\\b.exe"));
+        Assert.Equal("--at-login", AutostartCommand.LoginArgument);
+    }
+
+    [Fact]
+    public void AnEntryWrittenBeforeTheArgumentIsOursButNotCurrent()
+    {
+        Assert.True(AutostartCommand.PointsAt("\"C:\\a\\b.exe\"", "C:\\a\\b.exe"));
+        Assert.False(AutostartCommand.IsCurrent("\"C:\\a\\b.exe\"", "C:\\a\\b.exe"));
+        Assert.True(AutostartCommand.IsCurrent("\"C:\\a\\b.exe\" --at-login", "C:\\a\\b.exe"));
+        Assert.True(AutostartCommand.IsCurrent("\"C:\\A\\B.EXE\" --at-login", "C:\\a\\b.exe"));
+        Assert.False(AutostartCommand.IsCurrent("\"D:\\old\\b.exe\" --at-login", "C:\\a\\b.exe"));
+        Assert.False(AutostartCommand.IsCurrent(null, "C:\\a\\b.exe"));
+    }
+
+    [Fact]
+    public void AStoredValueWithTheArgumentIsRecognised()
+    {
+        Assert.True(AutostartCommand.PointsAt("\"C:\\a\\b.exe\" --at-login", "C:\\a\\b.exe"));
+        Assert.True(AutostartCommand.PointsAt("\"C:\\Program Files\\b.exe\" --at-login", "C:\\Program Files\\b.exe"));
+        Assert.False(AutostartCommand.PointsAt("\"D:\\old\\b.exe\" --at-login", "C:\\a\\b.exe"));
+    }
+
+    [Theory]
+    [InlineData(new[] { "C:\\a\\b.exe", "--at-login" }, false, true)]
+    [InlineData(new[] { "C:\\a\\b.exe", "--AT-LOGIN" }, false, true)]
+    [InlineData(new[] { "C:\\a\\b.exe" }, true, true)]
+    [InlineData(new[] { "C:\\a\\b.exe" }, false, false)]
+    [InlineData(new[] { "--at-login" }, false, false)]
+    [InlineData(new[] { "C:\\a\\b.exe", "tracecommons://join?invite=x" }, false, false)]
+    public void ALoginLaunchIsTheArgumentOrAStartupTask(string[] args, bool startupTask, bool login)
+    {
+        // args[0] is the program, as Environment.GetCommandLineArgs gives it.
+        Assert.Equal(login, AutostartCommand.IsLoginLaunch(args, startupTask));
+    }
+
+    [Theory]
+    [InlineData(false, true, false, true)]
+    [InlineData(true, true, false, false)]
+    [InlineData(true, false, false, true)]
+    [InlineData(true, true, true, true)]
+    public void OnlyALoginLaunchWithATrayAndNoInviteStaysInTheTray(bool login, bool trayPresent, bool invite, bool opens)
+    {
+        // A launch with no tray icon would leave nothing to click; an invite
+        // came from a link the person just followed.
+        Assert.Equal(opens, AutostartCommand.OpensWindow(login, trayPresent, invite));
+    }
+
+    [Fact]
+    public void TheAppHoldsItsWindowBackOnALoginLaunch()
+    {
+        string App(string name) => System.IO.File.ReadAllText(System.IO.Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App", name + ".txt"));
+        string app = App("App.xaml.cs");
+        Assert.Contains("AutostartCommand.IsLoginLaunch(Environment.GetCommandLineArgs(), activation.Kind == ExtendedActivationKind.StartupTask)", app);
+        Assert.Contains("AutostartCommand.OpensWindow(", app);
+        Assert.Contains("window.StartInTray();", app);
+        Assert.Contains("RunAtLogin.Refresh();", app);
     }
 
     [Fact]

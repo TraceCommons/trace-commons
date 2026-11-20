@@ -160,6 +160,7 @@ public sealed partial class MainWindow : Window
         WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
 #if DEBUG
         _flags.Changed += TraceFeatureFlags;
+        WindowMinimumSize.Resumed += () => TraceFeatureFlagsLine("wake");
 #endif
         WindowClocks.Changed += running =>
         {
@@ -174,6 +175,7 @@ public sealed partial class MainWindow : Window
         _tray.PauseRequested += OnTrayPauseRequested;
         _tray.ResumeRequested += OnTrayResumeRequested;
         _tray.QuitRequested += OnTrayQuitRequested;
+        _tray.Readded += () => _ = RefreshTrayAsync();
         InitializeHome();
 
         AppWindow.Closing += OnAppWindowClosing;
@@ -210,14 +212,19 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private void TraceFeatureFlags()
     {
-        string? path = Environment.GetEnvironmentVariable("TC_DEBUG_FEATURE_FLAGS_LOG");
-        if (string.IsNullOrEmpty(path)) return;
         FeatureFlagSnapshot? s = _flags.Current;
-        string line = s is null
+        TraceFeatureFlagsLine(s is null
             ? "none"
             : $"instance={s.InstanceId} generation={s.Generation} source={s.Source} "
               + $"{FeatureFlagGate.InsightsSkills}={_flags.IsEnabled(FeatureFlagGate.InsightsSkills)} "
-              + $"unknown_flag={_flags.IsEnabled("no_such_flag")} flags=[{string.Join(",", System.Linq.Enumerable.Select(s.Flags, f => f.Key + ":" + f.Value.Enabled))}]";
+              + $"unknown_flag={_flags.IsEnabled("no_such_flag")} flags=[{string.Join(",", System.Linq.Enumerable.Select(s.Flags, f => f.Key + ":" + f.Value.Enabled))}]");
+    }
+
+    /// <summary>One line in the Debug flags log, when <c>TC_DEBUG_FEATURE_FLAGS_LOG</c> names a file.</summary>
+    private void TraceFeatureFlagsLine(string line)
+    {
+        string? path = Environment.GetEnvironmentVariable("TC_DEBUG_FEATURE_FLAGS_LOG");
+        if (string.IsNullOrEmpty(path)) return;
         try
         {
             System.IO.File.AppendAllText(path, $"{DateTime.UtcNow:O} host_generation={_host.ConnectionGeneration} {line}\n");
@@ -720,6 +727,22 @@ public sealed partial class MainWindow : Window
     private void OnTrayResumeRequested()
     {
         _host.Dispatcher.TryEnqueue(async () => await ViewModel.ResumeAsync());
+    }
+
+    /// <summary>Whether the tray icon made it into the notification area, so a launch may stay in it.</summary>
+    internal bool TrayPresent => _tray.IsPresent;
+
+    /// <summary>
+    /// A launch at login (<see cref="AutostartCommand.IsLoginLaunch"/>): the
+    /// window stays hidden and the tray holds the app, as the Mac's login
+    /// item opens nothing. The daemon and its flags start as the first
+    /// showing would start them; that showing, from the tray or a second
+    /// launch, joins the start already made.
+    /// </summary>
+    internal void StartInTray()
+    {
+        SetHiddenToTray(true);
+        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
     }
 
     internal void BringForward()
