@@ -59,6 +59,30 @@ public static class InsightsSample
     public const string Refusal = "insights_sample_not_answered";
 
     /// <summary>
+    /// A Claude login and a Codex login, each with a weekly window part used,
+    /// resetting a few days from <paramref name="now"/>
+    /// (<c>InsightsSample.subscriptions</c>, InsightsSample.swift:177-205).
+    /// </summary>
+    public static SubscriptionUsage Subscriptions(DateTimeOffset now) => new(new[]
+    {
+        new SubscriptionUsageProvider("claude", true, Logins: new[]
+        {
+            new SubscriptionUsageLogin("sample-claude", "Claude", "observed", DefaultLogin: true, UpdatedAt: now, Windows: new[]
+            {
+                new SubscriptionUsageWindow("session", UsedPermille: 340, ResetsAt: now.AddHours(2.4), DurationMins: 300),
+                new SubscriptionUsageWindow("weekly", UsedPermille: 410, ResetsAt: now.AddDays(3.2), DurationMins: 10_080),
+            }),
+        }),
+        new SubscriptionUsageProvider("codex", true, Logins: new[]
+        {
+            new SubscriptionUsageLogin("sample-codex", "Codex", "observed", DefaultLogin: true, UpdatedAt: now, Windows: new[]
+            {
+                new SubscriptionUsageWindow("weekly", UsedPermille: 220, ResetsAt: now.AddDays(4.6), DurationMins: 10_080),
+            }),
+        }),
+    });
+
+    /// <summary>
     /// The sample week as <c>insights_week</c> sends it (feed T): the Mac's
     /// <c>InsightsSample.weekObject</c> (InsightsSample.swift:105-140) over
     /// <c>InsightsSampleWeek</c>'s Overview, Patterns and 37 counted sessions

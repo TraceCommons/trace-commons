@@ -259,14 +259,30 @@ public sealed partial class MainWindow
         _homeStatus = status;
         _homeRollup = rollup;
         _homePending = pending;
+        ShowInsightsCreditTile();
         if (ViewModel.ShowingHome)
         {
             ShowHome();
         }
     }
 
+    /// <summary>
+    /// Insights' "Credits earned" tile is Home's, from Home's own reads, so
+    /// the two never disagree (InsightsView.swift:177-182); none until the
+    /// rollup or the commons' credit came.
+    /// </summary>
+    private void ShowInsightsCreditTile()
+    {
+        if (InsightsPane.Content is InsightsView insights)
+        {
+            insights.ViewModel.CreditTile =
+                HomeFacts.InsightsCreditTile(_homeRollup, _homeCredit, HistoryCopy.CreditFigure, HomeFacts.CreditTileWords.FromMonitorTable());
+        }
+    }
+
     private void ShowHome()
     {
+        ShowInsightsCreditTile();
         string fingerprint = _campaign is Campaign c ? HomeFacts.CampaignFingerprint(c) : string.Empty;
         var reads = new HomeOverviewModel.Reads(
             _homeStatus,

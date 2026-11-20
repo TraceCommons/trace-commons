@@ -681,8 +681,9 @@ public sealed class InsightsWeekExtrasTests
         string view = Shell("TraceCommons.App/Controls/InsightsView.WeekExtras.cs");
         Assert.Contains("InsightsCounterWeek? week = ViewModel.CounterFeed ? ViewModel.CounterWeek : null;", view);
         Assert.Contains("if (week is not null && ViewModel.Comparisons.Recap is { } recap)", view);
-        Assert.Contains("InsightsWorkWords.Tiles(week?.Work, copy)", view);
-        Assert.Contains("if (week?.NearAiCredit is { } credit && InsightsUsageWords.ShowsNearAi(credit))", view);
+        Assert.Contains("InsightsWorkWords.Tiles(week?.Work, ViewModel.CreditTile, copy)", view);
+        Assert.Contains("week?.NearAiCredit is { } credit && InsightsUsageWords.ShowsNearAi(credit) ? credit : null",
+            Shell("TraceCommons.App/Controls/InsightsView.UsageCards.cs"));
         Assert.Contains("if (InsightsWorkWords.ModelRows(work, copy).Count > 0)", view);
         Assert.Contains("if (InsightsWorkWords.ShowsTrends(work, week.ChangeVsLastWeek, copy))", view);
         Assert.Contains("if (InsightsGoalsWords.Shows(week))", view);

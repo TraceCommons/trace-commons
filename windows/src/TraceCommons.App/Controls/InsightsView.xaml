@@ -170,6 +170,8 @@
                                   SelectedIndex="{Binding Patterns.SelectedWeekIndex}" SelectionChanged="OnPatternsWeek"
                                   AutomationProperties.Name="{Binding [analytics_this_week]}" />
                     </StackPanel>
+                    <!-- Feed T's drill-down, By project and By model (InsightsView.UsageCards.cs). -->
+                    <StackPanel x:Name="PatternsDetails" Spacing="12" Visibility="Collapsed" />
                     <TextBlock Text="{Binding Patterns.Status}" FontSize="22" AutomationProperties.LiveSetting="Polite" />
                     <ItemsControl ItemsSource="{Binding Patterns.Notes}">
                         <ItemsControl.ItemTemplate><DataTemplate>
