@@ -51,7 +51,7 @@ public enum GlassTokens {
         /// Watching, share automatically, automatic, always on. Glyph and label only.
         public static var statusOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
         /// Ask, worth a second look.
-        public static var statusAsk: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x9C610E, alpha: 1)), flat: GlassRGBA(0xFFC75C, alpha: 1, light: GlassRGBA(0x9C610E, alpha: 1))) }
+        public static var statusAsk: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1)), flat: GlassRGBA(0xFFC75C, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1))) }
         /// Never, not used. Never for text.
         public static let statusOff: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x78787F, alpha: 1))
         /// Leaves for an outside model, no proof.
@@ -219,6 +219,10 @@ public enum GlassTokens {
         public static var selection: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3275D3, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x0558B6, alpha: 1))) }
         public static let mapIdle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.35, light: GlassRGBA(0x000000, alpha: 0.3))
         public static var mapNodeOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0x5D5D63, alpha: 1, light: GlassRGBA(0xA1A1A6, alpha: 1)), flat: GlassRGBA(0x5D5D63, alpha: 1, light: GlassRGBA(0xC4C9D2, alpha: 1))) }
+        /// The launch pad's slab (This computer on the Traces map), drawn 75% to 100% down its height. statusOff in Dark; Light is statusOff darkened on its hue the least that clears 3:1 at its 75% edge on the map's measured ground #f0f1f4 (lead, on the owner's 2026-11-20 decision: raise to pass).
+        public static let mapPadSlab: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x69696F, alpha: 1))
+        /// The launch pad's service tower, drawn at 70%. statusOff in Dark; Light is statusOff darkened on its hue the least that clears 3:1 at 70% on the map's measured ground #f0f1f4 (lead, on the owner's 2026-11-20 decision: raise to pass).
+        public static let mapPadTower: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x5F5F65, alpha: 1))
         /// The map's centre node.
         public static let mapHub: GlassRGBA = GlassRGBA(0x8E8E96, alpha: 1, light: GlassRGBA(0x8A8A92, alpha: 1))
         public static var mapFieldInner: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1E2A3A, alpha: 1, light: GlassRGBA(0xEEF2F8, alpha: 1)), flat: GlassRGBA(0x070A1A, alpha: 0.15, light: GlassRGBA(0xFFFFFF, alpha: 0.1))) }
@@ -370,6 +374,8 @@ public enum GlassTokens {
             "selection": selection,
             "mapIdle": mapIdle,
             "mapNodeOff": mapNodeOff,
+            "mapPadSlab": mapPadSlab,
+            "mapPadTower": mapPadTower,
             "mapHub": mapHub,
             "mapFieldInner": mapFieldInner,
             "mapFieldOuter": mapFieldOuter,

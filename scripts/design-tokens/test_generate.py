@@ -260,12 +260,12 @@ class GlassTokensTests(unittest.TestCase):
         # GlassTokens.swift: statusOn (:52), statusAsk (:54), statusOff
         # (:56), statusOutside (:58), flat theme; graphFocusOn/Idle/Off
         # (:232-236); textPrimary (:31); GlassColor.ink is pure black in
-        # light and white in dark (:252). Light statusAsk and statusOff were
-        # #A8690F and #8A8A90, raised to pass on the map (owner, 2026-11-20:
-        # "Raise to pass, both apps"; LightContrastRaiseTests).
+        # light and white in dark (:252). Light statusOff was #8A8A90, raised
+        # to pass on the map (owner, 2026-11-20: "Raise to pass, both apps";
+        # LightContrastRaiseTests).
         rust = "\n".join(generate.render_glass_rust(self.tokens))
         for name, light, dark in (
-            ("ON", "#1A8F4C", "#30D158"), ("ASK", "#9C610E", "#FFC75C"),
+            ("ON", "#1A8F4C", "#30D158"), ("ASK", "#A8690F", "#FFC75C"),
             ("OFF", "#78787F", "#A9A9B0"), ("OUTSIDE", "#D0342C", "#FF6B6B"),
         ):
             self.assertIn(f'pub const {name}_LIGHT: &str = "{light}";', rust)
@@ -308,10 +308,10 @@ class GlassTokensTests(unittest.TestCase):
         # GlassListRow (ListRow.swift): a flagged sub-line in statusAsk or
         # statusOn (:292-296), the chevron in statusOff (:149), and
         # GlassToolTile's folder tile on tileFolder (Indicators.swift:306);
-        # flat theme, flattened over the pane. Light ask and off raised from
-        # #a8690f and #8a8a90 (owner, 2026-11-20: "Raise to pass, both apps").
+        # flat theme, flattened over the pane. Light off raised from #8a8a90
+        # (owner, 2026-11-20: "Raise to pass, both apps").
         for scheme, (ask, on, off, folder) in (
-            ("light", ("#9c610e", "#1a8f4c", "#78787f", "#e6e6ea")),
+            ("light", ("#a8690f", "#1a8f4c", "#78787f", "#e6e6ea")),
             ("dark", ("#ffc75c", "#30d158", "#a9a9b0", "#2a2a2c")),
         ):
             with self.subTest(scheme=scheme):
@@ -823,15 +823,30 @@ class LightContrastRaiseTests(unittest.TestCase):
                     drawn = generate.opaque_over({"hex": hex_, "alpha": alpha * coverage}, self.MAP_GROUND)
                     self.assertGreaterEqual(generate.contrast(drawn, self.MAP_GROUND), 3.0)
 
-    def test_ask_folder_node_clears_4_5_to_1(self):
+    def test_ask_folder_ring_clears_3_to_1(self):
         # 4. An Ask folder on the map: its ring in statusAsk (FlowMapView
-        # rule(.ask), MapGeometry.Rule). Held at the text floor the audit
-        # applied, so statusAsk also reads as text wherever it is drawn so.
+        # rule(.ask), MapGeometry.Rule). The audit read the node as text;
+        # its names are textPrimary, and the ring is a graphic, held at 3:1,
+        # which #a8690f already clears (lead, on the owner's 2026-11-20
+        # decision: statusAsk stays).
         for hex_, alpha in (self.swift_flat_light("statusAsk"), self.map_art_light("statusAsk")):
             with self.subTest(hex=hex_):
                 self.assertEqual(alpha, 1.0)
-                self.assertGreaterEqual(generate.contrast(hex_, self.MAP_GROUND), 4.5)
+                self.assertGreaterEqual(generate.contrast(hex_, self.MAP_GROUND), 3.0)
 
+    # The launch pad, the map's default "This computer" (FlowMapView
+    # drawPad, TracesMapView.DrawPad, GTK draw_pad): the slab's lightest
+    # stop is drawn at 0.75 and the tower's bars at 0.7. Each was statusOff
+    # (#78787f: 2.60 and 2.42) and takes its own token, darkened the least
+    # that clears 3:1 (lead, on the owner's 2026-11-20 decision).
+    PAD = (("mapPadSlab", 0.75), ("mapPadTower", 0.7))
+
+    def test_launch_pad_pieces_clear_3_to_1(self):
+        for name, coverage in self.PAD:
+            for hex_, alpha in (self.swift_flat_light(name), self.map_art_light(name)):
+                with self.subTest(name=name, coverage=coverage, hex=hex_):
+                    drawn = generate.opaque_over({"hex": hex_, "alpha": alpha * coverage}, self.MAP_GROUND)
+                    self.assertGreaterEqual(generate.contrast(drawn, self.MAP_GROUND), 3.0)
 
 if __name__ == '__main__':
     unittest.main()

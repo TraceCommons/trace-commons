@@ -516,7 +516,8 @@ GLASS_MOTION = REPO / "macos" / "Sources" / "TCDesign" / "Styling" / "GlassMotio
 # tints. The Linux map reads them from `brand_tokens::map`.
 MAP_COLOURS = [
     "mapOrbShared", "mapOrbKept", "purpleSoft", "blue", "statusOff", "statusOn",
-    "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapCredentialOn",
+    "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapPadSlab", "mapPadTower",
+    "mapCredentialOn",
     "mapRuleAutoFill", "mapRuleAskFill", "mapRuleIgnoreFill", "mapRuleUnsetFill",
     "paneOpaque", "wellFill", "mapFieldInner", "mapFieldOuter",
     "textPrimary", "textSecondary", "textTertiary", "purpleText",

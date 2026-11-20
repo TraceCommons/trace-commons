@@ -23,7 +23,7 @@ pub mod light {
     /// `statusOnText`.
     pub const STATUS_ON_TEXT: &str = "#11613A";
     /// `statusAsk`.
-    pub const STATUS_ASK: &str = "#9C610E";
+    pub const STATUS_ASK: &str = "#A8690F";
     /// `statusAskText`.
     pub const STATUS_ASK_TEXT: &str = "#7A4A06";
     /// `statusOutside`.
@@ -69,7 +69,7 @@ pub const LIGHT_CSS: &str = r#"
 @define-color tc_on_accent #FFFFFF; /* textOnAccent */
 @define-color tc_status_on #1A8F4C; /* statusOn */
 @define-color tc_status_on_text #11613A; /* statusOnText */
-@define-color tc_status_ask #9C610E; /* statusAsk */
+@define-color tc_status_ask #A8690F; /* statusAsk */
 @define-color tc_status_ask_text #7A4A06; /* statusAskText */
 @define-color tc_status_outside #D0342C; /* statusOutside */
 @define-color tc_status_outside_text #A3221C; /* statusOutsideText */
@@ -185,7 +185,7 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_status_on_text #0b4628;
 @define-color tc_glass_status_ask_text #573403;
 @define-color tc_glass_ink_tertiary #3d3d43;
-@define-color tc_glass_status_ask #9c610e;
+@define-color tc_glass_status_ask #a8690f;
 @define-color tc_glass_status_on #1a8f4c;
 @define-color tc_glass_status_off #78787f;
 @define-color tc_glass_tile_folder #e6e6ea;
@@ -483,7 +483,7 @@ pub mod glass {
         /// `statusOn`, light.
         pub const ON_LIGHT: &str = "#1A8F4C";
         /// `statusAsk`, light.
-        pub const ASK_LIGHT: &str = "#9C610E";
+        pub const ASK_LIGHT: &str = "#A8690F";
         /// `statusOff`, light.
         pub const OFF_LIGHT: &str = "#78787F";
         /// `statusOutside`, light.
@@ -640,9 +640,11 @@ pub mod map {
         pub const STATUS_OFF: Rgba = ("#78787f", 1.0);
         pub const STATUS_ON: Rgba = ("#1a8f4c", 1.0);
         pub const STATUS_ON_TEXT: Rgba = ("#0b4628", 1.0);
-        pub const STATUS_ASK: Rgba = ("#9c610e", 1.0);
+        pub const STATUS_ASK: Rgba = ("#a8690f", 1.0);
         pub const STATUS_OUTSIDE: Rgba = ("#d0342c", 1.0);
         pub const MAP_NODE_OFF: Rgba = ("#c4c9d2", 1.0);
+        pub const MAP_PAD_SLAB: Rgba = ("#69696f", 1.0);
+        pub const MAP_PAD_TOWER: Rgba = ("#5f5f65", 1.0);
         pub const MAP_CREDENTIAL_ON: Rgba = ("#27a06b", 1.0);
         pub const MAP_RULE_AUTO_FILL: Rgba = ("#d7f1e2", 1.0);
         pub const MAP_RULE_ASK_FILL: Rgba = ("#f6ead0", 1.0);
@@ -677,6 +679,8 @@ pub mod map {
         pub const STATUS_ASK: Rgba = ("#ffc75c", 1.0);
         pub const STATUS_OUTSIDE: Rgba = ("#ff6b6b", 1.0);
         pub const MAP_NODE_OFF: Rgba = ("#5d5d63", 1.0);
+        pub const MAP_PAD_SLAB: Rgba = ("#a9a9b0", 1.0);
+        pub const MAP_PAD_TOWER: Rgba = ("#a9a9b0", 1.0);
         pub const MAP_CREDENTIAL_ON: Rgba = ("#2c7a5b", 1.0);
         pub const MAP_RULE_AUTO_FILL: Rgba = ("#12321f", 1.0);
         pub const MAP_RULE_ASK_FILL: Rgba = ("#2b2412", 1.0);

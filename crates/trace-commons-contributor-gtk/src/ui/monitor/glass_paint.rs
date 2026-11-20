@@ -202,14 +202,14 @@ mod tests {
 
     /// `PrivateInferenceView.status` maps clear, attention and refused to
     /// on, ask and outside, and both neutral and held to statusOff; the
-    /// flat theme's values from `GlassTokens.swift` (:52-58). Light ask and
-    /// off were #A8690F and #8A8A90, raised to pass (owner, 2026-11-20:
-    /// "Raise to pass, both apps").
+    /// flat theme's values from `GlassTokens.swift` (:52-58). Light off was
+    /// #8A8A90, raised to pass (owner, 2026-11-20: "Raise to pass, both
+    /// apps").
     #[test]
     fn the_tab_dot_takes_the_macs_one_colour_per_state() {
         for (tone, light, dark) in [
             (style::Tone::Clear, "#1A8F4C", "#30D158"),
-            (style::Tone::Attention, "#9C610E", "#FFC75C"),
+            (style::Tone::Attention, "#A8690F", "#FFC75C"),
             (style::Tone::Refused, "#D0342C", "#FF6B6B"),
             (style::Tone::Held, "#78787F", "#A9A9B0"),
             (style::Tone::Neutral, "#78787F", "#A9A9B0"),
