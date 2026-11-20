@@ -44,7 +44,7 @@ CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US
 
 `S=` and `ST=` both parse to OID 2.5.4.8, so either spelling encodes to the same
 DER; the ordering is the part that matters. **This has not been confirmed
-against `signtool` on Windows** -- see "What is unverified" below.
+against `signtool` on Windows** -- see "What is verified, and what is not" below.
 
 `Identity Name` (`Iqlusion.TraceCommons`) is a choice, not a constraint, for
 sideloaded and directly-downloaded MSIX. If this app is ever submitted to the
@@ -104,20 +104,22 @@ drift check can run on `ubuntu-latest`. An earlier fix put the mark on these
 tiles using CoreGraphics, which meant only a Mac could regenerate them and the
 check had to skip them entirely.
 
-## What is unverified
+## What is verified, and what is not
 
-None of this has been built. It was authored on macOS, which cannot build WinUI
-or MSIX at all. Specifically unproven:
+Built, signed with a throwaway certificate, installed through its feed and
+updated in place on Windows Server 2025 (tc-win-az3, 2026-11-19 and
+2026-11-20; see `docs/operator/windows-app-release-checklist.md`):
 
-- that `TcPackaged=true` produces a package at all;
-- that `signtool` accepts the publisher string against a real Trusted Signing
-  certificate (the failure mode is an outright signing refusal, which is loud);
-- that the virtualization opt-out behaves as documented, i.e. that the packaged
-  app sees the CLI's real state directory;
-- that the manifest-declared protocol handler resolves to the packaged app.
+- `TcPackaged=true` produces one package, and `make-msix.ps1` builds it under
+  Windows PowerShell 5.1 and PowerShell 7;
+- the virtualization opt-out works: the packaged app writes the CLI's real
+  `%LOCALAPPDATA%\trace-commons`;
+- the manifest-declared protocol handler is registered by the deployment;
+- the `.appinstaller` feed installs, registers the intended update settings,
+  and the in-app update installs the next version with the state intact. It
+  does not start the app again afterwards.
 
-The first three need a Windows runner; the second additionally needs the
-signing identity, which pull-request CI does not have. The MSIX steps in
-`release-apps.yml` are therefore gated behind an explicit `workflow_dispatch`
-input and never run on a tag push, so the first attempt cannot damage a real
-release.
+Still unproven: that `signtool` accepts the publisher string against a real
+Trusted Signing certificate (the failure mode is an outright signing
+refusal, which is loud), which only the release job's dispatch run
+exercises, and any of it on a Windows 10 or 11 client or as a standard user.

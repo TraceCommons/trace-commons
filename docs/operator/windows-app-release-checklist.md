@@ -108,19 +108,38 @@ the version; the MSIX version is stamped from the tag at build time.
   `GCP_FLATPAK_PUBLISHER_SA`. The MSIX is not in this manifest; installed
   packages follow the `.appinstaller` feed.
 
-## Also fix before the first Windows tag
+## Fixed on 2026-11-20 (this branch)
 
-- The `publish` job's release notes open with "Trace Commons contributor
-  apps." That text is on the public Release page; the owner's rule is that
-  "Trace Commons" is never user-visible.
+- The `publish` job's release notes opened with "Trace Commons contributor
+  apps." They now open with the app's name, `APP_NAME` ("Near AI Gateway."),
+  pinned by `release_notes_open_with_the_app_name`.
+- `windows/scripts/make-msix.ps1` used a three-argument `Join-Path`, which
+  Windows PowerShell 5.1 rejects. It now runs under 5.1 and 7 (both proved
+  on tc-win-az3), and `clients.yml` builds the MSIX with it under both.
+- **Every feed `make-appinstaller.ps1` had written was invalid.** It put
+  `AutomaticBackgroundTask` in the 2021 namespace, and Windows refused the
+  whole file: `Add-AppxPackage -AppInstallerFile` failed with 0x8008020C,
+  "Element '{.../2021}AutomaticBackgroundTask' is unexpected ... Expecting:
+  {.../2017/2}AutomaticBackgroundTask". The generator at `app-v0.23.0` had
+  the same line, so the live feed is very likely the same invalid file
+  (inferred from the generator; the live feed was not fetched). Installed
+  MSIX apps would then never have updated from it. The `clients.yml` check
+  required the wrong namespace too; both are fixed and pinned.
+
+## Still open
+
+- **"Update and restart" does not restart.** The in-app update installs the
+  new version and ends the app, and nothing starts it again (see the trial
+  below). `RegisterApplicationRestart` was tried, with flags 11 and 0, and
+  with `AddPackageByAppInstallerFileAsync` in place of the `Request...`
+  call: it registered (S_OK) and the app still stayed closed. The
+  deployment ends the app through `TerminateApplications`, not Restart
+  Manager. Tried only as the box's built-in Administrator. Whether to change
+  the button's words or find another relaunch is the owner's call.
 - The `windows` job publishes the app without `-p:Version`, so the portable
   app's assembly version is the SDK default until #2216 (which reads the
   contributor crate's version) lands. The MSIX is unaffected: its version is
-  stamped from the tag.
-- `windows/scripts/make-msix.ps1` uses three-argument `Join-Path`, which
-  Windows PowerShell 5.1 rejects ("A positional parameter cannot be found
-  that accepts argument '..'"). The workflow runs it under `pwsh`, so only a
-  hand run on a box without PowerShell 7 hits it.
+  stamped from the tag. The zips are not on tags in any case.
 
 ## Trial on tc-win-az3, 2026-11-19
 
@@ -148,9 +167,53 @@ requires an https base, and the trial had no trusted local https endpoint);
 `contributor-v*` release, so it was parse-checked only); the Trusted Signing
 profile and the virtualization probe, which only the dispatch run exercises.
 
+## Trial on tc-win-az3, 2026-11-20: install and update through the feed
+
+The `windows-app` job's steps by hand on the same box, from this branch
+(main 70fc3227b plus the fixes above): Release FFI with
+`TC_FEATURE_PROFILE=production`, Release app, `stamp-package-identity.ps1`,
+`TcPackaged` package, `signtool sign` and `verify /pa`, and
+`make-appinstaller.ps1` with the real `-BaseUri`. Signing used a throwaway
+self-signed certificate (`CN=TC Release Path Throwaway`, in LocalMachine
+TrustedPeople for the trial only).
+
+To install through the feed without touching the bucket, the box resolved
+`storage.googleapis.com` to 127.0.0.1 (hosts file) and a local HTTPS server
+with a throwaway certificate for that name (LocalMachine Root, trial only)
+served `tracecommons-flatpak/windows/` with byte ranges and the Publish
+step's content types. So the app's own hard-coded `AppUpdater.FeedUri`, the
+feed's self `Uri` and the package `Uri` were all exercised unchanged. Every
+certificate, the hosts line, the TLS binding, the packages and the state
+directory were removed afterwards, and the box was deallocated.
+
+| Step | Result |
+|---|---|
+| `make-msix.ps1 -Version 0.0.1` under Windows PowerShell 5.1.26100 and PowerShell 7.4.6 | before the fix, 5.1 failed at `Join-Path`; after, both built one `.msix` and wrote the sign list |
+| Package 1.0.12 and 1.0.13, sign, verify, feed | both signed and verified; packages 89 MB |
+| `Add-AppxPackage -AppInstallerFile <feed URL>` | 0x8008020C, the invalid feed (fixed above); after the fix, installed `Iqlusion.TraceCommons_1.0.12.0_x64`, the package fetched in byte ranges by Delivery Optimization |
+| Registered update settings (`Get-AppxPackageAutoUpdateSettings`) | `AppInstallerUri` the feed, `CheckForUpdatesOnLaunch` True, `HoursBetweenUpdateChecks` 8, `AutomaticBackgroundTaskUpdatesEnabled` True, `ForceUpdateFromAnyVersion` False, `ShowPromptOnLaunchWhenUpdateIsAvailable` False: what `make-appinstaller.ps1` intends |
+| Write virtualization probe (the job's step, in the console session) | probe landed at `%LOCALAPPDATA%\trace-commons`, none in `LocalCache` |
+| Launch from `shell:AppsFolder` | ran from `C:\Program Files\WindowsApps\Iqlusion.TraceCommons_1.0.12.0_x64__...`; main window up |
+| Feed moved to 1.0.13; Settings opened (starts the daemon, then the update check) | the app fetched the feed; the "Update available" banner offered "Update and restart" on Insights (on Traces it sits behind the first-contribution card, by the notice order) |
+| "Update and restart" | the daemon shut down cleanly (`daemon.lock` removed, as on a clean close); `AddFromAppInstallerOperation` with `ForceTargetApplicationShutdownOption`; 1.0.13.0 registered about 7 s later |
+| Relaunch | **none**: no process for the two minutes watched, at 1.0.13 and again at 1.0.15 and 1.0.17 with the restart registration tried (see "Still open") |
+| State across the update | `daemon-settings.json`, `daemon-state.json` and a sentinel file byte-identical before and after; launched by hand, 1.0.17 started its daemon on the same state |
+
+Box notes: `Add-AppxPackage` and `Invoke-CommandInDesktopPackage` over SSH
+fail ("Failed to initialize PLM", 0x80070005); run them in the console
+session (an `/IT` task). The daemon needs a `daemon-settings.json` it wrote
+itself (it carries `schema_version`); a hand-written one reads as
+`settings-unreadable`. Under the hosts redirect the daemon's
+`feature-flags/production.json` fetch got a 404, so these runs had no
+remote flags.
+
+Not covered: a standard (non-administrator) user, Windows 10 and 11
+clients, the Trusted Signing certificate, and Windows' own OnLaunch and
+background updates (the 8-hour interval did not elapse).
+
 ## After
 
 - Install from the feed on a clean standard user and confirm the version.
-- Confirm an installed earlier build updates (App Installer checks on launch;
-  the app's own update action needs the `packageManagement` capability, which
-  the manifest declares).
+- Confirm an installed earlier build updates from the real feed. The in-app
+  path is proved on the box (above) apart from the relaunch; Windows' own
+  OnLaunch and background checks are not.
