@@ -22,15 +22,17 @@ internal static class SharingDisclosureSheets
 {
     public static async Task<bool> ShowAsync(
         XamlRoot root, SharingDisclosureFlow flow, AutomaticGrantCopy grant, FirstRunCopy copy,
-        Func<Task<DaemonResponse>> routeDisclosure, Func<bool> closed, ElementTheme? theme = null)
+        Func<Task<DaemonResponse>> routeDisclosure, Func<bool> closed, ElementTheme? theme = null,
+        Func<ContentDialog, Task<ContentDialogResult>>? show = null)
     {
+        show ??= dialog => dialog.ShowAsync().AsTask();
         var scrub = new StackPanel { Spacing = 10 };
         foreach (string line in grant.Lines)
         {
             scrub.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
         }
 
-        if (await Sheet(root, copy, WatchCopy.Armed, scrub, true, theme) != ContentDialogResult.Primary || closed())
+        if (await Sheet(root, copy, WatchCopy.Armed, scrub, true, theme, show) != ContentDialogResult.Primary || closed())
         {
             return false;
         }
@@ -51,7 +53,7 @@ internal static class SharingDisclosureSheets
         }
 
         string title = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
-        if (await Sheet(root, copy, title.Length > 0 ? title : WatchCopy.Armed, body, disclosure is not null, theme) != ContentDialogResult.Primary || closed())
+        if (await Sheet(root, copy, title.Length > 0 ? title : WatchCopy.Armed, body, disclosure is not null, theme, show) != ContentDialogResult.Primary || closed())
         {
             return false;
         }
@@ -60,7 +62,8 @@ internal static class SharingDisclosureSheets
         return flow.Step == DisclosureStep.Done;
     }
 
-    private static async Task<ContentDialogResult> Sheet(XamlRoot root, FirstRunCopy copy, string title, UIElement body, bool canContinue, ElementTheme? theme)
+    private static async Task<ContentDialogResult> Sheet(XamlRoot root, FirstRunCopy copy, string title, UIElement body, bool canContinue, ElementTheme? theme,
+        Func<ContentDialog, Task<ContentDialogResult>> show)
     {
         var dialog = new ContentDialog
         {
@@ -77,6 +80,6 @@ internal static class SharingDisclosureSheets
             dialog.RequestedTheme = requested;
         }
 
-        return await dialog.ShowAsync();
+        return await show(dialog);
     }
 }

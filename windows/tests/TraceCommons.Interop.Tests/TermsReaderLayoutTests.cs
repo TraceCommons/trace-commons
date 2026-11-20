@@ -69,5 +69,8 @@ public class TermsReaderLayoutTests
         Assert.Contains("legal.Retry", body, StringComparison.Ordinal);
         Assert.Contains("legal.PrivacyUrl", body, StringComparison.Ordinal);
         Assert.DoesNotContain("Card(panel", body, StringComparison.Ordinal);
+        // Unlocked only once laid out: before layout every extent reads 0.
+        Assert.Contains("scroll.ViewportHeight > 0 && scroll.ExtentHeight > 0", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("scroll.Loaded +=", body, StringComparison.Ordinal);
     }
 }

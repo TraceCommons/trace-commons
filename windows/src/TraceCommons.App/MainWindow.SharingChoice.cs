@@ -141,7 +141,8 @@ public sealed partial class MainWindow : ISharingChoiceSteps
         var flow = new SharingDisclosureFlow();
         bool done = await SharingDisclosureSheets.ShowAsync(
             Content.XamlRoot, flow, _grantCopy!, SharingCopy!,
-            () => ViewModel.Host.CallAsync(DaemonProtocol.Methods.RouteDisclosure), () => false);
+            () => ViewModel.Host.CallAsync(DaemonProtocol.Methods.RouteDisclosure), () => false,
+            show: DialogGuard.ShowOnceAsync);
         return done ? flow : null;
     }
 

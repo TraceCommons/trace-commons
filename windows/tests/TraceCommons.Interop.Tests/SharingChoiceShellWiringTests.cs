@@ -46,6 +46,9 @@ public class SharingChoiceShellWiringTests
         Assert.Contains("SetAskEachTime()", window, StringComparison.Ordinal);
         Assert.Contains("Flow1GrantRequest.Ask(", window, StringComparison.Ordinal);
         Assert.Contains("SharingDisclosureSheets.ShowAsync(", window, StringComparison.Ordinal);
+        // One dialog at a time in the main window, as every other there.
+        Assert.Contains("show: DialogGuard.ShowOnceAsync", window, StringComparison.Ordinal);
+        Assert.Contains("DialogGuard.ShowOnceAsync(dialog)", window, StringComparison.Ordinal);
         Assert.Contains("SettingsSharingRefused", window, StringComparison.Ordinal);
         Assert.Contains("SettingsSharingSaveFailed", window, StringComparison.Ordinal);
     }

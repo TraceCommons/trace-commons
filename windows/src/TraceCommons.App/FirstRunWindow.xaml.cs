@@ -1625,7 +1625,10 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         {
             void Unlock()
             {
-                if (scroll.VerticalOffset >= scroll.ScrollableHeight - 4)
+                // Only once laid out: before layout every extent reads 0,
+                // which would unlock a document nobody has seen.
+                if (scroll.ViewportHeight > 0 && scroll.ExtentHeight > 0
+                    && scroll.VerticalOffset >= scroll.ScrollableHeight - 4)
                 {
                     accept.IsEnabled = true;
                     AutomationProperties.SetHelpText(accept, string.Empty);
@@ -1637,7 +1640,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             }
 
             scroll.ViewChanged += (_, _) => Unlock();
-            scroll.Loaded += (_, _) => Unlock();
+            scroll.SizeChanged += (_, _) => Unlock();
         }
 
         return column;
