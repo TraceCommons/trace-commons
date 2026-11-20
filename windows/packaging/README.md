@@ -3,10 +3,12 @@
 Everything here is **additive and opt-in**. The shipping Windows app artifact
 is still `trace-commons-app-windows-x86_64-<version>.zip`: a self-contained,
 unpackaged (`WindowsPackageType=None`), Authenticode-signed publish tree that
-unzips and runs. Nothing in this directory changes that build. Since
-`app-v0.23.0` the release workflow no longer builds Windows on an `app-v*` tag
-push: the `windows` and `windows-app` jobs run only on a `workflow_dispatch`,
-which never publishes (see `docs/release-runbook.md`).
+unzips and runs. Nothing in this directory changes that build. An `app-v*`
+tag push builds, signs and publishes the MSIX and its `.appinstaller` feed
+(the `windows-app` job); the zips (the `windows` job) are built only on a
+`workflow_dispatch`, which never publishes them. From `app-v0.23.0` until
+the MSIX went back on tags, a tag push built no Windows artifact at all
+(see `docs/release-runbook.md`).
 
 The MSIX path is entered only by passing `TcPackaged=true` to MSBuild, which is
 done in one place: `windows/scripts/make-msix.ps1`.

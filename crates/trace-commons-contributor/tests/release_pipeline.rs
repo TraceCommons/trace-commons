@@ -280,17 +280,17 @@ fn release_apps_workflow_is_tag_driven_and_per_platform_runnable() {
     }
 }
 
-/// Native macOS is the lead client, the Windows and Tauri shells are frozen,
-/// and the Linux GTK app is in development but not yet released on tags, so
-/// an `app-v*` tag push builds and publishes macOS alone.
-/// The other build jobs stay reachable from a workflow_dispatch, which never
-/// publishes. Each job's `if:` must therefore require a dispatch, not merely
-/// omit `push`: a later edit that adds `github.event_name == 'push' ||` back
-/// would quietly resume production Windows and Linux releases.
+/// An `app-v*` tag push builds and publishes macOS and the Windows MSIX
+/// (`windows-app`). The Windows zips (`windows`) and the Linux GTK app are
+/// not released on tags: they stay reachable from a workflow_dispatch, which
+/// never publishes them. Those jobs' `if:` must therefore require a
+/// dispatch, not merely omit `push`: a later edit that adds
+/// `github.event_name == 'push' ||` back would quietly resume their
+/// production releases.
 #[test]
-fn a_tag_push_releases_macos_only() {
+fn a_tag_push_releases_macos_and_the_windows_msix_only() {
     let apps = executable_text(&read(".github/workflows/release-apps.yml"));
-    for job in ["  windows:", "  windows-app:", "  linux-flatpak:"] {
+    for job in ["  windows:", "  linux-flatpak:"] {
         let start = apps
             .find(&format!("\n{job}\n"))
             .unwrap_or_else(|| panic!("missing job {job}"));
@@ -312,16 +312,22 @@ fn a_tag_push_releases_macos_only() {
         );
     }
 
-    let start = apps.find("\n  macos:\n").expect("missing job macos");
-    let body = &apps[start + 1..];
-    let if_at = body.find("    if:").expect("macos has no if:");
-    let runs_on = body[if_at..]
-        .find("runs-on:")
-        .expect("macos has no runs-on:");
-    assert!(
-        body[if_at..if_at + runs_on].contains("github.event_name == 'push'"),
-        "the macOS job must still build on a tag push"
-    );
+    for job in ["macos", "windows-app"] {
+        let start = apps
+            .find(&format!("\n  {job}:\n"))
+            .unwrap_or_else(|| panic!("missing job {job}"));
+        let body = &apps[start + 1..];
+        let if_at = body
+            .find("    if:")
+            .unwrap_or_else(|| panic!("{job} has no if:"));
+        let runs_on = body[if_at..]
+            .find("runs-on:")
+            .unwrap_or_else(|| panic!("{job} has no runs-on:"));
+        assert!(
+            body[if_at..if_at + runs_on].contains("github.event_name == 'push' ||"),
+            "the {job} job must build on a tag push"
+        );
+    }
 }
 
 #[test]
@@ -422,19 +428,37 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
         );
     }
 
-    // A tag push builds macOS only, so the Azure Trusted Signing values the
-    // dispatch-only Windows jobs spend must not be required by the tag-push
-    // pre-flight: demanding them would fail a macOS release over
-    // configuration nothing it runs consumes.
+    // A tag push builds the Windows MSIX, which signs with Azure Trusted
+    // Signing, so the pre-flight checks all six AZURE_SIGNING_* values
+    // before macOS or Windows signs anything.
     let config_start = apps_code
         .find("  release-config:")
         .expect("release-apps.yml must have a release-config job");
     let config_job = &apps_code[config_start..];
     let config_job = &config_job[..config_job.find("\n  version:").unwrap_or(config_job.len())];
+    for name in [
+        "AZURE_SIGNING_CLIENT_ID",
+        "AZURE_SIGNING_TENANT_ID",
+        "AZURE_SIGNING_SUBSCRIPTION_ID",
+        "AZURE_SIGNING_ENDPOINT",
+        "AZURE_SIGNING_ACCOUNT",
+        "AZURE_SIGNING_PROFILE",
+    ] {
+        assert!(
+            config_job.matches(name).count() >= 2,
+            "release-config must check {name}: a tag push signs the Windows \
+             MSIX with it"
+        );
+    }
+    // A dispatch that publishes is held to the same credentials, and must
+    // run on the tag it publishes.
     assert!(
-        !config_job.contains("AZURE_SIGNING_"),
-        "release-config must not require AZURE_SIGNING_* -- a tag push no \
-         longer builds the Windows jobs that spend them"
+        config_job.contains("if: github.event_name == 'push' || inputs.publish_windows_app"),
+        "the credential pre-flight must also run for a publishing dispatch"
+    );
+    assert!(
+        config_job.contains("refs/tags/app-v$INPUT_VERSION"),
+        "a publishing dispatch must be refused unless it runs on refs/tags/app-v<version>"
     );
 
     // The AZURE_SIGNING_* values are environment variables on `release`, so a
@@ -1950,22 +1974,25 @@ fn windows_msix_job_installs_and_verifies_before_publishing() {
         );
     }
 
-    // Publication must only happen on a push (tag release), never on a
-    // workflow_dispatch -- but the build/sign/install/verify steps above
-    // must run unconditionally so the whole path is provable without ever
-    // moving what an installed client actually pulls.
-    let publish_gcp_auth = job
-        .find("Authenticate to GCP")
-        .expect("the publish path must authenticate to GCP");
-    let auth_step = &job[publish_gcp_auth..];
-    let if_line = auth_step
-        .lines()
-        .find(|l| l.trim_start().starts_with("if:"))
-        .expect("the GCP auth step must be gated");
-    assert!(
-        if_line.contains("github.event_name == 'push'"),
-        "publication must be gated to push events only, found: {if_line}"
-    );
+    // Publication happens on a push (tag release), or on a dispatch that
+    // explicitly sets publish_windows_app (release-config refuses one that
+    // is not on its app-v<version> tag) -- never on a plain dispatch. The
+    // build/sign/install/verify steps above run unconditionally so the whole
+    // path is provable without ever moving what an installed client pulls.
+    for step in ["Authenticate to GCP", "setup-gcloud", "name: Publish"] {
+        let at = job
+            .find(step)
+            .unwrap_or_else(|| panic!("the publish path must have {step}"));
+        let if_line = job[at..]
+            .lines()
+            .find(|l| l.trim_start().starts_with("if:"))
+            .unwrap_or_else(|| panic!("{step} must be gated"));
+        assert_eq!(
+            if_line.trim(),
+            "if: github.event_name == 'push' || inputs.publish_windows_app",
+            "{step} must publish only on a tag push or an explicit publishing dispatch"
+        );
+    }
 }
 
 #[test]

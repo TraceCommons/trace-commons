@@ -7,24 +7,29 @@ using it, because it is the source of truth.
 
 ## Where things stand
 
-- **No path publishes Windows today.** A tag push (`app-v*`) runs the
-  `windows` and `windows-app` jobs not at all: both are gated on
-  `github.event_name == 'workflow_dispatch'`. A dispatch builds, signs and
-  installs, but every publication step is guarded on
-  `github.event_name == 'push'`, so a dispatch publishes nothing.
-- **The live Windows artifacts are from app-v0.23.0.** The `.appinstaller`
-  feed at
+- **A tag push publishes the Windows MSIX.** Since the commit that put
+  `windows-app` back on tags (revert it alone to undo), an `app-v*` push
+  runs `windows-app` beside `macos`: it signs, installs and checks the
+  MSIX, uploads it and then `TraceCommons.appinstaller` to the bucket, and
+  `publish` attaches both to the GitHub Release. The `windows` zip job
+  stays dispatch-only (decision 3 below: the zips do not return).
+- **A dispatch can publish the MSIX and feed, and nothing else.** Set
+  `publish_windows_app` on a dispatch run on the `app-v<version>` tag
+  (`version` equal to it, `platform` `windows` or `all`). `release-config`
+  refuses it on any other ref and checks the publishing credentials first.
+  It never cuts or edits the Release and never writes `latest.json`. Any
+  other dispatch publishes nothing.
+- **The live Windows artifacts are from app-v0.23.0** until the first tag
+  after that change. The `.appinstaller` feed at
   `https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller`
-  and the last GitHub Release with Windows assets both date from it
-  (workflow header).
-- **Putting Windows back on tags is a workflow change and an owner
-  decision.** It is not made here. It needs:
-  1. the `if:` of `windows` and `windows-app` to admit
-     `github.event_name == 'push'`;
-  2. the six `AZURE_SIGNING_*` values added back to the tag-push preflight in
-     `release-config` (it stopped checking them when Windows left tags);
-  3. a decision on whether the CLI/portable-zip job (`windows`) also returns,
-     or only the MSIX job (`windows-app`).
+  and the last GitHub Release with Windows assets both date from it.
+- **Turning tag releases back on is the owner's decision.** The change is
+  prepared, in its own commit:
+  1. `windows-app`'s `if:` admits `github.event_name == 'push'`;
+  2. the six `AZURE_SIGNING_*` values are back in the `release-config`
+     preflight, for a tag push and a publishing dispatch;
+  3. only the MSIX job returns; the CLI/portable-zip job (`windows`) does
+     not.
 - **Release gates not yet met** (parity spec
   `docs/superpowers/specs/2026-11-18-windows-mac-parity-design.md`): the
   physical Windows 11 PC that signs off a slice as released does not exist
@@ -77,24 +82,28 @@ the version; the MSIX version is stamped from the tag at build time.
 
 ## Tagging
 
-1. The workflow change above (Windows back on tags), reviewed and merged.
+1. The workflow change above (the MSIX back on tags), reviewed and merged.
 2. `git tag app-vX.Y.Z <release commit>` and push the tag. That one push runs
-   macOS and, after the change, Windows.
+   macOS and the Windows MSIX.
+3. If only the Windows leg failed, fix the cause and re-run that job, or
+   dispatch `release-apps` on the tag with `platform=windows`,
+   `version=X.Y.Z` and `publish_windows_app` set. That republishes the
+   package and feed; attach the MSIX to the Release by hand if `publish`
+   ran without it.
 
 ## Where it lands
 
-- GitHub Release `app-vX.Y.Z` (`publish` job): the CLI zip, the portable app
-  zip, their `.sha256` files, and the MSIX with its `.sha256` and
-  `TraceCommons.appinstaller`.
+- GitHub Release `app-vX.Y.Z` (`publish` job): the MSIX with its `.sha256`
+  and `TraceCommons.appinstaller`. (The CLI and portable app zips come from
+  the dispatch-only `windows` job and are not on a tag's Release.)
 - `gs://tracecommons-flatpak/windows/<package>.msix` (immutable cache), then
   `gs://tracecommons-flatpak/windows/TraceCommons.appinstaller` (no-cache),
   from the `windows-app` job, before the Release is cut.
 - Build provenance attestations for every signed binary and the MSIX.
 - `gs://tracecommons-flatpak/updates/latest.json` and `latest.json.sig`
-  (`publish-updates` job, which runs when `macos` or `windows` succeeded): the
-  Windows entry `windows-x86_64` points at the CLI zip on the `app-vX.Y.Z`
-  Release, and `windows-x86_64-cli` at the `contributor-vX.Y.Z` Release's
-  exe. It signs with `update-manifest-signing-key` from Secret Manager in
+  (`publish-updates` job, which runs when `macos` or `windows` succeeded):
+  a tag push has no `windows` job, so no `windows-x86_64` entry, and
+  `windows-x86_64-cli` points at the `contributor-vX.Y.Z` Release's exe. It signs with `update-manifest-signing-key` from Secret Manager in
   `tracecommons-pilot-2026`, through the same `GCP_WIF_PROVIDER` and
   `GCP_FLATPAK_PUBLISHER_SA`. The MSIX is not in this manifest; installed
   packages follow the `.appinstaller` feed.
