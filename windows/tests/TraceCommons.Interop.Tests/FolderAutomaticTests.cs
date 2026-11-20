@@ -138,6 +138,22 @@ public class FolderAutomaticTests
         Assert.Equal(Failed, rig.Writes.Refusal("p1"));
     }
 
+    [Fact]
+    public async Task AReplyFromBeforeAnAccountBoundaryChangesNothing()
+    {
+        // As the arming offer settles only its own account's press
+        // (ArmingOfferFlow.AccountBoundary; TracesStore.swift:1041-1056).
+        var rig = new Rig();
+        Task press = rig.Writes.SetAsync(Folder(MapModes.Ask, MapModes.AutoUpload), true);
+        rig.Writes.AccountBoundary();
+        Assert.Empty(rig.Writes.Writing);
+        rig.Answer(Refused);
+        await press;
+        Assert.Null(rig.Writes.Refusal("p1"));
+        Assert.Empty(rig.Writes.Writing);
+        Assert.Equal(0, rig.Refreshes);
+    }
+
     /// <summary>The tree draws the switch from these rules and sends a press through them.</summary>
     [Fact]
     public void TheTreeDrawsAndSendsTheSwitch()

@@ -44,6 +44,7 @@ public sealed partial class MainWindow : ITracesTreeHost
             },
             () => MonitorWords.ProjectModeFailed);
         writes.Changed += () => _tree?.Refresh();
+        ViewModel.Host.Account.BoundaryCrossed += writes.AccountBoundary;
         return writes;
     }
 

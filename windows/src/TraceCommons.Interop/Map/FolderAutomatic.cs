@@ -24,6 +24,7 @@ public sealed class FolderAutomatic
     private readonly Func<string> _refusalLine;
     private readonly HashSet<string> _writing = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _refused = new(StringComparer.Ordinal);
+    private long _generation;
 
     /// <param name="call">The daemon call: method, params JSON.</param>
     /// <param name="refresh">Re-reads the projects and the tree.</param>
@@ -64,6 +65,19 @@ public sealed class FolderAutomatic
         };
     }
 
+    /// <summary>
+    /// A sign-out, unenroll or another account: every write in flight is
+    /// forgotten, and its reply, when it lands, changes nothing
+    /// (<see cref="ArmingOfferFlow.AccountBoundary"/>).
+    /// </summary>
+    public void AccountBoundary()
+    {
+        _generation++;
+        _writing.Clear();
+        _refused.Clear();
+        Changed?.Invoke();
+    }
+
     /// <summary>The switch moved to <paramref name="on"/>.</summary>
     public async Task SetAsync(TracesTree.FolderNode folder, bool on)
     {
@@ -73,6 +87,7 @@ public sealed class FolderAutomatic
         }
 
         string mode = on ? MapModes.AutoUpload : MapModes.Ask;
+        long generation = _generation;
         _writing.Add(folder.Id);
         _refused.Remove(folder.Id);
         Changed?.Invoke();
@@ -89,6 +104,11 @@ public sealed class FolderAutomatic
             ok = false;
         }
 
+        if (generation != _generation)
+        {
+            return;
+        }
+
         if (!ok)
         {
             _refused[folder.Id] = _refusalLine();
@@ -103,8 +123,11 @@ public sealed class FolderAutomatic
         }
         finally
         {
-            _writing.Remove(folder.Id);
-            Changed?.Invoke();
+            if (generation == _generation)
+            {
+                _writing.Remove(folder.Id);
+                Changed?.Invoke();
+            }
         }
     }
 }
