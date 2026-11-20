@@ -192,8 +192,97 @@ public sealed class SampleDaemon
     /// and never created here, so those reads see an empty state instead of
     /// the contributor's own.
     /// </summary>
-    public static string ThrowawayConfigDir() =>
-        Path.Combine(Path.GetTempPath(), $"tracecommons-sample-{Environment.ProcessId}");
+    public static string ThrowawayConfigDir() => ThrowawayConfigDir(Path.GetTempPath(), Environment.ProcessId);
+
+    /// <summary>The throwaway directory's name, before the launch's pid.</summary>
+    public const string ThrowawayPrefix = "tracecommons-sample-";
+
+    /// <summary>The throwaway directory of the launch <paramref name="pid"/> under <paramref name="tempRoot"/>.</summary>
+    public static string ThrowawayConfigDir(string tempRoot, int pid) =>
+        Path.Combine(tempRoot, ThrowawayPrefix + pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Removes the throwaway directories of sample launches that are gone
+    /// (force-stopped, so their exit never removed them): every directory
+    /// under <paramref name="tempRoot"/> named exactly the prefix and a pid
+    /// that is not this launch's and not running. Anything else is left
+    /// alone. Returns how many were removed; never throws.
+    /// </summary>
+    public static int SweepThrowawayDirs(string tempRoot, int currentPid, Func<int, bool> isRunning)
+    {
+        ArgumentNullException.ThrowIfNull(isRunning);
+        string[] dirs;
+        try
+        {
+            dirs = Directory.GetDirectories(tempRoot, ThrowawayPrefix + "*");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        foreach (string dir in dirs)
+        {
+            string tail = Path.GetFileName(dir)[ThrowawayPrefix.Length..];
+            if (tail.Length == 0 || !tail.All(char.IsAsciiDigit)
+                || !int.TryParse(tail, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int pid)
+                || pid == currentPid || isRunning(pid))
+            {
+                continue;
+            }
+
+            if (TryDelete(dir)) removed++;
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// Removes the throwaway directory of the launch <paramref name="pid"/>,
+    /// with what it holds, when it exists. True when one was removed; never
+    /// throws.
+    /// </summary>
+    public static bool RemoveThrowawayDir(string tempRoot, int pid)
+    {
+        string dir = ThrowawayConfigDir(tempRoot, pid);
+        return Directory.Exists(dir) && TryDelete(dir);
+    }
+
+    /// <summary>Whether a process with <paramref name="pid"/> is running.</summary>
+    public static bool IsProcessRunning(int pid)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            try
+            {
+                return !process.HasExited;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // It exists but cannot be opened: treat it as running.
+                return true;
+            }
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryDelete(string dir)
+    {
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// One request, one response frame: the recorded result, or a fixed
