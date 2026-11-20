@@ -20,8 +20,13 @@ public sealed record AnalyticsCoverage(uint Known, uint Partial, uint Unknown, I
 /// <summary>A cache share with its parts, so the shell divides nothing.</summary>
 public sealed record AnalyticsShare(ulong Numerator, ulong Denominator, ulong Permille);
 /// <summary>One harness's line. Lines are never summed together.</summary>
+/// <summary>
+/// One harness's line. <c>ChangePermille</c> and <c>BestPreviousPermille</c>
+/// come only under feed T; <c>Change</c> and <c>BestWeek</c> say why not
+/// (TCInsightsWeek.swift:33-49).
+/// </summary>
 public sealed record AnalyticsWeekSource(string Source, uint Sessions, ulong? Tokens, AnalyticsShare? CacheShare,
-    ulong? LargestTokens, string Change, string BestWeek);
+    ulong? LargestTokens, string? Change, string? BestWeek, long? ChangePermille = null, ulong? BestPreviousPermille = null);
 public sealed record AnalyticsDay(string Date, ulong Uncached, ulong CacheRead, ulong CacheWrite, ulong Output);
 /// <summary>A declared model label; <c>null</c> is the unknown label.</summary>
 public sealed record AnalyticsModelTokens(string? Label, ulong Tokens);
@@ -127,7 +132,9 @@ public static class InsightsAnalyticsResponses
     private static AnalyticsWeekSource DecodeSource(JsonElement source) => new(Required(source, "source"),
         source.GetProperty("sessions").GetUInt32(), OptionalU64(source, "tokens"), DecodeShare(source, "cache_share"),
         Nullable(source, "largest_session") is { } largest ? largest.GetProperty("tokens").GetUInt64() : null,
-        Required(source, "change"), Required(source, "best_week"));
+        Optional(source, "change"), Optional(source, "best_week"),
+        Nullable(source, "change_permille")?.GetInt64(),
+        Nullable(source, "best") is { } best ? best.GetProperty("previous_best_permille").GetUInt64() : null);
 
     private static AnalyticsShare? DecodeShare(JsonElement item, string name) =>
         Nullable(item, name) is { } share ? new AnalyticsShare(share.GetProperty("numerator").GetUInt64(),
@@ -226,7 +233,23 @@ public static class InsightsAnalyticsWords
     /// "vs last week" and "Your best week" on an Overview line. The core sends
     /// only the reason there is no figure under feed S, so both are the dash.
     /// </summary>
-    public static string Change(Func<string, string?> copy, AnalyticsWeekSource source) => Dash(copy);
+    /// <summary>
+    /// "vs last week": a figure only under feed T; any unavailable reason is
+    /// the dash (<c>InsightsOverviewWords.change</c>, InsightsModel.swift:256-266).
+    /// </summary>
+    public static string Change(Func<string, string?> copy, AnalyticsWeekSource source)
+    {
+        if (source.ChangePermille is not long permille) return Dash(copy);
+        string key = permille < 0 ? "analytics_change_down" : "analytics_change_up";
+        return Fill(Text(copy, key), ("p", Percent(permille < 0 ? (ulong)(-(permille + 1)) + 1 : (ulong)permille)));
+    }
+
+    /// <summary>"Your best week · previous best {q}%", or the dash (InsightsModel.swift:269-273).</summary>
+    public static string BestWeek(Func<string, string?> copy, AnalyticsWeekSource source) =>
+        source.BestPreviousPermille is ulong best ? Fill(Text(copy, "analytics_best_week"), ("q", Percent(best))) : Dash(copy);
+
+    /// <summary>Whole percent from a per mille, rounded half up (InsightsModel.swift:253).</summary>
+    private static string Percent(ulong permille) => ((permille + 5) / 10).ToString(CultureInfo.CurrentCulture);
 
     public static string CacheShareLine(Func<string, string?> copy, AnalyticsWeekSource source) =>
         Fill(Text(copy, "analytics_cache_share_line"), ("source", Harness(copy, source.Source)), ("p", Share(copy, source.CacheShare)));

@@ -1257,11 +1257,17 @@ public sealed partial class MainWindow : Window
 #if DEBUG
         if (_host.IsSample)
         {
-            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
+            // The Mac's sample week (feed T) on Overview and Breakdown, as its
+            // sample windows draw it (InsightsSampleModels, InsightsSample.swift:208-232).
+            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word),
+                weekReader: InsightsViewModel.SampleWeekReader);
         }
 #endif
+        // Feed T through the daemon's insights_week, as the Mac reads it (W20-D1).
         return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
-            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy));
+            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy),
+            iso => _host.CallAsync(InsightsCounterWeek.Method,
+                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
