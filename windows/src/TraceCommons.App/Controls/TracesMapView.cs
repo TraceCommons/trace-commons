@@ -967,6 +967,11 @@ public sealed partial class TracesMapView : UserControl
     /// </summary>
     private void TurnLibrary()
     {
+        if (_libraryOnMoving != false)
+        {
+            return;
+        }
+
         double turn = _style == TracesMapStyle.Launch ? LibraryStation.TurnSeconds : LibraryOrb.TurnSeconds;
         int index = MapMotion.LibraryFrameIndex(LibrarySeconds(true), turn);
         if (index != _libraryIndex)

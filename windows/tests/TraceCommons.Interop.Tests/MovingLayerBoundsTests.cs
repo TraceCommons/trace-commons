@@ -140,6 +140,8 @@ public class MovingLayerBoundsTests
         string turn = Method(source, "private void TurnLibrary(");
         Assert.Contains("MapMotion.LibraryFrameIndex(", turn, StringComparison.Ordinal);
         Assert.Contains("_libraryCanvas.Invalidate();", turn, StringComparison.Ordinal);
+        // Not while the moving layer has the library: its own layer is collapsed then.
+        Assert.Contains("if (_libraryOnMoving != false)", turn, StringComparison.Ordinal);
         Assert.Contains("MapMotion.LibraryFrameIndex(", Method(source, "private void DrawLibrary("), StringComparison.Ordinal);
 
         // The box is checked on every tick and on every redraw.
