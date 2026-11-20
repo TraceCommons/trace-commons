@@ -33,6 +33,36 @@ public static class FirstRunStageLayout
     public const double MinimumWidth = 760, MinimumHeight = 640;
 
     /// <summary>
+    /// The first-run window's first frame, in physical pixels: the canvas at
+    /// <paramref name="scale"/> plus the window's frame round it
+    /// (<paramref name="extraWidth"/>, <paramref name="extraHeight"/>), placed
+    /// as the main window's first frame is (<see cref="MonitorPaneLayout.FirstFrame"/>),
+    /// wholly on the work area. On a short display (1024x768, test box
+    /// 2026-11-20) the 862 by 762 window at y = 26 ran past the 720 work area;
+    /// held to it, the stage scales down (<see cref="FitScale"/>) and keeps the
+    /// Mac's proportions. Where the screen has room it is the Mac's size.
+    /// </summary>
+    public static LayoutRect FirstWindowFrame(LayoutRect frame, double scale, double extraWidth, double extraHeight, LayoutRect workArea)
+    {
+        double width = Math.Round(CanvasWidth * scale) + extraWidth;
+        double height = Math.Round(CanvasHeight * scale) + extraHeight;
+        return MonitorPaneLayout.FirstFrame(frame, width, height, workArea);
+    }
+
+    /// <summary>
+    /// The smallest first-run window in physical pixels: the Mac's minimum
+    /// (<see cref="MinimumWidth"/>, <see cref="MinimumHeight"/>) and the frame,
+    /// never larger than the work area, so the minimum cannot push the window
+    /// back off a short display.
+    /// </summary>
+    public static (int Width, int Height) MinimumWindow(double scale, double extraWidth, double extraHeight, LayoutRect workArea)
+    {
+        double width = Math.Ceiling(MinimumWidth * scale) + extraWidth;
+        double height = Math.Ceiling(MinimumHeight * scale) + extraHeight;
+        return ((int)Math.Min(width, workArea.Width), (int)Math.Min(height, workArea.Height));
+    }
+
+    /// <summary>
     /// The scale the canvas is drawn at in a host: never larger than the
     /// design (<c>FirstRunStageFit</c>, OnboardingCoordinatorView.swift:209-222).
     /// </summary>
