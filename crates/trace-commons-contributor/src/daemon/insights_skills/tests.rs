@@ -2086,27 +2086,32 @@ fn the_windows_skills_home_sample_is_this_snapshot() {
     let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
     set_skills_flag(&shared, 1, true);
     shared.settings.lock().unwrap().insights_counter_pass = true;
-    let mut value = snapshot(&shared);
+    let value = snapshot(&shared);
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
         "../../windows/src/TraceCommons.Interop/SampleExtras/skillsHome/insights_skills.json",
     );
-    let mut recorded: Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    for key in ["copy", "usage"] {
-        value.as_object_mut().unwrap().remove(key);
+    let recorded: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // What the sample's `_sample` note says is the daemon's own: the
+    // catalog, both feeds, the default publishers and the follows. The
+    // inventory depends on the home directory, and `usage` is hand-written.
+    for key in [
+        "enabled",
+        "readable",
+        "catalog",
+        "followed_publishers",
+        "updates",
+        "feed",
+        "feed_partial",
+        "default_publishers",
+        "home_feed",
+        "home_feed_partial",
+    ] {
+        assert_eq!(
+            recorded[key],
+            value[key],
+            "update `{key}` in {} to:\n{}",
+            path.display(),
+            serde_json::to_string_pretty(&value[key]).unwrap()
+        );
     }
-    // The scan is stamped with the daemon's clock; the sample's is pinned.
-    let scanned = value["inventory"]["scanned_at"].as_str().unwrap();
-    assert!(DateTime::parse_from_rfc3339(scanned).is_ok());
-    value["inventory"]["scanned_at"] = recorded["inventory"]["scanned_at"].clone();
-    for key in ["_sample", "usage"] {
-        recorded.as_object_mut().unwrap().remove(key);
-    }
-    assert_eq!(
-        recorded,
-        value,
-        "update {} (keeping its usage and _sample) to:\n{}",
-        path.display(),
-        serde_json::to_string_pretty(&value).unwrap()
-    );
 }
