@@ -7401,7 +7401,9 @@ mod tests {
         // when the pass saw the refusal: somewhere in the pass, so between
         // `now` and `now` plus what the pass took. Seventeen earlier
         // failures add nothing.
-        let wait = chrono::Duration::seconds(45) + witness_capacity_jitter(id, 45);
+        let spread = witness_capacity_jitter(id, 45);
+        assert!(spread <= chrono::Duration::seconds(22), "at most half the delay");
+        let wait = chrono::Duration::seconds(45) + spread;
         let retry_after = entry.retry_after.unwrap();
         assert!(retry_after >= now + wait, "{entry:?}");
         assert!(retry_after <= now + took + wait, "{entry:?}");
