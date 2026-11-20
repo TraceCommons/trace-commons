@@ -107,6 +107,11 @@ public sealed partial class MainWindow
     {
         Title = MonitorWords.AppName;
 
+        // The wake message is heard from the start, not from the first
+        // showing: a window that starts in the tray at login may never be
+        // shown, and would otherwise never ask for its flags after a wake.
+        WindowMinimumSize.Watch(WinRT.Interop.WindowNative.GetWindowHandle(this));
+
         // The toolbar row is the title bar: the window owns the bar, the
         // caption buttons stay the system's (snap layouts, window menu, their
         // own accessibility), on a transparent ground so the chrome colour
@@ -734,11 +739,11 @@ public sealed partial class MainWindow
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
-        LayoutRect frame = MonitorPaneLayout.WindowFrame(
-            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, new LayoutRect(work.X, work.Y, work.Width, work.Height));
+        LayoutRect frame = MonitorPaneLayout.FirstFrame(
+            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, height, new LayoutRect(work.X, work.Y, work.Width, work.Height));
         if (!IsMaximized)
         {
-            MoveAndResize(frame with { Height = Math.Min(height, work.Height) });
+            MoveAndResize(frame);
         }
 
         _presented = new PaneVisibility(_wantsMap, inspector);
@@ -1343,6 +1348,12 @@ internal static class WindowMinimumSize
     public static void Set(IntPtr hwnd, int width, int height)
     {
         Minimums[hwnd] = (width, height);
+        Watch(hwnd);
+    }
+
+    /// <summary>Hears <see cref="Resumed"/> on <paramref name="hwnd"/>, with no minimum size yet.</summary>
+    public static void Watch(IntPtr hwnd)
+    {
         if (Installed.Add(hwnd))
         {
             SetWindowSubclass(hwnd, Proc, (UIntPtr)1, UIntPtr.Zero);
