@@ -325,12 +325,6 @@ jobs:
       # same dev profile. Debug, not --release: see windows-contributor-app.
       - name: Build the contributor FFI cdylib for the app job
         run: cargo build -p trace-commons-contributor-ffi
-      # W25-D2: the FFI self-check reaches the real Credential Manager. Its
-      # own command, after the cdylib build above, because the combined test
-      # step unifies in the test credential-store feature, under which the
-      # store is refused and the check reports 2.
-      - name: Verify the FFI credential-store self-check reaches Credential Manager
-        run: cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::' --ignored
       - name: Upload the FFI cdylib
         uses: actions/upload-artifact@v4
         with:
@@ -338,6 +332,13 @@ jobs:
           path: target/debug/trace_commons_contributor_ffi.dll
           if-no-files-found: error
           retention-days: 1
+      # W25-D2: the FFI self-check reaches the real Credential Manager. Its
+      # own command, because the combined test step unifies in the test
+      # credential-store feature, under which the store is refused and the
+      # check reports 2. After the upload, so the test build cannot replace
+      # the DLL the app job downloads.
+      - name: Verify the FFI credential-store self-check reaches Credential Manager
+        run: cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::' --ignored
 
   windows-install-script:
     name: install.ps1 against the real release

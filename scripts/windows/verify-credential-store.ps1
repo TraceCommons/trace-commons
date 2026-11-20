@@ -39,8 +39,14 @@ if (-not (Test-Path $App -PathType Leaf)) {
 $App = (Resolve-Path $App).Path
 
 function Get-CredentialTargets {
-    # cmdkey prints one "Target: ..." line per stored credential.
-    @(cmdkey /list | Where-Object { $_ -match '^\s*Target:' } | Sort-Object)
+    # cmdkey prints one "Target: ..." line per stored credential. A failed
+    # listing would read as an empty, unchanged list, so it is a failure.
+    $listing = cmdkey /list
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAIL: cmdkey /list exited with code $LASTEXITCODE"
+        exit 1
+    }
+    @($listing | Where-Object { $_ -match '^\s*Target:' } | Sort-Object)
 }
 
 $before = Get-CredentialTargets
@@ -49,6 +55,8 @@ $out = Join-Path ([System.IO.Path]::GetTempPath()) ("tc-credential-store-check-"
 $env:TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT = $out
 try {
     $process = Start-Process -FilePath $App -WindowStyle Hidden -PassThru
+    # Cache the handle now, or ExitCode can read as null after the exit.
+    $null = $process.Handle
 } finally {
     Remove-Item Env:\TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT
 }
