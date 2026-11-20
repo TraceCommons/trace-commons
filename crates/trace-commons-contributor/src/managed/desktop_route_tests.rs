@@ -125,3 +125,86 @@ async fn desktop_vertex_calls_use_only_the_routes_near_key_and_never_invent_toke
     route.shutdown().await;
     server.abort();
 }
+
+/// The injected attempt refuses with `PortInUse` for its first `busy` calls,
+/// as a port Windows is still releasing does, then binds.
+fn released_after(
+    busy: usize,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+) -> impl FnMut() -> std::future::Ready<Result<u16, embed::EmbedError>> {
+    move || {
+        let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::ready(if call < busy {
+            Err(embed::EmbedError::PortInUse { port: 8471 })
+        } else {
+            Ok(8471)
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_restart_waits_for_its_saved_port_while_the_os_releases_it() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = start_on_released_port(
+        8471,
+        RELEASED_PORT_WITHIN,
+        RELEASED_PORT_PAUSE,
+        released_after(3, calls.clone()),
+    )
+    .await;
+    assert_eq!(started.ok(), Some(8471));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_port_another_listener_keeps_is_refused_after_a_bounded_wait() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let begun = tokio::time::Instant::now();
+    let started = start_on_released_port(
+        8471,
+        RELEASED_PORT_WITHIN,
+        RELEASED_PORT_PAUSE,
+        released_after(usize::MAX, calls.clone()),
+    )
+    .await;
+    assert!(matches!(
+        started,
+        Err(embed::EmbedError::PortInUse { port: 8471 })
+    ));
+    let waited = begun.elapsed();
+    assert!(waited >= RELEASED_PORT_WITHIN, "{waited:?}");
+    assert!(
+        waited < RELEASED_PORT_WITHIN + RELEASED_PORT_PAUSE * 2,
+        "{waited:?}"
+    );
+    let calls = calls.load(std::sync::atomic::Ordering::SeqCst);
+    let bound = (RELEASED_PORT_WITHIN.as_millis() / RELEASED_PORT_PAUSE.as_millis()) as usize + 2;
+    assert!(calls > 1 && calls <= bound, "{calls}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_a_fixed_port_refused_as_in_use_is_tried_again() {
+    // Port 0 lets the OS choose, so an in-use refusal there is not a
+    // released port and is returned at once.
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = start_on_released_port(
+        0,
+        RELEASED_PORT_WITHIN,
+        RELEASED_PORT_PAUSE,
+        released_after(1, calls.clone()),
+    )
+    .await;
+    assert!(started.is_err());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // Any other refusal is not about the port being released.
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let started: Result<u16, _> =
+        start_on_released_port(8471, RELEASED_PORT_WITHIN, RELEASED_PORT_PAUSE, || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err(embed::EmbedError::Bind))
+        })
+        .await;
+    assert!(matches!(started, Err(embed::EmbedError::Bind)));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

@@ -7,24 +7,29 @@ using it, because it is the source of truth.
 
 ## Where things stand
 
-- **No path publishes Windows today.** A tag push (`app-v*`) runs the
-  `windows` and `windows-app` jobs not at all: both are gated on
-  `github.event_name == 'workflow_dispatch'`. A dispatch builds, signs and
-  installs, but every publication step is guarded on
-  `github.event_name == 'push'`, so a dispatch publishes nothing.
-- **The live Windows artifacts are from app-v0.23.0.** The `.appinstaller`
-  feed at
+- **A tag push publishes the Windows MSIX.** Since the commit that put
+  `windows-app` back on tags (revert it alone to undo), an `app-v*` push
+  runs `windows-app` beside `macos`: it signs, installs and checks the
+  MSIX, uploads it and then `TraceCommons.appinstaller` to the bucket, and
+  `publish` attaches both to the GitHub Release. The `windows` zip job
+  stays dispatch-only (decision 3 below: the zips do not return).
+- **A dispatch can publish the MSIX and feed, and nothing else.** Set
+  `publish_windows_app` on a dispatch run on the `app-v<version>` tag
+  (`version` equal to it, `platform` `windows` or `all`). `release-config`
+  refuses it on any other ref and checks the publishing credentials first.
+  It never cuts or edits the Release and never writes `latest.json`. Any
+  other dispatch publishes nothing.
+- **The live Windows artifacts are from app-v0.23.0** until the first tag
+  after that change. The `.appinstaller` feed at
   `https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller`
-  and the last GitHub Release with Windows assets both date from it
-  (workflow header).
-- **Putting Windows back on tags is a workflow change and an owner
-  decision.** It is not made here. It needs:
-  1. the `if:` of `windows` and `windows-app` to admit
-     `github.event_name == 'push'`;
-  2. the six `AZURE_SIGNING_*` values added back to the tag-push preflight in
-     `release-config` (it stopped checking them when Windows left tags);
-  3. a decision on whether the CLI/portable-zip job (`windows`) also returns,
-     or only the MSIX job (`windows-app`).
+  and the last GitHub Release with Windows assets both date from it.
+- **Turning tag releases back on is the owner's decision.** The change is
+  prepared, in its own commit:
+  1. `windows-app`'s `if:` admits `github.event_name == 'push'`;
+  2. the six `AZURE_SIGNING_*` values are back in the `release-config`
+     preflight, for a tag push and a publishing dispatch;
+  3. only the MSIX job returns; the CLI/portable-zip job (`windows`) does
+     not.
 - **Release gates not yet met** (parity spec
   `docs/superpowers/specs/2026-11-18-windows-mac-parity-design.md`): the
   physical Windows 11 PC that signs off a slice as released does not exist
@@ -80,41 +85,70 @@ the version; the MSIX version is stamped from the tag at build time.
 
 ## Tagging
 
-1. The workflow change above (Windows back on tags), reviewed and merged.
+1. The workflow change above (the MSIX back on tags), reviewed and merged.
 2. `git tag app-vX.Y.Z <release commit>` and push the tag. That one push runs
-   macOS and, after the change, Windows.
+   macOS and the Windows MSIX.
+3. If only the Windows leg failed, fix the cause and re-run that job, or
+   dispatch `release-apps` on the tag with `platform=windows`,
+   `version=X.Y.Z` and `publish_windows_app` set. That republishes the
+   package and feed; attach the MSIX to the Release by hand if `publish`
+   ran without it.
 
 ## Where it lands
 
-- GitHub Release `app-vX.Y.Z` (`publish` job): the CLI zip, the portable app
-  zip, their `.sha256` files, and the MSIX with its `.sha256` and
-  `TraceCommons.appinstaller`.
+- GitHub Release `app-vX.Y.Z` (`publish` job): the MSIX with its `.sha256`
+  and `TraceCommons.appinstaller`. (The CLI and portable app zips come from
+  the dispatch-only `windows` job and are not on a tag's Release.)
 - `gs://tracecommons-flatpak/windows/<package>.msix` (immutable cache), then
   `gs://tracecommons-flatpak/windows/TraceCommons.appinstaller` (no-cache),
   from the `windows-app` job, before the Release is cut.
 - Build provenance attestations for every signed binary and the MSIX.
 - `gs://tracecommons-flatpak/updates/latest.json` and `latest.json.sig`
-  (`publish-updates` job, which runs when `macos` or `windows` succeeded): the
-  Windows entry `windows-x86_64` points at the CLI zip on the `app-vX.Y.Z`
-  Release, and `windows-x86_64-cli` at the `contributor-vX.Y.Z` Release's
-  exe. It signs with `update-manifest-signing-key` from Secret Manager in
+  (`publish-updates` job, which runs when `macos` or `windows` succeeded):
+  a tag push has no `windows` job, so no `windows-x86_64` entry, and
+  `windows-x86_64-cli` points at the `contributor-vX.Y.Z` Release's exe. It signs with `update-manifest-signing-key` from Secret Manager in
   `tracecommons-pilot-2026`, through the same `GCP_WIF_PROVIDER` and
   `GCP_FLATPAK_PUBLISHER_SA`. The MSIX is not in this manifest; installed
   packages follow the `.appinstaller` feed.
 
-## Also fix before the first Windows tag
+## Fixed on 2026-11-20 (this branch)
 
-- The `publish` job's release notes open with "Trace Commons contributor
-  apps." That text is on the public Release page; the owner's rule is that
-  "Trace Commons" is never user-visible.
+- The `publish` job's release notes opened with "Trace Commons contributor
+  apps." They now open with the app's name, `APP_NAME` ("Near AI Gateway."),
+  pinned by `release_notes_open_with_the_app_name`.
+- `windows/scripts/make-msix.ps1` used a three-argument `Join-Path`, which
+  Windows PowerShell 5.1 rejects. It now runs under 5.1 and 7 (both proved
+  on tc-win-az3), and `clients.yml` builds the MSIX with it under both.
+- **Every feed `make-appinstaller.ps1` had written was invalid.** It put
+  `AutomaticBackgroundTask` in the 2021 namespace, and Windows refused the
+  whole file: `Add-AppxPackage -AppInstallerFile` failed with 0x8008020C,
+  "Element '{.../2021}AutomaticBackgroundTask' is unexpected ... Expecting:
+  {.../2017/2}AutomaticBackgroundTask". The generator at `app-v0.23.0` had
+  the same line, and the live feed (0.23.0.0) carries it: the owner checked
+  it on 2026-11-20. Installed MSIX apps cannot have updated from it. The `clients.yml` check
+  required the wrong namespace too; both are fixed and pinned.
+
+- **"Update and restart" did not restart.** The deployment ends the app
+  (`TerminateApplications`) and installs the new version, and nothing
+  started it again; `RegisterApplicationRestart` (flags 11, and flags 0 with
+  `AddPackageByAppInstallerFileAsync`) changed nothing. A process the app
+  starts runs outside the package's container and survives that ending
+  (measured: plain children, a scheduled task and a WMI-created process all
+  outlived the update; only one forced into the container did not). So
+  `AppUpdater.ApplyAsync` now starts a hidden Windows PowerShell helper
+  (`UpdateRelaunch`, script in `UpdateRelaunch.ps1`) just before the
+  hand-off. It waits up to 180 s for the package family to be registered at
+  another version and starts the app through its AUMID; a refused hand-off
+  stops it. Proved twice on tc-win-az3: 1.0.25 to 1.0.26 relaunched 14 s
+  after the click, 1.0.27 to 1.0.28 12 s after, each on the same state with
+  its daemon running.
+
+## Still open
+
 - The `windows` job publishes the app without `-p:Version`, so the portable
   app's assembly version is the SDK default until #2216 (which reads the
   contributor crate's version) lands. The MSIX is unaffected: its version is
-  stamped from the tag.
-- `windows/scripts/make-msix.ps1` uses three-argument `Join-Path`, which
-  Windows PowerShell 5.1 rejects ("A positional parameter cannot be found
-  that accepts argument '..'"). The workflow runs it under `pwsh`, so only a
-  hand run on a box without PowerShell 7 hits it.
+  stamped from the tag. The zips are not on tags in any case.
 
 ## Trial on tc-win-az3, 2026-11-19
 
@@ -142,9 +176,59 @@ requires an https base, and the trial had no trusted local https endpoint);
 `contributor-v*` release, so it was parse-checked only); the Trusted Signing
 profile and the virtualization probe, which only the dispatch run exercises.
 
+## Trial on tc-win-az3, 2026-11-20: install and update through the feed
+
+The `windows-app` job's steps by hand on the same box, from this branch
+(main 70fc3227b plus the fixes above): Release FFI with
+`TC_FEATURE_PROFILE=production`, Release app, `stamp-package-identity.ps1`,
+`TcPackaged` package, `signtool sign` and `verify /pa`, and
+`make-appinstaller.ps1` with the real `-BaseUri`. Signing used a throwaway
+self-signed certificate (`CN=TC Release Path Throwaway`, in LocalMachine
+TrustedPeople for the trial only).
+
+To install through the feed without touching the bucket, the box resolved
+`storage.googleapis.com` to 127.0.0.1 (hosts file) and a local HTTPS server
+with a throwaway certificate for that name (LocalMachine Root, trial only)
+served `tracecommons-flatpak/windows/` with byte ranges and the Publish
+step's content types. So the app's own hard-coded `AppUpdater.FeedUri`, the
+feed's self `Uri` and the package `Uri` were all exercised unchanged. Every
+certificate, the hosts line, the TLS binding, the packages and the state
+directory were removed afterwards, and the box was deallocated.
+
+| Step | Result |
+|---|---|
+| `make-msix.ps1 -Version 0.0.1` under Windows PowerShell 5.1.26100 and PowerShell 7.4.6 | before the fix, 5.1 failed at `Join-Path`; after, both built one `.msix` and wrote the sign list |
+| Package 1.0.12 and 1.0.13, sign, verify, feed | both signed and verified; packages 89 MB |
+| `Add-AppxPackage -AppInstallerFile <feed URL>` | 0x8008020C, the invalid feed (fixed above); after the fix, installed `Iqlusion.TraceCommons_1.0.12.0_x64`, the package fetched in byte ranges by Delivery Optimization |
+| Registered update settings (`Get-AppxPackageAutoUpdateSettings`) | `AppInstallerUri` the feed, `CheckForUpdatesOnLaunch` True, `HoursBetweenUpdateChecks` 8, `AutomaticBackgroundTaskUpdatesEnabled` True, `ForceUpdateFromAnyVersion` False, `ShowPromptOnLaunchWhenUpdateIsAvailable` False: what `make-appinstaller.ps1` intends |
+| Write virtualization probe (the job's step, in the console session) | probe landed at `%LOCALAPPDATA%\trace-commons`, none in `LocalCache` |
+| Launch from `shell:AppsFolder` | ran from `C:\Program Files\WindowsApps\Iqlusion.TraceCommons_1.0.12.0_x64__...`; main window up |
+| Feed moved to 1.0.13; Settings opened (starts the daemon, then the update check) | the app fetched the feed; the "Update available" banner offered "Update and restart" on Insights (on Traces it sits behind the first-contribution card, by the notice order) |
+| "Update and restart" | the daemon shut down cleanly (`daemon.lock` removed, as on a clean close); `AddFromAppInstallerOperation` with `ForceTargetApplicationShutdownOption`; 1.0.13.0 registered about 7 s later |
+| Relaunch | **none** before the helper: no process in the 120 s watched at 1.0.13, nor in 90 s at 1.0.15 and 60 s at 1.0.17 with the restart registration tried. With the helper (2026-11-20 13:37 and 13:45 UTC): the new version running 14 s and 12 s after the click (see "Fixed") |
+| State across the update | `daemon-settings.json`, `daemon-state.json` and a sentinel file byte-identical before and after; launched by hand, 1.0.17 started its daemon on the same state |
+
+Box notes: `Add-AppxPackage -AppInstallerFile` over SSH fails ("Failed to
+initialize PLM", 0x80070005); run it, and `Invoke-CommandInDesktopPackage`,
+in the console session (an `/IT` task). A hand-written two-key
+`daemon-settings.json` read as `settings-unreadable`; one the daemon wrote
+itself from the same declarations (passed as start settings) worked. Under the hosts redirect the daemon's
+`feature-flags/production.json` fetch got a 404, so these runs had no
+remote flags.
+
+Windows' own on-launch check: with a newer version in the feed, launching
+the installed app from Start can open App Installer's "Update Near AI
+Gateway?" prompt (Finish Updating / Open Now / Cancel) instead of the app,
+although the feed writes no `ShowPrompt` and `HoursBetweenUpdateChecks` is 8
+(seen at 13:31 to 13:34 UTC, `LastCheckedForUpdates` 13:31).
+
+Not covered: a standard (non-administrator) user, Windows 10 and 11
+clients, the Trusted Signing certificate, and Windows' own OnLaunch and
+background updates (the 8-hour interval did not elapse).
+
 ## After
 
 - Install from the feed on a clean standard user and confirm the version.
-- Confirm an installed earlier build updates (App Installer checks on launch;
-  the app's own update action needs the `packageManagement` capability, which
-  the manifest declares).
+- Confirm an installed earlier build updates from the real feed. The in-app
+  path, relaunch included, is proved on the box (above); Windows' own
+  background check is not.

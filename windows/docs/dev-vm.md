@@ -225,6 +225,13 @@ because it makes a fix look like it did not work. Force a rebuild with
 PowerShell's `Set-Location` does not change. Files silently land somewhere
 else. Always pass absolute paths.
 
+**Installing an MSIX from its feed over SSH fails.** `Add-AppxPackage
+-AppInstallerFile` from an SSH session downloads and stages the package,
+then fails with 0x80070005 and "Failed to initialize PLM" in the
+`AppXDeploymentServer/Operational` log, which reads like a signing or
+permissions fault. Run it in the console session, through an `/IT` task,
+as the app launch above is (2026-11-20, tc-win-az3).
+
 **Scheduled tasks created with `/IT` run unelevated**, so they cannot write to
 `C:\`. The task still reports exit code 0, so the only symptom is a missing
 file.

@@ -53,9 +53,11 @@ pub(crate) fn native(
     #[cfg(all(not(test), not(feature = "test-credential-store")))]
     Ok(CloudCredentialLifecycle::new(
         store.clone(),
-        std::sync::Arc::new(crate::daemon::os_secret_store::OsSecretBackend::new(
-            &crate::channel::KEYCHAIN,
-        )?),
+        std::sync::Arc::new(crate::daemon::OutsideRuntimeSecrets(
+            crate::daemon::outside_runtime(|| {
+                crate::daemon::os_secret_store::OsSecretBackend::new(&crate::channel::KEYCHAIN)
+            })?,
+        )),
     ))
 }
 

@@ -1,17 +1,21 @@
 # Signed releases of the contributor apps. Tag-driven: push a tag like
 # `app-v0.2.0`.
 #
-# A tag push builds and publishes macOS ONLY. Native macOS is the lead
-# client, the Windows and Tauri shells are frozen, and the Linux GTK app
-# (back in development) is not released on tags until it catches up, so
-# the `windows`, `windows-app` and `linux-flatpak` jobs run only on a
-# workflow_dispatch that names them (platform=all, windows or linux). A
-# dispatch never publishes: every publication step below is guarded on
-# `github.event_name == 'push'`, so those jobs' own publish steps are now
-# unreachable, and the GitHub Release, the MSIX .appinstaller feed and the
-# flatpak repo stay at the last release that built them (app-v0.23.0).
-# `publish` and `publish-updates` still branch on each platform's result,
-# so turning a platform back on for tags is a change to its `if:` alone.
+# A tag push builds and publishes macOS and the Windows MSIX
+# (`windows-app`): the DMG, the signed MSIX and its .appinstaller feed in
+# the bucket, and both on the GitHub Release. The Windows zips (`windows`)
+# and the Linux GTK app (`linux-flatpak`, back in development) are not
+# released on tags; those two jobs run only on a workflow_dispatch that
+# names them (platform=all, windows or linux), and the flatpak repo stays at
+# the last release that built it (app-v0.23.0).
+#
+# A dispatch never publishes, with one exception: `publish_windows_app`
+# set, on a dispatch run against the `app-v<version>` tag itself, publishes
+# the `windows-app` job's MSIX and feed to the bucket. That is how a failed
+# Windows leg of a tag release is re-published without a new tag. It never
+# cuts or edits the GitHub Release and never writes updates/latest.json.
+# `release-config` refuses such a dispatch on any other ref.
+# `publish` and `publish-updates` branch on each platform's result.
 # The Tauri app is not built here or anywhere else for release.
 #
 # Three independent jobs rather than a matrix. The packaging steps share
@@ -46,6 +50,13 @@ on:
         description: Also build and sign an MSIX (unproven; never runs on a tag push)
         type: boolean
         default: false
+      # Off by default. Only the windows-app job reads it, and only on a run
+      # dispatched against the app-v<version> tag (release-config refuses it
+      # on any other ref). See the header.
+      publish_windows_app:
+        description: Publish the Windows MSIX and its feed to the bucket (run on the app-v<version> tag)
+        type: boolean
+        default: false
 
 env:
   TC_FEATURE_PROFILE: production
@@ -73,26 +84,46 @@ jobs:
   # `environment: release` is load-bearing and not just symmetry with the
   # signing jobs: values scoped to `release` (the AZURE_SIGNING_* variables
   # are) read as empty in a job without the environment, so this pre-flight
-  # would refuse every release that checks one. A tag push no longer checks
-  # the Azure values, but the declaration stays so that putting Windows back
-  # on tags needs no change here. The environment carries no protection
-  # rules, so declaring it adds no approval step.
+  # would refuse every release that checks one. The declaration stays
+  # whether or not a tag push checks the Azure values, so moving the Windows
+  # MSIX on or off tags needs no change here. The environment carries no
+  # protection rules, so declaring it adds no approval step.
   release-config:
     name: verify release configuration
     runs-on: ubuntu-latest
     environment: release
     timeout-minutes: 5
     steps:
-      # Dispatch runs build and sign but never publish (every publication
-      # step in this file is guarded on `github.event_name == 'push'`), so
-      # they are not held to the publishing credentials.
+      # A publishing dispatch must run on the tag it publishes, so the bytes
+      # in the bucket are built from the tagged commit, as a tag push's are.
+      - name: Refuse a publishing dispatch that is not on its release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_windows_app
+        env:
+          REF: ${{ github.ref }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/tags/app-v$INPUT_VERSION" ]; then
+            echo "refusing to publish: dispatch ref is $REF, not refs/tags/app-v$INPUT_VERSION" >&2
+            exit 1
+          fi
+          if [ "$PLATFORM" != windows ] && [ "$PLATFORM" != all ]; then
+            echo "refusing to publish: platform=$PLATFORM does not build the Windows app" >&2
+            exit 1
+          fi
+
+      # Dispatch runs build and sign but do not publish (every publication
+      # step in this file is guarded on `github.event_name == 'push'`, the
+      # windows-app job's also on publish_windows_app), so a dispatch is held
+      # to the publishing credentials only when publish_windows_app is set.
       #
-      # A tag push builds macOS only, so the Azure Trusted Signing values
-      # the Windows jobs spend are not required here. Those jobs run only on
-      # a dispatch, which this step does not check. The two GCP values stay:
-      # `publish-updates` uploads latest.json and the appcast with them.
+      # A tag push builds macOS and the Windows MSIX, so the Azure Trusted
+      # Signing values `windows-app` spends are required here too. The two
+      # GCP values are spent by `windows-app` (the feed) and
+      # `publish-updates` (latest.json and the appcast).
       - name: Confirm tag-release credentials are configured
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish_windows_app
         env:
           # macOS: Developer ID signing, notarization, and the Sparkle
           # public key make-release-dmg.sh refuses to build without.
@@ -103,12 +134,21 @@ jobs:
           MACOS_NOTARY_ASC_KEY_ID: ${{ secrets.MACOS_NOTARY_ASC_KEY_ID }}
           MACOS_NOTARY_ASC_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ASC_ISSUER_ID }}
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          # GCS: the update manifest and the appcast (publish-updates)
-          # authenticate with these. The flatpak repo and the Windows
-          # .appinstaller feed use them too, but only from the dispatch-only
-          # jobs, which never publish.
+          # GCS: the Windows .appinstaller feed (windows-app), the update
+          # manifest and the appcast (publish-updates) authenticate with
+          # these. The flatpak repo uses them too, but only from the
+          # dispatch-only linux-flatpak job, which never publishes.
           GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
           GCP_FLATPAK_PUBLISHER_SA: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
+          # Windows: Azure Trusted Signing for the MSIX (windows-app).
+          # Variables on the `release` environment, hence the job's
+          # `environment: release`.
+          AZURE_SIGNING_CLIENT_ID: ${{ vars.AZURE_SIGNING_CLIENT_ID }}
+          AZURE_SIGNING_TENANT_ID: ${{ vars.AZURE_SIGNING_TENANT_ID }}
+          AZURE_SIGNING_SUBSCRIPTION_ID: ${{ vars.AZURE_SIGNING_SUBSCRIPTION_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
           set -euo pipefail
           missing=()
@@ -121,7 +161,13 @@ jobs:
             MACOS_NOTARY_ASC_ISSUER_ID \
             SPARKLE_PUBLIC_ED_KEY \
             GCP_WIF_PROVIDER \
-            GCP_FLATPAK_PUBLISHER_SA
+            GCP_FLATPAK_PUBLISHER_SA \
+            AZURE_SIGNING_CLIENT_ID \
+            AZURE_SIGNING_TENANT_ID \
+            AZURE_SIGNING_SUBSCRIPTION_ID \
+            AZURE_SIGNING_ENDPOINT \
+            AZURE_SIGNING_ACCOUNT \
+            AZURE_SIGNING_PROFILE
           do
             # Indirect expansion, so the names above are the single list and
             # cannot drift from the tests below them.
@@ -131,7 +177,7 @@ jobs:
             printf 'refusing to release: missing configuration: %s\n' "${missing[*]}" >&2
             exit 1
           fi
-          echo "all 10 release credentials are present"
+          echo "all 15 release credentials are present"
 
   version:
     name: resolve version
@@ -765,10 +811,10 @@ jobs:
   windows-app:
     name: Windows signed MSIX
     needs: [version, release-config]
-    # Dispatch only: a tag push releases macOS alone (see the header).
+    # A tag push releases the MSIX alongside macOS (see the header).
     if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.platform == 'all' || inputs.platform == 'windows')
+      github.event_name == 'push' ||
+      inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     # Same reason as the `windows` job above: the federated credential's
     # subject is repo:...:environment:release, so this job must declare the
@@ -1056,18 +1102,20 @@ jobs:
           name: windows-msix
           path: dist/
 
-      # Publication is tag pushes only. A dispatch run still builds, signs,
-      # installs and verifies above, so the whole path is provable -- but it
-      # must never move what an installed client would actually pull.
+      # Publication is a tag push, or a dispatch with publish_windows_app on
+      # the app-v<version> tag (release-config refuses it on any other ref).
+      # Any other dispatch still builds, signs, installs and verifies above,
+      # so the whole path is provable -- but it must never move what an
+      # installed client would actually pull.
       - name: Authenticate to GCP (workload identity federation; no key on the runner)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish_windows_app
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_FLATPAK_PUBLISHER_SA }}
 
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish_windows_app
 
       # The package goes up FIRST. The feed is what clients follow, so a feed
       # that names a package not yet in the bucket is a window in which every
@@ -1097,7 +1145,7 @@ jobs:
       # package is uploaded before the feed that names it. Re-running the
       # job converges the bucket rather than layering onto it.
       - name: Publish
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish_windows_app
         shell: pwsh
         env:
           BUCKET: tracecommons-flatpak
@@ -1289,10 +1337,10 @@ jobs:
   publish:
     name: publish release
     needs: [version, macos, windows, windows-app, linux-flatpak]
-    # On a tag push the Windows and Linux jobs are skipped (dispatch only),
-    # so their results read `skipped`, their paragraphs below are left out,
-    # and only the macOS DMG is attached. This job is push-only, so a
-    # dispatch that builds Windows or Linux never publishes them.
+    # On a tag push the `windows` zip and Linux jobs are skipped (dispatch
+    # only), so their results read `skipped`, their paragraphs below are
+    # left out, and the macOS DMG and the Windows MSIX are attached. This
+    # job is push-only, so a dispatch never cuts a Release.
     # Publish whatever succeeded: the three build jobs are independent
     # precisely so a Linux failure does not withhold a verified macOS DMG.
     # But always() alone would let this job run even when EVERY platform
@@ -1354,7 +1402,7 @@ jobs:
           LINUX_RESULT: ${{ needs.linux-flatpak.result }}
         run: |
           set -euo pipefail
-          NOTES="Trace Commons contributor apps."
+          NOTES="Near AI Gateway."
           if [ "$MACOS_RESULT" = success ]; then
             NOTES="$NOTES
 
