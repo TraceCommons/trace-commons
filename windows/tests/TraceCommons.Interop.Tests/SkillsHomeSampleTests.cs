@@ -59,7 +59,8 @@ public class SkillsHomeSampleTests
     [Fact]
     public void TheWindowReadsTheExtrasFlagsOnceAndNoOtherSamplesFlags()
     {
-        string window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.xaml.cs.txt"));
+        string window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.xaml.cs.txt"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
         int at = window.IndexOf("private bool ReadsNoFlags()", StringComparison.Ordinal);
         Assert.True(at >= 0, "ReadsNoFlags is gone");
         string body = window[at..window.IndexOf("\n    }\n", at, StringComparison.Ordinal)];
@@ -105,7 +106,8 @@ public class SkillsHomeSampleTests
     {
         // InsightsSkillsHomeView.swift:464: bar.recent ? tint : GlassColor.ink(0.22).
         Assert.Equal(0.22, InsightsSkillsHome.EarlierBarInk);
-        string view = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/InsightsSkillsView.cs.txt"));
+        string view = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/InsightsSkillsView.cs.txt"))
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
         int at = view.IndexOf("private FrameworkElement UsageBars(", StringComparison.Ordinal);
         string body = view[at..view.IndexOf("\n    }\n", at, StringComparison.Ordinal)];
         Assert.Contains("InsightsSkillsHome.EarlierBarInk", body, StringComparison.Ordinal);
