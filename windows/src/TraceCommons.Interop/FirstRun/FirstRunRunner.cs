@@ -212,10 +212,14 @@ public sealed class FirstRunRunner
         }
 
         SignInWaiting = false;
-        _loginCancel = _daemon.CancelNearAILogin();
+        // Awaited through a local, as the Mac's `cancel` is: a wait that ends
+        // at once on the cancel runs the commit on inline, and the commit
+        // takes the field.
+        Task<bool> cancel = _daemon.CancelNearAILogin();
+        _loginCancel = cancel;
         _login.Cancel();
         Changed?.Invoke();
-        await _loginCancel;
+        await cancel;
     }
 
     /// <summary>

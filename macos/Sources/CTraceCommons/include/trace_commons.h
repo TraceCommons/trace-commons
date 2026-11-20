@@ -2747,6 +2747,12 @@ char*       tc_monitor_traces_copy_json(void);
  */
 char*       tc_monitor_screens_copy_json(void);
 
+/* The Windows app's own words (preview_copy::windows_words_copy), as a JSON
+ * object: Settings' credit-arrival switch naming the taskbar and tray.
+ * Free with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_windows_words_copy_json(void);
+
 /* The compiled default Private AI campaign, as JSON. Free with tc_string_free. */
 char*       tc_private_ai_campaign_json(void);
 

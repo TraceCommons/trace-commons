@@ -37,10 +37,10 @@ public class NativeBindingTests
     /// How many C ABI functions C# binds. Moves only on purpose: a slice that
     /// binds a new export states the old and new numbers (checklist I1).
     /// </summary>
-    private const int BoundFunctions = 130;
+    private const int BoundFunctions = 132;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
-    private const int HeaderFunctions = 186;
+    private const int HeaderFunctions = 187;
 
     private static string HeaderPath => Path.Combine(AppContext.BaseDirectory, "abi", "trace_commons.h.txt");
 

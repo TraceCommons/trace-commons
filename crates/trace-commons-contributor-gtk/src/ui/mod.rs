@@ -16,6 +16,7 @@ pub mod credit_arrival;
 mod css_contract;
 mod edge_motion;
 pub mod edge_surfaces;
+mod feature_flag_reads;
 mod first_run;
 mod first_run_fade;
 mod first_run_marker_check;
@@ -378,6 +379,9 @@ pub struct App {
     /// The folders screen was shown for the daemon this window is attached
     /// to; cleared when the backend is replaced.
     folders_asked: Cell<bool>,
+    /// The daemon's feature-flag snapshot (`feature_flags`); read again
+    /// on `feature_flags_changed` and on `resync_required`.
+    pub feature_flags: crate::feature_flags::FeatureFlags,
 }
 
 /// How long a scroll must sit still before `preview_visible` is sent.
@@ -623,6 +627,7 @@ impl App {
             history_location: RefCell::new(crate::queue_folders::Location::Root),
             quit_confirmed: Cell::new(false),
             folders_asked: Cell::new(false),
+            feature_flags: Default::default(),
         });
 
         app.home.bind(&app);
@@ -649,6 +654,7 @@ impl App {
         legacy_move::wire(&app);
         update::wire(&app);
         app.refresh();
+        app.refresh_feature_flags();
 
         // Best-effort and platform-optional, in the order the design spec
         // gives them: the portal registration is the one that matters most
@@ -731,6 +737,9 @@ impl App {
                         app.post_digest(event.digest.clone().unwrap_or_default());
                     }
                     "preview_ready" => app.handle_preview_ready(event.entry_id),
+                    crate::feature_flags::EVENT_FEATURE_FLAGS_CHANGED => {
+                        app.refresh_feature_flags()
+                    }
                     // A missed preview_ready is exactly the gap
                     // resync_required exists to cover, so both halves of
                     // "look again" run: the queue itself, and a full sweep
@@ -743,6 +752,7 @@ impl App {
                         // managed revisions afresh.
                         managed_sessions::backend_changed(&app.private_inference.managed_revision);
                         app.refresh();
+                        app.refresh_feature_flags();
                         app.poll_outstanding_previews();
                     }
                     _ => app.refresh(),
@@ -999,6 +1009,8 @@ impl App {
                     // Whatever happened, the daemon may have changed: the
                     // same "look again" as `resync_required`.
                     app.refresh();
+                    app.feature_flags.forget();
+                    app.refresh_feature_flags();
                     app.poll_outstanding_previews();
                     callback(app);
                 }

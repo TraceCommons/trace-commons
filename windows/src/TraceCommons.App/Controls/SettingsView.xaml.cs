@@ -32,6 +32,7 @@ public sealed partial class SettingsView : UserControl
         StartAtLoginSwitch.Header = $"Start {TraceCommons.Interop.Shell.MonitorWords.AppName} when you sign in";
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
+        InitializeShellSwitches();
         QuiescenceMinutes.Loaded += (_, _) => AddMapStyleSwitch();
 
         ViewModel = new PublicProfileViewModel(host);
