@@ -204,6 +204,26 @@ public sealed class InferenceLedgerTests
         Assert.Equal(new LedgerTotals(null, null, "\u2014"), Header("{\"readable\":false,\"window_hours\":null,\"summary\":null}"));
     }
 
+    // The Mac rounds the shortest decimal that reads back as the double,
+    // half to even (`formattedUSD`, printed by Swift's `.currency` style on
+    // macOS: $0.0124, $0.0012, $2.6744). Each of these is a midpoint only in
+    // that decimal; the double's binary value sits just off it, on one side
+    // or the other, so a conversion that keeps the binary value rounds them
+    // the other way.
+    [Theory]
+    [InlineData(0.0123, 0.00005, "$0.0124")]
+    [InlineData(0.00125, 0.0, "$0.0012")]
+    [InlineData(2.67435, 0.0, "$2.6744")]
+    public void TheHeaderRoundsTheAmountTheMacDoes(double routed, double outside, string priced)
+    {
+        string cost(double usd) => usd.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        LedgerTotals totals = InferenceLedger.NetworkHeaderTotals(InferenceLedger.ParseNetworkSummary(JsonDocument.Parse(Network(true,
+            "\"calls\":1,\"priced_calls\":1,\"cost_usd\":" + cost(routed) + "," + Zero,
+            "\"calls\":1,\"priced_calls\":1,\"cost_usd\":" + cost(outside) + "," + Zero,
+            "\"calls\":0,\"priced_calls\":0,\"cost_usd\":0," + Zero)).RootElement));
+        Assert.Equal(priced, totals.Priced);
+    }
+
     // Without a network summary the header draws priced alone; calls and
     // verified are dashes (InferenceViews.swift:129-135).
     [Fact]

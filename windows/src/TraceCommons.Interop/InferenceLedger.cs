@@ -370,7 +370,18 @@ public static class InferenceLedger
     /// </summary>
     public static string Money(long micros) => Usd(micros / 1_000_000m);
 
-    private static string Usd(double usd) => Math.Abs(usd) < 1e20 ? Usd((decimal)usd) : Dash;
+    /// <summary>
+    /// The amount as the Mac draws it: the shortest decimal that reads back
+    /// as the same double (what Swift prints), rounded half to even. Not a
+    /// <c>(decimal)</c> cast: which decimal that gives a double depends on the
+    /// runtime. .NET 8 keeps 15 significant digits, so 0.0123 + 0.00005 is
+    /// 0.01235 and rounds to $0.0124, as on the Mac; a later runtime keeps
+    /// the double's binary value, 0.012349999..., and rounds it to $0.0123.
+    /// </summary>
+    private static string Usd(double usd) =>
+        Math.Abs(usd) < 1e20
+            ? Usd(decimal.Parse(usd.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture))
+            : Dash;
 
     private static string Usd(decimal amount)
     {
