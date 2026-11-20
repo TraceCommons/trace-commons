@@ -65,7 +65,11 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
 
         Loaded += OnFirstLoaded;
+        SizeChanged += (_, e) => FooterScroller.MaxHeight = Math.Max(FooterFloor, e.NewSize.Height / 2);
     }
+
+    /// <summary>The footer's least height: the action row and a line above it.</summary>
+    private const double FooterFloor = 120;
 
     /// <summary>Ctrl+F: the Search tab, focused, wherever the sheet was.</summary>
     private void OnFindInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

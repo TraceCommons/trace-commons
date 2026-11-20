@@ -652,8 +652,17 @@
             The footer: the caveat, the read gate, and the only approve control
             in the product.
         -->
-        <StackPanel Grid.Row="3"
-                    Spacing="10"
+        <!--
+            At most half the sheet, scrolling inside itself beyond that: on a
+            short window the footer used to run off the bottom, and Tab
+            reached Not this one and Close where nothing could be seen (box
+            tab walk, 2026-11-19, a 754 by 512 window).
+        -->
+        <ScrollViewer x:Name="FooterScroller"
+                      Grid.Row="3"
+                      HorizontalScrollMode="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="10"
                     Padding="20,12"
                     Background="{ThemeResource TcSurfaceCardBrush}"
                     BorderBrush="{ThemeResource TcHairlineDividerBrush}"
@@ -860,5 +869,6 @@
                         Click="OnContribute" />
             </Grid>
         </StackPanel>
+        </ScrollViewer>
     </Grid>
 </UserControl>

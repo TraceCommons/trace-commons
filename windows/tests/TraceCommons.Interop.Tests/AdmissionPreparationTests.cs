@@ -147,7 +147,7 @@ public sealed class AdmissionPreparationTests
             @"\s+",
             " ");
 
-        int footer = markup.IndexOf("<StackPanel Grid.Row=\"3\"", StringComparison.Ordinal);
+        int footer = markup.IndexOf("<ScrollViewer x:Name=\"FooterScroller\" Grid.Row=\"3\"", StringComparison.Ordinal);
         Assert.True(footer >= 0, "the sheet no longer has a footer row to draw it in");
 
         int failureNotice = markup.IndexOf("This one can't be shown.", StringComparison.Ordinal);
