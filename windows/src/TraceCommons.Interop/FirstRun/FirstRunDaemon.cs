@@ -444,14 +444,22 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     /// rather than left out (DaemonClient+FirstRun.swift:48-60). A grant
     /// that does not include existing traces is refused.
     /// </summary>
-    public async Task<GrantAnswer> GrantAutomatic(string? witness)
+    public Task<GrantAnswer> GrantAutomatic(string? witness) => GrantAutomatic(witness, keepFolderAsks: true);
+
+    /// <summary>
+    /// The grant from the Traces toolbar (as from the Mac's Settings sharing
+    /// choice, AppModel.swift:5108-5113): <paramref name="keepFolderAsks"/>
+    /// false makes every folder but a Never one Automatic.
+    /// </summary>
+
+    public async Task<GrantAnswer> GrantAutomatic(string? witness, bool keepFolderAsks)
     {
         DaemonResponse? r = await GuardedGrantCall("grant_automatic_including_existing", new Dictionary<string, object?>
         {
             ["confirmed"] = true,
             ["witness_signing_address"] = witness,
             ["include_existing"] = true,
-            ["keep_folder_asks"] = true,
+            ["keep_folder_asks"] = keepFolderAsks,
         }).ConfigureAwait(true);
         if (r is null)
         {

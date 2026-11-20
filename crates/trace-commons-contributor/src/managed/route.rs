@@ -107,6 +107,48 @@ pub(crate) fn embed_options(store: &ConfigStore, key: &str) -> EmbedOptions {
 /// to serve the selected model.
 const READY_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// How long a restart keeps asking for its saved port while the OS lets go
+/// of it. Windows can hold a just-released port listening for about a
+/// second after the listener is dropped, so a stop followed at once by a
+/// restart on the same port would otherwise refuse with `PortInUse`.
+const RELEASED_PORT_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
+const RELEASED_PORT_PAUSE: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Run `attempt` and, when it refuses a fixed `port` as in use, run it again
+/// until `within` has passed. A port the OS is still releasing comes free in
+/// that window; a port another listener holds does not, and its refusal is
+/// returned unchanged, so the caller never moves to another port. Port 0
+/// asks the OS for any port and is never retried.
+/// Each fixed port a test build was refused and asked for again, so a
+/// daemon-level test can let go of a port only once the restart has met it.
+#[cfg(test)]
+pub(crate) static REFUSED_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) async fn start_on_released_port<T, F, Fut>(
+    port: u16,
+    within: std::time::Duration,
+    pause: std::time::Duration,
+    mut attempt: F,
+) -> Result<T, embed::EmbedError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, embed::EmbedError>>,
+{
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        match attempt().await {
+            Err(embed::EmbedError::PortInUse { .. })
+                if port != 0 && tokio::time::Instant::now() < deadline =>
+            {
+                #[cfg(test)]
+                REFUSED_PORTS.lock().unwrap().push(port);
+                tokio::time::sleep(pause.min(deadline - tokio::time::Instant::now())).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 async fn stop_desktop_proxy(
     mut proxy: embed::EmbeddedProxy,
     completion: Option<Arc<crate::daemon::claude_desktop::StartCompletion>>,
@@ -351,7 +393,12 @@ impl ManagedRoute {
         let proxy = tokio::select! {
             biased;
             _ = cancelled(&mut cancellation) => return Err(ManagedError::LaunchUnknown),
-            proxy = embed::start_with_options(&home, Some(desktop.map_or(0, |b| b.port)), options, |_, _| {}) => {
+            proxy = start_on_released_port(
+                desktop.map_or(0, |b| b.port),
+                RELEASED_PORT_WITHIN,
+                RELEASED_PORT_PAUSE,
+                || embed::start_with_options(&home, Some(desktop.map_or(0, |b| b.port)), options.clone(), |_, _| {}),
+            ) => {
                 proxy.map_err(|_error| {
                     #[cfg(test)]
                     if desktop.is_some() {

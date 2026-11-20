@@ -438,6 +438,15 @@ impl Backend {
         release_after_shutdown(rt, move || embedded.close(), STOP_WAIT)
     }
 
+    /// The hosted daemon's shared state, for tests that check how it ended.
+    #[cfg(test)]
+    pub(crate) fn hosted_shared(&self) -> Option<Arc<DaemonShared>> {
+        match self {
+            Backend::Hosting(h) => Some(Arc::clone(&h.shared)),
+            _ => None,
+        }
+    }
+
     /// The socket an attached window talks to; `None` while hosting, and
     /// on a sample.
     pub fn attached_socket(&self) -> Option<&std::path::Path> {

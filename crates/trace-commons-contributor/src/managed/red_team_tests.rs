@@ -265,6 +265,60 @@ fn the_spec_captures_receipts_into_the_managed_route_home() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn the_spec_targets_the_builds_near_ai_environment() {
+    use rts::inference::NearEnvironment;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-near-env-test");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    let expected = if cfg!(feature = "near-ai-staging") {
+        NearEnvironment::Staging
+    } else {
+        NearEnvironment::Production
+    };
+    assert_eq!(spec.near, expected);
+    assert_eq!(super::near_environment(), expected);
+}
+
+/// NEAR redeploys the staging gateway several times a day, so a staging
+/// build does not require its compose hash to be pinned (staging 0.24.68:
+/// 10d29b73 pinned in the morning, 4c544d60 live by the afternoon). Every
+/// other check stays on, and production stays strictly pinned.
+#[cfg(target_os = "macos")]
+#[test]
+fn only_staging_accepts_an_unpinned_compose_that_the_tee_measured() {
+    use rts::attest::{AttestOptions, ComposePolicy};
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-compose-policy-test");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    let expected = if cfg!(feature = "near-ai-staging") {
+        AttestOptions {
+            compose_policy: ComposePolicy::MrConfigOnly,
+            ..AttestOptions::default()
+        }
+    } else {
+        AttestOptions::default()
+    };
+    assert_eq!(spec.attest, expected);
+    assert!(!spec.attest.allow_tcb_out_of_date);
+    assert!(!spec.attest.allow_unattested_provider);
+}
+
+/// rts and the daemon must never disagree about which NEAR AI the key is for:
+/// the environment rts attests and proxies to is the channel's own inference
+/// base, the one the model catalogue is read from.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_near_environment_is_the_channels_inference_base() {
+    assert_eq!(
+        super::near_environment().base_url(),
+        crate::channel::NEAR_AI_INFERENCE_BASE
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn the_tool_command_is_this_executable() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
@@ -299,6 +353,63 @@ fn inputs_are_copied_not_linked() {
     // Editing the staged copy must leave the original untouched.
     std::fs::write(&staged_file, b"mutated-in-sandbox").unwrap();
     assert_eq!(std::fs::read(&original).unwrap(), b"original-content");
+}
+
+/// A project folder with node_modules has symlinks inside it (.bin/*).
+/// Staging skips them without following, copies the rest, and lists what
+/// it skipped beside (not inside) the staged folder (staging 0.24.68).
+#[cfg(unix)]
+#[test]
+fn symlinks_inside_an_input_folder_are_skipped_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, b"outside-the-folder").unwrap();
+    let project = dir.path().join("site");
+    let bin = project.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(project.join("index.js"), b"code").unwrap();
+    std::fs::write(project.join("node_modules").join("tool.js"), b"tool").unwrap();
+    std::os::unix::fs::symlink("../tool.js", bin.join("tool")).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("leak")).unwrap();
+
+    let session_id = Uuid::new_v4();
+    let staged = stage_inputs(&store, session_id, std::slice::from_ref(&project))
+        .unwrap()
+        .expect("staged in dir");
+    let site = staged.join("site");
+    assert_eq!(std::fs::read(site.join("index.js")).unwrap(), b"code");
+    assert_eq!(
+        std::fs::read(site.join("node_modules").join("tool.js")).unwrap(),
+        b"tool"
+    );
+    assert!(std::fs::symlink_metadata(site.join("leak")).is_err());
+    assert!(std::fs::symlink_metadata(site.join("node_modules/.bin/tool")).is_err());
+    assert!(site.join("node_modules/.bin").is_dir());
+
+    let note =
+        std::fs::read_to_string(staged.parent().unwrap().join(SKIPPED_SYMLINKS_FILE)).unwrap();
+    assert!(
+        note.contains(&project.join("leak").display().to_string()),
+        "{note}"
+    );
+    assert!(
+        note.contains(&bin.join("tool").display().to_string()),
+        "{note}"
+    );
+    assert!(!note.contains("outside-the-folder"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_selected_input_that_is_itself_a_symlink_is_still_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(stage_inputs(&store, Uuid::new_v4(), std::slice::from_ref(&link)).is_err());
 }
 
 #[test]

@@ -9,31 +9,37 @@ contracts, mandatory flags, deliberate exclusions). What the tests cannot
 prove — that signing, notarization, or a flatpak build actually succeed
 against real credentials — is covered by the manual gates below.
 
-## What an `app-v*` tag releases: macOS only
+## What an `app-v*` tag releases: macOS and the Windows MSIX
 
-Native macOS is the lead client. The Windows and Tauri shells are frozen,
-and the Linux GTK app, back in development since 2026-11-11, is not
-released on tags until it catches up. Since `app-v0.23.0`, an `app-v*`
-tag push in
-`release-apps.yml` builds and publishes the macOS DMG alone: the GitHub
-Release, `updates/latest.json` and the Sparkle appcast. The Homebrew cask
-is bumped by hand (see "Publishing, and the manual tap bump").
+Native macOS is the lead client. The Windows zips and the Tauri shell are
+frozen, and the Linux GTK app, back in development since 2026-11-11, is not
+released on tags until it catches up. An `app-v*` tag push in
+`release-apps.yml` builds and publishes the macOS DMG (the GitHub Release,
+`updates/latest.json` and the Sparkle appcast) and the Windows MSIX (the
+`windows-app` job: the signed package and `TraceCommons.appinstaller` in
+the `tracecommons-flatpak` bucket, and both on the GitHub Release). The
+Homebrew cask is bumped by hand (see "Publishing, and the manual tap
+bump"). From `app-v0.23.0` until the commit that put `windows-app` back on
+tags, a tag push built macOS alone.
 
-- The `windows` (signed zips), `windows-app` (MSIX) and `linux-flatpak`
-  jobs run only on a `workflow_dispatch` with `platform` set to `all`,
-  `windows` or `linux`. A dispatch builds and signs but never publishes, so
-  there is no path from these jobs to a release, a bucket or a feed.
-- `app-v0.23.0` is the last release with Windows and Linux app assets. The
-  MSIX `.appinstaller` feed and the flatpak OSTree repo in the
-  `tracecommons-flatpak` bucket are written only by those jobs, so they
-  stay on that build: installed MSIX and flatpak apps see no update and
-  are not pointed at anything missing.
-- `updates/latest.json` carries no `windows-x86_64` desktop entry from a
-  macOS-only release. Nothing installed reads that slug (the CLI
-  self-updater reads only the `-cli` slugs), and an absent slug means
-  "no update for this platform".
-- The tag pre-flight (`release-config`) no longer requires the
-  `AZURE_SIGNING_*` values. The `version` job still checks the tag against
+- The `windows` (signed zips) and `linux-flatpak` jobs run only on a
+  `workflow_dispatch` with `platform` set to `all`, `windows` or `linux`,
+  and publish nothing. `app-v0.23.0` is the last release with Windows zip
+  and Linux assets; the flatpak OSTree repo stays on that build.
+- A dispatch publishes nothing, with one exception: `publish_windows_app`
+  set, on a dispatch run against the `app-v<version>` tag itself (with
+  `version` equal to it and `platform` `windows` or `all`), publishes the
+  `windows-app` MSIX and feed to the bucket. `release-config` refuses it on
+  any other ref. It re-publishes a failed Windows leg of a tag release; it
+  never cuts or edits the GitHub Release and never writes `latest.json`.
+- `updates/latest.json` carries no `windows-x86_64` desktop entry, because
+  that entry comes from the `windows` zip job. Nothing installed reads that
+  slug (the CLI self-updater reads only the `-cli` slugs, and the MSIX
+  follows its `.appinstaller` feed), and an absent slug means "no update
+  for this platform".
+- The pre-flight (`release-config`) requires the six `AZURE_SIGNING_*`
+  values on a tag push and on a publishing dispatch. The `version` job
+  still checks the tag against
   `crates/trace-commons-contributor-gtk/Cargo.toml`, so keep bumping that
   crate in the release-prep commit.
 - The Tauri app is not built for release by any workflow.
@@ -43,9 +49,10 @@ is bumped by hand (see "Publishing, and the manual tap bump").
   `scripts/install.ps1`
   resolves `contributor-v*` releases, never `app-v*` ones.
 
-To put a platform back on tags, restore `github.event_name == 'push' ||`
+To put another platform back on tags, restore `github.event_name == 'push' ||`
 in its job's `if:` (and its credentials in `release-config`). `publish`
-and `publish-updates` already branch on each platform's result.
+and `publish-updates` already branch on each platform's result. To take the
+Windows MSIX off tags again, revert the commit that put it on.
 
 ## Homebrew
 
@@ -116,7 +123,7 @@ way; see the next section.
 
 Both `release-apps.yml` and `release-contributor.yml` end in a `publish`
 job (gated to `github.event_name == 'push'` -- a `workflow_dispatch` run
-never publishes) that downloads the platform artifacts and creates a GitHub
+never cuts a Release) that downloads the platform artifacts and creates a GitHub
 Release with `gh release create`, tagged from the pushed tag. In
 `release-apps.yml`, `publish-updates` then writes `updates/latest.json` and
 the Sparkle appcast.

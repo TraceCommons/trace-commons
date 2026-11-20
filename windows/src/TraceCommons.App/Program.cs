@@ -44,14 +44,28 @@ public static class Program
             // the contributor must reopen it after recovering that window.
             // Activation credentials and exception messages are never logged.
         }
+#if DEBUG
+        // A sample launch's throwaway state (SampleDaemon.ThrowawayConfigDir)
+        // goes with it; a force-stopped one's is removed by the next launch.
+        _ = SampleDaemon.SweepThrowawayDirs(System.IO.Path.GetTempPath(), Environment.ProcessId, SampleDaemon.IsProcessRunning);
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => RemoveOwnThrowawayDir();
+#endif
         Application.Start(initialization =>
         {
             SynchronizationContext.SetSynchronizationContext(
                 new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread()));
             _ = new App();
         });
+#if DEBUG
+        RemoveOwnThrowawayDir();
+#endif
         return 0;
     }
+
+#if DEBUG
+    private static void RemoveOwnThrowawayDir() =>
+        _ = SampleDaemon.RemoveThrowawayDir(System.IO.Path.GetTempPath(), Environment.ProcessId);
+#endif
 
     /// <summary>
     /// Whether this launch reads recorded samples instead of a daemon

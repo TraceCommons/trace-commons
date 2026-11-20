@@ -800,6 +800,12 @@ async fn capture_state_varying(client: &mut Client) -> Vec<(&'static str, Value)
                 .result("inference_calls", json!({ "limit": 25 }))
                 .await,
         ),
+        // The Traces toolbar's Automatic-for-every-folder eye is drawn only
+        // once the grant is known (`SharingChoice.drawsToolbarButton`).
+        (
+            "automatic_grant",
+            client.result("automatic_grant", json!({})).await,
+        ),
     ]
 }
 

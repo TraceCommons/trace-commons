@@ -62,6 +62,12 @@ public sealed class InsightsSkillsModel : INotifyPropertyChanged
         _idlePoll = idlePollInterval ?? IdlePollInterval;
     }
 
+    /// <summary>
+    /// The clock Skills reads its days and weeks on: the machine's, or a
+    /// Debug sample launch's own instant.
+    /// </summary>
+    public Func<DateTimeOffset> Now { get; set; } = () => DateTimeOffset.Now;
+
     /// <summary>The daemon, as the Mac's <c>LiveDaemonClient</c> asks it (LiveDaemonClient.swift:322-338).</summary>
     public static InsightsSkillsModel ForDaemon(Func<string, string, Task<DaemonResponse>> call, Func<string, string?> copy) =>
         new(

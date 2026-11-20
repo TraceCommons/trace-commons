@@ -1,5 +1,7 @@
 using System;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using TraceCommons.Interop;
@@ -14,8 +16,10 @@ namespace TraceCommons.App;
 /// The governing rule is that whoever installed the binary owns replacing it,
 /// and on Windows desktop that is the deployment service. This class never
 /// touches the install directory: it asks whether an update exists, it makes
-/// sure nothing is mid-upload, and it hands off. App Installer performs the
-/// swap and restarts the app.
+/// sure nothing is mid-upload, and it hands off. The deployment service
+/// performs the swap; a helper this class starts just before the hand-off
+/// starts the app again (<see cref="UpdateRelaunch"/>), because the
+/// deployment alone ends the app and does not start it.
 ///
 /// Every call here needs package identity, which is why the project is
 /// packaged. An unpackaged build reports
@@ -124,6 +128,62 @@ public sealed class AppUpdater
     /// app can do about it except say so.
     /// </summary>
     public async Task<bool> ApplyAsync()
+    {
+        Process? helper = StartRelaunchHelper();
+        bool handedOff = await HandOffAsync().ConfigureAwait(true);
+        if (!handedOff)
+        {
+            // Still running, so nothing should start a second copy of it.
+            try
+            {
+                helper?.Kill();
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
+        }
+
+        return handedOff;
+    }
+
+    /// <summary>
+    /// Starts the hidden helper that starts the app again once the new
+    /// version is registered (<see cref="UpdateRelaunch"/>). Best effort: a
+    /// helper that cannot start costs the relaunch, never the update.
+    /// </summary>
+    private static Process? StartRelaunchHelper()
+    {
+        try
+        {
+            PackageId id = Package.Current.Id;
+            string version = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}.{1}.{2}.{3}",
+                id.Version.Major,
+                id.Version.Minor,
+                id.Version.Build,
+                id.Version.Revision);
+            string script = UpdateRelaunch.Script(id.Name, id.FamilyName, version);
+            var start = new ProcessStartInfo(
+                Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
+                UpdateRelaunch.Arguments(script))
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            return Process.Start(start);
+        }
+        catch (Exception ex) when (
+            ex is InvalidOperationException
+            or ArgumentException
+            or System.ComponentModel.Win32Exception
+            or COMException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<bool> HandOffAsync()
     {
         try
         {
