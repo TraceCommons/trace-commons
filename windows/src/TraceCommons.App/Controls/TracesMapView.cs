@@ -977,12 +977,6 @@ public sealed partial class TracesMapView : UserControl
         _markUnit = null;
         _tile = null;
         _logos.Clear();
-        _libraryKey = string.Empty;
-        foreach (CanvasRenderTarget frame in _libraryFrames.Values)
-        {
-            frame.Dispose();
-        }
-
         _libraryFrames.Clear();
     }
 
@@ -1437,15 +1431,16 @@ public sealed partial class TracesMapView : UserControl
         ds.FillRoundedRectangle(display, (float)(2 * s), (float)(2 * s), screen);
     }
 
-    /// <summary>The station or the orb at the library's place (FlowMapView.swift:236-249).</summary>
-    private readonly Dictionary<int, CanvasRenderTarget> _libraryFrames = new();
-    private string _libraryKey = string.Empty;
+    /// <summary>The station's or the orb's drawn frames for the current look.</summary>
+    private readonly LibraryFrameCache<CanvasRenderTarget> _libraryFrames = new();
 
     /// <summary>
     /// The station or the orb at the library's place (FlowMapView.swift:236-249),
     /// with its glow. Each of its 20-a-second frames is drawn once per size,
     /// style, theme and lit state and then reused: the turn repeats, and the
-    /// mesh and the glow's blur are the costliest things the map draws.
+    /// mesh and the glow's blur are the costliest things the map draws. The
+    /// art is rasterised once per frame, into a bitmap the glow and the frame
+    /// both read (checklist O3: a command list was rasterised twice).
     /// </summary>
     private void DrawLibrary(CanvasDrawingSession ds, ICanvasResourceCreator device, MapNode library, MapGeometry fit, double seconds, bool still)
     {
@@ -1454,34 +1449,25 @@ public sealed partial class TracesMapView : UserControl
         double turn = launch ? LibraryStation.TurnSeconds : LibraryOrb.TurnSeconds;
         int frames = (int)Math.Round(turn / LibraryStation.FrameInterval);
         int index = still ? -1 : (int)Math.Floor(((seconds % turn) + turn) % turn / LibraryStation.FrameInterval) % frames;
-        string key = $"{_style}|{library.Active}|{Math.Round(fit.Scale, 3)}|{Dark}|{HighContrast}";
-        if (key != _libraryKey)
-        {
-            foreach (CanvasRenderTarget old in _libraryFrames.Values)
-            {
-                old.Dispose();
-            }
-
-            _libraryFrames.Clear();
-            _libraryKey = key;
-        }
+        _libraryFrames.Look($"{_style}|{library.Active}|{Math.Round(fit.Scale, 3)}|{Dark}|{HighContrast}");
 
         double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
         double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
         double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
-        if (!_libraryFrames.TryGetValue(index, out CanvasRenderTarget? frame))
+        CanvasRenderTarget? frame = _libraryFrames.Get(index);
+        if (frame is null)
         {
             double angle = launch
                 ? (still ? LibraryStation.RestAngle : LibraryStation.RestAngle + (index + 0.0) / frames * 2 * Math.PI)
                 : (still ? LibraryOrb.RestAngle : LibraryOrb.RestAngle + (index + 0.0) / frames * 2 * Math.PI);
-            frame = new CanvasRenderTarget(device, (float)(w + 2 * pad), (float)(h + 2 * pad), _canvas.Dpi);
-            using (CanvasDrawingSession f = frame.CreateDrawingSession())
+            float side = (float)(w + 2 * pad), tall = (float)(h + 2 * pad);
+            frame = new CanvasRenderTarget(device, side, tall, _canvas.Dpi);
+            Color brand = Ink("heroCampaignBright");
+            using (var art = new CanvasRenderTarget(device, side, tall, _canvas.Dpi))
             {
-                f.Clear(Color.FromArgb(0, 0, 0, 0));
-                Color brand = Ink("heroCampaignBright");
-                using var art = new CanvasCommandList(device);
                 using (CanvasDrawingSession layer = art.CreateDrawingSession())
                 {
+                    layer.Clear(Color.FromArgb(0, 0, 0, 0));
                     if (launch)
                     {
                         MapPainter.Station(layer, device, new Vector2((float)pad, (float)pad), w, h, angle);
@@ -1492,6 +1478,8 @@ public sealed partial class TracesMapView : UserControl
                     }
                 }
 
+                using CanvasDrawingSession f = frame.CreateDrawingSession();
+                f.Clear(Color.FromArgb(0, 0, 0, 0));
                 DrawGlow(f, art, With(brand, launch ? LibraryStation.Glow(library.Active) : LibraryOrb.Glow(library.Active)),
                     launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius);
                 using (f.CreateLayer(launch ? 1 : (float)LibraryOrb.Opacity(library.Active)))
@@ -1502,9 +1490,9 @@ public sealed partial class TracesMapView : UserControl
 
             // Kept for the next turn only while a whole turn's frames stay
             // small (64 MB); past that each frame is drawn and let go.
-            if ((w + 2 * pad) * (h + 2 * pad) * 4 * frames <= 64.0 * 1024 * 1024)
+            if (side * tall * 4 * frames <= 64.0 * 1024 * 1024)
             {
-                _libraryFrames[index] = frame;
+                _libraryFrames.Put(index, frame);
             }
             else
             {

@@ -250,6 +250,7 @@ pub fn validate_launch_args(
         let memory_mib = args.memory.as_deref().map(parse_memory_mib).transpose()?;
         Some(super::sandbox::SandboxSettings {
             inputs: args.inputs.clone(),
+            output_dir: None,
             allow_hosts: args.allow_hosts.clone(),
             packages: args.packages,
             cpus: args.cpus,

@@ -2819,10 +2819,14 @@ mod tests {
         card(Notice::Undo).set_visible(false);
         let faded = Cell::new(false);
         let moved = Cell::new(false);
+        // Waits for the closed card to be gone too: GTK keeps a widget's
+        // opacity in 8 bits (`round(opacity * 255)`), so the revealed card
+        // reads 1.0 from p > 0.998 while the closed card beneath is still
+        // at 1 - p, and a slow runner can land a frame in that sliver.
         pump_until(|| {
             faded.set(faded.get() || health.card_opacity() < 1.0);
             moved.set(moved.get() || health.offset() != 0.0);
-            faded.get() && health.card_opacity() == 1.0
+            faded.get() && health.card_opacity() == 1.0 && health.covered_opacity() == 0.0
         });
         assert!(faded.get(), "a revealed card did not fade in");
         assert!(!moved.get(), "a revealed card slid");
