@@ -73,12 +73,19 @@ public sealed class HistoryDetailInspector : UserControl
     private readonly SentTracesTrainingModel? _training;
     private readonly SkillLearningModel? _skills;
 
+    private readonly AccountOwnedContent? _account;
+
+    /// <param name="account">
+    /// The window's owner of record content, which every inspector's read
+    /// reports to; null leaves the record's own rule alone.
+    /// </param>
     public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record, SentTracesTrainingModel? training = null,
-        SkillLearningModel? skills = null)
+        SkillLearningModel? skills = null, AccountOwnedContent? account = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _training = training;
         _skills = skills;
+        _account = account;
         if (skills is not null)
         {
             // The skill surfaces come and go as the session's state settles
@@ -194,6 +201,7 @@ public sealed class HistoryDetailInspector : UserControl
         _loading = true;
         _state.ReadStarted();
         RefreshStatus();
+        ulong sequence = _account?.ReadStarted() ?? 0;
         DaemonResponse response = await _host
             .CallAsync(DaemonProtocol.Methods.HistoryDetail, PublicRunEditor.SubmissionParams(Record.SubmissionId))
             .ConfigureAwait(true);
@@ -201,12 +209,22 @@ public sealed class HistoryDetailInspector : UserControl
         string? raw = null;
         if (response.IsError || response.Result is not JsonElement result)
         {
+            _account?.ReadFailed(sequence, response.Error?.Message);
             _state.ReadFailed(response.Error?.Message);
         }
         else if (SessionDetail.Parse(result) is { } detail)
         {
-            raw = result.GetRawText();
-            SetDetail(detail);
+            // Read under an account a newer read has replaced: not shown,
+            // and the line says so, with Retry (AppModel.swift:4219-4225).
+            if (_account is not null && !_account.ReadSucceeded(sequence, detail.OwnerScopeSha256))
+            {
+                _state.ReadStale();
+            }
+            else
+            {
+                raw = result.GetRawText();
+                SetDetail(detail);
+            }
         }
         else
         {
@@ -239,6 +257,19 @@ public sealed class HistoryDetailInspector : UserControl
 
     private string? _lastRaw;
     private StackPanel? _statusSlot;
+
+    /// <summary>
+    /// The window's account content was cleared (<c>clearAccountOwnedContent</c>,
+    /// AppModel.swift:4255-4261): this record's detail and errors, the
+    /// editor's draft, and the skill panel with its typed draft all go.
+    /// </summary>
+    public void ClearAccountOwnedContent()
+    {
+        _state.AccountCleared();
+        ResetEditor();
+        _skillPanel = null;
+        Render();
+    }
 
     private void ResetEditor()
     {

@@ -242,6 +242,21 @@ public sealed class SkillLearningStore
     public SkillLearningSessionState State(string submissionId) =>
         _sessions.TryGetValue(submissionId, out SkillLearningSessionState? state) ? state : Fresh;
 
+    /// <summary>
+    /// Every session goes, each announced through <see cref="Changed"/>, as
+    /// the Mac's replacement with a fresh store (AppModel.swift:4260).
+    /// </summary>
+    public void Clear()
+    {
+        var removed = new List<string>(_sessions.Keys);
+        _sessions.Clear();
+        _recency.Clear();
+        foreach (string id in removed)
+        {
+            Changed?.Invoke(id);
+        }
+    }
+
     /// <summary>(:152-158).</summary>
     public bool BeginLearning(string submissionId)
     {
@@ -906,6 +921,17 @@ public sealed class SkillLearningModel : INotifyPropertyChanged
 
     /// <summary>A session's state (<c>skillLearningState(for:)</c>, :306-308).</summary>
     public SkillLearningSessionState State(string submissionId) => _store.State(submissionId);
+
+    /// <summary>How many sessions the store holds (<see cref="SkillLearningStore.RetainedSessionCount"/>).</summary>
+    public int RetainedSessionCount => _store.RetainedSessionCount;
+
+    /// <summary>
+    /// Another account, or none, owns the window now: every session's state
+    /// goes (<c>skillLearningStore = SkillLearningStore()</c>,
+    /// AppModel.swift:4255-4261). An answer still in flight settles nothing,
+    /// since its session no longer waits on it.
+    /// </summary>
+    public void ClearAccountOwnedContent() => _store.Clear();
 
     /// <summary>
     /// Learn a skill from the session's correction (<c>learnSkill</c>,

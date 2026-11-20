@@ -14,6 +14,7 @@
 #   tab <AutomationId>               click a main-window element by AutomationId
 #   click <win> <name>               click an element of window <win> by Name (first match)
 #   clickaid <win> <aid>             click by AutomationId in window <win>
+#   focusaid <win> <aid>             give keyboard focus by AutomationId (it scrolls into view)
 #   select <win> <name>              select a TabItem/ListItem by Name
 #   key <win> <vk-hex> [ctrl|shift|ctrlshift]
 #   newwin <label>                   the newest visible top-level window becomes <label>
@@ -359,6 +360,11 @@ try {
                 'exists' {
                     $el = Find $a[1] $UIA::AutomationIdProperty $a[2]
                     Log ("  exists {0}: {1}" -f $a[2], $(if ($el) { "yes offscreen=$($el.Current.IsOffscreen)" } else { 'no' }))
+                }
+                'focusaid' {
+                    $el = Find $a[1] $UIA::AutomationIdProperty $a[2]
+                    if ($el) { try { $el.SetFocus(); Log ("  focused " + (Desc (Focused))) } catch { Log "  SetFocus failed: $_" } } else { Log "  not found" }
+                    Start-Sleep -Milliseconds 600
                 }
                 'focusname' {
                     $el = Find $a[1] $UIA::NameProperty (($a[2..($a.Count - 1)]) -join ' ')

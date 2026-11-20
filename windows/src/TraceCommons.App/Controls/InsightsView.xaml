@@ -31,6 +31,8 @@
                             <TextBlock Text="{Binding}" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TcInkSecondaryBrush}" />
                         </DataTemplate></ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    <!-- Feed T's summary card, tiles, NEAR AI card, spend by model and trends (InsightsView.WeekExtras.cs). -->
+                    <StackPanel x:Name="OverviewExtras" Spacing="12" Visibility="Collapsed" />
                     <Grid ColumnDefinitions="*,*,*" ColumnSpacing="12">
                         <Button Tag="tokens" Click="OnOverviewCard" AutomationProperties.Name="{Binding [analytics_card_tokens]}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                                 HorizontalContentAlignment="Left" VerticalContentAlignment="Top"
@@ -246,6 +248,8 @@
                             </Grid>
                         </DataTemplate></ItemsControl.ItemTemplate>
                     </ItemsControl>
+                    <!-- Feed T's goals set with /goal (InsightsView.WeekExtras.cs). -->
+                    <StackPanel x:Name="PatternsGoals" Spacing="12" Visibility="Collapsed" />
                 </StackPanel>
             </ScrollViewer>
         </Grid>
