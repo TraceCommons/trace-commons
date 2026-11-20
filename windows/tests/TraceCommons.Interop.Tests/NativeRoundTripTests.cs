@@ -377,6 +377,61 @@ public sealed class NativeRoundTripTests : IDisposable
         Assert.Contains(audit!.Entries, entry => entry.Action == "consent-scopes-changed");
     }
 
+    /// <summary>
+    /// W17-D2: each shown kind's switch and an offer's No thanks reach the
+    /// daemon as written, and get_settings reads them back.
+    /// </summary>
+    [Fact]
+    public void NotificationKindSwitchesRoundTripThroughTheNativeBinding()
+    {
+        SeedEnrolledQueuedSession();
+        using TcDaemon daemon = StartDaemon();
+
+        foreach (string kind in NotificationKinds.ShownKinds)
+        {
+            NudgeRequest off = NotificationKinds.SetKind(kind, false);
+            DaemonResponse written = DaemonResponse.Parse(daemon.Call(off.Method, off.ParamsJson));
+            Assert.False(written.IsError, $"{kind}: {written.Error?.Code}: {written.Error?.Message}");
+        }
+
+        NotificationSettingsState? state = NotificationSettingsState.Parse(
+            DaemonResponse.Parse(daemon.Call(DaemonProtocol.Methods.GetSettings)).Result?.GetRawText());
+        Assert.NotNull(state);
+        Assert.All(NotificationKinds.ShownKinds, kind => Assert.False(state!.Notify[kind], kind));
+
+        NudgeRequest on = NotificationKinds.SetKind("verdicts_landed", true);
+        Assert.False(DaemonResponse.Parse(daemon.Call(on.Method, on.ParamsJson)).IsError);
+        state = NotificationSettingsState.Parse(
+            DaemonResponse.Parse(daemon.Call(DaemonProtocol.Methods.GetSettings)).Result?.GetRawText());
+        Assert.True(state!.Notify["verdicts_landed"]);
+        Assert.False(state.Notify["idle_sessions"]);
+
+        NudgeRequest decline = NotificationKinds.Decline(new NotifyOffer("idle_sessions", "t", "a", "d"));
+        DaemonResponse declined = DaemonResponse.Parse(daemon.Call(decline.Method, decline.ParamsJson));
+        Assert.False(declined.IsError, $"{declined.Error?.Code}: {declined.Error?.Message}");
+        state = NotificationSettingsState.Parse(
+            DaemonResponse.Parse(daemon.Call(DaemonProtocol.Methods.GetSettings)).Result?.GetRawText());
+        Assert.False(state!.IdleOfferPending);
+        Assert.False(state.Notify["idle_sessions"]);
+    }
+
+    /// <summary>
+    /// A subscription that declares <c>reengage_due</c> is taken
+    /// (<c>tc_subscribe_with_accepts</c>), as is one that declares nothing.
+    /// </summary>
+    [Fact]
+    public void ASubscriptionDeclaringReengageIsTaken()
+    {
+        TcDaemon daemon = StartDaemon();
+        TcSubscription? declared = daemon.Subscribe(_ => { }, ReengageNotice.AcceptedEvents(canShow: true));
+        Assert.NotNull(declared);
+        Assert.True(daemon.Unsubscribe(declared!));
+
+        TcSubscription? none = daemon.Subscribe(_ => { }, ReengageNotice.AcceptedEvents(canShow: false));
+        Assert.NotNull(none);
+        Assert.Equal(TcDaemon.ShutdownOutcome.Freed, daemon.Shutdown(none));
+    }
+
     [Fact]
     public void UnknownMethodReturnsAnErrorFrameNotACrash()
     {

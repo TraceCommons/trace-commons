@@ -517,7 +517,9 @@ public class FeatureFlagsTests
     public void TheWindowReadsFlagsWhereTheMacDoes()
     {
         string host = ShellSource("TraceCommons.App/DaemonHost.cs");
-        Assert.Contains("daemon.Subscribe(OnDaemonEvent, new[] { DaemonProtocol.Events.FeatureFlagsChanged })", host, StringComparison.Ordinal);
+        // feature_flags_changed is always declared; reengage_due joins it while
+        // the tray can show one (W17-D2).
+        Assert.Contains("new[] { DaemonProtocol.Events.FeatureFlagsChanged }.Concat(AcceptedEvents).ToArray());", host, StringComparison.Ordinal);
         Assert.Contains("case DaemonProtocol.Events.FeatureFlagsChanged:\n                    FeatureFlagsChanged?.Invoke();", host, StringComparison.Ordinal);
         int lagged = host.IndexOf("case DaemonProtocol.Events.Lagged:", StringComparison.Ordinal);
         int resync = host.IndexOf("case DaemonProtocol.Events.ResyncRequired:", StringComparison.Ordinal);

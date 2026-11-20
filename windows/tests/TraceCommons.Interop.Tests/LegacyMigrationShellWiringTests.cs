@@ -38,7 +38,7 @@ public class LegacyMigrationShellWiringTests
     public void BothPlacesShareTheMainViewModelsOffer()
     {
         Assert.Contains(
-            "new SettingsView(_host, ViewModel.LegacyOffer)",
+            "new SettingsView(_host, ViewModel.LegacyOffer, ViewModel.UpdateChecks)",
             ShellSource("TraceCommons.App/MainWindow.Shell.cs"));
 
         string main = ShellSource("TraceCommons.App/ViewModels/MainViewModel.cs");
