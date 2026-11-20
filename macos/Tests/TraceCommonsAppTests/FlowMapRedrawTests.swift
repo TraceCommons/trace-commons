@@ -63,7 +63,15 @@ final class FlowMapRedrawTests: XCTestCase {
         let host = Perf.Host(WindowMap(store: store))
         defer { host.close() }
         host.draw()
+        FlowMapBodies.reset()
         drain([host], 0.5)
+        // The timelines of a window never put on screen ticked on a
+        // developer Mac but not on the CI runner (2026-11-20): with no tick
+        // at all there is nothing to count, so the test says so instead of
+        // passing on zeros.
+        if FlowMapBodies.arcs == 0 && FlowMapBodies.library == 0 {
+            throw XCTSkip("the map's timelines did not tick in this environment")
+        }
         let scene = FlowMapScene.traces(
             store.tree, gate: .init(state: .ready, status: store.status, destinations: store.destinations))
         XCTAssertTrue(scene.flows, "the armed-folder day has a live flow")
