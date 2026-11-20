@@ -13,8 +13,10 @@ For each surface the run walked with Tab:
   - a name holding "Ctrl+", "Trace Commons" or "Near.ai".
 From every UIA dump: an enabled, on-screen, keyboard-focusable element with no
 name. From every contrast file (measured on the box from the drawn pixels):
-a named text or control label under 4.5:1. From the driver's log: every
-EXPECT FAIL.
+named text under 4.5:1, or a control's label under 3:1 (a label with no Text
+element may be a glyph, held to WCAG 1.4.11's 3:1; 3 to 4.5 is printed as
+WARN, to be looked at in the capture). From the driver's log: every EXPECT
+FAIL.
 
 A rectangle with four colours or fewer, or under 9 px tall, drew nothing (a
 label clipped out of its viewport, which UI Automation still reports) and is
@@ -60,7 +62,10 @@ def main(results, tag):
         walk = stops[:count]
         start = next((stop(l) for l in lines if l.startswith("start:")), None)
         silent = [s for s in walk if not s["name"].strip()]
-        unseen = [s for s in walk if s["changed"] == 0 or s["offscreen"]]
+        # A window with one stop cannot move its focus: its press changes
+        # nothing and that is not an unseen stop.
+        single = count == 1 and start is not None and walk and walk[0]["rid"] == start["rid"]
+        unseen = [s for s in walk if (s["changed"] == 0 and not single) or s["offscreen"]]
         banned = [s for s in walk if any(b.lower() in s["name"].lower() for b in BANNED)]
         print(f"{name}: {count} stops, {len(silent)} silent, {len(unseen)} unseen ({end.split()[0]})")
         for s in silent:
@@ -89,11 +94,21 @@ def main(results, tag):
             m = re.search(r'\| (\w+) \| name="([^"]*)" \| rect=[^|]*?x(\d+) \| bg=#(\w+) ink=#(\w+) ratio=([\d.]+).*colours=(\d+)', line)
             if not m or not m.group(2).strip() or int(m.group(7)) <= 4 or int(m.group(3)) < 9:
                 continue
-            if float(m.group(6)) < 4.5:
-                key = (re.sub(r"-sc\d+-\d+$", "", name), m.group(2)[:60], m.group(4), m.group(5))
-                if key not in seen:
-                    seen.add(key)
-                    failures.append(f"{name}: {m.group(6)}:1 '{m.group(2)[:60]}' ink #{m.group(5)} on #{m.group(4)}")
+            # Text is held to 4.5:1. A control's label without a Text element
+            # may be words or a glyph, which UI Automation cannot tell apart:
+            # under 3:1 (WCAG 1.4.11, graphics) fails, 3 to 4.5 is printed as
+            # WARN for a look at the capture.
+            text = m.group(1) in ("Text", "Hyperlink")
+            ratio = float(m.group(6))
+            key = (re.sub(r"-sc\d+-\d+$", "", name), m.group(2)[:60], m.group(4), m.group(5))
+            if key in seen or ratio >= 4.5:
+                continue
+            seen.add(key)
+            line = f"{name}: {m.group(6)}:1 {m.group(1)} '{m.group(2)[:60]}' ink #{m.group(5)} on #{m.group(4)}"
+            if text or ratio < 3.0:
+                failures.append(line)
+            else:
+                print("WARN " + line)
 
     log = os.path.join(results, f"{tag}.drive.log")
     if os.path.exists(log):

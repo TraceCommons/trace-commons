@@ -285,7 +285,8 @@ the app's own windows by handle.
   were copied) fails on a stop with no name, a press that changed nothing on
   screen or landed off screen, a window that opens with its bare input site
   focused, a trap, "Ctrl+", "Trace Commons" or "Near.ai" in a name, an
-  unnamed focusable element, a measured ratio under 4.5:1, and every
+  unnamed focusable element, text measured under 4.5:1 (a control label with
+  no text element under 3:1, since it may be a glyph), and every
   `EXPECT FAIL`.
 
 ```bash

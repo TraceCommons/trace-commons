@@ -34,7 +34,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $OutDir "$Tag.drive.log"
-function Log([string] $s) { Add-Content -Path $log -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date).ToString('HH:mm:ss.fff'), $s) }
+# The runner reads this log while the driver writes it: retry a busy file.
+function Log([string] $s) {
+    $line = "[{0}] {1}`r`n" -f (Get-Date).ToString('HH:mm:ss.fff'), $s
+    for ($i = 0; $i -lt 40; $i++) {
+        try { [IO.File]::AppendAllText($log, $line, [Text.Encoding]::UTF8); return } catch { Start-Sleep -Milliseconds 50 }
+    }
+}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName WindowsBase

@@ -1,15 +1,17 @@
-# The fixes' own checks, each an EXPECT the report fails on.
+# The fixes' own checks, each an EXPECT the report fails on, plus the
+# surfaces only a step reaches (a dialog, the tree's rows, the map).
 # Insights: the tabs are segments, each a stop (the walk), and a press
 # shows its page.
 tab TabInsights
 audit main insights 90
 click main Breakdown
 audit main insights-breakdown 60
-# History: Escape with the Withdraw dialog open closes only the dialog;
-# a second Escape goes back to the tree.
+# History: Escape with the Withdraw dialog open closes only the dialog; the
+# next Escape goes back to the tree, as the Mac's History does.
 tab TabTraces
 clickaid main TracesHistoryButton
 expect main lacks TracesHistoryButton
+click main api
 click main Withdraw
 state main withdraw-dialog
 snap main withdraw-dialog
@@ -18,14 +20,25 @@ state main after-esc-dialog
 expect main lacks TracesHistoryButton
 key main 1B
 expect main has TracesHistoryButton
-state main history-after-esc
-# The preview: Escape closes it.
-click main Look inside
-clicklast main Look inside
+# The tree: one stop; the arrows move inside it; Return on a trace opens
+# the preview, whose Escape closes it.
+focusname main Tools, folders and traces
+key main 28
+state main tree-down
+key main 27
+state main tree-right
+key main 28
+state main tree-down-again
+key main 0D
 newwin preview
 audit preview preview 60
+scroll preview preview
 key preview 1B
 expect preview hidden
+# The map, shown from its toolbar toggle.
+clickaid main MapToggle
+audit main map 120
+clickaid main MapToggle
 # The flyout and About open on a named control (the walks' start lines).
 flyout
 audit flyout flyout 20
@@ -36,8 +49,3 @@ newwin settings
 invoke settings About Near AI Gateway
 newwin about
 audit about about 20
-# The map: a window wide enough for it.
-size main 1250 740
-tab TabTraces
-audit main traces-wide 120
-snap main traces-wide
