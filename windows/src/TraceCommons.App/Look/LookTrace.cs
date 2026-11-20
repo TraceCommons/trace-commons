@@ -15,6 +15,9 @@ internal static class LookTrace
 {
     private static readonly string? Path = Resolve();
 
+    /// <summary>Whether lines go to a file (TRACE_COMMONS_LOOK_LOG is set).</summary>
+    public static bool Enabled => !string.IsNullOrEmpty(Path);
+
     public static void Write(string line)
     {
         Debug.WriteLine("monitor: " + line);

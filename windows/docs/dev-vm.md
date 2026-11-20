@@ -309,6 +309,12 @@ Debug sample has no NEAR AI sign-in, no approvals and no
 mission catalogue, so the undo card, Missions and the Private AI states
 after sign-in are not reached.
 
+## CPU and drawing profile
+
+`windows/scripts/perf/` measures the app's CPU while it animates, with the
+box made slower through a job object (fewer cores, a CPU cap). See
+[perf-profile.md](perf-profile.md).
+
 ## Azure: a Windows Server 2025 box
 
 `provision-azure-vm.sh` builds a second test box, on Azure, for the same work.

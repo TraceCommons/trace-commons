@@ -1212,8 +1212,16 @@ internal sealed class TracesTreeView : UserControl
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
+
     private void OnFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_framePace.Skips(XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         double now = _clock.Elapsed.TotalSeconds;
         bool moving = false;
         if (_searchAt >= 0)

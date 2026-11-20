@@ -398,6 +398,9 @@ public sealed class GlassFrameGate
     /// <summary>The caller's own pause (GlassAnimationTimeline's <c>paused</c>).</summary>
     public bool Paused { get; set; }
 
+    /// <summary>The shortest interval its window allows now (<see cref="FocusFrameRule"/>): 0 while focused.</summary>
+    public double Floor { get; set; }
+
     /// <summary>Whether the clock should be subscribed at all.</summary>
     public bool Running => AnimationsEnabled && Loaded && WindowVisible && !Paused;
 
@@ -413,7 +416,7 @@ public sealed class GlassFrameGate
             return false;
         }
 
-        if (_lastDrawn is double last && now - last < _interval - 1.0 / 240)
+        if (_lastDrawn is double last && now - last < Math.Max(_interval, Floor) - 1.0 / 240)
         {
             return false;
         }

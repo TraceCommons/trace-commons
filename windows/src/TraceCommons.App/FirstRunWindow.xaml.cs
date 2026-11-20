@@ -26,6 +26,8 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text;
 using Windows.UI.ViewManagement;
 
+using TraceCommons.App.Look;
+
 namespace TraceCommons.App;
 
 /// <summary>
@@ -481,8 +483,16 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         _budget?.Pause();
     }
 
+    private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
+
     private void OnFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_framePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         double now = Now;
         if (_reduceMotion || !_gate.MayTick)
         {
@@ -534,6 +544,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        long begun = LookFrames.Begin();
         double now = Now;
         Budget(sender, now);
         _painter.Draw(args.DrawingSession, sender, _model, _reduceMotion ? now + 1e6 : now, sender.ActualWidth, sender.ActualHeight,
@@ -541,6 +552,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             privateAIPill: _privateCopy?.StatInferenceAccess is { Length: > 0 } pill ? pill : null,
             usesCaptions: _copy is null ? null : new[] { Copy.Uses.ThisComputer, UsesGateLabel(), Copy.Uses.TheCommons },
             backdrop: _budget.Level);
+        LookFrames.End("stage", begun);
     }
 
     /// <summary>

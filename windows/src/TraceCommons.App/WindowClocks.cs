@@ -43,6 +43,23 @@ internal static class WindowClocks
     }
 
     /// <summary>
+    /// Records whether <paramref name="window"/> is the active one, from its
+    /// Activated events, so its clocks follow <see cref="FocusFrameRule"/>:
+    /// full rate while focused, at most 15 frames a second while it is
+    /// visible and another window is active.
+    /// </summary>
+    public static void FollowFocus(Window window)
+    {
+        window.Activated += (_, args) =>
+        {
+            if (window.Content?.XamlRoot is XamlRoot root)
+            {
+                Windows.SetFocused(root, args.WindowActivationState != WindowActivationState.Deactivated);
+            }
+        };
+    }
+
+    /// <summary>
     /// Follows a window other than the main one with its own
     /// <see cref="WindowClockGate"/>: minimised from its presenter, hidden
     /// from its visibility, and stopped for good when it closes.
@@ -75,6 +92,7 @@ internal static class WindowClocks
             }
         };
         window.VisibilityChanged += (_, args) => gate.SetHiddenToTray(!args.Visible);
+        FollowFocus(window);
         // Closed stays stopped: a clock whose Unloaded never comes cannot
         // tick in a window that is gone. The registry holds roots weakly.
         window.Closed += (_, _) => gate.SetClosed();

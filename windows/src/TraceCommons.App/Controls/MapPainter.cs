@@ -121,21 +121,41 @@ internal static class MapPainter
     {
         // Each face once, through its outline pushed out by half the seam
         // (StationSeam): the same pixels as a fill and a 0.6 stroke, in one
-        // fill (checklist O3).
-        foreach (DrawnFace face in LibraryStation.Frame(width, height, angle))
+        // fill (checklist O3). The frame's corners, order and colours and
+        // the outline's corners go into buffers kept from frame to frame
+        // (#2268): nothing here is allocated per face but the geometry.
+        StationFrame frame = _stationFrame ??= new StationFrame();
+        _stationOutlines ??= new Dictionary<int, (MapPoint[] Outset, Vector2[] Corners)>();
+        LibraryStation.FrameInto(frame, width, height, angle);
+        LibraryStation.IndexedMesh mesh = LibraryStation.Indexed;
+        for (int i = 0; i < frame.Count; i++)
         {
-            IReadOnlyList<MapPoint> outline = StationSeam.Outset(face.Points, StationSeam.Width / 2);
-            var corners = new Vector2[outline.Count];
-            for (int i = 0; i < corners.Length; i++)
+            int f = frame.Order[i], first = mesh.Starts[f], n = mesh.Starts[f + 1] - first;
+            if (!_stationOutlines.TryGetValue(n, out (MapPoint[] Outset, Vector2[] Corners) outline))
             {
-                corners[i] = new Vector2(origin.X + (float)outline[i].X, origin.Y + (float)outline[i].Y);
+                outline = (new MapPoint[n], new Vector2[n]);
+                _stationOutlines[n] = outline;
             }
 
-            using CanvasGeometry polygon = CanvasGeometry.CreatePolygon(device, corners);
-            Color colour = Color.FromArgb(255, (byte)Math.Round(face.R * 255), (byte)Math.Round(face.G * 255), (byte)Math.Round(face.B * 255));
+            StationSeam.Outset(frame.Projected, mesh.Corners, first, n, StationSeam.Width / 2, outline.Outset);
+            for (int c = 0; c < n; c++)
+            {
+                outline.Corners[c] = new Vector2(origin.X + (float)outline.Outset[c].X, origin.Y + (float)outline.Outset[c].Y);
+            }
+
+            using CanvasGeometry polygon = CanvasGeometry.CreatePolygon(device, outline.Corners);
+            Color colour = Color.FromArgb(255, (byte)Math.Round(frame.R[f] * 255), (byte)Math.Round(frame.G[f] * 255), (byte)Math.Round(frame.B[f] * 255));
             ds.FillGeometry(polygon, colour);
         }
     }
+
+    /// <summary>The station's frame buffers, kept per drawing thread.</summary>
+    [ThreadStatic]
+    private static StationFrame? _stationFrame;
+
+    /// <summary>A face's outline buffers by corner count, kept per drawing thread.</summary>
+    [ThreadStatic]
+    private static Dictionary<int, (MapPoint[] Outset, Vector2[] Corners)>? _stationOutlines;
 
     /// <summary>
     /// The orb of radius <paramref name="r"/> at <paramref name="c"/>, its

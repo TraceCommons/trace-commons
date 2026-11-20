@@ -16,6 +16,7 @@ using Windows.Foundation;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
 using TraceCommons.App.Look;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -200,8 +201,16 @@ internal sealed class TracesGraphFooter : UserControl
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _renderingPace = new(WindowClocks.Windows);
+
     private void OnRendering(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_renderingPace.Skips(XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         if (_change is null || _changeClock.Elapsed.TotalSeconds >= _change.Duration)
         {
             _leaving = null;
