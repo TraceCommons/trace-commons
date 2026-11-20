@@ -131,6 +131,14 @@ public static class MapMotion
         return ClockInterval(i) is { } moving && moving <= LibraryStation.FrameInterval ? null : LibraryStation.FrameInterval;
     }
 
+    /// <summary>
+    /// Whether the library's own layer is shown, and drawn again as it turns:
+    /// only with a library to draw that the moving layer does not have (a run
+    /// or an open pile gives it to the moving layer). A view with no library
+    /// keeps no layer for it.
+    /// </summary>
+    public static bool LibraryLayerShown(bool hasLibrary, bool onMovingLayer) => hasLibrary && !onMovingLayer;
+
     /// <summary>How many frames a turn of <paramref name="turn"/> seconds has at the library's 15 a second.</summary>
     public static int LibraryFrames(double turn) => (int)Math.Round(turn / LibraryStation.FrameInterval);
 

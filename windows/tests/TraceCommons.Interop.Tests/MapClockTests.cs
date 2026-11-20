@@ -80,6 +80,22 @@ public class MapClockTests
         Assert.Null(MapMotion.LibraryInterval(turning with { AnimationsEnabled = false }));
     }
 
+    /// <summary>
+    /// The library's own layer is shown, and drawn again as the station
+    /// turns, only while there is a library to draw and the moving layer
+    /// does not have it; otherwise it is collapsed and left alone (a view
+    /// with no library, such as Private AI, must not keep a pane-sized
+    /// layer).
+    /// </summary>
+    [Fact]
+    public void TheLibraryLayerIsShownOnlyWithALibraryTheMovingLayerDoesNotHave()
+    {
+        Assert.True(MapMotion.LibraryLayerShown(hasLibrary: true, onMovingLayer: false));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: true, onMovingLayer: true));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: false, onMovingLayer: false));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: false, onMovingLayer: true));
+    }
+
     /// <summary>The station's frame of the turn: 15 a second, 390 a turn, the same a turn later.</summary>
     [Fact]
     public void TheStationsFrameIsFifteenASecondAroundTheTurn()

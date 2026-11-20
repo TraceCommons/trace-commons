@@ -967,7 +967,7 @@ public sealed partial class TracesMapView : UserControl
     /// </summary>
     private void TurnLibrary()
     {
-        if (_libraryOnMoving != false)
+        if (_libraryShown != true)
         {
             return;
         }
@@ -1039,22 +1039,22 @@ public sealed partial class TracesMapView : UserControl
         }
     }
 
-    /// <summary>The library layer's box (<see cref="LibraryBox"/>) and whether the library is on the moving layer, as last placed.</summary>
+    /// <summary>The library layer's box (<see cref="LibraryBox"/>) and whether the layer is shown, as last placed.</summary>
     private LayoutRect? _libraryBox;
-    private bool? _libraryOnMoving;
+    private bool? _libraryShown;
 
     /// <summary>
     /// Sizes the library's layer to the library's frame and glow, and hides
-    /// it while the library is drawn on the moving layer; the layer that
-    /// takes the library over is drawn again at once.
+    /// it while there is no library or the moving layer draws it; the layer
+    /// that takes the library over is drawn again at once.
     /// </summary>
     private void PlaceLibraryCanvas(double now)
     {
-        bool onMoving = LibraryOnMovingLayer(now);
-        if (onMoving != _libraryOnMoving)
+        bool shown = MapMotion.LibraryLayerShown(HasLibrary, LibraryOnMovingLayer(now));
+        if (shown != _libraryShown)
         {
-            _libraryOnMoving = onMoving;
-            _libraryCanvas.Visibility = onMoving ? Visibility.Collapsed : Visibility.Visible;
+            _libraryShown = shown;
+            _libraryCanvas.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
             _libraryCanvas.Invalidate();
             _canvas.Invalidate();
         }
@@ -1072,6 +1072,9 @@ public sealed partial class TracesMapView : UserControl
     /// takes the whole pane, for a run or a pile on it, so the run and the
     /// pile still draw over the library. Otherwise it has its own layer.
     /// </summary>
+    private bool HasLibrary =>
+        _scene.DrawsMap && _scene.Stack is not null && _scene.Nodes.Any(n => n.Id == "library");
+
     private bool LibraryOnMovingLayer(double now) =>
         (Motion && WindowClocks.Running && _player.Run is not null) || PileMoves(now);
 
