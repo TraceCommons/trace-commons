@@ -504,10 +504,24 @@ public sealed class TrayIcon : IDisposable
 
         // The display scale changed: Windows broadcasts these to every
         // top-level window, this hidden one included (it gets no
-        // WM_DPICHANGED). Drawn again only when the size moved.
-        if ((message == WM_DISPLAYCHANGE || message == WM_SETTINGCHANGE) && _added && !_disposed && IconSize() != _drawnSize)
+        // WM_DPICHANGED). Drawn again a moment later, once the taskbar has
+        // laid itself out at the new scale: an icon handed over at once was
+        // copied at the old size and stretched (test box, 2026-11-20). Only
+        // when the size moved.
+        if ((message == WM_DISPLAYCHANGE || message == WM_SETTINGCHANGE) && _added && !_disposed)
         {
-            Redraw(withTip: false);
+            SetTimer(_hwnd, ScaleTimerId, ScaleSettleMilliseconds, IntPtr.Zero);
+        }
+
+        if (message == WM_TIMER && wParam == ScaleTimerId)
+        {
+            KillTimer(_hwnd, ScaleTimerId);
+            if (_added && !_disposed && IconSize() != _drawnSize)
+            {
+                Redraw(withTip: false);
+            }
+
+            return IntPtr.Zero;
         }
 
         if (message == CallbackMessage)
@@ -916,6 +930,9 @@ public sealed class TrayIcon : IDisposable
     private const uint WM_APP = 0x8000;
     private const uint WM_CONTEXTMENU = 0x007B;
     private const uint WM_DISPLAYCHANGE = 0x007E;
+    private const uint WM_TIMER = 0x0113;
+    private static readonly IntPtr ScaleTimerId = new(0x7463);
+    private const uint ScaleSettleMilliseconds = 1000;
     private const uint WM_SETTINGCHANGE = 0x001A;
     private const uint MONITOR_DEFAULTTOPRIMARY = 1;
     private const int MDT_EFFECTIVE_DPI = 0;
@@ -1038,6 +1055,13 @@ public sealed class TrayIcon : IDisposable
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "Shell_NotifyIconW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Shell_NotifyIcon(uint message, ref NOTIFYICONDATA data);
+
+    [DllImport("user32.dll")]
+    private static extern UIntPtr SetTimer(IntPtr hwnd, IntPtr id, uint elapse, IntPtr proc);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool KillTimer(IntPtr hwnd, IntPtr id);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
     private static extern IntPtr FindWindow(string className, string? windowName);
