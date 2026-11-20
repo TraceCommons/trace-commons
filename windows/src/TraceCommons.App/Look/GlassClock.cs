@@ -22,6 +22,7 @@ internal sealed class GlassClock
     private readonly FrameworkElement _owner;
     private readonly GlassClockCore<XamlRoot> _core;
     private readonly AncestorVisibility _shown;
+    private readonly HeldSubscription _motion;
 
     public GlassClock(FrameworkElement owner, double interval, Action<double> draw)
     {
@@ -42,9 +43,10 @@ internal sealed class GlassClock
             draw,
             () => Now);
         _shown = new AncestorVisibility(owner, shown => _core.Shown = shown);
+        _motion = new HeldSubscription(() => GlassMotionSettings.Changed += Update, () => GlassMotionSettings.Changed -= Update);
         owner.Loaded += (_, _) =>
         {
-            GlassMotionSettings.Changed += Update;
+            _motion.Hold();
             _core.Window = owner.XamlRoot;
             _core.AnimationsEnabled = GlassMotionSettings.AnimationsEnabled;
             _shown.Attach();
@@ -52,7 +54,7 @@ internal sealed class GlassClock
         };
         owner.Unloaded += (_, _) =>
         {
-            GlassMotionSettings.Changed -= Update;
+            _motion.Release();
             _shown.Detach();
             _core.Loaded = false;
         };

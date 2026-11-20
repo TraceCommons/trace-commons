@@ -1402,3 +1402,22 @@ fn the_status_copy_carries_the_setup_prompt_words() {
         );
     }
 }
+
+/// The setup sheet's intro and steps; the shell falls back to
+/// `instructions` without them.
+#[test]
+fn the_status_copy_carries_the_setup_steps() {
+    let copy = copy();
+    for key in [
+        "sheet_intro",
+        "sheet_step_models",
+        "sheet_step_copy",
+        "sheet_step_environment",
+        "sheet_step_session",
+    ] {
+        assert!(
+            copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),
+            "{key}"
+        );
+    }
+}
