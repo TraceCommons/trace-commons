@@ -55,6 +55,7 @@ pub mod preview;
 pub mod private_inference;
 pub(crate) mod projects_bulk;
 pub mod queue;
+mod redraw_counts;
 pub mod roots;
 pub(crate) mod sent_training;
 pub mod service_dialog;

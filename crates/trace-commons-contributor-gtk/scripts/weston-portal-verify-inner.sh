@@ -266,6 +266,7 @@ else
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
     ui::monitor::traces_list::mounted_tests::mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection \
     ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
+    ui::monitor::traces_list::mounted_tests::mounted_a_switch_press_builds_only_the_changed_row \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \

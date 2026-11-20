@@ -377,7 +377,7 @@ pub struct SettlementEstimate {
 /// `Default` is consistent with how it deserializes rather than an extra
 /// promise: every field but `entry_id` already carries `#[serde(default)]`,
 /// so an all-defaults value is exactly what an empty object decodes to.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct QueueEntry {
     pub entry_id: String,
     #[serde(default)]

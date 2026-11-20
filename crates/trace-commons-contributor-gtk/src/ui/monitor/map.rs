@@ -1423,6 +1423,7 @@ impl MapCanvas {
     }
 
     fn relayout(&self) {
+        crate::ui::redraw_counts::laid_out();
         self.imp().layout_scene();
         self.sync_children();
         self.update_clock();
