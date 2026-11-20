@@ -41,32 +41,6 @@
 
 
         <Grid.Resources>
-            <!--
-                The outer list is one item per project now, not one per
-                session, see MainWindow.xaml's queue ListView, which binds
-                Groups rather than Pending. This container gives up its own
-                padding and selection chrome and contributes only the 24px
-                gap between one project's block and the next; the 14px gap
-                between cards inside a project is on each row's own Border
-                margin, in the inner ItemsRepeater's DataTemplate, because
-                ItemsRepeater supplies no ItemContainerStyle (it has no
-                container at all, only whatever the DataTemplate's own root
-                element is) to carry it.
-            -->
-            <!--
-                A folder's row is its own Button, and nothing is selected
-                here, so the container is not a stop of its own: it was a
-                second stop named like the row (box tab walk, 2026-11-19).
-            -->
-            <Style x:Key="TcQueueGroupContainerStyle" TargetType="ListViewItem" BasedOn="{StaticResource DefaultListViewItemStyle}">
-                <Setter Property="IsTabStop" Value="False" />
-                <Setter Property="Padding" Value="0" />
-                <Setter Property="Margin" Value="0,0,0,24" />
-                <Setter Property="MinHeight" Value="0" />
-                <Setter Property="Background" Value="Transparent" />
-                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            </Style>
-
             <!-- The toolbar's toggles and the gear: a quiet button, the
                  checked state a scrim, as the Mac's capsule draws it. -->
             <Style x:Key="TcToolbarToggleStyle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
@@ -205,7 +179,7 @@
                 <ColumnDefinition x:Name="InspectorColumn" Width="0" />
             </Grid.ColumnDefinitions>
 
-            <Grid x:Name="MainPane" Grid.Column="0" RowDefinitions="Auto,Auto,*">
+            <Grid x:Name="MainPane" Grid.Column="0" RowDefinitions="Auto,Auto,*,Auto">
 
                 <!--
                     The tabs (GlassRuleTabs, MonitorWindowView.swift:972-995),
@@ -995,8 +969,10 @@
                                        Margin="0,0,28,0" />
                         </Border>
                             <!-- The front card's X (NoticeClose): what it does
-                                 and its name follow the card's rule. -->
+                                 and its name follow the card's rule. Above
+                                 the front card, which is raised to 1. -->
                             <Button x:Name="NoticeClose"
+                                    Canvas.ZIndex="2"
                                     HorizontalAlignment="Right"
                                     VerticalAlignment="Top"
                                     Margin="0,6,6,0"
@@ -1076,7 +1052,8 @@
 
                 <!-- Header, queue, recovery bar, decision notice, caveat, week
                      band, progress. -->
-                <Grid Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
+                <Grid x:Name="TracesContent"
+                      Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
                       RowDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto,Auto">
 
                     <!--
@@ -1202,210 +1179,11 @@
                     </Grid>
 
 
-                    <!--
-                        The queue, folders first.
-
-                        Two levels, and the grouping RULE for both (which entries
-                        share a folder, folder order, whether "Submit all" appears)
-                        is QueueGrouping.ByProject's, in TraceCommons.Interop,
-                        covered by QueueGroupingTests there. WHICH level is on
-                        screen is QueueNavigation.Resolve's, in the same assembly
-                        and covered by QueueNavigationTests. Neither decision is
-                        made in this markup; it only renders them.
-
-                        Why folders at all: at 149 waiting sessions the queue stops
-                        being a list and becomes a haystack, and a flat list of
-                        cards is the wrong shape for it. The folder name is the
-                        row's largest text here, where it used to be the SMALLEST
-                        text on its line beside an accented "Submit all". The line
-                        read as a button with a caption, and it should read as a
-                        place with actions.
-
-                        The preview scheduler's visibility signal reads the session
-                        ItemsRepeater in the detail pane below, through its own
-                        ElementPrepared and ElementClearing. See
-                        OnSessionElementPrepared and RecomputeVisiblePreviews in
-                        MainWindow.xaml.cs: those are ItemsRepeater's own per-row
-                        realization signals, which is the only thing that reports
-                        what is genuinely windowed into view.
-                    -->
-                    <ListView x:Name="QueueListView"
-                              Grid.Row="2"
-                              ItemsSource="{x:Bind ViewModel.Groups, Mode=OneWay}"
-                              ItemContainerStyle="{StaticResource TcQueueGroupContainerStyle}"
-                              SelectionMode="None"
-                              TabNavigation="Local"
-                              Padding="22,18,22,22"
-                              ScrollViewer.HorizontalScrollMode="Disabled">
-                        <ListView.ItemTemplate>
-                            <DataTemplate x:DataType="vm:QueueGroupViewModel">
-                                <!--
-                                    One folder. The row itself is a Button with its
-                                    chrome removed rather than a Border with a
-                                    tapped handler, the same choice the navigation
-                                    rail makes and for the same reason: a Button
-                                    carries keyboard focus, the invoke pattern and a
-                                    narrator announcement for free.
-
-                                    The three actions sit UNDER the name and path
-                                    rather than beside them, so the row reads as a
-                                    place first. "Ignore project" stays to the RIGHT
-                                    of "Submit all", matching macOS and GTK. Which
-                                    side each is on is muscle memory for two
-                                    adjacent controls acting on one set of traces in
-                                    opposite directions, so it is not a per-shell
-                                    choice.
-
-                                    Every label and tooltip is bound, not typed
-                                    here: they live in ProjectIgnoreCopy and
-                                    VerdictCopy, which is where three shells are
-                                    kept from drifting.
-                                -->
-                                <StackPanel Spacing="10" Margin="0,0,0,18">
-                                    <Button HorizontalAlignment="Stretch"
-                                            HorizontalContentAlignment="Stretch"
-                                            Background="Transparent"
-                                            BorderThickness="0"
-                                            Padding="0"
-                                            Tag="{x:Bind}"
-                                            AutomationProperties.Name="{x:Bind ProjectLabel}"
-                                            Click="OnOpenFolder">
-                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto"
-                                              ColumnSpacing="12">
-                                            <StackPanel Grid.Column="0" Spacing="2">
-                                                <TextBlock Text="{x:Bind ProjectLabel}"
-                                                           Style="{StaticResource TcTitleCardTextStyle}"
-                                                           TextTrimming="CharacterEllipsis" />
-                                                <!-- The path is the reason this
-                                                     layout exists: a disambiguated
-                                                     label keeps two projects
-                                                     distinct and can never make
-                                                     them identifiable. Absent
-                                                     against a daemon that does not
-                                                     send one, rather than a blank
-                                                     line. -->
-                                                <TextBlock Text="{x:Bind ProjectPath}"
-                                                           Visibility="{x:Bind HasProjectPath}"
-                                                           Style="{StaticResource TcCaptionTextStyle}"
-                                                           Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                           TextTrimming="CharacterEllipsis" />
-                                            </StackPanel>
-                                            <TextBlock Grid.Column="1"
-                                                       Text="{x:Bind CountText}"
-                                                       Style="{StaticResource TcCaptionTextStyle}"
-                                                       Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                       VerticalAlignment="Center" />
-                                            <TextBlock Grid.Column="2"
-                                                       Text="{x:Bind SizeText}"
-                                                       Style="{StaticResource TcMonoFigureTextStyle}"
-                                                       VerticalAlignment="Center" />
-                                            <FontIcon Grid.Column="3"
-                                                      Glyph="&#xE76C;"
-                                                      FontSize="12"
-                                                      Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                                      VerticalAlignment="Center" />
-                                        </Grid>
-                                    </Button>
-
-                                    <!--
-                                        Emphasis goes to opening the folder, not
-                                        to sending it. One-click submit added
-                                        AVAILABILITY; accent styling is a
-                                        RECOMMENDATION, and the recommendation is
-                                        to look first. The row above opens the
-                                        folder too; this button is the same act
-                                        with the accent on it.
-                                    -->
-                                    <!--
-                                        How many of this folder's sessions a
-                                        "Submit all" would leave behind, BEFORE
-                                        the press. The daemon publishes the count
-                                        on the project row for exactly this: the
-                                        number used to be discoverable only from
-                                        approve's excluded_ineligible, which is
-                                        after the fact.
-
-                                        Absent entirely for an invited
-                                        contributor, whose group offers everything
-                                        it holds. It says how many and NOT why:
-                                        the reason a particular session cannot be
-                                        sent is that row's own sentence, one level
-                                        in, and a summary here would stand for up
-                                        to thirteen different reasons and say
-                                        nothing true about any of them.
-                                    -->
-                                    <TextBlock Text="{x:Bind WithheldText}"
-                                               Visibility="{x:Bind HasWithheldText}"
-                                               Style="{StaticResource TcCaptionSmallTextStyle}"
-                                               Foreground="{ThemeResource TcInkSecondaryBrush}"
-                                               TextWrapping="Wrap" />
-
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button Style="{StaticResource TcPrimaryButtonStyle}"
-                                                Content="Look inside"
-                                                Tag="{x:Bind}"
-                                                Click="OnOpenFolder" />
-                                        <!--
-                                            GONE, not greyed, when nothing in this
-                                            folder can be sent. The withheld line
-                                            above already SAYS SO IN WORDS, and an
-                                            inert button beside that sentence is an
-                                            inert control with its own explanation
-                                            standing next to it proving it
-                                            redundant.
-
-                                            ShowSubmitAll is the shared branch
-                                            table's answer, reached with an absent
-                                            count spelled as a NEGATIVE. See
-                                            ProjectQueueGroup.
-                                        -->
-                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                Content="{x:Bind SubmitAllText}"
-                                                Visibility="{x:Bind ShowSubmitAll}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="Sends every trace waiting in this project, in one call. Scrubbing still runs, and Undo follows for a few seconds."
-                                                Click="OnSubmitAll" />
-                                        <!--
-                                            The opt-in path for answering the
-                                            verdict question once for the whole
-                                            folder. "Submit all" beside it is
-                                            untouched and still sends no outcome:
-                                            this is a separate control, never a
-                                            confirmation step in front of it, so the
-                                            common one-click path does not get
-                                            slower for a question nobody has to
-                                            answer.
-                                        -->
-                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                Content="{x:Bind SubmitAllAsText}"
-                                                Visibility="{x:Bind ShowSubmitAll}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="{x:Bind SubmitAllAsTooltip}">
-                                            <Button.Flyout>
-                                                <MenuFlyout>
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictWorkedLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllWorked" />
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictPartlyLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllPartly" />
-                                                    <MenuFlyoutItem Text="{x:Bind VerdictFailedLabel}"
-                                                                    Tag="{x:Bind}"
-                                                                    Click="OnSubmitAllFailed" />
-                                                </MenuFlyout>
-                                            </Button.Flyout>
-                                        </Button>
-                                        <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                                Content="{x:Bind IgnoreProjectText}"
-                                                Visibility="{x:Bind ShowIgnoreProject}"
-                                                Tag="{x:Bind}"
-                                                ToolTipService.ToolTip="{x:Bind IgnoreProjectTooltip}"
-                                                Click="OnIgnoreProject" />
-                                    </StackPanel>
-                                </StackPanel>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                    <!-- The Traces tree (W3, the Mac's TracesTreeView): built in
+                         code by MainWindow.Tree.cs over the map's read, acting
+                         through this window's Submit all, Ignore, Submit and
+                         Dismiss paths. -->
+                    <Border x:Name="TracesTreeHost" Grid.Row="2" />
 
                     <!--
                         The sessions a witness certificate is held for, gathered
@@ -1424,7 +1202,7 @@
                         the choice between the two readings is behind the ABI: no
                         shell decides it. Nothing here is typed out.
                     -->
-                    <StackPanel Grid.Row="1"
+                    <StackPanel x:Name="CertificateSection" Grid.Row="1"
                                 Spacing="6"
                                 Margin="22,0,22,12">
                         <TextBlock Text="{x:Bind ViewModel.CertificateHeldTitle, Mode=OneWay}"
@@ -1435,7 +1213,7 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    Foreground="{ThemeResource TcInkSecondaryBrush}"
                                    TextWrapping="Wrap" />
-                        <ItemsControl ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.CertificateHeld, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:QueueEntryViewModel">
                                     <StackPanel Spacing="2" Margin="0,0,0,6">
@@ -1460,8 +1238,10 @@
                          thing, and this app's own wording ("Sessions appear here
                          after they settle") was the only one of the three that
                          did not also say nothing is sent unless you say so. -->
-                    <StackPanel Grid.Row="2"
-                                Visibility="{x:Bind ViewModel.IsEmpty, Mode=OneWay}"
+                    <!-- Shown by MainWindow.Tree.cs when the tree's read has no folder. -->
+                    <StackPanel x:Name="QueueEmptyState"
+                                Grid.Row="2"
+                                Visibility="Collapsed"
                                 VerticalAlignment="Center"
                                 HorizontalAlignment="Center"
                                 Spacing="8"
@@ -1498,7 +1278,7 @@
                         and on a long one alike.
                     -->
 
-                    <TextBlock Grid.Row="4"
+                    <TextBlock x:Name="ScrubCaveatLine" Grid.Row="4"
                                Text="Scrubbing is pattern-based. It misses things it hasn't seen before."
                                Style="{StaticResource TcCaptionTextStyle}"
                                TextWrapping="Wrap"
@@ -1527,7 +1307,7 @@
                         glyphs the sibling screen does not have would read as two
                         designs rather than one.
                     -->
-                    <StackPanel Grid.Row="5" Padding="22,4,22,16" Spacing="8">
+                    <StackPanel x:Name="WeekBandSection" Grid.Row="5" Padding="22,4,22,16" Spacing="8">
                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
                             <TextBlock Grid.Column="0"
                                        Text="{x:Bind ViewModel.ThisWeekLabel}"
@@ -1601,6 +1381,9 @@
 
 
                 </Grid>
+
+                <!-- The Traces graph, full bleed under the tab (W3; MainWindow.Graph.cs). -->
+                <Grid x:Name="GraphFooterHost" Grid.Row="3" Height="0" Visibility="Collapsed" />
             </Grid>
 
             <!-- The map's place (W3 draws it). -->

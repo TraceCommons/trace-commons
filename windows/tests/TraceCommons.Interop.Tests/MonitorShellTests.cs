@@ -233,10 +233,40 @@ public class MonitorShellTests
     public void OffersAskForTheInspectorOnlyWhereItDrawsThem()
     {
         // TracesInspectorHost.swift:193-199, counted only where
-        // promptsInInspector (MonitorWindowView.swift:652-654).
+        // promptsInInspector and the inspector may open
+        // (MonitorWindowView.swift:652-654, :668-675, :692-697): Home's
+        // History page, never Home's own page or Traces.
+        var history = new MonitorLocation(MonitorTab.Home, HomePage.History, TracesPage.Tree);
+        var home = new MonitorLocation(MonitorTab.Home, HomePage.Overview, TracesPage.Tree);
+        var traces = new MonitorLocation(MonitorTab.Traces, HomePage.Overview, TracesPage.Tree);
         Assert.Equal(new[] { "offer:arming:p1", "offer:private-ai" },
-            InspectorDemand.OfferKeys(MonitorTab.Home, true, "p1").OrderBy(k => k, StringComparer.Ordinal));
-        Assert.Empty(InspectorDemand.OfferKeys(MonitorTab.Traces, true, "p1"));
+            InspectorDemand.OfferKeys(history, true, "p1").OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Empty(InspectorDemand.OfferKeys(home, true, "p1"));
+        Assert.Empty(InspectorDemand.OfferKeys(traces, true, "p1"));
+    }
+
+    [Fact]
+    public void AnOfferDoesNotReopenAClosedInspectorAsTheTabsChange()
+    {
+        // F10 of #2215: with an offer standing, Traces -> Home -> Traces
+        // re-opened an inspector the person had closed, because the offer
+        // counted as a new demand on Home's own page, where the inspector
+        // cannot open (MonitorWindowView.swift:692-697). The window's keys,
+        // as MainWindow.ApplyDemand asks for them.
+        var traces = new MonitorLocation(MonitorTab.Traces, HomePage.Overview, TracesPage.Tree);
+        var home = new MonitorLocation(MonitorTab.Home, HomePage.Overview, TracesPage.Tree);
+        var sources = new DemandSources();
+        var tracker = new InspectorDemandTracker();
+        Assert.False(tracker.Update(InspectorDemand.WindowKeys(sources, traces, privateAIOffer: true, armingOfferProject: null)));
+        // The person closes the inspector, then looks at Home and comes back.
+        Assert.False(tracker.Update(InspectorDemand.WindowKeys(sources, home, privateAIOffer: true, armingOfferProject: null)));
+        Assert.False(tracker.Update(InspectorDemand.WindowKeys(sources, traces, privateAIOffer: true, armingOfferProject: null)));
+        Assert.False(tracker.Update(InspectorDemand.WindowKeys(sources, home, privateAIOffer: true, armingOfferProject: null)));
+
+        // A selected trace is a demand, a new one each time (TracesInspectorHost.swift:182-185).
+        Assert.True(tracker.Update(InspectorDemand.WindowKeys(sources with { Review = "e1" }, traces, true, null)));
+        Assert.False(tracker.Update(InspectorDemand.WindowKeys(sources with { Review = "e1" }, traces, true, null)));
+        Assert.True(tracker.Update(InspectorDemand.WindowKeys(sources with { Review = "e2" }, traces, true, null)));
     }
 
     [Fact]

@@ -29,10 +29,19 @@ public sealed partial class InsightsView : UserControl, IDisposable
         InitializeComponent();
         _window = window;
         DataContext = ViewModel;
-        _segments = new[] { Segment0, Segment1, Segment2, Segment3, Segment4 };
-        _pages = new FrameworkElement[] { Page0, Page1, Page2, Page3, Page4 };
-        ShowPage(0);
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
+        _segments[InsightsViewModel.OverviewTab] = Segment0;
+        _segments[InsightsViewModel.PatternsTab] = Segment1;
+        _segments[InsightsViewModel.BenchmarksTab] = Segment2;
+        _segments[InsightsViewModel.SessionsTab] = Segment3;
+        _segments[InsightsViewModel.AnalyzeTab] = Segment4;
+        _pages[InsightsViewModel.OverviewTab] = Page0;
+        _pages[InsightsViewModel.PatternsTab] = Page1;
+        _pages[InsightsViewModel.BenchmarksTab] = Page2;
+        _pages[InsightsViewModel.SessionsTab] = Page3;
+        _pages[InsightsViewModel.AnalyzeTab] = Page4;
+        LayOutSegments();
+        ShowPage(InsightsViewModel.OverviewTab);
     }
     public async Task ActivateAsync()
     {
@@ -40,36 +49,100 @@ public sealed partial class InsightsView : UserControl, IDisposable
         _activated = true;
         await ViewModel.SelectTabAsync(_tab);
     }
+
+    /// <summary>Skills' "review settings" action: Settings opens (InsightsView.swift <c>openSkillsSettings</c>).</summary>
+    public event EventHandler? SkillsSettingsRequested;
+
+    private InsightsSkillsView? _skills;
+
+    /// <summary>
+    /// The daemon's <c>insights_skills</c> flag: Skills is added after
+    /// Benchmarks, the Mac's place for it, or removed. Removing it while it
+    /// is shown shows Overview.
+    /// </summary>
+    public void SetSkillsEnabled(bool enabled)
+    {
+        if (_closed) return;
+        if (enabled && _skills is null)
+        {
+            _skills = new InsightsSkillsView(ViewModel.Skills, () => SkillsSettingsRequested?.Invoke(this, EventArgs.Empty)) { Visibility = Visibility.Collapsed };
+            var segment = new MonitorTabButton { Style = (Style)TabBar.Resources["InsightsSegmentStyle"], Content = ViewModel.Skills.Text("skills_title") };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(segment, "insights-tab-skills");
+            segment.Click += OnSegment;
+            _ = ViewModel.SetSkillsEnabled(true);
+            TabBar.Children.Add(segment);
+            Pages.Children.Add(_skills);
+            _segments[InsightsViewModel.SkillsTab] = segment;
+            _pages[InsightsViewModel.SkillsTab] = _skills;
+            LayOutSegments();
+            ShowPage(_tab);
+        }
+        else if (!enabled && _skills is not null)
+        {
+            bool shown = _tab == InsightsViewModel.SkillsTab;
+            InsightsSkillsView view = _skills;
+            _skills = null;
+            view.Close();
+            _ = ViewModel.SetSkillsEnabled(false);
+            TabBar.Children.Remove(_segments[InsightsViewModel.SkillsTab]);
+            Pages.Children.Remove(view);
+            _segments.Remove(InsightsViewModel.SkillsTab);
+            _pages.Remove(InsightsViewModel.SkillsTab);
+            LayOutSegments();
+            if (shown)
+            {
+                ShowPage(InsightsViewModel.OverviewTab);
+                if (_activated) _ = ViewModel.SelectTabAsync(_tab);
+            }
+        }
+    }
     // Set once the core's words are loaded. The first tab is shown while the
     // control is built, before then, and that read would present with no
     // words; ActivateAsync reads the tab on screen instead.
     private bool _activated;
-    private readonly ToggleButton[] _segments;
-    private readonly FrameworkElement[] _pages;
-    private int _tab;
+    private readonly System.Collections.Generic.Dictionary<int, ToggleButton> _segments = new();
+    private readonly System.Collections.Generic.Dictionary<int, FrameworkElement> _pages = new();
+    private int _tab = InsightsViewModel.OverviewTab;
     // A segment shows its page. Pressing the one already shown keeps it
     // checked: exactly one tab is always the selected one, as on the Mac
     // (Navigation.swift:101-104 sets the selection, never clears it).
     private async void OnSegment(object sender, RoutedEventArgs args)
     {
-        int tab = Array.IndexOf(_segments, sender);
+        int tab = _segments.FirstOrDefault(pair => ReferenceEquals(pair.Value, sender), new(-1, null!)).Key;
         if (tab < 0) return;
         bool changed = tab != _tab;
         ShowPage(tab);
         // The tabs read their figures when shown; Analyze reads nothing new.
         if (changed && !_closed && _activated) await ViewModel.SelectTabAsync(_tab);
     }
+    // The segments in the order on screen (ShownTabs), each an equal share
+    // of the track, as the Mac's fill it (Navigation.swift:115).
+    private void LayOutSegments()
+    {
+        var order = InsightsViewModel.ShownTabs(_skills is not null);
+        TabBar.ColumnDefinitions.Clear();
+        int column = 0;
+        foreach (int tab in order)
+        {
+            if (!_segments.TryGetValue(tab, out ToggleButton? segment)) continue;
+            TabBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            Grid.SetColumn(segment, column++);
+        }
+    }
     private void ShowPage(int tab)
     {
         _tab = tab;
-        for (int i = 0; i < _pages.Length; i++)
+        foreach ((int id, FrameworkElement page) in _pages)
         {
-            bool shown = i == tab;
-            _pages[i].Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
-            _segments[i].IsChecked = shown;
+            page.Visibility = id == tab ? Visibility.Visible : Visibility.Collapsed;
+        }
+        foreach ((int id, ToggleButton segment) in _segments)
+        {
+            bool shown = id == tab;
+            segment.IsChecked = shown;
             // The Mac's label weight: semibold selected, medium otherwise
             // (Navigation.swift:109).
-            _segments[i].FontWeight = shown ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Medium;
+            segment.FontWeight = shown ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Medium;
         }
     }
     // A week picker's own index follows the model; only a choice the model
