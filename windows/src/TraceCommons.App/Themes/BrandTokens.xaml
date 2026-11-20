@@ -43,6 +43,11 @@
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#FF6B6B" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#FFD3D3" />
             <SolidColorBrush x:Key="TcStatusOffBrush" Color="#A9A9B0" />
+            <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#E08A6A" />
+            <SolidColorBrush x:Key="TcToolCodexBrush" Color="#E6E6EC" />
+            <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#4FD39A" />
+            <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#EB1924" />
+            <SolidColorBrush x:Key="TcTileFolderBrush" Color="#2A2A2C" />
         </ResourceDictionary>
 
         <!-- Light. -->
@@ -71,6 +76,11 @@
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D0342C" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#771814" />
             <SolidColorBrush x:Key="TcStatusOffBrush" Color="#8A8A90" />
+            <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#C2603E" />
+            <SolidColorBrush x:Key="TcToolCodexBrush" Color="#3A3A3C" />
+            <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#1D9467" />
+            <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#C8141E" />
+            <SolidColorBrush x:Key="TcTileFolderBrush" Color="#E6E6EA" />
         </ResourceDictionary>
 
         <!-- High contrast: the system's colours, as in DesignSystem.xaml. -->
@@ -99,6 +109,11 @@
             <StaticResource x:Key="TcCoralBrandBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcCoralTextBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcStatusOffBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcToolClaudeBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcToolCodexBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcToolOpenCodeBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcToolRedTeamBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcTileFolderBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>
