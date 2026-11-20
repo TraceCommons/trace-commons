@@ -48,6 +48,12 @@ internal interface ITracesTreeHost
 
     void DismissTrace(ViewModels.QueueEntryViewModel entry);
 
+    /// <summary>The folders' Automatic writes: which are in flight, and each one's refusal.</summary>
+    FolderAutomatic AutomaticWrites { get; }
+
+    /// <summary>A folder row's Automatic switch moved (TracesViews.swift:685-691).</summary>
+    void SetFolderAutomatic(TracesTree.FolderNode folder, bool on);
+
     /// <summary>The person's folder order changed: keep it.</summary>
     void OrderChanged(IReadOnlyList<string> order, bool arranged);
 }
@@ -495,6 +501,11 @@ internal sealed class TracesTreeView : UserControl
             row.Children.Add(target);
         }
 
+        // Submit, then the Automatic switch, side by side (TracesViews.swift:1195-1222).
+        var accessory = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(accessory, 3);
+        row.Children.Add(accessory);
+
         // Submit: the shared table's offer, never for a folder that is not sent (TracesViews.swift:612-670).
         if (group is { ShowSubmitAll: true } && !off)
         {
@@ -520,8 +531,35 @@ internal sealed class TracesTreeView : UserControl
             }
 
             split.Flyout = verdicts;
-            Grid.SetColumn(split, 3);
-            row.Children.Add(split);
+            accessory.Children.Add(split);
+        }
+
+        // The Automatic switch (owner, 2026-10-30; TracesViews.swift:438-451,
+        // :639): on at Automatic, off at Ask, when the core offers the other
+        // and has the switch's name. Off while its write is in flight.
+        string automaticWord = _words["automatic_folder"];
+        if (automaticWord.Length > 0 && FolderAutomatic.Switch(folder) is bool automatic)
+        {
+            string label = automaticWord.Replace("{label}", folder.Label, StringComparison.Ordinal);
+            var toggle = new ToggleSwitch
+            {
+                IsOn = automatic,
+                OnContent = string.Empty,
+                OffContent = string.Empty,
+                MinWidth = 0,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsEnabled = !_host.AutomaticWrites.Writing.Contains(folder.Id),
+            };
+            AutomationProperties.SetName(toggle, label);
+            ToolTipService.SetToolTip(toggle, label);
+            toggle.Toggled += (_, _) =>
+            {
+                if (toggle.IsOn != automatic)
+                {
+                    _host.SetFolderAutomatic(folder, toggle.IsOn);
+                }
+            };
+            accessory.Children.Add(toggle);
         }
 
         // The row menu: Ignore (TracesViews.swift:627-633, :856-878).
@@ -545,6 +583,11 @@ internal sealed class TracesTreeView : UserControl
         if (folder.IsBucket && _words["unresolved_bucket_note"] is { Length: > 0 } note)
         {
             notes.Add(note);
+        }
+
+        if (_host.AutomaticWrites.Refusal(folder.Id) is { } refused)
+        {
+            notes.Add(refused);
         }
 
         if (!off && group is { HasWithheldText: true })

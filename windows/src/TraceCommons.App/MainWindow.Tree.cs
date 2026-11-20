@@ -11,6 +11,7 @@ using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Map;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App;
 
@@ -23,6 +24,45 @@ namespace TraceCommons.App;
 public sealed partial class MainWindow : ITracesTreeHost
 {
     private TracesTreeView? _tree;
+
+    private FolderAutomatic? _automatic;
+
+    /// <summary>The folder rows' Automatic writes, through the arming offer's call and refusal line.</summary>
+    FolderAutomatic ITracesTreeHost.AutomaticWrites => _automatic ??= NewFolderAutomatic();
+
+    private FolderAutomatic NewFolderAutomatic()
+    {
+        var writes = new FolderAutomatic(
+            (method, payload) => ViewModel.Host.CallAsync(method, payload),
+            async () =>
+            {
+                await ViewModel.RefreshAsync();
+                if (_map is not null)
+                {
+                    await _map.ReadAsync();
+                }
+            },
+            () => MonitorWords.ProjectModeFailed);
+        writes.Changed += () => _tree?.Refresh();
+        return writes;
+    }
+
+    /// <summary>
+    /// A folder row's Automatic switch: the write, or for the bucket of
+    /// traces with no project, nothing; the note under it already says why
+    /// (TracesViews.swift:685-691), and the switch is drawn back as it was.
+    /// </summary>
+    async void ITracesTreeHost.SetFolderAutomatic(TracesTree.FolderNode folder, bool on)
+    {
+        if (folder.IsBucket)
+        {
+            _tree?.Refresh();
+            return;
+        }
+
+        await ((ITracesTreeHost)this).AutomaticWrites.SetAsync(folder, on);
+        _tree?.Refresh();
+    }
 
     /// <summary>The person's folder order, kept beside the daemon's state as the map style is.</summary>
     private static string FolderOrderPath() =>
