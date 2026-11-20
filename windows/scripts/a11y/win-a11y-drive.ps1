@@ -8,7 +8,9 @@
 # one recorded sample set, then follows a plan file of steps. Every window is
 # found by its HWND and owning pid; nothing outside the app is captured.
 #
-# Plan steps (one per line, '#' comments):
+# Plan steps (one per line, '#' comments; also front, toggle, invoke,
+# clicklast, rail-open, size, expect, exists, focusname, selected, hc,
+# theme, scroll):
 #   tab <AutomationId>               click a main-window element by AutomationId
 #   click <win> <name>               click an element of window <win> by Name (first match)
 #   clickaid <win> <aid>             click by AutomationId in window <win>
@@ -342,15 +344,18 @@ try {
                 }
                 'expect' {
                     # expect <win> shown|hidden, or expect <win> has|lacks <AutomationId>
+                    # A window that never opened passes nothing: no handle fails.
+                    $h = if ($wins.ContainsKey($a[1])) { $wins[$a[1]] } else { [IntPtr]::Zero }
                     $ok = switch ($a[2]) {
-                        'shown' { [W]::IsWindowVisible($wins[$a[1]]) }
-                        'hidden' { -not [W]::IsWindowVisible($wins[$a[1]]) }
+                        'shown' { $h -ne [IntPtr]::Zero -and [W]::IsWindowVisible($h) }
+                        'hidden' { $h -ne [IntPtr]::Zero -and -not [W]::IsWindowVisible($h) }
                         'has' { $null -ne (Find $a[1] $UIA::AutomationIdProperty $a[3]) }
                         'lacks' { $null -eq (Find $a[1] $UIA::AutomationIdProperty $a[3]) }
                         default { $false }
                     }
                     Log ("  EXPECT {0}: {1}" -f $(if ($ok) { 'PASS' } else { 'FAIL' }), ($a[1..($a.Count - 1)] -join ' '))
                 }
+                'front' { [W]::Fg($wins[$a[1]]); Start-Sleep -Milliseconds 600 }
                 'exists' {
                     $el = Find $a[1] $UIA::AutomationIdProperty $a[2]
                     Log ("  exists {0}: {1}" -f $a[2], $(if ($el) { "yes offscreen=$($el.Current.IsOffscreen)" } else { 'no' }))

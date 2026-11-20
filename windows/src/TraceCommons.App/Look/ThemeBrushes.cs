@@ -26,8 +26,10 @@ namespace TraceCommons.App.Look;
 internal static class ThemeBrushes
 {
     private static readonly List<(WeakReference<DependencyObject> Target, DependencyProperty Property, string Key)> Bound = new();
+    private static readonly Dictionary<string, Brush> Cache = new();
     private static FrameworkElement? _root;
     private static string? _shown;
+    private static string? _cached;
 
     /// <summary>Raised on the UI thread after the theme or high contrast changed and every bound brush was set again.</summary>
     public static event Action? Changed;
@@ -53,7 +55,27 @@ internal static class ThemeBrushes
     /// <summary>The brush <paramref name="key"/> names in the theme in force now.</summary>
     public static Brush Get(string key)
     {
+        // Read once per theme: a paint or a binding asks often, and the walk
+        // goes through every merged dictionary.
         string theme = Key;
+        if (theme != _cached)
+        {
+            Cache.Clear();
+            _cached = theme;
+        }
+
+        if (Cache.TryGetValue(key, out Brush? known))
+        {
+            return known;
+        }
+
+        Brush found = Lookup(theme, key);
+        Cache[key] = found;
+        return found;
+    }
+
+    private static Brush Lookup(string theme, string key)
+    {
         foreach (ResourceDictionary dictionary in Application.Current.Resources.MergedDictionaries.SelectMany(Flatten))
         {
             if (dictionary.ThemeDictionaries.TryGetValue(theme, out object? themed)

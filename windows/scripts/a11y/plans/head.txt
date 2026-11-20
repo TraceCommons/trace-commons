@@ -37,6 +37,10 @@ clicklast main Look inside
 newwin preview
 audit preview preview 60
 scroll preview preview
+# Made short by hand: the footer scrolls in its share and the action row
+# stays on screen.
+size preview 776 520
+audit preview preview-short 30
 key preview 1B
 expect preview hidden
 # The map, shown from its toolbar toggle.

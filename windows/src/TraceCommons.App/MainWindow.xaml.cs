@@ -1487,7 +1487,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var sheet = new PreviewWindow(_host, entry, ViewModel.LiveEntry);
+        var sheet = new PreviewWindow(_host, entry, ViewModel.LiveEntry, AppWindow);
         sheet.Decided += OnSheetDecided;
 
         // The sheet's gate reads the LIVE entry, but the properties it feeds

@@ -255,13 +255,15 @@ public sealed partial class MainWindow
 
         // Return undoes the last approval while its card offers the undo:
         // the Mac's one Return binding (MonitorKeys.ReturnUndoes). A focused
-        // button, field or list keeps its own Return.
+        // button, split button, field, list or the Traces tree keeps its own
+        // Return (a SplitButton is a ContentControl, not a ButtonBase).
         var undo = new KeyboardAccelerator { Key = VirtualKey.Enter };
         undo.Invoked += async (_, args) =>
         {
             bool undoOffered = ViewModel.HasUndo && UndoCard.Visibility == Visibility.Visible;
             object? focused = WindowRoot.XamlRoot is XamlRoot root ? FocusManager.GetFocusedElement(root) : null;
-            bool focusTakesReturn = focused is ButtonBase or TextBox or PasswordBox or AutoSuggestBox or RichEditBox or Selector or SelectorItem or ToggleSwitch;
+            bool focusTakesReturn = focused is ButtonBase or SplitButton or TextBox or PasswordBox or AutoSuggestBox or RichEditBox
+                or Selector or SelectorItem or ToggleSwitch or TracesTreeView;
             if (MonitorKeys.ReturnUndoes(undoOffered, focusTakesReturn))
             {
                 args.Handled = true;

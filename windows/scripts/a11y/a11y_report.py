@@ -16,7 +16,7 @@ name. From every contrast file (measured on the box from the drawn pixels):
 named text under 4.5:1, or a control's label under 3:1 (a label with no Text
 element may be a glyph, held to WCAG 1.4.11's 3:1; 3 to 4.5 is printed as
 WARN, to be looked at in the capture). From the driver's log: every EXPECT
-FAIL.
+FAIL, and every step that could not act (not found, no window, an exception).
 
 A rectangle with four colours or fewer, or under 9 px tall, drew nothing (a
 label clipped out of its viewport, which UI Automation still reports) and is
@@ -113,7 +113,11 @@ def main(results, tag):
     log = os.path.join(results, f"{tag}.drive.log")
     if os.path.exists(log):
         for line in open(log, encoding="utf-8-sig"):
-            if "EXPECT FAIL" in line or "FAILED:" in line:
+            # A step that could not act (an element or window not found, an
+            # exception) is a failure too: a check that never ran passes
+            # nothing.
+            if ("EXPECT FAIL" in line or "FAILED:" in line or "step failed" in line
+                    or line.rstrip().endswith("  not found") or ": no window" in line):
                 failures.append(line.strip())
             elif "EXPECT PASS" in line:
                 print(line.strip())

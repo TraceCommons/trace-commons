@@ -15,10 +15,3 @@ audit main insights-sessions 90
 select main Analyze
 audit main insights-analyze 120
 select main Overview
-tab TabTraces
-click main Look inside
-snap main after-look-inside
-newwin preview
-audit preview preview 90
-key preview 1B
-state preview preview-after-esc

@@ -1,5 +1,5 @@
 # Main window: every tab, Insights' five pages, History and its Escape,
-# the preview window and its Escape, the flyout, Settings, About.
+# the flyout, Settings, About. The preview is in head.txt.
 tab TabHome
 audit main home 90
 scroll main home
@@ -35,14 +35,6 @@ audit main history 90
 scroll main history
 key main 1B
 state main history-after-esc
-tab TabTraces
-click main Look inside
-clicklast main Look inside
-newwin preview
-audit preview preview 90
-scroll preview preview
-key preview 1B
-state preview preview-after-esc
 flyout
 audit flyout flyout 20
 key flyout 1B
