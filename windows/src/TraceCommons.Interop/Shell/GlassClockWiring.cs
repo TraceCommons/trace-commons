@@ -18,8 +18,13 @@ namespace TraceCommons.Interop.Shell;
 public sealed class WindowClockRegistry<TWindow> where TWindow : class
 {
     private readonly ConditionalWeakTable<TWindow, StrongBox<bool>> _mayTick = new();
+    private readonly ConditionalWeakTable<TWindow, StrongBox<bool>> _focused = new();
 
-    /// <summary>Raised with the window and its new answer whenever <see cref="MayTick"/> changes for it.</summary>
+    /// <summary>
+    /// Raised with the window and its <see cref="MayTick"/> answer whenever
+    /// that answer or the window's focus changes, so every clock re-reads
+    /// its rate.
+    /// </summary>
     public event Action<TWindow, bool>? Changed;
 
     /// <summary>Whether clocks drawn in <paramref name="window"/> may run.</summary>
@@ -36,6 +41,111 @@ public sealed class WindowClockRegistry<TWindow> where TWindow : class
             Changed?.Invoke(window, mayTick);
         }
     }
+
+    /// <summary>Whether <paramref name="window"/> is the active window. One that never reported counts as focused.</summary>
+    public bool Focused(TWindow? window) =>
+        window is not null && (!_focused.TryGetValue(window, out StrongBox<bool>? focused) || focused.Value);
+
+    /// <summary>Records whether <paramref name="window"/> is the active window (its Activated and Deactivated).</summary>
+    public void SetFocused(TWindow window, bool focused)
+    {
+        bool before = Focused(window);
+        _focused.GetOrCreateValue(window).Value = focused;
+        if (before != focused)
+        {
+            Changed?.Invoke(window, MayTick(window));
+        }
+    }
+
+    /// <summary>How much attention <paramref name="window"/> has: hidden, visible but not focused, or focused.</summary>
+    public WindowAttention Attention(TWindow? window) =>
+        !MayTick(window) ? WindowAttention.Hidden : Focused(window) ? WindowAttention.Focused : WindowAttention.Unfocused;
+
+    /// <summary>The interval a clock in <paramref name="window"/> may run at (<see cref="FocusFrameRule"/>), or null: stopped.</summary>
+    public double? Interval(TWindow? window, double wanted) => FocusFrameRule.Interval(wanted, Attention(window));
+}
+
+/// <summary>Where a window stands for its animations.</summary>
+public enum WindowAttention
+{
+    /// <summary>Hidden to the tray, minimised, closed, or not in a window: nothing moves.</summary>
+    Hidden,
+
+    /// <summary>On screen, but another window is active.</summary>
+    Unfocused,
+
+    /// <summary>The active window.</summary>
+    Focused,
+}
+
+/// <summary>
+/// The one rule every animated surface's clock follows (owner, 2026-11-20):
+/// full rate while its window is focused, at most 15 frames a second while
+/// the window is visible but another is active, and stopped while it is
+/// hidden or minimised. A window that becomes focused again runs at its
+/// full rate from its next frame. Reduce Motion is separate and unchanged.
+/// </summary>
+public static class FocusFrameRule
+{
+    /// <summary>The shortest interval an unfocused window's clocks may draw at: 15 frames a second.</summary>
+    public const double UnfocusedInterval = 1.0 / 15;
+
+    /// <summary>
+    /// The interval to draw at, given the one the surface wants
+    /// (<paramref name="wanted"/> seconds; 0 is every display frame), or
+    /// null when nothing may draw.
+    /// </summary>
+    public static double? Interval(double wanted, WindowAttention attention) => attention switch
+    {
+        WindowAttention.Hidden => null,
+        WindowAttention.Unfocused => Math.Max(wanted, UnfocusedInterval),
+        _ => wanted,
+    };
+}
+
+/// <summary>
+/// A frame gate for a surface that draws on the display's frames
+/// (CompositionTarget.Rendering): asks the window's <see cref="FocusFrameRule"/>
+/// interval on every frame, so focus changes take effect on the next one.
+/// </summary>
+public sealed class FocusFramePace<TWindow> where TWindow : class
+{
+    private readonly WindowClockRegistry<TWindow> _windows;
+    private double? _last;
+
+    public FocusFramePace(WindowClockRegistry<TWindow> windows) => _windows = windows;
+
+    /// <summary>
+    /// Whether to draw the frame at <paramref name="now"/> seconds in
+    /// <paramref name="window"/>, for a surface that wants
+    /// <paramref name="wanted"/> seconds between frames (0: every frame). A
+    /// frame comes no sooner than the interval after the last one drawn,
+    /// less a quarter of a 60 Hz frame for jitter.
+    /// </summary>
+    public bool Due(TWindow? window, double now, double wanted = 0)
+    {
+        if (_windows.Interval(window, wanted) is not double interval)
+        {
+            return false;
+        }
+
+        if (_last is double last && now - last < interval - 1.0 / 240 && now >= last)
+        {
+            return false;
+        }
+
+        _last = now;
+        return true;
+    }
+
+    /// <summary>
+    /// Whether a surface whose window may tick should leave out the frame at
+    /// <paramref name="now"/>: true only while its window is visible and the
+    /// frame is not due. While the window is hidden this is false, so the
+    /// surface's own stop logic still runs.
+    /// </summary>
+    public bool Skips(TWindow? window, double now, double wanted = 0) =>
+        _windows.MayTick(window) && !Due(window, now, wanted);
 }
 
 /// <summary>
@@ -163,6 +273,7 @@ public sealed class GlassClockCore<TWindow> where TWindow : class
     public void Update()
     {
         _gate.WindowVisible = _shown && _windows.MayTick(_window);
+        _gate.Floor = _windows.Focused(_window) ? 0 : FocusFrameRule.UnfocusedInterval;
         bool run = _gate.Running;
         if (run && !Subscribed)
         {

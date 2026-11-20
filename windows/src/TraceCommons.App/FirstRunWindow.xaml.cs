@@ -467,8 +467,16 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
+
     private void OnFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_framePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         double now = Now;
         if (_reduceMotion || !_gate.MayTick)
         {

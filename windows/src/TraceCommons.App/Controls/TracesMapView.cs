@@ -860,7 +860,9 @@ public sealed partial class TracesMapView : UserControl
 
     private void Kick()
     {
-        if (WantedInterval() is not { } interval)
+        // The window's rule on top of the map's own: at most 15 a second
+        // while the window is not focused (FocusFrameRule).
+        if (WantedInterval() is not { } wanted || WindowClocks.Windows.Interval(XamlRoot, wanted) is not { } interval)
         {
             StopTimer();
             return;
