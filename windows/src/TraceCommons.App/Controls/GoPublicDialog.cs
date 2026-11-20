@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -99,7 +100,7 @@ public static class GoPublicDialog
         {
             TextWrapping = TextWrapping.Wrap,
             Visibility = Visibility.Collapsed,
-            Foreground = (Brush)Application.Current.Resources["TcCoralTextBrush"],
+            Foreground = ThemeBrushes.Get("TcCoralTextBrush"),
         };
 
         var acknowledgement = new CheckBox
@@ -225,8 +226,8 @@ public static class GoPublicDialog
         {
             Padding = new Thickness(14),
             CornerRadius = new CornerRadius(8),
-            Background = (Brush)Application.Current.Resources["TcSurfaceInsetBrush"],
-            BorderBrush = (Brush)Application.Current.Resources["TcHairlineBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceInsetBrush"),
+            BorderBrush = ThemeBrushes.Get("TcHairlineBrush"),
             BorderThickness = new Thickness(1),
         };
         columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -243,7 +244,7 @@ public static class GoPublicDialog
         var hairline = new Rectangle
         {
             Width = 1,
-            Fill = (Brush)Application.Current.Resources["TcHairlineDividerBrush"],
+            Fill = ThemeBrushes.Get("TcHairlineDividerBrush"),
         };
         Grid.SetColumn(hairline, 1);
         columns.Children.Add(hairline);

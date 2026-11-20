@@ -17,6 +17,7 @@ using TraceCommons.Interop.Generated;
 using TraceCommons.Interop.Shell;
 using Windows.UI;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -41,7 +42,7 @@ public sealed class HomeView : UserControl
     private readonly List<HeroGlyphView> _glyphs = new();
     private readonly Stopwatch _burstClock = new();
     private HomeOverviewModel? _model;
-    private bool _drawnHighContrast;
+    private string? _drawnTheme;
     private TextBlock? _balanceValue;
     private FrameworkElement? _balanceTile;
     private IReadOnlyList<long> _countSteps = Array.Empty<long>();
@@ -96,6 +97,8 @@ public sealed class HomeView : UserControl
             WindowClocks.Changed += OnWindowClocks;
             SystemSettingWatch.Changed -= OnSystemSettings;
             SystemSettingWatch.Changed += OnSystemSettings;
+            ThemeBrushes.Changed -= OnSystemSettings;
+            ThemeBrushes.Changed += OnSystemSettings;
             OnSystemSettings();
         };
         Unloaded += (_, _) =>
@@ -103,6 +106,7 @@ public sealed class HomeView : UserControl
             _loaded = false;
             WindowClocks.Changed -= OnWindowClocks;
             SystemSettingWatch.Changed -= OnSystemSettings;
+            ThemeBrushes.Changed -= OnSystemSettings;
             UpdateClocks();
             EndBurst();
         };
@@ -112,13 +116,14 @@ public sealed class HomeView : UserControl
     private void OnWindowClocks(bool running) => DispatcherQueue.TryEnqueue(UpdateClocks);
 
     /// <summary>
-    /// The clocks follow the motion setting; the heroes, which pick their own
-    /// colours, are drawn again when a high contrast theme comes or goes.
+    /// The clocks follow the motion setting; the cards, whose colours are
+    /// picked in code, are drawn again when the theme or a high contrast
+    /// theme changes (ThemeBrushes).
     /// </summary>
     private void OnSystemSettings()
     {
         UpdateClocks();
-        if (_model is HomeOverviewModel model && _drawnHighContrast != SystemSettingWatch.HighContrast)
+        if (_model is HomeOverviewModel model && _drawnTheme != ThemeBrushes.Key)
         {
             _model = null;
             Show(model);
@@ -156,13 +161,13 @@ public sealed class HomeView : UserControl
     /// <summary>Draws <paramref name="model"/>. Only what changed is rebuilt; the glyphs keep their clock.</summary>
     public void Show(HomeOverviewModel model)
     {
-        if (model.Same(_model) && _drawnHighContrast == SystemSettingWatch.HighContrast)
+        if (model.Same(_model) && _drawnTheme == ThemeBrushes.Key)
         {
             return;
         }
 
         _model = model;
-        _drawnHighContrast = SystemSettingWatch.HighContrast;
+        _drawnTheme = ThemeBrushes.Key;
         _column.Children.Clear();
         _glyphs.Clear();
         _balanceValue = null;
@@ -258,14 +263,14 @@ public sealed class HomeView : UserControl
         {
             Text = signIn.NoData,
             Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
-            Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         });
         var dash = new TextBlock
         {
             Text = "\u2013",
             Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
-            Foreground = (Brush)Application.Current.Resources["TcInkTertiaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkTertiaryBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         };
         AutomationProperties.SetAccessibilityView(dash, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
@@ -313,7 +318,7 @@ public sealed class HomeView : UserControl
                 HorizontalContentAlignment = HorizontalAlignment.Left,
                 Padding = new Thickness(12, 10, 12, 10),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+                Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
             };
             AutomationProperties.SetName(button, section.Heading);
             AutomationProperties.SetHelpText(button, string.Join(", ", figures.Select(f => f.Value + " " + f.Label)));
@@ -327,7 +332,7 @@ public sealed class HomeView : UserControl
                 ColumnSpacing = HomeTrayInks.Measures.S4,
                 Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 10, HomeTrayInks.Measures.CardPaddingHorizontal, 10),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+                Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
             };
             card.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             card.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -370,7 +375,7 @@ public sealed class HomeView : UserControl
             ColumnSpacing = HomeTrayInks.Measures.S3,
             Padding = new Thickness(HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3, HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.ControlRadius),
-            Background = new SolidColorBrush(Faded((Brush)Application.Current.Resources["TcStatusAskBrush"], 0.12)),
+            Background = new SolidColorBrush(Faded(ThemeBrushes.Get("TcStatusAskBrush"), 0.12)),
         };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -379,7 +384,7 @@ public sealed class HomeView : UserControl
         {
             Glyph = "\uEB90",
             FontSize = 14,
-            Foreground = (Brush)Application.Current.Resources["TcStatusAskBrush"],
+            Foreground = ThemeBrushes.Get("TcStatusAskBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         };
         AutomationProperties.SetAccessibilityView(mark, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
@@ -440,7 +445,7 @@ public sealed class HomeView : UserControl
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 12, HomeTrayInks.Measures.CardPaddingHorizontal, 12),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
         };
         AutomationProperties.SetName(button, card.Title);
         if (card.Subtitle is string help)
@@ -492,7 +497,7 @@ public sealed class HomeView : UserControl
             VerticalAlignment = VerticalAlignment.Stretch,
             Padding = new Thickness(12, 10, 12, 10),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
         };
 
         // Named by its visible label, its figure the help text (checklist E1).
@@ -713,7 +718,7 @@ public sealed class HomeView : UserControl
     private static Color HeroColor(HeroPart part, HeroGround ground, bool highContrast)
     {
         HeroInk ink = HeroCard.Ink(part, ground, highContrast);
-        if (ink.ThemeKey is string key && Application.Current.Resources[key] is SolidColorBrush themed)
+        if (ink.ThemeKey is string key && ThemeBrushes.Get(key) is SolidColorBrush themed)
         {
             return themed.Color;
         }

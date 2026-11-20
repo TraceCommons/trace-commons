@@ -15,6 +15,7 @@ using TraceCommons.Interop.Map;
 using Windows.Foundation;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -420,7 +421,7 @@ internal sealed class TracesGraphFooter : UserControl
 
     private static Color With(Color c, double alpha) => Color.FromArgb((byte)Math.Round(c.A * Math.Clamp(alpha, 0, 1)), c.R, c.G, c.B);
 
-    private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];
+    private static Brush Brush(string key) => ThemeBrushes.Get(key);
 
     private static TextBlock Figure() => new()
     {

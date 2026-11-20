@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop.Map;
 using TraceCommons.Interop.Shell;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -164,7 +165,7 @@ internal sealed class TransferCardView : UserControl
         AutomationProperties.SetName(this, face.AccessibleName);
     }
 
-    private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];
+    private static Brush Brush(string key) => ThemeBrushes.Get(key);
 
     private static Style Resource(string key) => (Style)Application.Current.Resources[key];
 }

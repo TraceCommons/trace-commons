@@ -11,6 +11,7 @@ using TraceCommons.Interop;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -430,7 +431,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         {
             FontFamily = (FontFamily)Application.Current.Resources["TcMonoFontFamily"],
             FontSize = (double)Application.Current.Resources["TcMonoTranscriptFontSize"],
-            Foreground = (Brush)Application.Current.Resources["TcInkPrimaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkPrimaryBrush"),
             IsTextSelectionEnabled = true,
         };
 
@@ -444,7 +445,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             return block;
         }
 
-        var markerBrush = (Brush)Application.Current.Resources["TcGoldTextBrush"];
+        var markerBrush = ThemeBrushes.Get("TcGoldTextBrush");
 
         foreach (TranscriptRun run in TranscriptMarkers.Split(text))
         {

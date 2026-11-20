@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Generated;
 using TraceCommons.Interop.Shell;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -35,9 +36,11 @@ internal sealed class TrayFlyoutWindow : Window
         Title = MonitorWords.AppName;
         var root = new Border
         {
-            Background = (Brush)Application.Current.Resources["TcWindowBackgroundBrush"],
             Child = new ScrollViewer { Content = _body, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
         };
+
+        // Built once; the body is built again on every open.
+        ThemeBrushes.Bind(root, Border.BackgroundProperty, "TcWindowBackgroundBrush");
         Content = root;
         OpenApp = openApp;
         OpenSettings = openSettings;
@@ -71,7 +74,7 @@ internal sealed class TrayFlyoutWindow : Window
         {
             Data = NearMarkGeometry.Build(),
             Stretch = Stretch.Uniform,
-            Fill = (Brush)Application.Current.Resources["TcInkPrimaryBrush"],
+            Fill = ThemeBrushes.Get("TcInkPrimaryBrush"),
             Width = 18,
             Height = 18,
             VerticalAlignment = VerticalAlignment.Center,

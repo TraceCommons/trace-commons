@@ -27,6 +27,7 @@ using Windows.Graphics;
 using VirtualKey = Windows.System.VirtualKey;
 using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -377,7 +378,7 @@ public sealed partial class MainWindow
                     Glyph = "",
                     FontSize = 10,
                     VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+                    Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
                     IsTabStop = false,
                 });
             }

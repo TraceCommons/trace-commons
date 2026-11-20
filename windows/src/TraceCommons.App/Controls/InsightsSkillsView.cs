@@ -23,6 +23,7 @@ using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -136,7 +137,7 @@ public sealed class InsightsSkillsView : UserControl
 
     private static string N(int value) => value.ToString(CultureInfo.InvariantCulture);
 
-    private static Brush R(string key) => (Brush)Application.Current.Resources[key];
+    private static Brush R(string key) => ThemeBrushes.Get(key);
 
     private static TextBlock Line(string text, string? style = null, Brush? brush = null)
     {

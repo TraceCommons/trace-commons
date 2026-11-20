@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.Interop.Shell;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -48,10 +49,11 @@ public sealed class AboutWindow : Window
             Width = 96,
             Height = 96,
             Stretch = Stretch.Uniform,
-            Fill = (Brush)Application.Current.Resources["TcMarkAccentBrush"],
             IsHitTestVisible = false,
             HorizontalAlignment = HorizontalAlignment.Center,
         };
+        // Built once: each brush is set again on a change of theme.
+        ThemeBrushes.Bind(mark, Shape.FillProperty, "TcMarkAccentBrush");
         AutomationProperties.SetAccessibilityView(mark, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
 
         var name = new TextBlock
@@ -95,20 +97,19 @@ public sealed class AboutWindow : Window
         };
         if (model.ShowsCopyright)
         {
-            column.Children.Add(new TextBlock
+            var copyright = new TextBlock
             {
                 Text = model.Copyright,
                 Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
-                Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
                 HorizontalAlignment = HorizontalAlignment.Center,
-            });
+            };
+            ThemeBrushes.Bind(copyright, TextBlock.ForegroundProperty, "TcInkSecondaryBrush");
+            column.Children.Add(copyright);
         }
 
-        Content = new Grid
-        {
-            Background = (Brush)Application.Current.Resources["TcWindowBackgroundBrush"],
-            Children = { column },
-        };
+        var ground = new Grid { Children = { column } };
+        ThemeBrushes.Bind(ground, Panel.BackgroundProperty, "TcWindowBackgroundBrush");
+        Content = ground;
         WindowClocks.Watch(this);
     }
 
