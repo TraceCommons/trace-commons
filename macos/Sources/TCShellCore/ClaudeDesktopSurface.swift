@@ -113,6 +113,8 @@ public enum ClaudeDesktopPrompt {
 
     /// Claude Desktop's bundle identifier.
     public static let desktopBundleID = "com.anthropic.claudefordesktop"
+    /// Claude Desktop's documented deep link for a new Code session.
+    public static let newCodeSessionURL = URL(string: "claude://code/new")!
     /// The `UserDefaults` key holding the offer's dismissal.
     public static let dismissedKey = "claudeDesktopPromptDismissed"
 

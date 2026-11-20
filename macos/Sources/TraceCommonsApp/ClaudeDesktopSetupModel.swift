@@ -86,7 +86,7 @@ final class ClaudeDesktopSetupModel {
 
     func readCachedCatalogue(_ catalogue: ManagedModelCatalogue?) {
         guard isEnabled, !isPresented, let catalogue else { return }
-        self.catalogue = catalogue
+        self.catalogue = catalogue.forClaudeDesktop()
     }
 
     func open() {
@@ -142,7 +142,7 @@ final class ClaudeDesktopSetupModel {
         load { [weak self] catalogue in
             guard let self, self.isEnabled, self.isPresented, self.catalogueRead == token else { return }
             self.catalogueBusy = false
-            self.catalogue = catalogue
+            self.catalogue = catalogue?.forClaudeDesktop()
             if catalogue == nil { self.failed = true }
             self.reconcileBackground()
         }

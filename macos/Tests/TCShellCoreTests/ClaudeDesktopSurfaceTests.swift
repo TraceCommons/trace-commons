@@ -137,3 +137,38 @@ final class ClaudeDesktopSheetStepsTests: XCTestCase {
         XCTAssertEqual(try status(steps: false).sheetSteps, [])
     }
 }
+
+/// The Claude Desktop sheet lists only the models the daemon says its route
+/// accepts (`desktop_models`); an older daemon's catalogue is unchanged.
+final class ClaudeDesktopCatalogueTests: XCTestCase {
+    private func catalogue(desktop: [String]?, default def: String = "small/model") throws -> ManagedModelCatalogue {
+        var value: [String: Any] = [
+            "models": ["big/model", "small/model", "huge/model"].map { ["id": $0] },
+            "default": def, "favorites": ["small/model", "big/model"],
+        ]
+        if let desktop { value["desktop_models"] = desktop }
+        return try JSONDecoder().decode(ManagedModelCatalogue.self, from: JSONSerialization.data(withJSONObject: value))
+    }
+
+    func testTheSheetListsOnlyModelsTheRouteAccepts() throws {
+        let cut = try catalogue(desktop: ["big/model", "huge/model"]).forClaudeDesktop()
+        XCTAssertEqual(cut.models.map(\.id), ["big/model", "huge/model"])
+        XCTAssertEqual(cut.favorites, ["big/model"])
+        // The default moves to the first accepted model when it is not one.
+        XCTAssertEqual(cut.default, "big/model")
+        XCTAssertEqual(try catalogue(desktop: ["big/model", "huge/model"], default: "huge/model").forClaudeDesktop().default, "huge/model")
+    }
+
+    func testAnOlderDaemonsCatalogueIsUnchanged() throws {
+        let old = try catalogue(desktop: nil)
+        XCTAssertEqual(old.forClaudeDesktop(), old)
+    }
+}
+
+/// The sheet's Open Claude Desktop button uses Claude Desktop's documented
+/// deep link for a new Code session.
+final class ClaudeDesktopOpenLinkTests: XCTestCase {
+    func testTheLinkOpensANewCodeSession() {
+        XCTAssertEqual(ClaudeDesktopPrompt.newCodeSessionURL.absoluteString, "claude://code/new")
+    }
+}
