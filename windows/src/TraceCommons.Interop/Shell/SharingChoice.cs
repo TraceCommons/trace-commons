@@ -169,6 +169,10 @@ public static class SharingChoice
         return new TracesColumnTitles(folders, submit, automatic);
     }
 
+    /// <summary>The titles in the eyebrow type's capitals (the Mac's <c>TypeScale.eyebrow</c> is uppercase).</summary>
+    public static TracesColumnTitles Eyebrow(TracesColumnTitles titles, System.Globalization.CultureInfo culture) =>
+        new(titles.Folders.ToUpper(culture), titles.Submit.ToUpper(culture), titles.Automatic.ToUpper(culture));
+
     /// <summary>
     /// A press of the eye (SharingChoiceCard.swift:217-260). On (Automatic
     /// in force) it is Ask each time. Off, it asks about folders set to Ask,

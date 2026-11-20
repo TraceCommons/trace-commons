@@ -357,6 +357,8 @@ internal sealed class TracesTreeView : UserControl
             return null;
         }
 
+        titles = SharingChoice.Eyebrow(titles, CultureInfo.CurrentCulture);
+
         var grid = new Grid
         {
             // The scroller's 14 px, then the row's own insets (8 leading, 6 trailing).

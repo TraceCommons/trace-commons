@@ -152,6 +152,17 @@ public class SharingChoiceTests
         Assert.Null(SharingChoice.ColumnTitles(new TreeWords(words, empty, empty)));
     }
 
+    [Fact]
+    public void TheColumnTitlesAreSetInTheEyebrowsCapitals()
+    {
+        // GlassTokens.TypeScale.eyebrow is uppercase on the Mac ("FOLDERS ON THIS MAC").
+        var culture = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+        Assert.Equal(new TracesColumnTitles("FOLDERS ON THIS COMPUTER", "SUBMIT", "AUTO"),
+            SharingChoice.Eyebrow(new TracesColumnTitles("Folders on this computer", "Submit", "Auto"), culture));
+        string path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/TracesTreeView.cs.txt");
+        Assert.Contains("SharingChoice.Eyebrow(titles, CultureInfo.CurrentCulture)", File.ReadAllText(path), StringComparison.Ordinal);
+    }
+
     // ---- A press (SharingChoiceCard.swift:217-260) -----------------------
 
     private sealed class Fake : ISharingChoiceSteps
