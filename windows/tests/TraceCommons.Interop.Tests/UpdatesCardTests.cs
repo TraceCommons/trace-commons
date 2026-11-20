@@ -89,6 +89,41 @@ public class UpdatesCardTests
         Assert.Equal(2, changed);
     }
 
+    /// <summary>
+    /// Check Now is off while a check is out (<c>.disabled(!updates.canCheckNow)</c>,
+    /// StartupSection.swift:203; W17 review F3): a second press starts no
+    /// overlapping check, and any answer, even a failed one, arms it again.
+    /// </summary>
+    [Theory]
+    [InlineData(TcUpdateAvailability.NoUpdates)]
+    [InlineData(TcUpdateAvailability.Error)]
+    [InlineData(TcUpdateAvailability.Unknown)]
+    public void ACheckThatIsOutCannotBeStartedAgainUntilItAnswers(TcUpdateAvailability answer)
+    {
+        var clock = new UpdateCheckClock();
+        int changed = 0;
+        clock.Changed += () => changed++;
+        Assert.False(clock.Checking);
+        Assert.True(clock.TryBegin());
+        Assert.True(clock.Checking);
+        Assert.False(clock.TryBegin());
+        clock.Record(answer, Now);
+        Assert.False(clock.Checking);
+        Assert.Equal(2, changed);
+        Assert.True(clock.TryBegin());
+    }
+
+    [Fact]
+    public void TheButtonFollowsTheCheck()
+    {
+        string section = System.IO.File.ReadAllText(System.IO.Path.Combine(
+            System.AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "Settings", "UpdatesSection.cs.txt"));
+        Assert.Contains("_check.IsEnabled = !_checks.Checking;", section);
+        string model = System.IO.File.ReadAllText(System.IO.Path.Combine(
+            System.AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "ViewModels", "MainViewModel.cs.txt"));
+        Assert.Contains("if (!UpdateChecks.TryBegin())", model);
+    }
+
     [Theory]
     [InlineData(TcUpdateAvailability.NoUpdates, true)]
     [InlineData(TcUpdateAvailability.Available, true)]

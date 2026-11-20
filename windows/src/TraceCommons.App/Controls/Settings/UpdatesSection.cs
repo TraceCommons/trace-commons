@@ -26,6 +26,7 @@ public sealed class UpdatesSection : UserControl
     /// card under the focused Check Now button.
     /// </summary>
     private readonly TextBlock _lastChecked;
+    private readonly Button? _check;
 
     public UpdatesSection(Action checkNow, UpdateCheckClock checks)
     {
@@ -60,8 +61,8 @@ public sealed class UpdatesSection : UserControl
 
         if (card.CheckNow is { } word)
         {
-            Button check = SettingsCards.Button(word, (_, _) => checkNow());
-            body.Children.Add(SettingsCards.Row(check));
+            _check = SettingsCards.Button(word, (_, _) => checkNow());
+            body.Children.Add(SettingsCards.Row(_check));
         }
 
         Content = SettingsCards.Card(MonitorShellCopy.Shell("updates_eyebrow"), body);
@@ -87,6 +88,11 @@ public sealed class UpdatesSection : UserControl
         string? line = UpdatesCard.Live(_packaged, _version, _checks.LastCompleted).LastChecked;
         _lastChecked.Text = line ?? string.Empty;
         _lastChecked.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;
+        if (_check is not null)
+        {
+            // Off while a check is out (StartupSection.swift:203).
+            _check.IsEnabled = !_checks.Checking;
+        }
     }
 
     /// <summary>

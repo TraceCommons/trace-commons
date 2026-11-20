@@ -74,6 +74,25 @@ public sealed class UpdateCheckClock
     public event Action? Changed;
 
     /// <summary>
+    /// A check is out: Check Now is off until it answers, as the Mac's is
+    /// while Sparkle cannot check (<c>canCheckNow</c>; W17 review F3).
+    /// </summary>
+    public bool Checking { get; private set; }
+
+    /// <summary>Starts a check; false when one is already out, which then starts nothing.</summary>
+    public bool TryBegin()
+    {
+        if (Checking)
+        {
+            return false;
+        }
+
+        Checking = true;
+        Changed?.Invoke();
+        return true;
+    }
+
+    /// <summary>
     /// Whether the deployment service answered: up to date, or an update
     /// offered. A failed check, or a package with no App Installer
     /// association, checked nothing.
@@ -86,8 +105,16 @@ public sealed class UpdateCheckClock
     /// <summary>Records a check made at <paramref name="at"/> if it completed.</summary>
     public void Record(TcUpdateAvailability availability, DateTimeOffset at)
     {
+        bool wasChecking = Checking;
+        Checking = false;
         if (!Completed(availability))
         {
+            // Any answer ends the check; only one that got an answer is recorded.
+            if (wasChecking)
+            {
+                Changed?.Invoke();
+            }
+
             return;
         }
 
