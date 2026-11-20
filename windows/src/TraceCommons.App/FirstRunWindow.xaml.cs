@@ -61,6 +61,13 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private readonly List<(Action<double> Apply, Func<double, bool> Moving)> _motions = new();
     private readonly Dictionary<string, string> _names = new(StringComparer.Ordinal);
     private IReadOnlyList<SourceCandidate> _discovered = Array.Empty<SourceCandidate>();
+
+    /// <summary>
+    /// How many times discovery has answered. Tools is built when the window
+    /// opens, before the probe returns; counting it in the content key builds
+    /// the step again with the tools found, signed in or not.
+    /// </summary>
+    private int _discoveries;
     private List<ConsentOption> _options = new();
     private string? _termsLabel;
     private bool _ticking;
@@ -323,6 +330,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private async Task LoadAsync()
     {
         _discovered = await Task.Run(SourceDiscovery.ProbeThisMachine).ConfigureAwait(true);
+        _discoveries++;
         var rows = _discovered.Select(c => (c.Source, c.Exists)).ToList();
         _runner.State.RecordDiscovery(rows);
         _model.SetRows(rows);
@@ -651,7 +659,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         Notice(state) ?? "", _runner.IsCommitting, _runner.SignInWaiting, state.SignedIn, state.Account,
         state.Invite, state.EnrolledInvite ?? "-", _runner.Failure?.GetType().Name ?? "",
         _pendingFolder?.Path ?? "", _addRefused, _inviteRefused, state.AddedFolders.Count,
-        state.SharingChosen, state.Sharing, _controller.GrantCopyRead);
+        state.SharingChosen, state.Sharing, _controller.GrantCopyRead, _discoveries);
 
     /// <summary>
     /// The failed request's line under the step's content
