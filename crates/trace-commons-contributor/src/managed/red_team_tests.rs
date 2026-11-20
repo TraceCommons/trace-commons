@@ -11,7 +11,7 @@ use crate::managed::sessions::{
     CollectionState, LaunchContext, LaunchPurpose, LaunchRequest, PreparedLaunch, SessionState,
     SessionView,
 };
-use crate::managed::{AccountId, AccountView, ConnectionKind, Generation, RED_TEAM_FLAG, ToolId};
+use crate::managed::{AccountId, AccountView, ConnectionKind, Generation, ToolId};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -71,30 +71,7 @@ async fn redeem_returns_the_key_only_for_red_team() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
-    let mut shared = DaemonShared::load(store).unwrap();
-    shared.feature_flags = crate::feature_flags::Runtime::open(
-        crate::feature_flags::registry().unwrap(),
-        crate::feature_flags::test_signing::testing_profile(),
-        shared.store.dir(),
-        chrono::Utc::now(),
-    )
-    .unwrap();
-    let now = chrono::Utc::now();
-    let manifest = json!({
-        "schema_version": 1,
-        "environment": shared.feature_flags.snapshot().environment,
-        "revision": 1001,
-        "issued_at": now,
-        "expires_at": now + chrono::Duration::hours(1),
-        "flags": { RED_TEAM_FLAG: true }
-    });
-    shared
-        .feature_flags
-        .accept(
-            &crate::feature_flags::test_signing::sign(&serde_json::to_vec(&manifest).unwrap()),
-            now,
-        )
-        .unwrap();
+    let shared = DaemonShared::load(store).unwrap();
     let cred = crate::daemon::settings::NearAiInferenceCredential {
         key: "sk-red-team-secret".into(),
         key_id: "rt-key".into(),
