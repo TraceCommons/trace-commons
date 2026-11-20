@@ -411,7 +411,33 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     public async Task<bool> SetAskEachTime() =>
         await GuardedGrantCall("withdraw_automatic_grant", new { return_folders_to_ask = true }).ConfigureAwait(true) is { IsError: false };
 
-    public Task<bool> SaveConsentScopes(IReadOnlyList<string> scopes) => Ok(DaemonProtocol.Methods.SetConsentScopes, new { scopes });
+    /// <summary>
+    /// A consent write the daemon confirmed: the scopes before it (the
+    /// status read just before) and the scopes its reply confirms. The main
+    /// window offers Train coding models on traces already sent when the
+    /// write turned it on (<c>saveConsentScopes</c>, AppModel.swift:5049-5058).
+    /// Nothing is reported for a refusal, a reply without scopes, or a status
+    /// that could not be read: nothing is offered on a guess.
+    /// </summary>
+    public event Action<IReadOnlyList<string>, IReadOnlyList<string>>? ConsentScopesConfirmed;
+
+    public async Task<bool> SaveConsentScopes(IReadOnlyList<string> scopes)
+    {
+        DaemonResponse? status = await Call(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+        IReadOnlyList<string>? before = status is { IsError: false } ? status.ResultAs<DaemonStatus>()?.ConsentScopes : null;
+        DaemonResponse? r = await Call(DaemonProtocol.Methods.SetConsentScopes, new { scopes }).ConfigureAwait(true);
+        if (r is not { IsError: false })
+        {
+            return false;
+        }
+
+        if (before is not null && SentTracesTrainingState.ConfirmedScopes(r) is { } confirmed)
+        {
+            ConsentScopesConfirmed?.Invoke(before, confirmed);
+        }
+
+        return true;
+    }
 
     public static string ModeWord(ProjectRule mode) => mode switch
     {

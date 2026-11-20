@@ -109,6 +109,38 @@ public sealed partial class MainWindow
     }
 
     /// <summary>
+    /// The first run's Start confirmed a consent write: when it turned Train
+    /// coding models on, read the eligible traces and raise the sheet once
+    /// for this window, which the first run hands off to; it is shown here
+    /// once the first run has closed, not over the Start still running
+    /// (<c>saveConsentScopes</c>, AppModel.swift:5049-5058).
+    /// </summary>
+    private void OnFirstRunConsentScopesConfirmed(IReadOnlyList<string> before, IReadOnlyList<string> confirmed) =>
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            if (!SentTracesTrainingState.TurnsOn(before, confirmed))
+            {
+                return;
+            }
+
+            await SentTraining.OfferAfterTurnOnAsync(SentTracesTrainingSite.Monitor);
+            // The first run may have closed while the eligible traces were read.
+            if (_onboarding is null)
+            {
+                ShowFirstRunTrainingOffer();
+            }
+        });
+
+    /// <summary>The first run has handed off: an offer it raised is shown on this window.</summary>
+    private void ShowFirstRunTrainingOffer()
+    {
+        if (SentTraining.Sheet is { Site: SentTracesTrainingSite.Monitor } && Content?.XamlRoot is XamlRoot root)
+        {
+            _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
+        }
+    }
+
+    /// <summary>
     /// A Settings consent write the daemon confirmed: when it turned Train
     /// coding models on, read the eligible traces and raise the sheet once,
     /// in the Settings window (<c>offerSentTracesTraining</c>, AppModel.swift:3007-3017).

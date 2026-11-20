@@ -138,6 +138,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             // notices once this window has gone (UsesScreen.swift:244-250).
             notice => Finished?.Invoke(_copy is null ? null : FirstRunNotices.Finished(notice, Copy.Uses)),
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri));
+        daemon.ConsentScopesConfirmed += (before, confirmed) => ConsentScopesConfirmed?.Invoke(before, confirmed);
         _runner = previewAt is FirstRunStep step
             ? new FirstRunRunner(new FirstRunState { Step = step }, new RefusingFirstRunDaemon())
             : new FirstRunRunner(new FirstRunState(), daemon);
@@ -292,6 +293,9 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     /// <summary>The Tools step started the daemon with the person's declaration.</summary>
     public event Action? DaemonStarted;
+
+    /// <summary>The first run's consent write was confirmed: the scopes before it and after (<see cref="FirstRunDaemon.ConsentScopesConfirmed"/>).</summary>
+    public event Action<IReadOnlyList<string>, IReadOnlyList<string>>? ConsentScopesConfirmed;
 
     /// <summary>Set by the caller after the window closes.</summary>
     internal Task CloseCompletion { get; private set; } = Task.CompletedTask;
