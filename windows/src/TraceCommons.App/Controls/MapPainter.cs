@@ -7,6 +7,7 @@ using Microsoft.Graphics.Canvas.Brushes;
 using Microsoft.Graphics.Canvas.Geometry;
 using TraceCommons.Interop.Map;
 using TraceCommons.Interop.Shell;
+using SvgPathData = TraceCommons.Interop.Map.SvgPathData;
 using Color = Windows.UI.Color;
 
 namespace TraceCommons.App.Controls;

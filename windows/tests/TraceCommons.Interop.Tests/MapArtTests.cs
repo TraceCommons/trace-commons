@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using TraceCommons.Interop.Map;
 using TraceCommons.Interop.Shell;
+using SvgPathData = TraceCommons.Interop.Map.SvgPathData;
 using Xunit;
 using static TraceCommons.Interop.Tests.FlowMapSceneTests;
 
