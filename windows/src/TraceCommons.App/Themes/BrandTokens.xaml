@@ -59,7 +59,7 @@
             <SolidColorBrush x:Key="TcOnAccentBrush" Color="#FFFFFF" />
             <SolidColorBrush x:Key="TcStatusOnBrush" Color="#1A8F4C" />
             <SolidColorBrush x:Key="TcStatusOnTextBrush" Color="#0B4628" />
-            <SolidColorBrush x:Key="TcStatusAskBrush" Color="#A8690F" />
+            <SolidColorBrush x:Key="TcStatusAskBrush" Color="#9C610E" />
             <SolidColorBrush x:Key="TcStatusAskTextBrush" Color="#573403" />
             <SolidColorBrush x:Key="TcStatusOutsideBrush" Color="#D0342C" />
             <SolidColorBrush x:Key="TcStatusOutsideTextBrush" Color="#771814" />
@@ -71,12 +71,12 @@
             <SolidColorBrush x:Key="TcGreenChipBorderBrush" Color="#73056BDC" />
             <SolidColorBrush x:Key="TcActiveTabBorderBrush" Color="#8C056BDC" />
             <SolidColorBrush x:Key="TcMarkAccentBrush" Color="#0558B6" />
-            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#A8690F" />
+            <SolidColorBrush x:Key="TcGoldBrandBrush" Color="#9C610E" />
             <SolidColorBrush x:Key="TcGoldTextBrush" Color="#573403" />
-            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8CA8690F" />
+            <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8C9C610E" />
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D0342C" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#771814" />
-            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#8A8A90" />
+            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#78787F" />
             <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#C2603E" />
             <SolidColorBrush x:Key="TcToolCodexBrush" Color="#3A3A3C" />
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#1D9467" />

@@ -260,11 +260,13 @@ class GlassTokensTests(unittest.TestCase):
         # GlassTokens.swift: statusOn (:52), statusAsk (:54), statusOff
         # (:56), statusOutside (:58), flat theme; graphFocusOn/Idle/Off
         # (:232-236); textPrimary (:31); GlassColor.ink is pure black in
-        # light and white in dark (:252).
+        # light and white in dark (:252). Light statusAsk and statusOff were
+        # #A8690F and #8A8A90, raised to pass on the map (owner, 2026-11-20:
+        # "Raise to pass, both apps"; LightContrastRaiseTests).
         rust = "\n".join(generate.render_glass_rust(self.tokens))
         for name, light, dark in (
-            ("ON", "#1A8F4C", "#30D158"), ("ASK", "#A8690F", "#FFC75C"),
-            ("OFF", "#8A8A90", "#A9A9B0"), ("OUTSIDE", "#D0342C", "#FF6B6B"),
+            ("ON", "#1A8F4C", "#30D158"), ("ASK", "#9C610E", "#FFC75C"),
+            ("OFF", "#78787F", "#A9A9B0"), ("OUTSIDE", "#D0342C", "#FF6B6B"),
         ):
             self.assertIn(f'pub const {name}_LIGHT: &str = "{light}";', rust)
             self.assertIn(f'pub const {name}_DARK: &str = "{dark}";', rust)
@@ -306,9 +308,10 @@ class GlassTokensTests(unittest.TestCase):
         # GlassListRow (ListRow.swift): a flagged sub-line in statusAsk or
         # statusOn (:292-296), the chevron in statusOff (:149), and
         # GlassToolTile's folder tile on tileFolder (Indicators.swift:306);
-        # flat theme, flattened over the pane.
+        # flat theme, flattened over the pane. Light ask and off raised from
+        # #a8690f and #8a8a90 (owner, 2026-11-20: "Raise to pass, both apps").
         for scheme, (ask, on, off, folder) in (
-            ("light", ("#a8690f", "#1a8f4c", "#8a8a90", "#e6e6ea")),
+            ("light", ("#9c610e", "#1a8f4c", "#78787f", "#e6e6ea")),
             ("dark", ("#ffc75c", "#30d158", "#a9a9b0", "#2a2a2c")),
         ):
             with self.subTest(scheme=scheme):
@@ -748,6 +751,84 @@ class MotionTokensTests(unittest.TestCase):
 
     def test_the_gtk_output_carries_the_motion_module(self):
         self.assertIn("pub mod motion {", generate.render_gtk(self.tokens))
+
+
+class LightContrastRaiseTests(unittest.TestCase):
+    """The four light-mode values a Windows UI Automation audit measured
+    under their floors (owner, 2026-11-20: "Raise to pass, both apps"),
+    read back from the generated Mac and Windows outputs."""
+
+    # The Traces map's ground as the audit measured it on the Windows test
+    # box, light theme: a little darker than the pane token (#f2f3f6), so
+    # the floors below hold on what was drawn, not only on the token.
+    MAP_GROUND = "#f0f1f4"
+
+    def setUp(self):
+        self.tokens = json.loads(generate.SOURCE.read_text())
+        self.rendered = {path: text for path, text in generate.outputs(self.tokens)}
+
+    def swift_flat_light(self, name):
+        """(hex, alpha) of a colour token's flat-theme light value in the
+        generated GlassTokens.swift."""
+        import re
+        swift = self.rendered[generate.OUTPUT]
+        line = next(l for l in swift.splitlines()
+                    if f"static var {name}: GlassRGBA" in l or f"static let {name}: GlassRGBA" in l)
+        # A token the themes share has no flat: arm; its one value is the flat's.
+        flat = line.split("flat:", 1)[1] if "flat:" in line else line.split("=", 1)[1]
+        m = re.search(r"light: GlassRGBA\(0x([0-9A-F]{6}), alpha: ([0-9.]+)\)", flat)
+        if m is None:  # no light twin: the flat value serves both
+            m = re.search(r"GlassRGBA\(0x([0-9A-F]{6}), alpha: ([0-9.]+)", flat)
+        return "#" + m.group(1).lower(), float(m.group(2))
+
+    def map_art_light(self, name):
+        """(hex, alpha) of an ink in the generated MapArt.g.cs light table."""
+        import re
+        cs = self.rendered[generate.WINDOWS_MAP_OUTPUT]
+        light = cs.split("Light =", 1)[1].split("Dark =", 1)[0]
+        m = re.search(r'\["%s"\] = new MapRgba\((\d+), (\d+), (\d+), ([0-9.]+)\)' % name, light)
+        return "#%02x%02x%02x" % tuple(int(m.group(i)) for i in (1, 2, 3)), float(m.group(4))
+
+    def test_switch_off_track_clears_3_to_1_on_mac_and_windows(self):
+        # 1. The settings switch off: white knob on #B8B9BB, 1.96:1. The
+        # Mac's flat light toggleOff takes the alpha Linux already lifts it
+        # to, so all three apps draw one track.
+        hex_, alpha = self.swift_flat_light("toggleOff")
+        palette = generate.glass_palette(self.tokens, "light")
+        self.assertEqual(generate.switch_failures(palette, {"hex": hex_, "alpha": alpha}), [])
+        self.assertEqual({"hex": hex_, "alpha": alpha},
+                         generate.switch_off_track(self.tokens, "light"))
+        win = generate.windows_glass_palette(self.tokens, "light")
+        knob, track = "#" + win["TcGlassToggleKnobOffBrush"][3:], "#" + win["TcGlassToggleOffBrush"][3:]
+        self.assertGreaterEqual(generate.contrast(knob, track), 3.0)
+        self.assertGreaterEqual(generate.contrast(track, palette["pane"]), 3.0)
+
+    def test_selected_row_kebab_ink_clears_3_to_1(self):
+        # 2. "Dismiss trace" on a selected row: the Mac draws the kebab in
+        # GlassGround.selection.controlInk, textOnAccent, on selection.
+        for ink, ground in ((self.swift_flat_light("textOnAccent"), self.swift_flat_light("selection")),
+                            (self.map_art_light("textOnAccent"), self.map_art_light("selection"))):
+            self.assertEqual(ground[1], 1.0)
+            self.assertGreaterEqual(generate.contrast(ink[0], ground[0]), 3.0)
+
+    def test_this_computer_glyph_clears_3_to_1(self):
+        # 3. "This computer" on the map: statusOff, its laptop's lid drawn
+        # at 0.85 (FlowMapView.swift drawLaptop, TracesMapView.DrawLaptop),
+        # the glyph's main shape.
+        for hex_, alpha in (self.swift_flat_light("statusOff"), self.map_art_light("statusOff")):
+            for coverage in (1.0, 0.85):
+                with self.subTest(hex=hex_, coverage=coverage):
+                    drawn = generate.opaque_over({"hex": hex_, "alpha": alpha * coverage}, self.MAP_GROUND)
+                    self.assertGreaterEqual(generate.contrast(drawn, self.MAP_GROUND), 3.0)
+
+    def test_ask_folder_node_clears_4_5_to_1(self):
+        # 4. An Ask folder on the map: its ring in statusAsk (FlowMapView
+        # rule(.ask), MapGeometry.Rule). Held at the text floor the audit
+        # applied, so statusAsk also reads as text wherever it is drawn so.
+        for hex_, alpha in (self.swift_flat_light("statusAsk"), self.map_art_light("statusAsk")):
+            with self.subTest(hex=hex_):
+                self.assertEqual(alpha, 1.0)
+                self.assertGreaterEqual(generate.contrast(hex_, self.MAP_GROUND), 4.5)
 
 
 if __name__ == '__main__':

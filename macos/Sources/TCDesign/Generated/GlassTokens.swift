@@ -51,9 +51,9 @@ public enum GlassTokens {
         /// Watching, share automatically, automatic, always on. Glyph and label only.
         public static var statusOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }
         /// Ask, worth a second look.
-        public static var statusAsk: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1)), flat: GlassRGBA(0xFFC75C, alpha: 1, light: GlassRGBA(0xA8690F, alpha: 1))) }
+        public static var statusAsk: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x9C610E, alpha: 1)), flat: GlassRGBA(0xFFC75C, alpha: 1, light: GlassRGBA(0x9C610E, alpha: 1))) }
         /// Never, not used. Never for text.
-        public static let statusOff: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x8A8A90, alpha: 1))
+        public static let statusOff: GlassRGBA = GlassRGBA(0xA9A9B0, alpha: 1, light: GlassRGBA(0x78787F, alpha: 1))
         /// Leaves for an outside model, no proof.
         public static let statusOutside: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xD0342C, alpha: 1))
         /// statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.
@@ -164,7 +164,7 @@ public enum GlassTokens {
         /// The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].
         public static var controlSelectedFloating: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0xFFFFFF, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x0558B6, alpha: 1))) }
         public static var toggleOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x0558B6, alpha: 1))) }
-        public static var toggleOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.38, light: GlassRGBA(0x000000, alpha: 0.24))) }
+        public static var toggleOff: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16)), flat: GlassRGBA(0xFFFFFF, alpha: 0.38, light: GlassRGBA(0x000000, alpha: 0.43))) }
         public static var toggleOnSettings: GlassRGBA { GlassTheme.pick(GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1)), flat: GlassRGBA(0x7EBCFF, alpha: 1, light: GlassRGBA(0x0558B6, alpha: 1))) }
         /// The watch switch's track when on: statusOn in both appearances, as #1146's --tc-watch-on is var(--tc-status-on). The knob is white on it, as #1146 draws it, with switchKnobEdge inside it.
         public static var watchOn: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1)), flat: GlassRGBA(0x30D158, alpha: 1, light: GlassRGBA(0x1A8F4C, alpha: 1))) }

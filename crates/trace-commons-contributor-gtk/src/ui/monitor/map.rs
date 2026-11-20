@@ -3774,9 +3774,9 @@ mod tests {
     /// Every word the map draws (`Word::ALL`, the only colours its text
     /// calls take) is opaque and clears 4.5:1 on every ground it is drawn
     /// on, in the standard look light and dark and in every Omarchy
-    /// palette. The Mac's statusOff sublabel (#8a8a90) measured 3.43:1 on
-    /// white and 3.09:1 on the light pane, and its dark tertiary text is
-    /// translucent (0.84).
+    /// palette. The Mac's statusOff sublabel (#78787f since 2026-11-20, was
+    /// #8a8a90) measures 4.38:1 on white and 3.95:1 on the light pane, and
+    /// its dark tertiary text is translucent (0.84).
     #[test]
     fn the_map_secondary_labels_clear_the_text_floor() {
         let mut failures = Vec::new();
@@ -3831,7 +3831,7 @@ mod tests {
         let light = MapColours::resolve(false, &Inks::standard(false));
         assert_ne!(
             light.sublabel,
-            parse("#8a8a90"),
+            MapColours::scheme(false).status_off,
             "the sublabel was not raised"
         );
         let (_, _, _, grounds) = every_look().remove(0);
@@ -4414,7 +4414,7 @@ mod tests {
 
     /// A node's words are in the Mac's text colours, not the theme's ink
     /// (`FlowMapView.drawNode`): its name in the primary text colour, its
-    /// sublabel in statusOff's text twin (#8a8a90 raised to the 4.5:1
+    /// sublabel in statusOff's text twin (#78787f raised to the 4.5:1
     /// floor, `the_standard_map_is_the_macs_raised_only_to_the_floor`),
     /// both faded with the node; a "+N" in the tertiary text colour.
     #[test]
@@ -4435,7 +4435,7 @@ mod tests {
         let (label, sublabel) = node_word_colours(&node, &palette);
         assert_eq!(label, parse("#1d1d1f").with_alpha(0.5));
         assert_eq!(sublabel, palette.map.sublabel.with_alpha(0.5));
-        assert_ne!(palette.map.sublabel, parse("#8a8a90"));
+        assert_ne!(palette.map.sublabel, parse("#78787f"));
         assert_eq!(overflow_colour(&palette), parse("#3d3d43"));
         let dark = Palette {
             map: MapColours::resolve(true, &crate::ui::style::Inks::standard(true)),

@@ -565,7 +565,7 @@ internal sealed class TracesTreeView : UserControl
         // The row menu: Ignore (TracesViews.swift:627-633, :856-878).
         if (group is not null && !off && folder.Mode is not null && folder.OfferableModes.Contains(MapModes.Ignore))
         {
-            var kebab = Kebab(_words["folder_menu"]);
+            var kebab = Kebab(_words["folder_menu"], selected);
             var menu = new MenuFlyout();
             var ignore = new MenuFlyoutItem { Text = _words["ignore_folder"] };
             ignore.Click += (_, _) => _host.IgnoreFolder(group);
@@ -670,7 +670,7 @@ internal sealed class TracesTreeView : UserControl
         // The row menu: Dismiss trace, which asks first (TracesViews.swift:826-842, :890-922).
         if (live is not null)
         {
-            var kebab = Kebab(_words["dismiss_session"]);
+            var kebab = Kebab(_words["dismiss_session"], selected);
             var menu = new MenuFlyout();
             var dismiss = new MenuFlyoutItem { Text = _words["dismiss_session"] };
             dismiss.Click += (_, _) => _host.DismissTrace(live);
@@ -688,11 +688,17 @@ internal sealed class TracesTreeView : UserControl
         return row;
     }
 
-    private Button Kebab(string name)
+    private Button Kebab(string name, bool selected)
     {
+        var glyph = new FontIcon { Glyph = "", FontSize = 12 };
+        if (TracesTreeRows.KebabInk(selected) is { } ink)
+        {
+            glyph.Foreground = Brush(ink);
+        }
+
         var kebab = new Button
         {
-            Content = new FontIcon { Glyph = "", FontSize = 12 },
+            Content = glyph,
             Padding = new Thickness(0),
             Width = 22,
             Height = 22,

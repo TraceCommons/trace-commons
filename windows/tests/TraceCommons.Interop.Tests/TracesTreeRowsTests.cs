@@ -462,6 +462,23 @@ public class TracesTreeRowsTests
         Assert.Null(state.Menu);
     }
 
+    [Fact]
+    public void ASelectedRowsKebabTakesTheRowsInk()
+    {
+        // Controls.swift GlassKebab.ink: on a selected row, the row's own
+        // ink (GlassGround.selection.controlInk, textOnAccent). Without it
+        // the Windows glyph drew in the button's dark ink on the selection,
+        // 2.72:1 measured (owner, 2026-11-20: "Raise to pass, both apps").
+        Assert.Equal("textOnAccent", TracesTreeRows.KebabInk(selected: true));
+        Assert.Null(TracesTreeRows.KebabInk(selected: false));
+        static string Opaque(MapRgba c) => $"#FF{c.R:X2}{c.G:X2}{c.B:X2}";
+        foreach (IReadOnlyDictionary<string, MapRgba> inks in new[] { MapArt.Light, MapArt.Dark })
+        {
+            Assert.Equal(1.0, inks["selection"].A);
+            Assert.True(GlassTokensTests.Contrast(Opaque(inks["textOnAccent"]), Opaque(inks["selection"])) >= 3.0);
+        }
+    }
+
     private static MapEntry Entry(string id) => new(id, "codex", null, "p", "P", null, null);
 }
 
