@@ -50,7 +50,8 @@
             clicked is one of the quieter things that makes a preview
             trustworthy.
         -->
-        <StackPanel Grid.Row="0"
+        <StackPanel x:Name="SheetHeader"
+                    Grid.Row="0"
                     Spacing="8"
                     Padding="20,14"
                     Background="{ThemeResource TcSurfaceCardBrush}"
@@ -113,7 +114,8 @@
             the four carry a count, so a contributor can see there is
             something to look at before clicking the tab.
         -->
-        <StackPanel Grid.Row="1"
+        <StackPanel x:Name="SheetTabs"
+                    Grid.Row="1"
                     Orientation="Horizontal"
                     Spacing="4"
                     Padding="20,10,20,0"
@@ -653,10 +655,11 @@
             in the product.
         -->
         <!--
-            At most half the sheet, scrolling inside itself beyond that: on a
-            short window the footer used to run off the bottom, and Tab
-            reached Not this one and Close where nothing could be seen (box
-            tab walk, 2026-11-19, a 754 by 512 window).
+            At most half the sheet, and never more than the room the rows
+            above leave, scrolling inside itself beyond that: on a short
+            window the footer used to run off the bottom, and Tab reached Not
+            this one and Close where nothing could be seen (box tab walk,
+            2026-11-19, a 754 by 512 window).
         -->
         <ScrollViewer x:Name="FooterScroller"
                       Grid.Row="3"

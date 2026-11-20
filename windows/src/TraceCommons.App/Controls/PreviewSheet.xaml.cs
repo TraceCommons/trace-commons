@@ -66,7 +66,20 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
 
         Loaded += OnFirstLoaded;
-        SizeChanged += (_, e) => FooterScroller.MaxHeight = Math.Max(FooterFloor, e.NewSize.Height / 2);
+        SizeChanged += (_, _) => FitFooter();
+        SheetHeader.SizeChanged += (_, _) => FitFooter();
+        SheetTabs.SizeChanged += (_, _) => FitFooter();
+    }
+
+    /// <summary>
+    /// The footer's most height: half the sheet, and no more than what the
+    /// header rows leave, so its own scrolling keeps a focused control on
+    /// screen rather than past the window's edge.
+    /// </summary>
+    private void FitFooter()
+    {
+        double left = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight;
+        FooterScroller.MaxHeight = Math.Max(FooterFloor, Math.Min(ActualHeight / 2, left));
     }
 
     /// <summary>The footer's least height: the action row and a line above it.</summary>
