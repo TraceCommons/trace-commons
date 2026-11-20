@@ -1,0 +1,15 @@
+# The edge rail: Settings' switch on (sample state only), open by a click
+# on its zone, measured open, then the switch back off.
+animations on
+launch normalDay {throttle}
+size 1020 725
+key BC ctrl
+window newest
+toggle Show the edge rail
+sleep 1500
+window main
+measure rail-closed 1
+rail-open
+snap rail
+measure rail-open 1
+quit

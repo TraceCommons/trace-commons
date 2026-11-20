@@ -149,6 +149,7 @@ public sealed partial class MainWindow
         ToolbarCapsule.SizeChanged += (_, _) => UpdateTitleBarRegions();
         AppWindow.Changed += OnAppWindowChanged;
         _clockGate.Changed += OnClocksChanged;
+        WindowClocks.FollowFocus(this);
         InitArmingMotion();
 
         ViewModel.PropertyChanged += OnShellViewModelChanged;
@@ -627,8 +628,16 @@ public sealed partial class MainWindow
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _moveFramePace = new(WindowClocks.Windows);
+
     private void OnMoveFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_moveFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         if (_moveRun is not PaneMoveRun run)
         {
             StopMoveTicks();

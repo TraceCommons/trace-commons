@@ -1044,8 +1044,16 @@ public sealed class InsightsSkillsView : UserControl
             _block.Text = _format(_to);
         }
 
+        private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
+
         private void OnFrame(object? sender, object e)
         {
+            // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+            if (_framePace.Skips(_block.XamlRoot, GlassClock.Now))
+            {
+                return;
+            }
+
             double seconds = (DateTime.UtcNow - _start).TotalSeconds;
             if (seconds >= SkillsHomeMotion.SnappySettling || !WindowClocks.Running)
             {

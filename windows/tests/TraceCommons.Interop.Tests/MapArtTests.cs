@@ -65,12 +65,12 @@ public class MapArtTests
         }
 
         Near(mac[seconds.Length].GetDouble(), LibraryStation.Angle(5, true));
-        // LibraryStation.swift:33-39, LibraryOrb.swift:24-36.
+        // LibraryStation.swift:33-39 (15 a second since #2268), LibraryOrb.swift:24-36.
         Assert.Equal(26, LibraryStation.TurnSeconds);
-        Assert.Equal(1.0 / 20, LibraryStation.FrameInterval);
+        Assert.Equal(1.0 / 15, LibraryStation.FrameInterval);
         Assert.Equal(18, LibraryOrb.TurnSeconds);
         Assert.Equal(6, LibraryOrb.Meridians);
-        Assert.Equal(1.0 / 20, LibraryOrb.FrameInterval);
+        Assert.Equal(1.0 / 15, LibraryOrb.FrameInterval);
 
         double[] angles = { 0.4, 1.0, 2.5 };
         for (int i = 0; i < angles.Length; i++)
@@ -241,15 +241,23 @@ public class MapArtTests
     }
 
     [Fact]
-    public void TheRestingClockRunsAtThirtyForDashesTwentyForTheLibraryAndNotAtAllOtherwise()
+    public void AtRestTheDashesAndTheLibraryMoveApart()
     {
-        var cases = new[] { (false, true, true, true), (false, false, true, true), (true, true, true, true), (false, false, true, false), (false, true, false, false) };
-        JsonElement mac = MapProbe.Get("resting");
-        for (int i = 0; i < cases.Length; i++)
+        // #2268's restingMotion (FlowMapView.swift): the dashes move while
+        // flows are live and healthy, the library while there is one, and
+        // nothing under Reduce Motion. Each runs on its own clock.
+        var cases = new (bool Reduce, bool Flows, bool Healthy, bool Library, bool Dashes, bool Turns)[]
         {
-            (double interval, bool paused) = MapMotion.Resting(cases[i].Item1, cases[i].Item2, cases[i].Item3, cases[i].Item4);
-            Near(mac[i][0].GetDouble(), interval, $"case {i}");
-            Assert.Equal(mac[i][1].GetDouble() == 1, paused);
+            (false, true, true, true, true, true),
+            (false, false, true, true, false, true),
+            (true, true, true, true, false, false),
+            (false, false, true, false, false, false),
+            (false, true, false, false, false, false),
+            (false, true, true, false, true, false),
+        };
+        foreach (var c in cases)
+        {
+            Assert.Equal((c.Dashes, c.Turns), MapMotion.Resting(c.Reduce, c.Flows, c.Healthy, c.Library));
         }
 
         Assert.False(MapMotion.ClockRuns(true, true, windowVisible: false));
