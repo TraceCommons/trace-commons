@@ -66,6 +66,9 @@ struct FlowMapView: View {
     private var motion: MapTransferRun? { reduceMotion ? nil : transferRun }
 
     var body: some View {
+        #if DEBUG
+        let _ = FlowMapBodies.maps += 1
+        #endif
         GeometryReader { proxy in
             let fit = FlowMapGeometry(size: proxy.size, zoom: zoom, focus: focus, space: scene.space)
             let library = libraryOnMap
@@ -219,6 +222,9 @@ struct FlowMapView: View {
     /// It turns with the map's own timeline (`date`), not one of its own.
     @ViewBuilder
     private func libraryArt(lit: Bool, style: TracesMapStyle, scale: CGFloat, date: Date) -> some View {
+        #if DEBUG
+        let _ = FlowMapBodies.library += 1
+        #endif
         switch style {
         case .launch:
             GlassLibraryStation(lit: lit, date: date)
@@ -267,6 +273,9 @@ struct FlowMapView: View {
     /// The arcs, under everything else; the only part of the map drawn
     /// again on each tick of its timeline.
     private func drawArcs(in context: inout GraphicsContext, fit: FlowMapGeometry, phase: Double) {
+        #if DEBUG
+        FlowMapBodies.arcs += 1
+        #endif
         for arc in scene.arcs {
             var path = Path()
             path.move(to: fit.point(arc.from))
@@ -305,6 +314,9 @@ struct FlowMapView: View {
     /// The nodes and the overflow counts, over the arcs: drawn only when
     /// `stillKey` changes.
     private func drawStill(in context: inout GraphicsContext, fit: FlowMapGeometry) {
+        #if DEBUG
+        FlowMapBodies.still += 1
+        #endif
         for node in scene.nodes {
             drawNode(node, in: &context, fit: fit)
         }
@@ -601,6 +613,9 @@ struct FlowMapView: View {
     }
 
     private func target(_ node: FlowMapScene.Node, fit: FlowMapGeometry) -> some View {
+        #if DEBUG
+        FlowMapBodies.targets += 1
+        #endif
         let side = max(24, (node.radius * 2 + 8) * fit.scale)
         return Button {
             if let onSelectFolder, let projectID = Self.folderID(node.id) { onSelectFolder(projectID) }
@@ -811,3 +826,30 @@ struct FlowMapGeometry: Equatable {
         CGPoint(x: origin.x + p.x * scale, y: origin.y + p.y * scale)
     }
 }
+
+#if DEBUG
+/// What the Traces map drew since the last reset, counted, not timed: a
+/// tick of its timelines should redraw only the arcs and the library, and
+/// a change to the scene the map once (`FlowMapRedrawTests`).
+@MainActor
+enum FlowMapBodies {
+    /// `FlowMapView.body` passes.
+    static var maps = 0
+    /// Arcs canvas draws, one per dash tick.
+    static var arcs = 0
+    /// Library frames, one per library tick.
+    static var library = 0
+    /// Still layer draws: nodes, names and logos.
+    static var still = 0
+    /// Node controls built.
+    static var targets = 0
+
+    static func reset() {
+        maps = 0
+        arcs = 0
+        library = 0
+        still = 0
+        targets = 0
+    }
+}
+#endif
