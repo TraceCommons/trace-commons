@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import simd
@@ -35,8 +36,10 @@ public struct GlassLibraryStation: View {
     /// The angle the station rests at, and starts from.
     static let restAngle: Double = 0.6
     /// The station's own frame rate: one turn in 26 seconds moves the
-    /// solar arrays' tips about a point a frame at 20 frames a second.
-    public static let frameInterval: Double = 1 / 20
+    /// solar arrays' tips about a point and a third a frame at 15 frames a
+    /// second. Each frame rebuilds, sorts and fills the whole mesh, so this
+    /// rate is most of what the Traces map costs while it is on screen.
+    public static let frameInterval: Double = 1 / 15
 
     public var body: some View {
         Group {
@@ -48,7 +51,9 @@ public struct GlassLibraryStation: View {
                 }
             }
         }
-        .shadow(color: Self.brandBlue.opacity(Self.glow(lit: lit)), radius: 6)
+        // The glow is drawn once per size from the ring, never per frame:
+        // a shadow on the turning mesh was blurred again on every frame.
+        .background { GlassLibraryStationGlow(lit: lit) }
         .accessibilityHidden(true)
     }
 
@@ -85,6 +90,10 @@ public struct GlassLibraryStation: View {
     static let brandBlue = GlassTokens.Gradient.heroCampaign.stops.last?.color.color ?? GlassTokens.Color.blue.color
 
     static let mesh: [Face] = build()
+
+    /// The ring's radius and its tube's, in mesh units.
+    static let ringRadius = 36.0
+    static let ringTube = 3.6
 
     /// The mark's outline from the brand kit path (`GlassBrandMark`),
     /// curves flattened, centred, scaled to `height` units and turned y-up.
@@ -182,7 +191,7 @@ public struct GlassLibraryStation: View {
 
         // The ring: a torus round the mark, in the same plane; metal with a
         // little of the brand blue in it.
-        let ringRadius = 36.0, tube = 3.6, around = 40, across = 8
+        let ringRadius = Self.ringRadius, tube = Self.ringTube, around = 40, across = 8
         func torus(_ u: Int, _ v: Int) -> SIMD3<Double> {
             let a = Double(u) / Double(around) * 2 * .pi, b = Double(v) / Double(across) * 2 * .pi
             let r = ringRadius + tube * cos(b)
@@ -246,64 +255,213 @@ public struct GlassLibraryStation: View {
         return SIMD3(x * cz - y2 * sz, x * sz + y2 * cz, z2)
     }
 
-    static func draw(in context: inout GraphicsContext, size: CGSize, angle: Double) {
+    /// A turned point of the mesh on a frame of `size`, in perspective.
+    static func project(_ q: SIMD3<Double>, size: CGSize) -> CGPoint {
         let scale = min(Double(size.width) / 140, Double(size.height) / 120)
-        func project(_ q: SIMD3<Double>) -> CGPoint {
-            let s = scale * cameraDistance / (cameraDistance - q.z)
-            return CGPoint(x: Double(size.width) / 2 + q.x * s, y: Double(size.height) / 2 - q.y * s)
+        let s = scale * cameraDistance / (cameraDistance - q.z)
+        return CGPoint(x: Double(size.width) / 2 + q.x * s, y: Double(size.height) / 2 - q.y * s)
+    }
+
+    /// The ring's outline on a frame of `size`: its outer and inner edges,
+    /// to fill even-odd. The ring lies in the plane the station turns in,
+    /// so its outline is the same at every angle of the turn, and the glow
+    /// drawn from it can be drawn once.
+    static func ringOutline(size: CGSize) -> Path {
+        var path = Path()
+        let steps = 96
+        for radius in [ringRadius + ringTube, ringRadius - ringTube] {
+            for step in 0 ... steps {
+                let a = Double(step) / Double(steps) * 2 * .pi
+                let point = project(turned(SIMD3(radius * cos(a), 0, radius * sin(a)), angle: 0), size: size)
+                if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            path.closeSubpath()
         }
-        struct Drawn {
-            let points: [SIMD3<Double>]
-            let color: SIMD3<Double>
-            let shade: Double
-            let spec: Double
-            var depth: Double
-            let cap: Bool
-        }
-        var drawn: [Drawn] = []
-        drawn.reserveCapacity(mesh.count)
-        var markNear = -Double.infinity, markFar = Double.infinity
-        let cy = cos(angle), sy = sin(angle)
+        return path
+    }
+
+    /// The mesh as shared corners and the faces that index them, so a
+    /// frame turns and projects each corner once rather than once per face
+    /// that meets there (each of the ring's corners is shared by four).
+    struct IndexedMesh {
+        /// Every distinct corner of the mesh.
+        let vertices: [SIMD3<Double>]
+        /// Face `f`'s corners are `corners[starts[f] ..< starts[f + 1]]`,
+        /// indices into `vertices`, in the face's own order.
+        let starts: [Int]
+        let corners: [Int]
+        let faces: [Face]
+    }
+
+    static let indexed: IndexedMesh = index(mesh)
+
+    static func index(_ mesh: [Face]) -> IndexedMesh {
+        var lookup: [SIMD3<Double>: Int] = [:]
+        var vertices: [SIMD3<Double>] = []
+        var starts: [Int] = [0]
+        var corners: [Int] = []
         for face in mesh {
-            let q = face.points.map { turned($0, cy: cy, sy: sy) }
-            guard q.count >= 3 else { continue }
-            var n = simd_cross(q[1] - q[0], q[2] - q[0])
+            for point in face.points {
+                if let known = lookup[point] {
+                    corners.append(known)
+                } else {
+                    lookup[point] = vertices.count
+                    corners.append(vertices.count)
+                    vertices.append(point)
+                }
+            }
+            starts.append(corners.count)
+        }
+        return IndexedMesh(vertices: vertices, starts: starts, corners: corners, faces: mesh)
+    }
+
+    /// One frame of the station. Each corner is turned and projected once,
+    /// and the faces are put in order by index rather than moved, so a
+    /// frame allocates a handful of arrays, not one per face. The faces,
+    /// their order and their colours are what drawing face by face gave.
+    static func draw(in context: inout GraphicsContext, size: CGSize, angle: Double) {
+        let mesh = indexed
+        let count = mesh.faces.count
+        let cy = cos(angle), sy = sin(angle)
+        let turnedPoints = mesh.vertices.map { turned($0, cy: cy, sy: sy) }
+        let projected = turnedPoints.map { project($0, size: size) }
+
+        var depth = [Double](repeating: 0, count: count)
+        var shade = [Double](repeating: 0, count: count)
+        var spec = [Double](repeating: 0, count: count)
+        var order: [Int] = []
+        order.reserveCapacity(count)
+        var markNear = -Double.infinity, markFar = Double.infinity
+        for f in 0 ..< count {
+            let range = mesh.starts[f] ..< mesh.starts[f + 1]
+            guard range.count >= 3 else { continue }
+            let q0 = turnedPoints[mesh.corners[range.lowerBound]]
+            let q1 = turnedPoints[mesh.corners[range.lowerBound + 1]]
+            let q2 = turnedPoints[mesh.corners[range.lowerBound + 2]]
+            var n = simd_cross(q1 - q0, q2 - q0)
             let length = simd_length(n)
             n = length > 0 ? n / length : SIMD3(0, 0, 1)
             // Two-sided: light the side that faces the viewer.
             if n.z < 0 { n = -n }
             let lambert = max(0, simd_dot(n, light))
-            let spec = pow(max(0, n.z * 0.5 + lambert * 0.5), 18) * 0.35
-            let depth = q.reduce(0) { $0 + $1.z } / Double(q.count)
-            if face.mark {
-                for p in q {
-                    markNear = max(markNear, p.z)
-                    markFar = min(markFar, p.z)
+            spec[f] = pow(max(0, n.z * 0.5 + lambert * 0.5), 18) * 0.35
+            shade[f] = 0.3 + 0.7 * lambert
+            var sum = 0.0
+            for corner in range {
+                let z = turnedPoints[mesh.corners[corner]].z
+                sum += z
+                if mesh.faces[f].mark {
+                    markNear = max(markNear, z)
+                    markFar = min(markFar, z)
                 }
             }
-            drawn.append(Drawn(points: q, color: face.color, shade: 0.3 + 0.7 * lambert, spec: spec, depth: depth, cap: face.markCap))
+            depth[f] = sum / Double(range.count)
+            order.append(f)
         }
         // The mark's face toward the viewer is drawn over its own wall, the
         // other under it.
         let markMiddle = (markNear + markFar) / 2
-        for index in drawn.indices where drawn[index].cap {
-            drawn[index].depth = drawn[index].depth > markMiddle ? markNear + 0.01 : markFar - 0.01
+        for f in order where mesh.faces[f].markCap {
+            depth[f] = depth[f] > markMiddle ? markNear + 0.01 : markFar - 0.01
         }
-        drawn.sort { $0.depth < $1.depth }
+        // Far to near; equal depths keep the mesh's order, as a stable sort
+        // of the faces themselves did.
+        order.sort { depth[$0] != depth[$1] ? depth[$0] < depth[$1] : $0 < $1 }
 
-        for face in drawn {
+        for f in order {
             var path = Path()
-            for (index, point) in face.points.enumerated() {
-                let s = project(point)
-                if index == 0 { path.move(to: s) } else { path.addLine(to: s) }
+            let range = mesh.starts[f] ..< mesh.starts[f + 1]
+            path.move(to: projected[mesh.corners[range.lowerBound]])
+            for corner in range.dropFirst() {
+                path.addLine(to: projected[mesh.corners[corner]])
             }
             path.closeSubpath()
-            let shaded: SIMD3<Double> = face.color * face.shade + SIMD3<Double>(repeating: face.spec)
-            let c: SIMD3<Double> = shaded
+            let c: SIMD3<Double> = mesh.faces[f].color * shade[f] + SIMD3<Double>(repeating: spec[f])
             let color = Color(red: min(1, c.x), green: min(1, c.y), blue: min(1, c.z))
             context.fill(path, with: .color(color))
             // The same colour round the edge closes the seams between faces.
             context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 0.6, lineJoin: .round))
         }
+    }
+}
+
+/// The station's glow: a soft brand-blue light round its ring, drawn into
+/// an image once per size, scale and strength and then shown as that
+/// image. It used to be a shadow on the turning mesh, which made the
+/// window blur the whole station again on every frame.
+struct GlassLibraryStationGlow: View {
+    let lit: Bool
+    @Environment(\.displayScale) private var displayScale
+
+    /// How far the glow reaches past the ring, in points: the old
+    /// shadow's radius.
+    static let radius: CGFloat = 6
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let image = Self.image(size: proxy.size, scale: displayScale, lit: lit) {
+                Image(decorative: image, scale: displayScale)
+                    .frame(width: proxy.size.width + Self.margin * 2, height: proxy.size.height + Self.margin * 2)
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+
+    /// Room round the frame for the blur to fade out in.
+    static let margin: CGFloat = radius * 3
+
+    struct Key: Hashable {
+        let width: CGFloat
+        let height: CGFloat
+        let scale: CGFloat
+        let lit: Bool
+    }
+
+    @MainActor private static var cache: [Key: CGImage] = [:]
+
+    /// The glow for a station frame of `size`, with `margin` points of room
+    /// on each side; nil for an empty frame.
+    @MainActor
+    static func image(size: CGSize, scale: CGFloat, lit: Bool) -> CGImage? {
+        guard size.width > 0, size.height > 0, scale > 0 else { return nil }
+        let key = Key(width: size.width, height: size.height, scale: scale, lit: lit)
+        if let cached = cache[key] { return cached }
+        guard let image = render(size: size, scale: scale, lit: lit) else { return nil }
+        // A window resized by hand passes through many sizes; keep the
+        // cache small rather than one image per size it ever had.
+        if cache.count > 16 { cache.removeAll() }
+        cache[key] = image
+        return image
+    }
+
+    static func render(size: CGSize, scale: CGFloat, lit: Bool) -> CGImage? {
+        let width = Int(((size.width + margin * 2) * scale).rounded(.up))
+        let height = Int(((size.height + margin * 2) * scale).rounded(.up))
+        guard width > 0, height > 0,
+              let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        // Top-left origin in points, as SwiftUI draws.
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: margin, y: margin)
+
+        // Only the shadow is wanted: the ring is filled far off the image
+        // and its shadow cast back onto it. A shadow's offset and blur are
+        // in device pixels, whatever the transform. SwiftUI's shadow radius
+        // is about half Core Graphics' blur.
+        let away: CGFloat = (size.width + margin * 2) * 4
+        let colour = NSColor(GlassLibraryStation.brandBlue)
+            .withAlphaComponent(GlassLibraryStation.glow(lit: lit)).cgColor
+        context.setShadow(offset: CGSize(width: away * scale, height: 0), blur: radius * 2 * scale, color: colour)
+        context.translateBy(x: -away, y: 0)
+        context.addPath(GlassLibraryStation.ringOutline(size: size).cgPath)
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fillPath(using: .evenOdd)
+        return context.makeImage()
     }
 }
