@@ -3,7 +3,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using Windows.Storage.Pickers;
@@ -30,17 +29,12 @@ public sealed partial class InsightsView : UserControl, IDisposable
         _window = window;
         DataContext = ViewModel;
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
-        _segments[InsightsViewModel.OverviewTab] = Segment0;
-        _segments[InsightsViewModel.PatternsTab] = Segment1;
-        _segments[InsightsViewModel.BenchmarksTab] = Segment2;
-        _segments[InsightsViewModel.SessionsTab] = Segment3;
-        _segments[InsightsViewModel.AnalyzeTab] = Segment4;
+        TabBar.Pressed += OnTabPressed;
         _pages[InsightsViewModel.OverviewTab] = Page0;
         _pages[InsightsViewModel.PatternsTab] = Page1;
         _pages[InsightsViewModel.BenchmarksTab] = Page2;
         _pages[InsightsViewModel.SessionsTab] = Page3;
         _pages[InsightsViewModel.AnalyzeTab] = Page4;
-        LayOutSegments();
         ShowPage(InsightsViewModel.OverviewTab);
     }
     public async Task ActivateAsync()
@@ -66,15 +60,10 @@ public sealed partial class InsightsView : UserControl, IDisposable
         if (enabled && _skills is null)
         {
             _skills = new InsightsSkillsView(ViewModel.Skills, () => SkillsSettingsRequested?.Invoke(this, EventArgs.Empty)) { Visibility = Visibility.Collapsed };
-            var segment = new MonitorTabButton { Style = (Style)TabBar.Resources["InsightsSegmentStyle"], Content = ViewModel.Skills.Text("skills_title") };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(segment, "insights-tab-skills");
-            segment.Click += OnSegment;
             _ = ViewModel.SetSkillsEnabled(true);
-            TabBar.Children.Add(segment);
+            TabBar.AddSkills(ViewModel.Skills.Text("skills_title"));
             Pages.Children.Add(_skills);
-            _segments[InsightsViewModel.SkillsTab] = segment;
             _pages[InsightsViewModel.SkillsTab] = _skills;
-            LayOutSegments();
             ShowPage(_tab);
         }
         else if (!enabled && _skills is not null)
@@ -84,11 +73,9 @@ public sealed partial class InsightsView : UserControl, IDisposable
             _skills = null;
             view.Close();
             _ = ViewModel.SetSkillsEnabled(false);
-            TabBar.Children.Remove(_segments[InsightsViewModel.SkillsTab]);
+            TabBar.RemoveSkills();
             Pages.Children.Remove(view);
-            _segments.Remove(InsightsViewModel.SkillsTab);
             _pages.Remove(InsightsViewModel.SkillsTab);
-            LayOutSegments();
             if (shown)
             {
                 ShowPage(InsightsViewModel.OverviewTab);
@@ -100,34 +87,15 @@ public sealed partial class InsightsView : UserControl, IDisposable
     // control is built, before then, and that read would present with no
     // words; ActivateAsync reads the tab on screen instead.
     private bool _activated;
-    private readonly System.Collections.Generic.Dictionary<int, ToggleButton> _segments = new();
     private readonly System.Collections.Generic.Dictionary<int, FrameworkElement> _pages = new();
     private int _tab = InsightsViewModel.OverviewTab;
-    // A segment shows its page. Pressing the one already shown keeps it
-    // checked: exactly one tab is always the selected one, as on the Mac
-    // (Navigation.swift:101-104 sets the selection, never clears it).
-    private async void OnSegment(object sender, RoutedEventArgs args)
+    // A tab shows its page; the tabs read their figures when shown, and
+    // Analyze reads nothing new.
+    private async void OnTabPressed(int tab)
     {
-        int tab = _segments.FirstOrDefault(pair => ReferenceEquals(pair.Value, sender), new(-1, null!)).Key;
-        if (tab < 0) return;
         bool changed = tab != _tab;
         ShowPage(tab);
-        // The tabs read their figures when shown; Analyze reads nothing new.
         if (changed && !_closed && _activated) await ViewModel.SelectTabAsync(_tab);
-    }
-    // The segments in the order on screen (ShownTabs), each an equal share
-    // of the track, as the Mac's fill it (Navigation.swift:115).
-    private void LayOutSegments()
-    {
-        var order = InsightsViewModel.ShownTabs(_skills is not null);
-        TabBar.ColumnDefinitions.Clear();
-        int column = 0;
-        foreach (int tab in order)
-        {
-            if (!_segments.TryGetValue(tab, out ToggleButton? segment)) continue;
-            TabBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            Grid.SetColumn(segment, column++);
-        }
     }
     private void ShowPage(int tab)
     {
@@ -136,14 +104,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
         {
             page.Visibility = id == tab ? Visibility.Visible : Visibility.Collapsed;
         }
-        foreach ((int id, ToggleButton segment) in _segments)
-        {
-            bool shown = id == tab;
-            segment.IsChecked = shown;
-            // The Mac's label weight: semibold selected, medium otherwise
-            // (Navigation.swift:109).
-            segment.FontWeight = shown ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Medium;
-        }
+        TabBar.Show(tab);
     }
     // A week picker's own index follows the model; only a choice the model
     // is not already showing reads again.

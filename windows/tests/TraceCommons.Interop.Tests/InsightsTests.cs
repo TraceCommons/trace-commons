@@ -597,14 +597,17 @@ public sealed class InsightsAnalyticsTests
     {
         string xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.txt"));
         string code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.cs.txt"));
-        int overview = xaml.IndexOf("Content=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
-        int patterns = xaml.IndexOf("Content=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
-        int benchmarks = xaml.IndexOf("Content=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
-        int sessions = xaml.IndexOf("Content=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
-        int analyze = xaml.IndexOf("Content=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
+        // The tabs are InsightsTabBar's; the pages stay in the view.
+        string tabs = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsTabBar.xaml.txt"));
+        Assert.Contains("<local:InsightsTabBar x:Name=\"TabBar\"", xaml);
+        int overview = tabs.IndexOf("Content=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
+        int patterns = tabs.IndexOf("Content=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
+        int benchmarks = tabs.IndexOf("Content=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
+        int sessions = tabs.IndexOf("Content=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
+        int analyze = tabs.IndexOf("Content=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
         // The Mac's Overview, Breakdown, Benchmarks (InsightsView.swift:162), then this app's own two.
         Assert.True(overview >= 0 && overview < patterns && patterns < benchmarks && benchmarks < sessions && sessions < analyze);
-        Assert.DoesNotContain("analytics_tab_spend", xaml);
+        Assert.DoesNotContain("analytics_tab_spend", xaml + tabs);
         Assert.DoesNotContain("analytics_later", xaml);
         // One spinner, Benchmarks' while it reads (InsightsBenchmarksTab.swift:270
         // GlassSpinner): inside the third page, before the fourth.
