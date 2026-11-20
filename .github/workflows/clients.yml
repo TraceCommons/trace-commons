@@ -836,8 +836,13 @@ jobs:
           $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
           $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
           $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
-          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/s4:AutomaticBackgroundTask', $ns)) {
+          # AutomaticBackgroundTask is in the 2017/2 namespace. Written in
+          # 2021, Windows refuses the whole feed (0x8008020C).
+          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/a:AutomaticBackgroundTask', $ns)) {
             throw "the feed lost its background update task"
+          }
+          if ($feed.SelectSingleNode('//s4:AutomaticBackgroundTask', $ns)) {
+            throw "AutomaticBackgroundTask is in the 2021 namespace, where Windows rejects the feed"
           }
           if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
             throw "the feed allows downgrades, which this project forbids"

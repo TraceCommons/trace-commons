@@ -2156,6 +2156,37 @@ fn release_notes_open_with_the_app_name() {
     }
 }
 
+/// The `.appinstaller` feed writes `AutomaticBackgroundTask` in the 2017/2
+/// namespace. From #281 until 2026-11-20 it wrote it in the 2021 namespace,
+/// and Windows refused the whole feed: `Add-AppxPackage -AppInstallerFile`
+/// failed with 0x8008020C, "Element '{.../2021}AutomaticBackgroundTask' is
+/// unexpected ... Expecting: {.../2017/2}AutomaticBackgroundTask". The CI
+/// check pinned the same mistake, so both are held here.
+#[test]
+fn appinstaller_feed_writes_the_background_task_in_the_2017_namespace() {
+    let script = read("windows/scripts/make-appinstaller.ps1");
+    let code = executable_text(&script);
+    assert!(
+        code.contains("$writer.WriteStartElement('AutomaticBackgroundTask', $ns2017)"),
+        "make-appinstaller.ps1 must write AutomaticBackgroundTask in the 2017/2 namespace"
+    );
+    assert!(
+        !code.contains("appinstaller/2021"),
+        "make-appinstaller.ps1 writes nothing in the 2021 namespace; Windows \
+         rejects AutomaticBackgroundTask there"
+    );
+
+    let ci = read(".github/workflows/clients.yml");
+    assert!(
+        ci.contains("/a:AppInstaller/a:UpdateSettings/a:AutomaticBackgroundTask"),
+        "clients.yml must look for AutomaticBackgroundTask in the 2017/2 namespace"
+    );
+    assert!(
+        !ci.contains("a:UpdateSettings/s4:AutomaticBackgroundTask"),
+        "clients.yml must not require the 2021 namespace Windows rejects"
+    );
+}
+
 /// `make-msix.ps1` must run under Windows PowerShell 5.1 as well as 7. It
 /// used a three-argument `Join-Path`, which 5.1 rejects before building
 /// anything, and the only thing that ran it was the release job, under pwsh.
