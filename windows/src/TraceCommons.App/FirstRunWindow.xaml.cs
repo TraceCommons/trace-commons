@@ -1488,69 +1488,177 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     // ---- Terms ----------------------------------------------------------------
 
-    /// <summary>TermsReader: the published terms, then Accept once read to the end.</summary>
+    /// <summary>
+    /// TermsReader (TermsReader.swift:93-240): a 420-wide column whose
+    /// 260-high region holds the document, or the loading or failed state
+    /// with Retry, so the step keeps its place as the document arrives; then
+    /// the not-in-effect line, the checkbox, which unlocks once the end has
+    /// been in view, the scroll hint while it is locked, and the Terms and
+    /// Privacy links (<see cref="TermsReaderLayout"/>).
+    /// </summary>
     private UIElement TermsReader()
     {
         LegalWords legal = Copy.Welcome.Legal;
-        var panel = new StackPanel { Spacing = 8, MaxWidth = 600 };
-        if (_controller.Terms is null)
+        FetchedTerms? terms = _controller.Terms;
+        TermsRegion region = TermsReaderLayout.Region(terms is not null, _termsLabel);
+        bool unlocked = _runner.AcceptedTerms is not null;
+        var column = new StackPanel { Spacing = TermsReaderLayout.Spacing, MaxWidth = TermsReaderLayout.Width, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var box = new Border
         {
-            panel.Children.Add(Text(_termsLabel is null ? legal.Loading : legal.Failed, 14, FirstRunTokens.TextSecondary));
-            return Card(panel, 24, 12);
-        }
-
-        FetchedTerms terms = _controller.Terms;
-        var body = new StackPanel { Spacing = 8 };
-        body.Children.Add(Text(terms.Title, 17, FirstRunTokens.TextPrimary, FontWeights.SemiBold));
-        if (!terms.InEffect)
-        {
-            body.Children.Add(Text(legal.NotInEffect, 13, FirstRunTokens.TextSecondary));
-        }
-
-        foreach (TermsBlock block in terms.Blocks)
-        {
-            switch (block.Kind)
-            {
-                case "heading":
-                    body.Children.Add(new TextBlock { Text = block.Text, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
-                    break;
-                case "list":
-                    foreach (string item in block.Items!)
-                    {
-                        body.Children.Add(new TextBlock { Text = "• " + item, TextWrapping = TextWrapping.Wrap });
-                    }
-
-                    break;
-                case "table":
-                    body.Children.Add(new TextBlock { Text = string.Join(" | ", block.Header!), FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap });
-                    foreach (var row in block.Rows!)
-                    {
-                        body.Children.Add(new TextBlock { Text = string.Join(" | ", row), TextWrapping = TextWrapping.Wrap });
-                    }
-
-                    break;
-                default:
-                    body.Children.Add(new TextBlock { Text = block.Text, TextWrapping = TextWrapping.Wrap });
-                    break;
-            }
-        }
-
-        var scroll = new ScrollViewer { Content = body, Height = 260 };
-        var accept = Key(new CheckBox { Content = legal.Accept, IsEnabled = _runner.AcceptedTerms is not null, IsChecked = _runner.AcceptedTerms is not null }, "accept");
-        AutomationProperties.SetName(accept, legal.Accept);
-        scroll.ViewChanged += (_, _) =>
-        {
-            if (scroll.VerticalOffset >= scroll.ScrollableHeight - 4)
-            {
-                accept.IsEnabled = true;
-            }
+            Height = TermsReaderLayout.Viewport,
+            CornerRadius = new CornerRadius(GlassTokens.Radius.Control),
+            Background = Brush(0x0AFFFFFF),
+            BorderBrush = Brush(FirstRunTokens.FirstRunRule),
+            BorderThickness = new Thickness(1),
         };
-        accept.Checked += (_, _) => { _controller.AcceptTerms(true, DateTimeOffset.UtcNow); Render(); };
-        accept.Unchecked += (_, _) => { _controller.AcceptTerms(false, DateTimeOffset.UtcNow); Render(); };
-        panel.Children.Add(scroll);
-        panel.Children.Add(Text(legal.ScrollHint, 12, FirstRunTokens.TextSecondary));
-        panel.Children.Add(accept);
-        return Card(panel, 24, 12);
+        CheckBox? accept = null;
+        TextBlock? hint = null;
+        ScrollViewer? scroll = null;
+        switch (region)
+        {
+            case TermsRegion.Loading:
+            {
+                var loading = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+                loading.Children.Add(new ProgressRing { IsActive = true, Width = 16, Height = 16 });
+                loading.Children.Add(Text(legal.Loading, 12, FirstRunTokens.TextSecondary));
+                box.Child = loading;
+                break;
+            }
+
+            case TermsRegion.Failed:
+            {
+                var failed = new StackPanel { Spacing = 8, Padding = new Thickness(TermsReaderLayout.DocumentPadding), VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+                failed.Children.Add(Text(legal.Failed, 14, FirstRunTokens.TextSecondary));
+                var retry = new Button { Content = legal.Retry, HorizontalAlignment = HorizontalAlignment.Center };
+                retry.Click += async (_, _) => await RetryTermsAsync();
+                failed.Children.Add(retry);
+                box.Child = failed;
+                break;
+            }
+
+            default:
+            {
+                var body = new StackPanel { Spacing = TermsReaderLayout.BlockSpacing, Padding = new Thickness(TermsReaderLayout.DocumentPadding) };
+                var heading = new TextBlock { Text = terms!.Title, FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = Brush(FirstRunTokens.TextPrimary), TextWrapping = TextWrapping.Wrap };
+                AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level2);
+                body.Children.Add(heading);
+                foreach (TermsBlock block in terms.Blocks)
+                {
+                    switch (block.Kind)
+                    {
+                        case "heading":
+                            body.Children.Add(new TextBlock { Text = block.Text, FontWeight = FontWeights.SemiBold, Foreground = Brush(FirstRunTokens.TextPrimary), TextWrapping = TextWrapping.Wrap });
+                            break;
+                        case "list":
+                            foreach (string item in block.Items!)
+                            {
+                                body.Children.Add(new TextBlock { Text = "\u2022 " + item, Foreground = Brush(FirstRunTokens.TextSecondary), TextWrapping = TextWrapping.Wrap });
+                            }
+
+                            break;
+                        case "table":
+                            body.Children.Add(new TextBlock { Text = string.Join(" | ", block.Header!), FontWeight = FontWeights.SemiBold, Foreground = Brush(FirstRunTokens.TextPrimary), TextWrapping = TextWrapping.Wrap });
+                            foreach (var row in block.Rows!)
+                            {
+                                body.Children.Add(new TextBlock { Text = string.Join(" | ", row), Foreground = Brush(FirstRunTokens.TextSecondary), TextWrapping = TextWrapping.Wrap });
+                            }
+
+                            break;
+                        default:
+                            body.Children.Add(new TextBlock { Text = block.Text, Foreground = Brush(FirstRunTokens.TextSecondary), TextWrapping = TextWrapping.Wrap });
+                            break;
+                    }
+                }
+
+                scroll = new ScrollViewer { Content = body };
+                box.Child = scroll;
+                break;
+            }
+        }
+
+        foreach (TermsReaderPart part in TermsReaderLayout.Parts(region, terms?.InEffect ?? true, unlocked))
+        {
+            switch (part)
+            {
+                case TermsReaderPart.Region:
+                    column.Children.Add(box);
+                    break;
+                case TermsReaderPart.NotInEffect:
+                    column.Children.Add(Text(legal.NotInEffect, 12, FirstRunTokens.TextSecondary));
+                    break;
+                case TermsReaderPart.Accept:
+                    accept = Key(new CheckBox { Content = legal.Accept, IsEnabled = unlocked, IsChecked = _runner.AcceptedTerms is not null, HorizontalAlignment = HorizontalAlignment.Center, Foreground = Brush(FirstRunTokens.TextSecondary) }, "accept");
+                    AutomationProperties.SetName(accept, legal.Accept);
+                    if (!unlocked)
+                    {
+                        AutomationProperties.SetHelpText(accept, legal.ScrollHint);
+                    }
+
+                    accept.Checked += (_, _) => { _controller.AcceptTerms(true, DateTimeOffset.UtcNow); Render(); };
+                    accept.Unchecked += (_, _) => { _controller.AcceptTerms(false, DateTimeOffset.UtcNow); Render(); };
+                    column.Children.Add(accept);
+                    break;
+                case TermsReaderPart.ScrollHint:
+                    hint = Text(legal.ScrollHint, 12, FirstRunTokens.TextSecondary);
+                    hint.Opacity = 0.75;
+                    hint.Margin = new Thickness(0, TermsReaderLayout.HintSpacing - TermsReaderLayout.Spacing, 0, 0);
+                    AutomationProperties.SetAccessibilityView(hint, AccessibilityView.Raw);
+                    column.Children.Add(hint);
+                    break;
+                case TermsReaderPart.Links:
+                    var links = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
+                    foreach ((string label, string url) in new[] { (legal.Terms, legal.TermsUrl), (legal.Privacy, legal.PrivacyUrl) })
+                    {
+                        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? target))
+                        {
+                            links.Children.Add(new HyperlinkButton { Content = label, NavigateUri = target, FontSize = 12, Padding = new Thickness(0) });
+                        }
+                    }
+
+                    column.Children.Add(links);
+                    break;
+            }
+        }
+
+        // Unlocked once the end has been in view, and at once for a document that fits.
+        if (scroll is not null && accept is not null && !unlocked)
+        {
+            void Unlock()
+            {
+                if (scroll.VerticalOffset >= scroll.ScrollableHeight - 4)
+                {
+                    accept.IsEnabled = true;
+                    AutomationProperties.SetHelpText(accept, string.Empty);
+                    if (hint is not null)
+                    {
+                        hint.Visibility = Visibility.Collapsed;
+                    }
+                }
+            }
+
+            scroll.ViewChanged += (_, _) => Unlock();
+            scroll.Loaded += (_, _) => Unlock();
+        }
+
+        return column;
+    }
+
+    /// <summary>The failed region's Retry: fetch the published terms again (TermsReader.swift:155).</summary>
+    private async Task RetryTermsAsync()
+    {
+        _controller.Terms = null;
+        _termsLabel = null;
+        _contentStale = true;
+        Render();
+        var fetched = await Task.Run(FetchedTerms.Fetch).ConfigureAwait(true);
+        _controller.Terms = fetched.Terms;
+        _termsLabel = fetched.Label;
+        if (_runner.State.Step == FirstRunStep.Terms)
+        {
+            _contentStale = true;
+        }
+
+        Render();
     }
 
     // ---- Join -------------------------------------------------------------
