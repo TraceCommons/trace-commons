@@ -265,6 +265,35 @@ fn the_spec_captures_receipts_into_the_managed_route_home() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn the_spec_targets_the_builds_near_ai_environment() {
+    use rts::inference::NearEnvironment;
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-near-env-test");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    let expected = if cfg!(feature = "near-ai-staging") {
+        NearEnvironment::Staging
+    } else {
+        NearEnvironment::Production
+    };
+    assert_eq!(spec.near, expected);
+    assert_eq!(super::near_environment(), expected);
+}
+
+/// rts and the daemon must never disagree about which NEAR AI the key is for:
+/// the environment rts attests and proxies to is the channel's own inference
+/// base, the one the model catalogue is read from.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_near_environment_is_the_channels_inference_base() {
+    assert_eq!(
+        super::near_environment().base_url(),
+        crate::channel::NEAR_AI_INFERENCE_BASE
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn the_tool_command_is_this_executable() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();

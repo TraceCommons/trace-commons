@@ -232,6 +232,19 @@ fn copy_no_symlinks(src: &Path, dst: &Path) -> anyhow::Result<()> {
     .into())
 }
 
+/// The NEAR AI environment rts attests against and proxies to: staging builds
+/// use staging, production builds production, matching the channel's
+/// `NEAR_AI_INFERENCE_BASE` (a test holds the two together). rts defaults to
+/// production, which refuses a staging key.
+#[cfg(target_os = "macos")]
+pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
+    if cfg!(feature = "near-ai-staging") {
+        rts::inference::NearEnvironment::Staging
+    } else {
+        rts::inference::NearEnvironment::Production
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn spec_for(
     store: &ConfigStore,
@@ -315,6 +328,7 @@ pub(crate) fn spec_for(
         tool_command,
         ironwire,
         env,
+        near: near_environment(),
     })
 }
 
