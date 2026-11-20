@@ -17,6 +17,14 @@ namespace TraceCommons.App;
 public sealed partial class MainWindow
 {
     private SentTracesTrainingModel? _sentTraining;
+    private SkillLearningModel? _skillLearning;
+
+    /// <summary>
+    /// The tested-skill flow's one model (W20-D2, taken (a)): per-session
+    /// state the History inspector draws (<c>AppModel.skillLearningStore</c>).
+    /// </summary>
+    private SkillLearningModel SkillLearning =>
+        _skillLearning ??= SkillLearningModel.WithCore((method, parameters) => _host.CallAsync(method, parameters));
 
     /// <summary>The model, made on first use over this window's daemon.</summary>
     private SentTracesTrainingModel SentTraining =>

@@ -70,11 +70,26 @@ public sealed class HistoryDetailInspector : UserControl
     private readonly List<CheckBox> _evidenceBoxes = new();
 
     private readonly SentTracesTrainingModel? _training;
+    private readonly SkillLearningModel? _skills;
 
-    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record, SentTracesTrainingModel? training = null)
+    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record, SentTracesTrainingModel? training = null,
+        SkillLearningModel? skills = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _training = training;
+        _skills = skills;
+        if (skills is not null)
+        {
+            // The skill surfaces come and go as the session's state settles
+            // (an install, a rollback); the panel itself is kept, so a draft
+            // being typed survives the redraw.
+            Loaded += (_, _) =>
+            {
+                skills.SessionChanged -= OnSkillSessionChanged;
+                skills.SessionChanged += OnSkillSessionChanged;
+            };
+            Unloaded += (_, _) => skills.SessionChanged -= OnSkillSessionChanged;
+        }
         Record = record ?? throw new ArgumentNullException(nameof(record));
         Content = new ScrollViewer
         {
@@ -107,8 +122,32 @@ public sealed class HistoryDetailInspector : UserControl
         }
 
         await LoadAsync();
+        EnsureInstalledSkillStatus();
     }
 
+    /// <summary>
+    /// The installed skill is read for a closed record or an unaccepted
+    /// detail (SessionDetailView.swift:35-50); an open, accepted one reads it
+    /// from the learning flow.
+    /// </summary>
+    private void EnsureInstalledSkillStatus()
+    {
+        if (_skills is { } skills
+            && (ContributionGate.IsTerminal(Record.Status) || CurrentDetail?.Accepted == false))
+        {
+            _ = skills.EnsureLocalInstalledSkillStatusAsync(Record.SubmissionId);
+        }
+    }
+
+    private SkillLearningPanel? _skillPanel;
+
+    private void OnSkillSessionChanged(string submissionId)
+    {
+        if (submissionId == Record.SubmissionId)
+        {
+            DispatcherQueue.TryEnqueue(Render);
+        }
+    }
     private ContentControl? _trainingSlot;
 
     /// <summary>Redraws the sent-traces training section in place.</summary>
@@ -128,6 +167,7 @@ public sealed class HistoryDetailInspector : UserControl
     {
         Record = record;
         Render();
+        EnsureInstalledSkillStatus();
     }
 
     /// <summary>
@@ -303,10 +343,19 @@ public sealed class HistoryDetailInspector : UserControl
         _root.Children.Add(_statusSlot);
         RefreshStatus();
 
+        bool withdrawn = ContributionGate.WithdrawalCompleted(Record.Status, Record.WithdrawnHere);
         if (CurrentDetail is { } detail)
         {
             Overview(copy, detail);
-            bool completed = ContributionGate.WithdrawalCompleted(Record.Status, Record.WithdrawnHere);
+            bool completed = withdrawn;
+
+            // Learn, review, test and install, on an active corrected
+            // contribution (SessionDetailView.swift:145-149).
+            if (SkillLearningGate.OffersLearning(detail, Record.Status, completed) && SkillPanel() is { } learning)
+            {
+                _root.Children.Add(learning);
+            }
+
             if (ContributionGate.IsActive(detail, Record.Status, completed))
             {
                 _root.Children.Add(Editor(copy, detail));
@@ -315,6 +364,62 @@ public sealed class HistoryDetailInspector : UserControl
             {
                 _root.Children.Add(Caption(copy["publication_after_acceptance"], "TcInkSecondaryBrush"));
             }
+        }
+
+        InstalledSkillSurface(copy, withdrawn);
+    }
+
+    /// <summary>The skill panel for this record, or null without the core's words or a daemon.</summary>
+    private SkillLearningPanel? SkillPanel()
+    {
+        if (_skills is not { Copy: { } words } skills)
+        {
+            return null;
+        }
+
+        // One panel per record, kept across redraws (the Mac keys its state
+        // by the record, SessionDetailView.swift:113-116).
+        if (_skillPanel is not { } kept || kept.SubmissionId != Record.SubmissionId)
+        {
+            _skillPanel = new SkillLearningPanel(skills, Record.SubmissionId, words);
+        }
+
+        return _skillPanel;
+    }
+
+    /// <summary>
+    /// An installed skill (its rollback) shows outside the learning rule, and
+    /// a failed status read on a closed or unaccepted record offers Retry
+    /// (<c>localInstalledSkillSurface</c>, SessionDetailView.swift:108-133).
+    /// </summary>
+    private void InstalledSkillSurface(PublicRunCopy copy, bool withdrawalCompleted)
+    {
+        if (_skills is not { } skills || !SkillLearningGate.ShowsInstalledSurface(CurrentDetail, withdrawalCompleted))
+        {
+            return;
+        }
+
+        SkillLearningSessionState state = skills.State(Record.SubmissionId);
+        if (state.SkillLearningInstall is not null)
+        {
+            if (SkillPanel() is { } panel)
+            {
+                _root.Children.Add(panel);
+            }
+        }
+        else if (SkillLearningGate.OffersInstallStatusRetry(state, CurrentDetail, Record.Status))
+        {
+            var inner = new StackPanel { Spacing = 8 };
+            Button retry = ActionButton(copy["retry_read"], primary: false);
+            retry.IsEnabled = !state.IsWorking;
+            retry.Click += async (_, _) => await skills.EnsureLocalInstalledSkillStatusAsync(Record.SubmissionId);
+            inner.Children.Add(retry);
+            if (state.Failure is { } message)
+            {
+                inner.Children.Add(Text(message, "TcBodyTextStyle", "TcStatusOutsideTextBrush"));
+            }
+
+            _root.Children.Add(Wrap(inner));
         }
     }
 
