@@ -291,6 +291,14 @@ public sealed partial class TracesMapView : UserControl
             {
                 _readAgain = false;
                 MapSnapshot snapshot = await MapFeed.ReadAsync(_call).ConfigureAwait(true);
+
+                // The same replies as the last read: nothing drawn from them
+                // can differ, so the scene and the rows that follow it stay.
+                if (MapSnapshot.SameRead(_snapshot, snapshot))
+                {
+                    continue;
+                }
+
                 // A row History gained since the last read is a contribution
                 // landing (MapTransferFeed.swift:31-33); the first read finds none.
                 _player.Enqueue(MapTransferDetector.Contributions(_lastHistory, snapshot.History), Now);
