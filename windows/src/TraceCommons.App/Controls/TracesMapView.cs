@@ -1431,16 +1431,36 @@ public sealed partial class TracesMapView : UserControl
         ds.FillRoundedRectangle(display, (float)(2 * s), (float)(2 * s), screen);
     }
 
-    /// <summary>The station's or the orb's drawn frames, per lit state, for the current look.</summary>
-    private readonly LibraryFrameCache<CanvasRenderTarget> _libraryFrames = new();
+    /// <summary>One frame of the library's turn: its art, and its glow drawn at full strength.</summary>
+    private sealed class LibraryFrame : IDisposable
+    {
+        public LibraryFrame(CanvasRenderTarget art, CanvasRenderTarget glow)
+        {
+            Art = art;
+            Glow = glow;
+        }
+
+        public CanvasRenderTarget Art { get; }
+
+        public CanvasRenderTarget Glow { get; }
+
+        public void Dispose()
+        {
+            Art.Dispose();
+            Glow.Dispose();
+        }
+    }
+
+    /// <summary>The station's or the orb's drawn frames for the current look.</summary>
+    private readonly LibraryFrameCache<LibraryFrame> _libraryFrames = new();
 
     /// <summary>
     /// The station or the orb at the library's place (FlowMapView.swift:236-249),
     /// with its glow. Each of its 20-a-second frames is drawn once per size,
-    /// style, theme and lit state and then reused: the turn repeats, and the
-    /// mesh and the glow's blur are the costliest things the map draws. A lit
-    /// flip keeps the other state's frames (checklist O3), and the art is
-    /// drawn once into a bitmap that both the glow and the frame read.
+    /// style and theme and then reused: the turn repeats, and the mesh and
+    /// the glow's blur are the costliest things the map draws. The lit state
+    /// is only the glow's strength and the orb's opacity, so it is applied
+    /// as each frame is drawn and a flip keeps every frame (checklist O3).
     /// </summary>
     private void DrawLibrary(CanvasDrawingSession ds, ICanvasResourceCreator device, MapNode library, MapGeometry fit, double seconds, bool still)
     {
@@ -1454,58 +1474,59 @@ public sealed partial class TracesMapView : UserControl
         double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
         double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
         double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
-        CanvasRenderTarget? frame = _libraryFrames.Get(library.Active, index);
+        float side = (float)(w + 2 * pad), tall = (float)(h + 2 * pad);
+        LibraryFrame? frame = _libraryFrames.Get(index);
+        bool keep = true;
         if (frame is null)
         {
             double angle = launch
                 ? (still ? LibraryStation.RestAngle : LibraryStation.RestAngle + (index + 0.0) / frames * 2 * Math.PI)
                 : (still ? LibraryOrb.RestAngle : LibraryOrb.RestAngle + (index + 0.0) / frames * 2 * Math.PI);
-            float side = (float)(w + 2 * pad), tall = (float)(h + 2 * pad);
-            frame = new CanvasRenderTarget(device, side, tall, _canvas.Dpi);
             Color brand = Ink("heroCampaignBright");
-            // The art rasterised once: a command list would be replayed for
-            // the glow's shadow and again for the image.
-            using (var art = new CanvasRenderTarget(device, side, tall, _canvas.Dpi))
+            // The art rasterised once, into a bitmap the glow reads too.
+            var art = new CanvasRenderTarget(device, side, tall, _canvas.Dpi);
+            using (CanvasDrawingSession layer = art.CreateDrawingSession())
             {
-                using (CanvasDrawingSession layer = art.CreateDrawingSession())
+                layer.Clear(Color.FromArgb(0, 0, 0, 0));
+                if (launch)
                 {
-                    layer.Clear(Color.FromArgb(0, 0, 0, 0));
-                    if (launch)
-                    {
-                        MapPainter.Station(layer, device, new Vector2((float)pad, (float)pad), w, h, angle);
-                    }
-                    else
-                    {
-                        MapPainter.Orb(layer, device, new Vector2((float)(pad + w / 2), (float)(pad + h / 2)), LibraryOrb.Radius(w, h), angle, brand, Ink("heroCampaignDeep"));
-                    }
+                    MapPainter.Station(layer, device, new Vector2((float)pad, (float)pad), w, h, angle);
                 }
-
-                using CanvasDrawingSession f = frame.CreateDrawingSession();
-                f.Clear(Color.FromArgb(0, 0, 0, 0));
-                DrawGlow(f, art, With(brand, launch ? LibraryStation.Glow(library.Active) : LibraryOrb.Glow(library.Active)),
-                    launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius);
-                using (f.CreateLayer(launch ? 1 : (float)LibraryOrb.Opacity(library.Active)))
+                else
                 {
-                    f.DrawImage(art);
+                    MapPainter.Orb(layer, device, new Vector2((float)(pad + w / 2), (float)(pad + h / 2)), LibraryOrb.Radius(w, h), angle, brand, Ink("heroCampaignDeep"));
                 }
             }
 
+            // The glow at full strength; its colour's alpha is the lit
+            // state's, applied as an opacity when drawn (the same pixels).
+            var glow = new CanvasRenderTarget(device, side, tall, _canvas.Dpi);
+            using (CanvasDrawingSession g = glow.CreateDrawingSession())
+            {
+                g.Clear(Color.FromArgb(0, 0, 0, 0));
+                DrawGlow(g, art, brand, launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius);
+            }
+
+            frame = new LibraryFrame(art, glow);
             // Kept for the next turn only while a whole turn's frames stay
-            // small (64 MB per lit state); past that each frame is drawn and
-            // let go.
-            if (side * tall * 4 * frames <= 64.0 * 1024 * 1024)
+            // small (64 MB for each of the two images, as one image was
+            // before, when a lit flip drew the turn again); past that each
+            // frame is drawn and let go.
+            keep = side * tall * 4 * frames <= 64.0 * 1024 * 1024;
+            if (keep)
             {
-                _libraryFrames.Put(library.Active, index, frame);
-            }
-            else
-            {
-                ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
-                frame.Dispose();
-                return;
+                _libraryFrames.Put(index, frame);
             }
         }
 
-        ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
+        var origin = new Vector2((float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
+        double glowAlpha = launch ? LibraryStation.Glow(library.Active) : LibraryOrb.Glow(library.Active);
+        ds.DrawImage(frame.Glow, origin.X, origin.Y, new Rect(0, 0, side, tall), (float)glowAlpha);
+        ds.DrawImage(frame.Art, origin.X, origin.Y, new Rect(0, 0, side, tall), launch ? 1 : (float)LibraryOrb.Opacity(library.Active));
+        if (!keep)
+        {
+            frame.Dispose();
+        }
     }
 
     /// <summary>A shadow-style glow of <paramref name="radius"/> round an image (SwiftUI's <c>.shadow</c>).</summary>

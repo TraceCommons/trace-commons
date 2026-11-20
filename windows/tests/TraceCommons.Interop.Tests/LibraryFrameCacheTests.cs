@@ -7,10 +7,10 @@ namespace TraceCommons.Interop.Tests;
 
 /// <summary>
 /// The map's station frames (checklist O3): each of a turn's frames is drawn
-/// once per look and reused. The station lights and dims as transfers run,
-/// and before this every flip threw the whole turn away and drew it again,
-/// so the map kept paying the first turn's cost (box tc-win-az10:
-/// 4.0 s of CPU per 10 s after the first turn).
+/// once per look and reused. The station lights and dims as transfers run;
+/// before this the lit state was part of the key and every flip threw the
+/// whole turn away and drew it again (box tc-win-az10: 4.0 s of CPU per
+/// 10 s after the first turn). The lit state is now composed at draw time.
 /// </summary>
 public class LibraryFrameCacheTests
 {
@@ -22,20 +22,16 @@ public class LibraryFrameCacheTests
     }
 
     [Fact]
-    public void ALitFlipKeepsBothStatesFrames()
+    public void TheSameLookKeepsItsFrames()
     {
         var cache = new LibraryFrameCache<Frame>();
-        var dim = new Frame();
-        var lit = new Frame();
+        var frame = new Frame();
         cache.Look("launch|1|dark");
-        cache.Put(false, 3, dim);
-        cache.Put(true, 3, lit);
+        cache.Put(3, frame);
 
         cache.Look("launch|1|dark");
-        Assert.Same(dim, cache.Get(false, 3));
-        Assert.Same(lit, cache.Get(true, 3));
-        Assert.False(dim.Disposed);
-        Assert.False(lit.Disposed);
+        Assert.Same(frame, cache.Get(3));
+        Assert.False(frame.Disposed);
     }
 
     [Fact]
@@ -44,13 +40,13 @@ public class LibraryFrameCacheTests
         var cache = new LibraryFrameCache<Frame>();
         var frames = new List<Frame> { new(), new() };
         cache.Look("launch|1|dark");
-        cache.Put(false, 0, frames[0]);
-        cache.Put(true, 1, frames[1]);
+        cache.Put(0, frames[0]);
+        cache.Put(1, frames[1]);
 
         cache.Look("launch|1.25|dark");
         Assert.All(frames, f => Assert.True(f.Disposed));
-        Assert.Null(cache.Get(false, 0));
-        Assert.Null(cache.Get(true, 1));
+        Assert.Null(cache.Get(0));
+        Assert.Null(cache.Get(1));
     }
 
     [Fact]
@@ -58,7 +54,7 @@ public class LibraryFrameCacheTests
     {
         var cache = new LibraryFrameCache<Frame>();
         cache.Look("orb|1|light");
-        Assert.Null(cache.Get(true, 7));
+        Assert.Null(cache.Get(7));
     }
 
     [Fact]
@@ -67,10 +63,22 @@ public class LibraryFrameCacheTests
         var cache = new LibraryFrameCache<Frame>();
         var frame = new Frame();
         cache.Look("launch|1|dark");
-        cache.Put(true, 0, frame);
+        cache.Put(0, frame);
         cache.Clear();
         Assert.True(frame.Disposed);
         cache.Look("launch|1|dark");
-        Assert.Null(cache.Get(true, 0));
+        Assert.Null(cache.Get(0));
+    }
+
+    /// <summary>The map keys a frame by its index alone and draws the lit state over it.</summary>
+    [Fact]
+    public void TheMapComposesTheLitStateAtDrawTime()
+    {
+        string path = System.IO.Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/TracesMapView.cs.txt");
+        string source = System.IO.File.ReadAllText(path);
+        int draw = source.IndexOf("private void DrawLibrary(", StringComparison.Ordinal);
+        string body = source[draw..source.IndexOf("\n    }\n", draw, StringComparison.Ordinal)];
+        Assert.Contains("_libraryFrames.Get(index)", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("library.Active}", body, StringComparison.Ordinal);
     }
 }
