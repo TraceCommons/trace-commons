@@ -72,32 +72,36 @@ struct FlowMapView: View {
             let resting = Self.restingMotion(
                 reduceMotion: reduceMotion, flows: scene.flows, healthy: state.isHealthy, library: library != nil)
             ZStack(alignment: .topLeading) {
-                // One timeline for everything on the map that moves at
-                // rest: the arcs' dashes and the library. Only what moves
-                // is redrawn on a tick: the arcs (a few strokes) and the
-                // library; the nodes, their names and logos are drawn once
-                // per change, on the canvas between them.
-                GlassAnimationTimeline(minimumInterval: resting.interval, paused: resting.paused) { date in
-                    ZStack(alignment: .topLeading) {
-                        Canvas { context, _ in
-                            drawArcs(in: &context, fit: fit, phase: reduceMotion ? 0 : date.timeIntervalSinceReferenceDate * 18)
-                        }
-                        .accessibilityHidden(true)
+                // What moves at rest runs on two timelines, each at its own
+                // rate: the arcs' dashes (a few strokes) at 30 frames a
+                // second, and the library at its own, slower rate. The
+                // library was on the dashes' timeline, so its mesh was
+                // drawn 30 times a second, the map's main cost at rest.
+                // The nodes, their names and logos sit between them and are
+                // drawn once per change.
+                GlassAnimationTimeline(minimumInterval: FlowMapView.dashInterval, paused: !resting.dashes) { date in
+                    Canvas { context, _ in
+                        drawArcs(in: &context, fit: fit, phase: reduceMotion ? 0 : date.timeIntervalSinceReferenceDate * 18)
+                    }
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .accessibilityHidden(true)
+                }
 
-                        FlowMapStillLayer(key: stillKey(fit: fit)) { context in
-                            drawStill(in: &context, fit: fit)
-                        }
-                        .equatable()
-                        .accessibilityHidden(true)
+                FlowMapStillLayer(key: stillKey(fit: fit)) { context in
+                    drawStill(in: &context, fit: fit)
+                }
+                .equatable()
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .accessibilityHidden(true)
 
-                        // The Traces map's library: the station, or on the
-                        // standard map the orb (owner, 2026-10-16 and
-                        // 2026-10-19).
-                        if let library, case .library(let active) = library.kind {
-                            libraryArt(lit: active, style: mapStyle, scale: fit.scale, date: date)
-                                .position(fit.point(library.at))
-                                .allowsHitTesting(false)
-                        }
+                // The Traces map's library: the station, or on the
+                // standard map the orb (owner, 2026-10-16 and
+                // 2026-10-19).
+                if let library, case .library(let active) = library.kind {
+                    GlassAnimationTimeline(minimumInterval: GlassLibraryStation.frameInterval, paused: !resting.turns) { date in
+                        libraryArt(lit: active, style: mapStyle, scale: fit.scale, date: date)
+                            .position(fit.point(library.at))
+                            .allowsHitTesting(false)
                     }
                     .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
                 }
@@ -232,15 +236,17 @@ struct FlowMapView: View {
         return scene.nodes.first(where: { $0.id == "library" })
     }
 
-    /// How the map's resting timeline runs: at 30 frames a second while
-    /// arcs carry moving dashes (as before), at the library's own rate
-    /// while only the library turns, and not at all when nothing moves or
-    /// under Reduce Motion.
+    /// The arcs' dashes' frame rate: 30 a second, as they always ran.
+    static let dashInterval: Double = 1 / 30
+
+    /// What moves on the map at rest: the arcs' dashes while flows are
+    /// live and healthy, the library while there is one. Nothing moves
+    /// under Reduce Motion. Each runs on its own timeline, so the library
+    /// turns at its own rate (`GlassLibraryStation.frameInterval`) whether
+    /// or not the dashes run.
     static func restingMotion(reduceMotion: Bool, flows: Bool, healthy: Bool, library: Bool)
-        -> (interval: Double, paused: Bool) {
-        let dashes = !reduceMotion && flows && healthy
-        let turns = !reduceMotion && library
-        return (dashes ? 1 / 30 : GlassLibraryStation.frameInterval, !(dashes || turns))
+        -> (dashes: Bool, turns: Bool) {
+        (!reduceMotion && flows && healthy, !reduceMotion && library)
     }
 
     /// What the still layer is drawn from: when none of it changes, the
