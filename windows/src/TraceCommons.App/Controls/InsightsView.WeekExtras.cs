@@ -271,6 +271,7 @@ public sealed partial class InsightsView
             grid.Children.Add(amount);
             TextBlock percent = Caption(row.Percent);
             percent.HorizontalAlignment = HorizontalAlignment.Right;
+            percent.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(percent, 3);
             grid.Children.Add(percent);
             AutomationProperties.SetName(grid, string.Join(", ", tools ? new[] { row.Label, row.Tool, row.Amount, row.Percent } : new[] { row.Label, row.Amount, row.Percent }));
