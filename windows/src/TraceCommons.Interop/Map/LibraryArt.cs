@@ -46,8 +46,11 @@ public static class LibraryStation
     /// <summary>The resting angle (:35).</summary>
     public const double RestAngle = 0.6;
 
-    /// <summary>The station's own frame rate, 20 frames a second (:39).</summary>
-    public const double FrameInterval = 1.0 / 20;
+    /// <summary>
+    /// The station's own frame rate, 15 frames a second (#2268, LibraryStation.swift:39):
+    /// one turn is still 26 s, and the first turn draws 390 frames, not 520.
+    /// </summary>
+    public const double FrameInterval = 1.0 / 15;
 
     /// <summary>The station's frame on the rocket map, in design units (FlowMapView.swift:290).</summary>
     public const double FrameWidth = 150, FrameHeight = 130;
@@ -241,25 +244,38 @@ public static class LibraryStation
     /// </summary>
     public static IReadOnlyList<DrawnFace> Frame(double width, double height, double angle)
     {
+        // Each distinct corner is turned and projected once (#2268): a ring
+        // corner is shared by four faces. Faces are ordered by index, far to
+        // near, with the mesh's order breaking ties as the stable sort did.
+        IndexedMesh mesh = Indexed;
         double scale = Math.Min(width / 140, height / 120);
-        MapPoint Project(Vec3 q)
+        double cy = Math.Cos(angle), sy = Math.Sin(angle);
+        var turned = new Vec3[mesh.Vertices.Length];
+        var projected = new MapPoint[mesh.Vertices.Length];
+        for (int v = 0; v < turned.Length; v++)
         {
+            Vec3 q = Turned(mesh.Vertices[v], cy, sy);
+            turned[v] = q;
             double s = scale * CameraDistance / (CameraDistance - q.Z);
-            return new MapPoint(width / 2 + q.X * s, height / 2 - q.Y * s);
+            projected[v] = new MapPoint(width / 2 + q.X * s, height / 2 - q.Y * s);
         }
 
-        double cy = Math.Cos(angle), sy = Math.Sin(angle);
-        var drawn = new List<(Vec3[] Points, Vec3 Color, double Shade, double Spec, double Depth, bool Cap)>(Mesh.Count);
+        int count = Mesh.Count;
+        var depth = new double[count];
+        var colour = new Vec3[count];
+        var order = new List<int>(count);
         double markNear = double.NegativeInfinity, markFar = double.PositiveInfinity;
-        foreach (StationFace face in Mesh)
+        for (int f = 0; f < count; f++)
         {
-            Vec3[] q = face.Points.Select(p => Turned(p, cy, sy)).ToArray();
-            if (q.Length < 3)
+            int first = mesh.Starts[f], corners = mesh.Starts[f + 1] - first;
+            if (corners < 3)
             {
                 continue;
             }
 
-            Vec3 n = Vec3.Cross(q[1] - q[0], q[2] - q[0]);
+            StationFace face = Mesh[f];
+            Vec3 q0 = turned[mesh.Corners[first]], q1 = turned[mesh.Corners[first + 1]], q2 = turned[mesh.Corners[first + 2]];
+            Vec3 n = Vec3.Cross(q1 - q0, q2 - q0);
             double length = n.Length;
             n = length > 0 ? n / length : new Vec3(0, 0, 1);
             if (n.Z < 0)
@@ -269,37 +285,85 @@ public static class LibraryStation
 
             double lambert = Math.Max(0, Vec3.Dot(n, Light));
             double spec = Math.Pow(Math.Max(0, n.Z * 0.5 + lambert * 0.5), 18) * 0.35;
-            double depth = q.Sum(p => p.Z) / q.Length;
-            if (face.Mark)
+            double sum = 0;
+            for (int c = first; c < first + corners; c++)
             {
-                foreach (Vec3 p in q)
+                double z = turned[mesh.Corners[c]].Z;
+                sum += z;
+                if (face.Mark)
                 {
-                    markNear = Math.Max(markNear, p.Z);
-                    markFar = Math.Min(markFar, p.Z);
+                    markNear = Math.Max(markNear, z);
+                    markFar = Math.Min(markFar, z);
                 }
             }
 
-            drawn.Add((q, face.Color, 0.3 + 0.7 * lambert, spec, depth, face.MarkCap));
+            depth[f] = sum / corners;
+            colour[f] = face.Color * (0.3 + 0.7 * lambert) + new Vec3(spec, spec, spec);
+            order.Add(f);
         }
 
         double markMiddle = (markNear + markFar) / 2;
-        for (int i = 0; i < drawn.Count; i++)
+        foreach (int f in order)
         {
-            if (drawn[i].Cap)
+            if (Mesh[f].MarkCap)
             {
-                var d = drawn[i];
-                d.Depth = d.Depth > markMiddle ? markNear + 0.01 : markFar - 0.01;
-                drawn[i] = d;
+                depth[f] = depth[f] > markMiddle ? markNear + 0.01 : markFar - 0.01;
             }
         }
 
-        // Swift's sort is stable for equal depths; OrderBy is too.
-        return drawn.OrderBy(d => d.Depth).Select(d =>
+        order.Sort((a, b) => depth[a] != depth[b] ? depth[a].CompareTo(depth[b]) : a.CompareTo(b));
+        var faces = new DrawnFace[order.Count];
+        for (int i = 0; i < faces.Length; i++)
         {
-            Vec3 c = d.Color * d.Shade + new Vec3(d.Spec, d.Spec, d.Spec);
-            return new DrawnFace(d.Points.Select(Project).ToList(), Math.Min(1, c.X), Math.Min(1, c.Y), Math.Min(1, c.Z));
-        }).ToList();
+            int f = order[i], first = mesh.Starts[f], corners = mesh.Starts[f + 1] - first;
+            var points = new MapPoint[corners];
+            for (int c = 0; c < corners; c++)
+            {
+                points[c] = projected[mesh.Corners[first + c]];
+            }
+
+            Vec3 c3 = colour[f];
+            faces[i] = new DrawnFace(points, Math.Min(1, c3.X), Math.Min(1, c3.Y), Math.Min(1, c3.Z));
+        }
+
+        return faces;
     }
+
+    /// <summary>
+    /// The mesh as distinct corners and the faces that index them: face
+    /// <c>f</c>'s corners are <c>Corners[Starts[f]..Starts[f + 1]]</c>,
+    /// indices into <c>Vertices</c>, in the face's own order.
+    /// </summary>
+    public sealed record IndexedMesh(Vec3[] Vertices, int[] Starts, int[] Corners);
+
+    private static readonly Lazy<IndexedMesh> IndexedValue = new(() =>
+    {
+        var lookup = new Dictionary<Vec3, int>();
+        var vertices = new List<Vec3>();
+        var starts = new List<int> { 0 };
+        var corners = new List<int>();
+        foreach (StationFace face in Mesh)
+        {
+            foreach (Vec3 p in face.Points)
+            {
+                if (!lookup.TryGetValue(p, out int at))
+                {
+                    at = vertices.Count;
+                    lookup[p] = at;
+                    vertices.Add(p);
+                }
+
+                corners.Add(at);
+            }
+
+            starts.Add(corners.Count);
+        }
+
+        return new IndexedMesh(vertices.ToArray(), starts.ToArray(), corners.ToArray());
+    });
+
+    /// <summary>The mesh indexed by distinct corner, built once.</summary>
+    public static IndexedMesh Indexed => IndexedValue.Value;
 }
 
 /// <summary>

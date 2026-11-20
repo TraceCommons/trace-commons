@@ -40,9 +40,9 @@ public class MapClockTests
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { PileMoving = true }));
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { LightFading = true }));
         Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
-        Assert.Equal(1.0 / 20, MapMotion.ClockInterval(Idle with { HasLibrary = true }));
+        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(Idle with { HasLibrary = true }));
         // Paused or stale dashes do not move (FlowMapView.swift:278-285).
-        Assert.Equal(1.0 / 20, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
+        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public class MapClockTests
 
     [Theory]
     [InlineData(true, 32.5, 1.0 / 30, true)]   // waiting for a shimmer, the arcs want 30 a second
-    [InlineData(true, 1.0 / 20, 1.0 / 60, true)]
+    [InlineData(true, 1.0 / 15, 1.0 / 60, true)]
     [InlineData(true, 1.0 / 60, 1.0 / 30, true)]
     [InlineData(false, 32.5, 1.0 / 30, true)]  // stopped: start it
     [InlineData(true, 1.0 / 30, 1.0 / 30, false)] // already on the wanted beat: leave its phase alone

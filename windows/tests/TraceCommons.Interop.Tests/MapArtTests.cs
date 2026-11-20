@@ -65,12 +65,12 @@ public class MapArtTests
         }
 
         Near(mac[seconds.Length].GetDouble(), LibraryStation.Angle(5, true));
-        // LibraryStation.swift:33-39, LibraryOrb.swift:24-36.
+        // LibraryStation.swift:33-39 (15 a second since #2268), LibraryOrb.swift:24-36.
         Assert.Equal(26, LibraryStation.TurnSeconds);
-        Assert.Equal(1.0 / 20, LibraryStation.FrameInterval);
+        Assert.Equal(1.0 / 15, LibraryStation.FrameInterval);
         Assert.Equal(18, LibraryOrb.TurnSeconds);
         Assert.Equal(6, LibraryOrb.Meridians);
-        Assert.Equal(1.0 / 20, LibraryOrb.FrameInterval);
+        Assert.Equal(1.0 / 15, LibraryOrb.FrameInterval);
 
         double[] angles = { 0.4, 1.0, 2.5 };
         for (int i = 0; i < angles.Length; i++)
@@ -241,14 +241,17 @@ public class MapArtTests
     }
 
     [Fact]
-    public void TheRestingClockRunsAtThirtyForDashesTwentyForTheLibraryAndNotAtAllOtherwise()
+    public void TheRestingClockRunsAtThirtyForDashesFifteenForTheLibraryAndNotAtAllOtherwise()
     {
         var cases = new[] { (false, true, true, true), (false, false, true, true), (true, true, true, true), (false, false, true, false), (false, true, false, false) };
         JsonElement mac = MapProbe.Get("resting");
         for (int i = 0; i < cases.Length; i++)
         {
             (double interval, bool paused) = MapMotion.Resting(cases[i].Item1, cases[i].Item2, cases[i].Item3, cases[i].Item4);
-            Near(mac[i][0].GetDouble(), interval, $"case {i}");
+            // The probe was recorded with the Mac's library at 20 a second;
+            // #2268 lowers it to 15, and Windows follows.
+            double expected = Math.Abs(mac[i][0].GetDouble() - 1.0 / 20) < 1e-9 ? LibraryStation.FrameInterval : mac[i][0].GetDouble();
+            Near(expected, interval, $"case {i}");
             Assert.Equal(mac[i][1].GetDouble() == 1, paused);
         }
 

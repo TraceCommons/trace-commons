@@ -19,6 +19,8 @@
 #   key <vk-hex> [ctrl]            press a key in the main window
 #   animations on|off              the system's client-area animation setting
 #   minimize | restore             the main window
+#   unfocus | focus                the desktop takes the focus (the app stays on
+#                                  screen) | the app's window takes it back
 #   hide                           close the main window (it hides to the tray)
 #   flyout                         open the tray flyout (it becomes the measured window)
 #   measure <label> <n> [secs]     n windows of secs (default 10): see below
@@ -229,6 +231,13 @@ try {
                     Start-Sleep -Milliseconds 1200
                 }
                 'animations' { [W]::SetAnim($a[1] -eq 'on'); Start-Sleep -Milliseconds 1500; Log "  animations now $([W]::Anim())" }
+                'unfocus' {
+                    # Another window takes the focus (the desktop); the app stays on screen.
+                    $desk = [W]::FindWindow('Progman', $null)
+                    [W]::Fg($desk); Start-Sleep -Milliseconds 1500
+                    Log "  foreground now 0x$([W]::GetForegroundWindow().ToString('X')) $([W]::Cls([W]::GetForegroundWindow())); app visible=$([W]::IsWindowVisible($main))"
+                }
+                'focus' { [W]::Fg($main); Start-Sleep -Milliseconds 1500; Log "  foreground is the app: $([W]::GetForegroundWindow() -eq $main)" }
                 'minimize' { [W]::ShowWindow($main, 6) | Out-Null; Start-Sleep -Milliseconds 1500; Log "  iconic=$([W]::IsIconic($main))" }
                 'restore' { [W]::ShowWindow($main, 9) | Out-Null; [W]::Fg($main); Start-Sleep -Milliseconds 1500; Log "  iconic=$([W]::IsIconic($main)) visible=$([W]::IsWindowVisible($main))" }
                 'hide' { [W]::PostMessage($main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null; Start-Sleep -Milliseconds 2000; Log "  visible=$([W]::IsWindowVisible($main)) alive=$([bool](Get-Process -Id $appPid -EA SilentlyContinue))" }
