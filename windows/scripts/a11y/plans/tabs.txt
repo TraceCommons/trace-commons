@@ -1,0 +1,24 @@
+tab TabHome
+audit main home 90
+tab TabInference
+audit main inference 90
+tab TabTraces
+audit main traces 90
+tab TabInsights
+audit main insights-overview 90
+select main Breakdown
+audit main insights-breakdown 90
+select main Benchmarks
+audit main insights-benchmarks 90
+select main Sessions
+audit main insights-sessions 90
+select main Analyze
+audit main insights-analyze 120
+select main Overview
+tab TabTraces
+click main Look inside
+snap main after-look-inside
+newwin preview
+audit preview preview 90
+key preview 1B
+state preview preview-after-esc

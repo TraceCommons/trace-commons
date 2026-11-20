@@ -1,0 +1,43 @@
+# The fixes' own checks, each an EXPECT the report fails on.
+# Insights: the tabs are segments, each a stop (the walk), and a press
+# shows its page.
+tab TabInsights
+audit main insights 90
+click main Breakdown
+audit main insights-breakdown 60
+# History: Escape with the Withdraw dialog open closes only the dialog;
+# a second Escape goes back to the tree.
+tab TabTraces
+clickaid main TracesHistoryButton
+expect main lacks TracesHistoryButton
+click main Withdraw
+state main withdraw-dialog
+snap main withdraw-dialog
+key main 1B
+state main after-esc-dialog
+expect main lacks TracesHistoryButton
+key main 1B
+expect main has TracesHistoryButton
+state main history-after-esc
+# The preview: Escape closes it.
+click main Look inside
+clicklast main Look inside
+newwin preview
+audit preview preview 60
+key preview 1B
+expect preview hidden
+# The flyout and About open on a named control (the walks' start lines).
+flyout
+audit flyout flyout 20
+key flyout 1B
+expect flyout hidden
+key main BC ctrl
+newwin settings
+invoke settings About Near AI Gateway
+newwin about
+audit about about 20
+# The map: a window wide enough for it.
+size main 1250 740
+tab TabTraces
+audit main traces-wide 120
+snap main traces-wide

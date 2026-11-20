@@ -1,0 +1,60 @@
+# Main window: every tab, Insights' five pages, History and its Escape,
+# the preview window and its Escape, the flyout, Settings, About.
+tab TabHome
+audit main home 90
+scroll main home
+tab TabInference
+audit main inference 90
+scroll main inference
+tab TabTraces
+audit main traces 90
+scroll main traces
+tab TabInsights
+audit main insights-overview 90
+select main Breakdown
+audit main insights-breakdown 90
+scroll main insights-breakdown
+select main Benchmarks
+audit main insights-benchmarks 90
+scroll main insights-benchmarks
+select main Sessions
+audit main insights-sessions 90
+scroll main insights-sessions
+select main Analyze
+audit main insights-analyze 120
+scroll main insights-analyze
+select main Overview
+tab TabHome
+click main Contributed
+audit main home-contributed 90
+key main 1B
+state main home-contributed-after-esc
+tab TabTraces
+clickaid main TracesHistoryButton
+audit main history 90
+scroll main history
+key main 1B
+state main history-after-esc
+tab TabTraces
+click main Look inside
+clicklast main Look inside
+newwin preview
+audit preview preview 90
+scroll preview preview
+key preview 1B
+state preview preview-after-esc
+flyout
+audit flyout flyout 20
+key flyout 1B
+state flyout flyout-after-esc
+key main BC ctrl
+newwin settings
+audit settings settings 120
+scroll settings settings
+key settings 1B
+state settings settings-after-esc
+invoke settings About Near AI Gateway
+newwin about
+audit about about 30
+key about 1B
+state about about-after-esc
