@@ -69,6 +69,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         SizeChanged += (_, _) => FitFooter();
         SheetHeader.SizeChanged += (_, _) => FitFooter();
         SheetTabs.SizeChanged += (_, _) => FitFooter();
+        ActionRow.SizeChanged += (_, _) => FitFooter();
     }
 
     /// <summary>
@@ -79,7 +80,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     /// </summary>
     private void FitFooter()
     {
-        double room = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight;
+        double room = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight - ActionRow.ActualHeight;
         if (room <= 0 || FooterScroller.Content is not FrameworkElement footer)
         {
             return;

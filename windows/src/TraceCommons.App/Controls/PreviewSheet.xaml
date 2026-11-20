@@ -49,6 +49,7 @@
             <!-- Auto, or a star share when the footer needs more than half
                  the room (PreviewSheet.FitFooter). -->
             <RowDefinition x:Name="FooterRow" Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <!--
@@ -850,35 +851,48 @@
                 <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
             </Grid>
 
-            <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
-                <!-- Outlined like Close, never filled: it must not read as a
-                     second way to approve. -->
-                <Button Grid.Column="0"
-                        Style="{StaticResource TcSecondaryButtonStyle}"
-                        Content="Not this one"
-                        IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
-                        ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
-                        Click="OnNotThisOne" />
-                <Button Grid.Column="2"
-                        Style="{StaticResource TcSecondaryButtonStyle}"
-                        Content="Close"
-                        Click="OnClose" />
-                <!--
-                    The ONLY approve control in the product. It is behind the
-                    preview by design, behind the read gate by design, and it
-                    carries NO keyboard accelerator and is not the default
-                    button: an irreversible send one Return away from a hand
-                    resting on the keyboard is exactly the misclick this sheet
-                    exists to prevent.
-                -->
-                <Button Grid.Column="3"
-                        Style="{StaticResource TcPrimaryButtonStyle}"
-                        Content="Contribute"
-                        IsEnabled="{x:Bind ViewModel.CanContribute, Mode=OneWay}"
-                        ToolTipService.ToolTip="{x:Bind ViewModel.ContributeHelp, Mode=OneWay}"
-                        Click="OnContribute" />
-            </Grid>
         </StackPanel>
         </ScrollViewer>
+
+        <!--
+            The action row, pinned under the footer as the Mac's sheet pins
+            its action bar (PreviewSheet.swift:538-551): on a short window
+            the explanatory footer scrolls, and Not this one, Close and
+            Contribute stay on screen, so Tab never reaches them where they
+            cannot be seen (box tab walk, 2026-11-19).
+        -->
+        <Grid x:Name="ActionRow"
+              Grid.Row="4"
+              Padding="20,8,20,12"
+              Background="{ThemeResource TcSurfaceCardBrush}"
+              ColumnDefinitions="Auto,*,Auto,Auto"
+              ColumnSpacing="8">
+            <!-- Outlined like Close, never filled: it must not read as a
+                 second way to approve. -->
+            <Button Grid.Column="0"
+                    Style="{StaticResource TcSecondaryButtonStyle}"
+                    Content="Not this one"
+                    IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
+                    ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
+                    Click="OnNotThisOne" />
+            <Button Grid.Column="2"
+                    Style="{StaticResource TcSecondaryButtonStyle}"
+                    Content="Close"
+                    Click="OnClose" />
+            <!--
+                The ONLY approve control in the product. It is behind the
+                preview by design, behind the read gate by design, and it
+                carries NO keyboard accelerator and is not the default
+                button: an irreversible send one Return away from a hand
+                resting on the keyboard is exactly the misclick this sheet
+                exists to prevent.
+            -->
+            <Button Grid.Column="3"
+                    Style="{StaticResource TcPrimaryButtonStyle}"
+                    Content="Contribute"
+                    IsEnabled="{x:Bind ViewModel.CanContribute, Mode=OneWay}"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.ContributeHelp, Mode=OneWay}"
+                    Click="OnContribute" />
+        </Grid>
     </Grid>
 </UserControl>
