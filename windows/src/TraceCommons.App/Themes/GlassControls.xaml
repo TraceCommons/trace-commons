@@ -175,6 +175,19 @@
         <Setter Property="IsTabStop" Value="False" />
     </Style>
 
+    <!--
+        A Pivot's headers are its tabs, yet the stock style makes the Pivot
+        no tab stop, so Tab went from the window's own tabs straight into the
+        page and Insights' Overview, Breakdown, Benchmarks, Sessions and
+        Analyze could not be reached from the keyboard at all (box tab walk,
+        2026-11-19). As a tab stop the Pivot focuses its selected header,
+        and the arrow keys move between headers, as the Mac's tab picker
+        does.
+    -->
+    <Style TargetType="Pivot" BasedOn="{StaticResource DefaultPivotStyle}">
+        <Setter Property="IsTabStop" Value="True" />
+    </Style>
+
     <!-- Every ToggleSwitch in the app takes the Mac's switch. -->
     <Style TargetType="ToggleSwitch" BasedOn="{StaticResource TcGlassSwitchStyle}" />
 
