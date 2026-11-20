@@ -116,6 +116,9 @@ public static class InsightsSkillsHome
         _ => "skills_home_earlier",
     };
 
+    /// <summary>The week before's bars: the ink at this opacity (InsightsSkillsHomeView.swift:464, <c>GlassColor.ink(0.22)</c>).</summary>
+    public const double EarlierBarInk = 0.22;
+
     public enum Direction { More, Less, Started }
 
     public sealed record Update(string Id, string GroupId, string InstalledId, string Name, IReadOnlyList<string> Agents,

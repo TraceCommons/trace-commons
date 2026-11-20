@@ -74,6 +74,7 @@ public sealed partial class MainWindow : ITracesTreeHost
         (IReadOnlyList<string> order, bool arranged) = LoadFolderOrder();
         _tree = new TracesTreeView(new TracesTreeState(order, arranged), this);
         TracesTreeHost.Child = _tree;
+        WireAutomaticGrantRead();
 
         // The empty state (in the tree, as the Mac's emptyTree is) and the
         // Windows sections that sat in rows of their own beside the folder

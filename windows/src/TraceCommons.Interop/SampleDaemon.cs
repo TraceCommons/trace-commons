@@ -108,6 +108,53 @@ public sealed class SampleDaemon
     /// </summary>
     public const string SkillLearningExtra = "skillLearning";
 
+    /// <summary>
+    /// Insights &gt; Skills with Home's story cards and usage bars: the
+    /// daemon's own catalog and feed, hand-written usage, a flag snapshot
+    /// with <c>insights_skills</c> on for this build's profile, and the
+    /// instant Skills reads them at (<c>sample_clock.json</c>).
+    /// </summary>
+    public const string SkillsHomeExtra = "skillsHome";
+
+    /// <summary>
+    /// This build's flag profile, which an extra's flag snapshot marked
+    /// <c>_sample_build_profile</c> takes its environment and digest from,
+    /// so the window accepts it as this build's.
+    /// </summary>
+    public Func<BuildFeatureProfile?> BuildProfile { get; init; } = BuildFeatureProfile.FromLibrary;
+
+    /// <summary>
+    /// Whether this launch answers <c>feature_flags_snapshot</c>: only an
+    /// extra that records one does; every other sample reads no flags.
+    /// </summary>
+    public bool AnswersFlags => _extra is not null && File.Exists(Path.Combine(_extra, "feature_flags_snapshot.json"));
+
+    /// <summary>The instant this launch's extra is read at, or null for the clock.</summary>
+    public DateTimeOffset? PinnedNow
+    {
+        get
+        {
+            if (_extra is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument clock = JsonDocument.Parse(File.ReadAllText(Path.Combine(_extra, "sample_clock.json")));
+                return clock.RootElement.TryGetProperty("now", out JsonElement now) && now.ValueKind == JsonValueKind.String
+                    && DateTimeOffset.TryParse(now.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out DateTimeOffset at)
+                    ? at
+                    : null;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
+            {
+                return null;
+            }
+        }
+    }
+
     /// <summary>The directory beside the assembly that holds the extras.</summary>
     public const string ExtrasDir = "SampleExtras";
 
@@ -179,7 +226,7 @@ public sealed class SampleDaemon
     /// null for unset or anything else.
     /// </summary>
     public static string? Extra(string? value, string root) =>
-        value is SpendOrganizationsExtra or SkillLearningExtra
+        value is SpendOrganizationsExtra or SkillLearningExtra or SkillsHomeExtra
             ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, value)
             : null;
 
@@ -207,8 +254,97 @@ public sealed class SampleDaemon
     /// and never created here, so those reads see an empty state instead of
     /// the contributor's own.
     /// </summary>
-    public static string ThrowawayConfigDir() =>
-        Path.Combine(Path.GetTempPath(), $"tracecommons-sample-{Environment.ProcessId}");
+    public static string ThrowawayConfigDir() => ThrowawayConfigDir(Path.GetTempPath(), Environment.ProcessId);
+
+    /// <summary>The throwaway directory's name, before the launch's pid.</summary>
+    public const string ThrowawayPrefix = "tracecommons-sample-";
+
+    /// <summary>The throwaway directory of the launch <paramref name="pid"/> under <paramref name="tempRoot"/>.</summary>
+    public static string ThrowawayConfigDir(string tempRoot, int pid) =>
+        Path.Combine(tempRoot, ThrowawayPrefix + pid.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// Removes the throwaway directories of sample launches that are gone
+    /// (force-stopped, so their exit never removed them): every directory
+    /// under <paramref name="tempRoot"/> named exactly the prefix and a pid
+    /// that is not this launch's and not running. Anything else is left
+    /// alone. Returns how many were removed; never throws.
+    /// </summary>
+    public static int SweepThrowawayDirs(string tempRoot, int currentPid, Func<int, bool> isRunning)
+    {
+        ArgumentNullException.ThrowIfNull(isRunning);
+        string[] dirs;
+        try
+        {
+            dirs = Directory.GetDirectories(tempRoot, ThrowawayPrefix + "*");
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        foreach (string dir in dirs)
+        {
+            string tail = Path.GetFileName(dir)[ThrowawayPrefix.Length..];
+            if (tail.Length == 0 || !tail.All(char.IsAsciiDigit)
+                || !int.TryParse(tail, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int pid)
+                || pid == currentPid || isRunning(pid))
+            {
+                continue;
+            }
+
+            if (TryDelete(dir)) removed++;
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// Removes the throwaway directory of the launch <paramref name="pid"/>,
+    /// with what it holds, when it exists. True when one was removed; never
+    /// throws.
+    /// </summary>
+    public static bool RemoveThrowawayDir(string tempRoot, int pid)
+    {
+        string dir = ThrowawayConfigDir(tempRoot, pid);
+        return Directory.Exists(dir) && TryDelete(dir);
+    }
+
+    /// <summary>Whether a process with <paramref name="pid"/> is running.</summary>
+    public static bool IsProcessRunning(int pid)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            try
+            {
+                return !process.HasExited;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                // It exists but cannot be opened: treat it as running.
+                return true;
+            }
+        }
+        catch (Exception e) when (e is ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryDelete(string dir)
+    {
+        try
+        {
+            Directory.Delete(dir, recursive: true);
+            return true;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// One request, one response frame: the recorded result, or a fixed
@@ -248,7 +384,19 @@ public sealed class SampleDaemon
 
             try
             {
-                return new JsonObject { ["result"] = JsonNode.Parse(text) }.ToJsonString();
+                JsonNode? result = JsonNode.Parse(text);
+                if (result is JsonObject recorded && recorded["_sample_build_profile"] is JsonValue marked && marked.TryGetValue(out bool fill) && fill)
+                {
+                    if (BuildProfile() is not { Valid: true } build)
+                    {
+                        return ErrorFrame(UnrecordedLabel);
+                    }
+
+                    recorded["environment"] = build.Environment;
+                    recorded["profile_digest"] = build.ProfileDigest;
+                }
+
+                return new JsonObject { ["result"] = result }.ToJsonString();
             }
             catch (JsonException)
             {

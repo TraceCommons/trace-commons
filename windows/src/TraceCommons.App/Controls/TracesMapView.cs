@@ -979,6 +979,7 @@ public sealed partial class TracesMapView : UserControl
     {
         _markUnit = null;
         _tile = null;
+        DropFieldLayers();
         _logos.Clear();
         _libraryFrames.Clear();
     }
@@ -1084,58 +1085,66 @@ public sealed partial class TracesMapView : UserControl
     private void DrawField(CanvasDrawingSession ds, ICanvasResourceCreator device, Size size, double now, bool motion)
     {
         float w = (float)size.Width, h = (float)size.Height;
-        Color outer = Ink("mapFieldOuter"), inner = Ink("mapFieldInner");
-        ds.FillRectangle(0, 0, w, h, outer);
-        using (var field = new CanvasRadialGradientBrush(device, inner, outer)
-        {
-            Center = new Vector2(w * (float)MapField.CentreX, h * (float)MapField.CentreY),
-            RadiusX = w * (float)MapField.RadiusX,
-            RadiusY = h * (float)MapField.RadiusY,
-        })
-        {
-            ds.FillRectangle(0, 0, w, h, field);
-        }
-
         if (HighContrast)
         {
+            Color outer = Ink("mapFieldOuter"), inner = Ink("mapFieldInner");
+            ds.FillRectangle(0, 0, w, h, outer);
+            using var field = new CanvasRadialGradientBrush(device, inner, outer)
+            {
+                Center = new Vector2(w * (float)MapField.CentreX, h * (float)MapField.CentreY),
+                RadiusX = w * (float)MapField.RadiusX,
+                RadiusY = h * (float)MapField.RadiusY,
+            };
+            ds.FillRectangle(0, 0, w, h, field);
             return;
         }
 
-        CanvasGeometry tile = Tile(device, size);
-        (MapRgba resting, MapRgba lit, MapRgba crest, MapRgba bloom) = MapField.Inks(Dark);
-        var fadeStops = MapField.FadeStops.Select(s => new CanvasGradientStop { Position = (float)s.At, Color = Color.FromArgb((byte)Math.Round(255 * s.Opacity), 255, 255, 255) }).ToArray();
-        using var fade = new CanvasRadialGradientBrush(device, fadeStops)
-        {
-            Center = new Vector2(w * (float)MapField.FadeCentreX, h * (float)MapField.FadeCentreY),
-            RadiusX = w * (float)MapField.FadeRadius,
-            RadiusY = h * (float)MapField.FadeRadius,
-        };
-        using (ds.CreateLayer(fade))
-        {
-            ds.FillGeometry(tile, Rgba(resting));
+        // The field at rest and its marks' mask, rasterised once per size,
+        // theme and DPI (checklist O3): a shimmer pass draws the still layer
+        // at 60 frames a second, and filling every mark twice under a
+        // gradient layer each frame cost about 3.5 s of CPU a pass on WARP.
+        (CanvasRenderTarget Base, CanvasRenderTarget Mask) layers = FieldLayers(device, size);
+        ds.DrawImage(layers.Base, 0, 0);
+        (MapRgba _, MapRgba lit, MapRgba crest, MapRgba bloom) = MapField.Inks(Dark);
 
-            // The shimmer: the whole tile filled once with a band of light (Indicators.swift:809-830).
-            double sweep = motion ? MapField.Sweep(now - _shownAt, false) : 0;
-            if (sweep > 0)
+        // The shimmer: the whole tile filled once with a band of light
+        // (Indicators.swift:809-830), through the marks' mask, which carries
+        // the field's fade.
+        double sweep = motion ? MapField.Sweep(now - _shownAt, false) : 0;
+        if (sweep > 0)
+        {
+            (MapPoint start, MapPoint end) = MapField.ShimmerBand(sweep, new MapSize(w, h));
+            Color c = Rgba(crest);
+            using var band = new CanvasLinearGradientBrush(device, new[]
             {
-                (MapPoint start, MapPoint end) = MapField.ShimmerBand(sweep, new MapSize(w, h));
-                Color c = Rgba(crest);
-                using var band = new CanvasLinearGradientBrush(device, new[]
-                {
-                    new CanvasGradientStop { Position = 0, Color = With(c, 0) },
-                    new CanvasGradientStop { Position = 0.5f, Color = c },
-                    new CanvasGradientStop { Position = 1, Color = With(c, 0) },
-                })
-                {
-                    StartPoint = new Vector2((float)start.X, (float)start.Y),
-                    EndPoint = new Vector2((float)end.X, (float)end.Y),
-                };
-                ds.FillGeometry(tile, band);
+                new CanvasGradientStop { Position = 0, Color = With(c, 0) },
+                new CanvasGradientStop { Position = 0.5f, Color = c },
+                new CanvasGradientStop { Position = 1, Color = With(c, 0) },
+            })
+            {
+                StartPoint = new Vector2((float)start.X, (float)start.Y),
+                EndPoint = new Vector2((float)end.X, (float)end.Y),
+            };
+            using var masked = new CanvasImageBrush(device, layers.Mask);
+            using (ds.CreateLayer(masked))
+            {
+                ds.FillRectangle(0, 0, w, h, band);
             }
+        }
 
-            // The marks near the pointer, lit, fading on Motion.fast (:835-865).
-            double fadeIn = LightOpacity(now, motion);
-            if (fadeIn > 0 && (_pointer ?? _lastPointer) is { } p)
+        // The marks near the pointer, lit, fading on Motion.fast (:835-865),
+        // through the field's fade, as the marks themselves are.
+        double fadeIn = LightOpacity(now, motion);
+        if (fadeIn > 0 && (_pointer ?? _lastPointer) is { } p)
+        {
+            var fadeStops = MapField.FadeStops.Select(s => new CanvasGradientStop { Position = (float)s.At, Color = Color.FromArgb((byte)Math.Round(255 * s.Opacity), 255, 255, 255) }).ToArray();
+            using var fade = new CanvasRadialGradientBrush(device, fadeStops)
+            {
+                Center = new Vector2(w * (float)MapField.FadeCentreX, h * (float)MapField.FadeCentreY),
+                RadiusX = w * (float)MapField.FadeRadius,
+                RadiusY = h * (float)MapField.FadeRadius,
+            };
+            using (ds.CreateLayer(fade))
             {
                 var near = (p.X - MapField.Reach, p.Y - MapField.Reach, MapField.Reach * 2, MapField.Reach * 2);
                 CanvasGeometry mark = MarkUnit(device);
@@ -1186,6 +1195,84 @@ public sealed partial class TracesMapView : UserControl
 
         double p = MapMotion.PointerLightFade.At(now - _pointerChangedAt);
         return on ? p : 1 - p;
+    }
+
+    private CanvasRenderTarget? _fieldBase;
+    private CanvasRenderTarget? _fieldMask;
+    private string? _fieldLayerKey;
+
+    /// <summary>
+    /// The field at rest (its ground, its glow and every mark under the
+    /// fade) and the marks' mask (white, under the same fade), for this size,
+    /// theme and DPI; built again only when one of those changes.
+    /// </summary>
+    private (CanvasRenderTarget Base, CanvasRenderTarget Mask) FieldLayers(ICanvasResourceCreator device, Size size)
+    {
+        float dpi = _still.Dpi;
+        string key = $"{size.Width}x{size.Height}|{Dark}|{dpi}";
+        if (_fieldBase is not null && _fieldMask is not null && _fieldLayerKey == key)
+        {
+            return (_fieldBase, _fieldMask);
+        }
+
+        DropFieldLayers();
+        float w = (float)size.Width, h = (float)size.Height;
+        CanvasGeometry tile = Tile(device, size);
+        (MapRgba resting, MapRgba _, MapRgba _, MapRgba _) = MapField.Inks(Dark);
+        var fadeStops = MapField.FadeStops.Select(s => new CanvasGradientStop { Position = (float)s.At, Color = Color.FromArgb((byte)Math.Round(255 * s.Opacity), 255, 255, 255) }).ToArray();
+        CanvasRadialGradientBrush Fade() => new(device, fadeStops)
+        {
+            Center = new Vector2(w * (float)MapField.FadeCentreX, h * (float)MapField.FadeCentreY),
+            RadiusX = w * (float)MapField.FadeRadius,
+            RadiusY = h * (float)MapField.FadeRadius,
+        };
+
+        var ground = new CanvasRenderTarget(device, w, h, dpi);
+        using (CanvasDrawingSession g = ground.CreateDrawingSession())
+        {
+            Color outer = Ink("mapFieldOuter"), inner = Ink("mapFieldInner");
+            g.FillRectangle(0, 0, w, h, outer);
+            using (var field = new CanvasRadialGradientBrush(device, inner, outer)
+            {
+                Center = new Vector2(w * (float)MapField.CentreX, h * (float)MapField.CentreY),
+                RadiusX = w * (float)MapField.RadiusX,
+                RadiusY = h * (float)MapField.RadiusY,
+            })
+            {
+                g.FillRectangle(0, 0, w, h, field);
+            }
+
+            using CanvasRadialGradientBrush fade = Fade();
+            using (g.CreateLayer(fade))
+            {
+                g.FillGeometry(tile, Rgba(resting));
+            }
+        }
+
+        var mask = new CanvasRenderTarget(device, w, h, dpi);
+        using (CanvasDrawingSession m = mask.CreateDrawingSession())
+        {
+            m.Clear(Color.FromArgb(0, 0, 0, 0));
+            using CanvasRadialGradientBrush fade = Fade();
+            using (m.CreateLayer(fade))
+            {
+                m.FillGeometry(tile, Color.FromArgb(255, 255, 255, 255));
+            }
+        }
+
+        _fieldBase = ground;
+        _fieldMask = mask;
+        _fieldLayerKey = key;
+        return (ground, mask);
+    }
+
+    private void DropFieldLayers()
+    {
+        _fieldBase?.Dispose();
+        _fieldMask?.Dispose();
+        _fieldBase = null;
+        _fieldMask = null;
+        _fieldLayerKey = null;
     }
 
     private CanvasGeometry MarkUnit(ICanvasResourceCreator device) => _markUnit ??= MapPainter.MarkUnit(device);

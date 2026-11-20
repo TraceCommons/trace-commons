@@ -161,6 +161,13 @@ public sealed partial class MainWindow : Window
         _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
         _flags.Changed += OnFeatureFlagsChanged;
         _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
+#if DEBUG
+        // A sample's host never starts: read the extra's flags once.
+        if (_host.IsSample && !ReadsNoFlags())
+        {
+            _ = _flags.RefreshAsync();
+        }
+#endif
         _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
         WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
 #if DEBUG
@@ -248,7 +255,9 @@ public sealed partial class MainWindow : Window
     private bool ReadsNoFlags()
     {
 #if DEBUG
-        return _host.IsSample;
+        // A sample reads no flags, unless its extra records a snapshot
+        // (skillsHome: Insights > Skills).
+        return _host.IsSample && SampleDaemon.FromEnvironment()?.AnswersFlags != true;
 #else
         return false;
 #endif
@@ -1400,7 +1409,19 @@ public sealed partial class MainWindow : Window
         {
             // The Mac's sample week (feed T) on Overview and Breakdown, as its
             // sample windows draw it (InsightsSampleModels, InsightsSample.swift:208-232).
+            // Skills answers from the sample too, on the sample's own instant
+            // when it has one (the skillsHome extra: Home's stories and bars).
             return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word),
+                copy =>
+                {
+                    InsightsSkillsModel skills = InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy);
+                    if (SampleDaemon.FromEnvironment()?.PinnedNow is { } pinned)
+                    {
+                        skills.Now = () => pinned;
+                    }
+
+                    return skills;
+                },
                 weekReader: InsightsViewModel.SampleWeekReader);
         }
 #endif
