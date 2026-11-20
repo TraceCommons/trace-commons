@@ -921,6 +921,9 @@ public sealed partial class MainWindow : Window
         }
         var onboarding = new FirstRunWindow(_host, state);
         onboarding.DaemonStarted += OnSessionRootsDeclared;
+        // Start turned Train coding models on: the offer waits for the
+        // hand-off to this window (AppModel.swift:5049-5058).
+        onboarding.ConsentScopesConfirmed += OnFirstRunConsentScopesConfirmed;
         // A refused grant finished on Ask: the first run's last line, said
         // on the queue pane once its window has gone (AppModel.firstRunNotice).
         onboarding.Finished += line =>
@@ -941,6 +944,7 @@ public sealed partial class MainWindow : Window
             await onboarding.CloseCompletion;
             if (ReferenceEquals(_onboarding, onboarding)) _onboarding = null;
             if (ReferenceEquals(_automaticOnboarding, onboarding)) _automaticOnboarding = null;
+            ShowFirstRunTrainingOffer();
             DispatcherQueue.TryEnqueue(OfferNextRedirectedInvite);
         };
         return onboarding;
@@ -1429,7 +1433,9 @@ public sealed partial class MainWindow : Window
         return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
             copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy),
             iso => _host.CallAsync(InsightsCounterWeek.Method,
-                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)));
+                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)),
+            // The summary card's Hide: the daemon's insights_recap_card_enabled off (InsightsView.swift:88-91).
+            () => new InsightsRecapSwitch((method, parameters) => _host.CallAsync(method, parameters)).SetAsync(false));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)

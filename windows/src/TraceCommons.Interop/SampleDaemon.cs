@@ -105,8 +105,21 @@ public sealed class SampleDaemon
     /// the Mac's tests use (SkillLearningTestSupport.swift), the detail is the
     /// one <c>PublicRunTests</c> reads. No grant, commit or rollback is
     /// recorded: each is refused as unrecorded and nothing pretends to change.
+    /// A consent write is answered with the daemon's own recorded reply
+    /// (tests/fixtures/first-run/set_consent_scopes.json), so a turn-on in
+    /// Settings raises the sheet; the reply is static, nothing is written,
+    /// and the status still reports the scopes it did.
     /// </summary>
     public const string SkillLearningExtra = "skillLearning";
+
+    /// <summary>
+    /// The skill-learning extra with the sample record's skill installed, so
+    /// the installed panel and its rollback confirmation draw (W20 round 2).
+    /// Its status is the Mac's installed fixture (SkillLearningTestSupport.swift)
+    /// on that record; a rollback is refused as unrecorded, so confirming it
+    /// removes nothing.
+    /// </summary>
+    public const string SkillInstalledExtra = "skillInstalled";
 
     /// <summary>
     /// Insights &gt; Skills with Home's story cards and usage bars: the
@@ -226,7 +239,7 @@ public sealed class SampleDaemon
     /// null for unset or anything else.
     /// </summary>
     public static string? Extra(string? value, string root) =>
-        value is SpendOrganizationsExtra or SkillLearningExtra or SkillsHomeExtra
+        value is SpendOrganizationsExtra or SkillLearningExtra or SkillInstalledExtra or SkillsHomeExtra
             ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, value)
             : null;
 

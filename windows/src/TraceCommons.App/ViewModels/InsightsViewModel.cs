@@ -79,11 +79,18 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     /// the current one): Insights feed T, as the Mac's <c>InsightsModel</c>
     /// reads it (InsightsModel.swift:57-80). With none, the saved feed only.
     /// </param>
+    /// <param name="turnOffRecap">
+    /// The summary card's "Hide": the daemon's <c>insights_recap_card_enabled</c>
+    /// set off (InsightsView.swift:284-287). With none, the card has no Hide.
+    /// </param>
     public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null,
-        Func<Func<string, string?>, InsightsSkillsModel>? skills = null, Func<string?, Task<DaemonResponse>>? weekReader = null)
+        Func<Func<string, string?>, InsightsSkillsModel>? skills = null, Func<string?, Task<DaemonResponse>>? weekReader = null,
+        Func<Task>? turnOffRecap = null)
     {
         _service = service ?? new LocalInsights();
         _weekReader = weekReader;
+        _turnOffRecap = turnOffRecap;
+        Comparisons = new InsightsComparisonsModel(_service, () => (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds);
         // The tab headers bind while the control is built, before any read:
         // the core's table is there from the start, as on the Mac.
         foreach (var pair in LocalInsights.CoreCopy()) _copy[pair.Key] = pair.Value;
@@ -347,14 +354,45 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    /// <summary>Put the week on both tabs: the daemon's, or the saved one again (<c>showCounterWeek</c>, InsightsView.swift:384-389).</summary>
+    /// <summary>
+    /// Put the week on both tabs: the daemon's, or the saved one again; its
+    /// weekly figures go to the core for the summary card, and the saved
+    /// week takes the card away (<c>showCounterWeek</c>, InsightsView.swift:384-389).
+    /// </summary>
     private void ShowWeek(InsightsCounterWeek? week, bool notice)
     {
         CounterWeek = week;
         CounterNotice = notice ? this["insights_feed_counter_pass_unavailable"] : "";
         Overview.ShowCounter(week?.Overview, week?.Sessions, CounterNotice);
         Patterns.ShowCounter(week?.Patterns);
+        _ = Comparisons.LoadAsync(week?.History, week?.WeekStart, week?.RecapCardEnabled ?? false);
         Changed();
+    }
+
+    private readonly Func<Task>? _turnOffRecap;
+
+    /// <summary>The weekly summary card (feed T only).</summary>
+    public InsightsComparisonsModel Comparisons { get; }
+
+    /// <summary>Whether the card offers Hide: only with a daemon to tell.</summary>
+    public bool CanHideRecap => _turnOffRecap is not null;
+
+    /// <summary>"View week": the card is not shown again, and its closed week goes on screen (InsightsView.swift:283).</summary>
+    public async Task OpenRecapAsync()
+    {
+        if (Comparisons.OpenRecap() is { } week)
+        {
+            await SelectCounterWeekAsync(week);
+        }
+    }
+
+    /// <summary>"Hide": the daemon turns the card off, then the week is read again (InsightsView.swift:284-287).</summary>
+    public async Task HideRecapAsync()
+    {
+        if (_turnOffRecap is null || _closed) return;
+        try { await _turnOffRecap(); }
+        catch (Exception) { }
+        await LoadWeekAsync();
     }
 
     /// <summary>
