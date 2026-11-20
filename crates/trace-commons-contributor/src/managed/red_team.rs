@@ -372,8 +372,9 @@ pub(crate) fn finalize_outcome(
 }
 
 /// Copy exported files from `<session_dir>/out` into the operator's chosen
-/// output folder. Symlinks are skipped rather than followed.
-#[cfg(any(target_os = "macos", test))]
+/// output folder. Symlinks are skipped rather than followed. Only `run`
+/// calls it, so it is built where `run` is.
+#[cfg(target_os = "macos")]
 pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::Result<()> {
     let out_dir = session_dir.join("out");
     if !out_dir.is_dir() {
