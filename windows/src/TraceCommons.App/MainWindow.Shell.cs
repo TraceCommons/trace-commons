@@ -1204,16 +1204,12 @@ public sealed partial class MainWindow
     /// <summary>Stops a card's motion and puts it at rest: opaque, in its place.</summary>
     private static void ResetMotion(FrameworkElement card)
     {
-        // A card that never slid has no Translation property until it is
-        // enabled, and stopping an animation on a missing property throws
-        // (box, 2026-11-19: every launch died here in RefreshNotices).
+        // A card that never slid has no Translation property, and stopping
+        // an animation on a property that does not exist throws ("The
+        // specified property was not found"; box, 2026-11-19: every launch
+        // died here in RefreshNotices). Give it the property first, at rest.
         ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
-        // A card that never arrived has no Translation property, and stopping
-        // an animation on a property that does not exist throws ("The
-        // specified property was not found", the app's first notice at
-        // launch). Give it the property first, at rest.
-        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
