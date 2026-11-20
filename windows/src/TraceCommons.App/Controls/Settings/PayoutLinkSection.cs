@@ -33,9 +33,6 @@ public sealed class PayoutLinkSection : UserControl
         Loaded += async (_, _) => await _flow.RefreshAsync();
     }
 
-    /// <summary>Reads the links again, after a change of account.</summary>
-    public System.Threading.Tasks.Task RefreshAsync() => _flow.RefreshAsync();
-
     /// <summary>Raised when the section starts or stops drawing anything: the list shows its row only then (D2).</summary>
     public event Action<bool>? VisibilityChanged;
 
