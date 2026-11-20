@@ -668,6 +668,18 @@ public class InsightsSkillsTests
     }
 
     [Fact]
+    public void ThePalettesAreTheMacs()
+    {
+        // InsightsSkillsCover.swift:69-78, in order: the palette index is a
+        // hash, so an edited or reordered stop gives a publisher another cover.
+        Assert.Equal(new (uint, uint)[]
+        {
+            (0x2F3FA8, 0x6B3FB8), (0x0E5C8F, 0x1D4FB0), (0x0F6B5C, 0x1B5E86), (0x8A3A12, 0xA8324A),
+            (0x7A2E8C, 0xB0306A), (0x4A5A12, 0x1F6B3A), (0x6E5008, 0x9A3C16), (0x35404F, 0x4A3F6B),
+        }, SkillCoverArt.Palettes);
+    }
+
+    [Fact]
     public void AgentMarksAreTheGeneratedLogosInTheirToolTints()
     {
         // GlassTool.tint (Indicators.swift:179-240): a logo and its token for

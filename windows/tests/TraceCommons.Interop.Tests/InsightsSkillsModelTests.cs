@@ -366,6 +366,21 @@ public class InsightsSkillsModelTests
     }
 
     [Fact]
+    public async Task TheSnapshotsWordsWinOverTheCoreTable()
+    {
+        // text(_:) (InsightsSkillsModel.swift:72-73): the confirmed snapshot's copy
+        // first, the core's Insights table only before the first answer.
+        var model = new InsightsSkillsModel(_ => Task.FromResult(Snapshot(enabled: true) with
+        {
+            Copy = new Dictionary<string, string> { ["skills_title"] = "From the snapshot" },
+        }), copy: key => key == "skills_title" ? "From the core" : null);
+        Assert.Equal("From the core", model.Text("skills_title"));
+        await model.LoadAsync();
+        Assert.Equal("From the snapshot", model.Text("skills_title"));
+        Assert.Equal(string.Empty, model.Text("skills_unknown_key"));
+    }
+
+    [Fact]
     public void SkillsSectionsKeepTheirOrderAndSharedCopyKeys()
     {
         Assert.Equal(new[] { "home", "inventory", "usage", "catalog", "following" }, InsightsSkillsModel.Sections);
