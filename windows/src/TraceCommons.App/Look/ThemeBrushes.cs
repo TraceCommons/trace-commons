@@ -25,7 +25,11 @@ namespace TraceCommons.App.Look;
 /// </remarks>
 internal static class ThemeBrushes
 {
-    private static readonly List<(WeakReference<DependencyObject> Target, DependencyProperty Property, string Key)> Bound = new();
+    // Held strongly: a weak reference holds only the projection's wrapper,
+    // which the collector takes while the element stays on screen, so a
+    // bound card kept its old colour (box live switch, 2026-11-19). Bind is
+    // for elements built once that live as long as their window.
+    private static readonly List<(DependencyObject Target, DependencyProperty Property, string Key)> Bound = new();
     private static readonly Dictionary<string, Brush> Cache = new();
     private static FrameworkElement? _root;
     private static string? _shown;
@@ -90,11 +94,15 @@ internal static class ThemeBrushes
         return (Brush)Application.Current.Resources[key];
     }
 
-    /// <summary>Sets <paramref name="property"/> to <paramref name="key"/>'s brush now and on every change of theme.</summary>
+    /// <summary>
+    /// Sets <paramref name="property"/> to <paramref name="key"/>'s brush now
+    /// and on every change of theme. For an element built once that lives as
+    /// long as its window (the rail, the flyout, About): it is held.
+    /// </summary>
     public static void Bind(DependencyObject target, DependencyProperty property, string key)
     {
         target.SetValue(property, Get(key));
-        Bound.Add((new WeakReference<DependencyObject>(target), property, key));
+        Bound.Add((target, property, key));
     }
 
     private static void Refresh()
@@ -106,13 +114,9 @@ internal static class ThemeBrushes
         }
 
         _shown = now;
-        Bound.RemoveAll(entry => !entry.Target.TryGetTarget(out _));
-        foreach ((WeakReference<DependencyObject> target, DependencyProperty property, string key) in Bound)
+        foreach ((DependencyObject target, DependencyProperty property, string key) in Bound)
         {
-            if (target.TryGetTarget(out DependencyObject? element))
-            {
-                element.SetValue(property, Get(key));
-            }
+            target.SetValue(property, Get(key));
         }
 
         Changed?.Invoke();
