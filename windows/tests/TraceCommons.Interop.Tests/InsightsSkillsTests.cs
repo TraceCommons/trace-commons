@@ -668,6 +668,18 @@ public class InsightsSkillsTests
     }
 
     [Fact]
+    public void AgentMarksAreTheGeneratedLogosInTheirToolTints()
+    {
+        // GlassTool.tint (Indicators.swift:179-240): a logo and its token for
+        // the three tools, initials in the primary ink for anything else.
+        Assert.Equal((ToolLogoPaths.Claude, "TcToolClaudeBrush"), SkillsToolMark.For("claude_code"));
+        Assert.Equal((ToolLogoPaths.Codex, "TcToolCodexBrush"), SkillsToolMark.For("codex"));
+        Assert.Equal((ToolLogoPaths.OpenCode, "TcToolOpenCodeBrush"), SkillsToolMark.For("opencode"));
+        Assert.Null(SkillsToolMark.For("shared"));
+        Assert.Null(SkillsToolMark.For("claude"));
+    }
+
+    [Fact]
     public void InitialsComeFromThePublishersWords()
     {
         Assert.Equal(new[] { "OB", "TC", "CS", "X", "" },

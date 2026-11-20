@@ -1065,17 +1065,17 @@ public sealed class InsightsSkillsView : UserControl
     // MARK: Agents
 
     /// <summary>A tool's tint (<c>GlassTool.tint</c>): its token, or the primary ink for a tool without a logo.</summary>
-    private static Color Tint(string agent) => R(ToolLogos.For(agent)?.TintKey ?? "TcInkPrimaryBrush") is SolidColorBrush brush
+    private static Color Tint(string agent) => R(SkillsToolMark.For(agent)?.TintKey ?? "TcInkPrimaryBrush") is SolidColorBrush brush
         ? brush.Color
         : Colors.Gray;
 
     private FrameworkElement AgentLogo(string agent, double size)
     {
-        if (ToolLogos.For(agent) is { } logo)
+        if (SkillsToolMark.For(agent) is { } mark)
         {
             var canvas = new Viewbox { Width = size, Height = size };
-            var art = new Canvas { Width = logo.ViewBox, Height = logo.ViewBox };
-            foreach (string data in logo.Paths)
+            var art = new Canvas { Width = mark.Logo.ViewBox.Width, Height = mark.Logo.ViewBox.Height };
+            foreach (string data in mark.Logo.Paths)
             {
                 art.Children.Add(new Microsoft.UI.Xaml.Shapes.Path
                 {

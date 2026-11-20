@@ -222,3 +222,20 @@ public sealed record SkillsHomeMotion(bool Reduce)
     /// <summary><c>.easeOut</c>: CoreAnimation's ease-out curve, (0, 0, 0.58, 1).</summary>
     public static double EaseOut(double t) => MonitorMotion.CubicBezier(0, 0, 0.58, 1, t);
 }
+
+/// <summary>
+/// A Skills agent's mark (<c>GlassTool</c>, Indicators.swift:179-240): the
+/// generated logo artwork (<see cref="ToolLogoPaths"/>, from the Mac's one
+/// copy) and its tint token. Any other agent, a shared root among them, has
+/// none and draws its initials in the primary ink.
+/// </summary>
+public static class SkillsToolMark
+{
+    public static (ToolLogoArtwork Logo, string TintKey)? For(string agent) => agent switch
+    {
+        "claude_code" => (ToolLogoPaths.Claude, "TcToolClaudeBrush"),
+        "codex" => (ToolLogoPaths.Codex, "TcToolCodexBrush"),
+        "opencode" => (ToolLogoPaths.OpenCode, "TcToolOpenCodeBrush"),
+        _ => null,
+    };
+}
