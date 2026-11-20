@@ -237,10 +237,13 @@ try {
                     # The desktop takes the focus and the app stays on screen,
                     # uncovered: a click on bare desktop beside the window
                     # (SetForegroundWindow on the desktop is refused).
-                    $f = [W]::Frame($main); $sw = [W]::GetSystemMetrics(0); $sh = [W]::GetSystemMetrics(1)
-                    if ($f.Right -lt $sw - 12) { $x = [int](($f.Right + $sw) / 2); $y = [int]($f.Top + 12) }
-                    elseif ($f.Left -gt 12) { $x = [int]($f.Left / 2); $y = [int]($f.Top + 12) }
-                    else { $x = [int]($f.Left + 12); $y = [int]($f.Top / 2) }
+                    # Right of it, below it (above the taskbar), left of it, or above it.
+                    Add-Type -AssemblyName System.Windows.Forms
+                    $f = [W]::Frame($main); $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea; $sw = $wa.Right; $sh = $wa.Bottom
+                    if ($f.Right -lt $sw - 12) { $x = [int](($f.Right + $sw) / 2); $y = [int]([Math]::Max($f.Top, 0) + 12) }
+                    elseif ($f.Bottom -lt $sh - 12) { $x = [int]($sw / 2); $y = [int](($f.Bottom + $sh) / 2) }
+                    elseif ($f.Left -gt 12) { $x = [int]($f.Left / 2); $y = [int]([Math]::Max($f.Top, 0) + 12) }
+                    else { $x = [int]($sw / 2); $y = [int]($f.Top / 2) }
                     [W]::Move($x, $y); Start-Sleep -Milliseconds 200; [W]::Click(); Start-Sleep -Milliseconds 1500
                     $fg = [W]::GetForegroundWindow()
                     Log "  clicked desktop at $x,$y (window $([W]::R($main)), screen ${sw}x${sh}); foreground now 0x$($fg.ToString('X')) $([W]::Cls($fg)); app focused=$($fg -eq $main) visible=$([W]::IsWindowVisible($main))"
