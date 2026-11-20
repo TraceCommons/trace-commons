@@ -48,6 +48,7 @@
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#4FD39A" />
             <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#EB1924" />
             <SolidColorBrush x:Key="TcTileFolderBrush" Color="#2A2A2C" />
+            <SolidColorBrush x:Key="TcChartSeries1Brush" Color="#0091FD" />
         </ResourceDictionary>
 
         <!-- Light. -->
@@ -81,6 +82,7 @@
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#1D9467" />
             <SolidColorBrush x:Key="TcToolRedTeamBrush" Color="#C8141E" />
             <SolidColorBrush x:Key="TcTileFolderBrush" Color="#E6E6EA" />
+            <SolidColorBrush x:Key="TcChartSeries1Brush" Color="#2A78D6" />
         </ResourceDictionary>
 
         <!-- High contrast: the system's colours, as in DesignSystem.xaml. -->
@@ -114,6 +116,7 @@
             <StaticResource x:Key="TcToolOpenCodeBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcToolRedTeamBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcTileFolderBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcChartSeries1Brush" ResourceKey="TextFillColorPrimaryBrush" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 </ResourceDictionary>

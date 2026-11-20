@@ -1567,12 +1567,15 @@ WINDOWS_TOKEN_KEYS = [
     ("TcStatusOffBrush", "statusOff"),
     # W14 (launch): the tool tints a launch button's logo and the launch
     # art's logo are filled with, and the folder tile's ground
-    # (Indicators.swift:179-187, :306), as the Mac's GlassTool.tint.
+    # (Indicators.swift:179-187, :306), as the Mac's GlassTool.tint. The
+    # Skills tab's tool marks use the same three tool tints.
     ("TcToolClaudeBrush", "toolClaude"),
     ("TcToolCodexBrush", "toolCodex"),
     ("TcToolOpenCodeBrush", "toolOpenCode"),
     ("TcToolRedTeamBrush", "toolRedTeam"),
     ("TcTileFolderBrush", "tileFolder"),
+    # The Skills tab's usage bars (chartSeries1, as the Mac's Insights charts).
+    ("TcChartSeries1Brush", "chartSeries1"),
 ]
 # Under a high contrast theme every brand colour gives way to the system's:
 # a fill or ink aliases the primary text brush and a label on a fill the
