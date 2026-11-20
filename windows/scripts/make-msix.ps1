@@ -48,7 +48,11 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 # Windows, which is not what a rebuild of the same release means.
 $packageVersion = "$Version.0"
 
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+# Two-argument Join-Path only. Windows PowerShell 5.1's Join-Path takes no
+# third path, and a hand run on a box without PowerShell 7 failed here with
+# "A positional parameter cannot be found that accepts argument '..'".
+# clients.yml runs this script under both hosts.
+$repoRoot = (Resolve-Path (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
 $windowsDir = Join-Path $repoRoot 'windows'
 $project = Join-Path $windowsDir 'src\TraceCommons.App\TraceCommons.App.csproj'
 $manifest = Join-Path $windowsDir 'packaging\Package.appxmanifest'
