@@ -1429,7 +1429,9 @@ public sealed partial class MainWindow : Window
         return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
             copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy),
             iso => _host.CallAsync(InsightsCounterWeek.Method,
-                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)));
+                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)),
+            // The summary card's Hide: the daemon's insights_recap_card_enabled off (InsightsView.swift:88-91).
+            () => new InsightsRecapSwitch((method, parameters) => _host.CallAsync(method, parameters)).SetAsync(false));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
