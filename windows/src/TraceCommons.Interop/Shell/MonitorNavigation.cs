@@ -259,6 +259,31 @@ public static class MonitorNavigation
         };
     }
 
+    /// <summary>
+    /// The crumb Escape follows, or null where the Mac binds no Escape:
+    /// History on either tab (HomeViews.swift:926-927) and the commons
+    /// catalogue (MissionsViews.swift:71-72) go back as their breadcrumb does.
+    /// </summary>
+    public static Crumb? EscapeBack(MonitorLocation at, bool missions)
+    {
+        bool bound = ShowsHistory(at)
+            || (at.Tab == MonitorTab.Home && at.HomePage.Shown(missions) == HomePage.Missions);
+        if (!bound || Breadcrumb(at, missions) is not { } crumbs)
+        {
+            return null;
+        }
+
+        foreach (Crumb crumb in crumbs)
+        {
+            if (crumb.GoesBack)
+            {
+                return crumb;
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Where a crumb that goes back lands: the tab's first page.</summary>
     public static MonitorLocation Back(MonitorLocation at, Crumb crumb) => crumb.Tab switch
     {

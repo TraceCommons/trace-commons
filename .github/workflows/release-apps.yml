@@ -601,6 +601,16 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "signature verification failed for $_" }
           }
 
+      # W25-D2 (a): the signed app, in the publish tree that ships, reaches the
+      # Windows Credential Manager before it is packaged. The Windows
+      # counterpart of the launch check in verify-macos-entitlements.sh; the
+      # app answers before it opens a window, so no console session is needed.
+      - name: Verify the signed app reaches the Windows Credential Manager
+        shell: pwsh
+        run: |
+          ./scripts/windows/verify-credential-store.ps1 -App "$env:GITHUB_WORKSPACE/app-publish/TraceCommons.exe"
+          exit $LASTEXITCODE
+
       # After signing, so the provenance covers the signed bytes rather than the
       # unsigned build output. The Authenticode signature travels inside the .exe,
       # so provenance on the exe covers what a contributor executes; the zip is

@@ -15,6 +15,7 @@ using TraceCommons.Interop.Map;
 using Windows.Foundation;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -112,7 +113,8 @@ internal sealed class TracesGraphFooter : UserControl
         _range.Style = (Style)Application.Current.Resources["TcCaptionTextStyle"];
         _range.FontSize = 12;
         _range.FontWeight = FontWeights.Medium;
-        _range.Foreground = Brush("TcInkPrimaryBrush");
+        // Built once: set again on a live theme switch (ThemeBrushes).
+        ThemeBrushes.Bind(_range, TextBlock.ForegroundProperty, "TcInkPrimaryBrush");
         var rangePill = new Grid
         {
             Height = 26,
@@ -147,6 +149,8 @@ internal sealed class TracesGraphFooter : UserControl
         Content = root;
 
         ActualThemeChanged += (_, _) => { Paint(); _canvas.Invalidate(); };
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { Paint(); _canvas.Invalidate(); });
         Unloaded += (_, _) => StopTicking();
         Paint();
         Render();
@@ -398,7 +402,7 @@ internal sealed class TracesGraphFooter : UserControl
 
     private bool HighContrast => _accessibility.HighContrast;
 
-    private bool Dark => ActualTheme == ElementTheme.Dark;
+    private bool Dark => ThemeBrushes.Dark;
 
     /// <summary>A generated flat ink for the theme (MapArt); under High Contrast the system's text colour.</summary>
     private Color Ink(string token, double alpha = 1)
@@ -420,7 +424,7 @@ internal sealed class TracesGraphFooter : UserControl
 
     private static Color With(Color c, double alpha) => Color.FromArgb((byte)Math.Round(c.A * Math.Clamp(alpha, 0, 1)), c.R, c.G, c.B);
 
-    private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];
+    private static Brush Brush(string key) => ThemeBrushes.Get(key);
 
     private static TextBlock Figure() => new()
     {

@@ -117,6 +117,13 @@ public sealed class TrayIcon : IDisposable
     /// </remarks>
     public event Action? QuitRequested;
 
+    /// <summary>
+    /// Raised after the icon was added again because the taskbar was made
+    /// again (<see cref="_taskbarCreated"/>): the window feeds it the current
+    /// state, which it may have skipped while the icon was absent.
+    /// </summary>
+    public event Action? Readded;
+
     private const uint CallbackMessage = WM_APP + 1;
     private const uint IconId = 1;
 
@@ -133,6 +140,19 @@ public sealed class TrayIcon : IDisposable
     private const int MenuIdAbout = 16;
 
     private readonly WndProc _wndProc;
+
+    /// <summary>
+    /// The shell's "TaskbarCreated" message, broadcast to every top-level
+    /// window when explorer.exe starts its taskbar: after it crashed or was
+    /// restarted, and at sign-in when this app started before the taskbar.
+    /// The notification area forgets every icon then; an app that does not
+    /// add its icon again on this message has none until it restarts (test
+    /// box, 2026-11-20: explorer restarted, the icon was gone for good).
+    /// </summary>
+    private readonly uint _taskbarCreated;
+
+    /// <summary>The pixel size the current icon was drawn at.</summary>
+    private int _drawnSize;
     private readonly string _className;
     private IntPtr _hwnd;
     private IntPtr _hIcon;
@@ -174,6 +194,7 @@ public sealed class TrayIcon : IDisposable
         // alive. The same rule the subscribe callback in TcDaemon follows,
         // and the same crash if it is dropped.
         _wndProc = OnMessage;
+        _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
 
         // Unique per instance. A class name is process-global, and
         // RegisterClassEx fails on a duplicate -- which would silently cost
@@ -431,7 +452,10 @@ public sealed class TrayIcon : IDisposable
         data.hIcon = _hIcon;
         data.szTip = Tooltip;
 
-        if (!Shell_NotifyIcon(NIM_ADD, ref data))
+        // NIM_ADD fails when the shell still holds the icon (a
+        // TaskbarCreated that did not forget it); updating it in place is
+        // then what is wanted, and it proves the icon is present.
+        if (!Shell_NotifyIcon(NIM_ADD, ref data) && !Shell_NotifyIcon(NIM_MODIFY, ref data))
         {
             return false;
         }
@@ -460,6 +484,46 @@ public sealed class TrayIcon : IDisposable
 
     private IntPtr OnMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)
     {
+        if (_taskbarCreated != 0 && message == _taskbarCreated && !_disposed)
+        {
+            // The new taskbar holds no icon of ours, whatever _added says.
+            IntPtr previous = _hIcon;
+            _added = AddIcon();
+            if (previous != IntPtr.Zero && previous != _hIcon)
+            {
+                DestroyIcon(previous);
+            }
+
+            if (_added)
+            {
+                Readded?.Invoke();
+            }
+
+            return IntPtr.Zero;
+        }
+
+        // The display scale changed: Windows broadcasts these to every
+        // top-level window, this hidden one included (it gets no
+        // WM_DPICHANGED). Drawn again a moment later, once the taskbar has
+        // laid itself out at the new scale: an icon handed over at once was
+        // copied at the old size and stretched (test box, 2026-11-20). Only
+        // when the size moved.
+        if ((message == WM_DISPLAYCHANGE || message == WM_SETTINGCHANGE) && _added && !_disposed)
+        {
+            SetTimer(_hwnd, ScaleTimerId, ScaleSettleMilliseconds, IntPtr.Zero);
+        }
+
+        if (message == WM_TIMER && wParam == ScaleTimerId)
+        {
+            KillTimer(_hwnd, ScaleTimerId);
+            if (_added && !_disposed && IconSize() != _drawnSize)
+            {
+                Redraw(withTip: false);
+            }
+
+            return IntPtr.Zero;
+        }
+
         if (message == CallbackMessage)
         {
             // Version 4 packing: the notification is the low word of lParam.
@@ -704,6 +768,35 @@ public sealed class TrayIcon : IDisposable
     }
 
     /// <summary>
+    /// The small-icon size at the DPI of the monitor the notification area is
+    /// on. Not this class's own window's DPI: that window is never shown, and
+    /// a hidden window keeps the DPI it was created at, so after the display
+    /// scale changed the icon stayed a 16-pixel raster stretched to 20 (test
+    /// box, 2026-11-20, 100 to 125 percent).
+    /// </summary>
+    private int IconSize()
+    {
+        uint dpi = 0;
+        IntPtr taskbar = FindWindow("Shell_TrayWnd", null);
+        if (taskbar != IntPtr.Zero)
+        {
+            IntPtr monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTOPRIMARY);
+            if (monitor == IntPtr.Zero || GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, out dpi, out _) != 0)
+            {
+                dpi = 0;
+            }
+        }
+
+        if (dpi == 0 && _hwnd != IntPtr.Zero)
+        {
+            dpi = GetDpiForWindow(_hwnd);
+        }
+
+        int size = GetSystemMetricsForDpi(SM_CXSMICON, Math.Max(96u, dpi));
+        return size > 0 ? size : 16;
+    }
+
+    /// <summary>
     /// Rasterizes the mark at the current small-icon size and turns it into
     /// an HICON.
     /// </summary>
@@ -714,12 +807,8 @@ public sealed class TrayIcon : IDisposable
     /// </remarks>
     private IntPtr CreateMarkIcon()
     {
-        int dpi = _hwnd != IntPtr.Zero ? (int)GetDpiForWindow(_hwnd) : 96;
-        int size = GetSystemMetricsForDpi(SM_CXSMICON, (uint)Math.Max(96, dpi));
-        if (size <= 0)
-        {
-            size = 16;
-        }
+        int size = IconSize();
+        _drawnSize = size;
 
         // The Mac's strip in the logo kit's single ink for the bar it sits
         // on: white on a dark taskbar, black on a light one (menuItemMark),
@@ -840,6 +929,13 @@ public sealed class TrayIcon : IDisposable
 
     private const uint WM_APP = 0x8000;
     private const uint WM_CONTEXTMENU = 0x007B;
+    private const uint WM_DISPLAYCHANGE = 0x007E;
+    private const uint WM_TIMER = 0x0113;
+    private static readonly IntPtr ScaleTimerId = new(0x7463);
+    private const uint ScaleSettleMilliseconds = 1000;
+    private const uint WM_SETTINGCHANGE = 0x001A;
+    private const uint MONITOR_DEFAULTTOPRIMARY = 1;
+    private const int MDT_EFFECTIVE_DPI = 0;
     private const uint NIN_SELECT = 0x0400;
     private const uint NIN_KEYSELECT = 0x0401;
     private const uint NIN_BALLOONUSERCLICK = 0x0405;
@@ -959,6 +1055,25 @@ public sealed class TrayIcon : IDisposable
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "Shell_NotifyIconW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool Shell_NotifyIcon(uint message, ref NOTIFYICONDATA data);
+
+    [DllImport("user32.dll")]
+    private static extern UIntPtr SetTimer(IntPtr hwnd, IntPtr id, uint elapse, IntPtr proc);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool KillTimer(IntPtr hwnd, IntPtr id);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
+    private static extern IntPtr FindWindow(string className, string? windowName);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint dpiX, out uint dpiY);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "RegisterWindowMessageW")]
+    private static extern uint RegisterWindowMessage(string name);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "RegisterClassExW")]
     private static extern ushort RegisterClassEx(ref WNDCLASSEX wc);

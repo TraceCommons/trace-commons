@@ -5,7 +5,6 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.Interop;
@@ -13,6 +12,7 @@ using TraceCommons.Interop.Generated;
 using TraceCommons.Interop.Shell;
 using Windows.UI;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -36,6 +36,8 @@ internal sealed class EdgeRailWindow : Window
     private readonly EdgeRailHover _hover = new();
     private readonly DispatcherQueueTimer _closeTimer;
     private readonly Grid _root = new();
+    private Rectangle? _handle;
+    private Microsoft.UI.Xaml.Shapes.Path? _mark;
     private readonly Grid _closed = new();
     private readonly Grid _open = new();
     private readonly TranslateTransform _slide = new();
@@ -75,7 +77,11 @@ internal sealed class EdgeRailWindow : Window
 
         BuildClosed();
         BuildOpen();
-        _root.Background = (Brush)Application.Current.Resources["TcWindowBackgroundBrush"];
+        ThemeBrushes.Bind(_root, Panel.BackgroundProperty, "TcWindowBackgroundBrush");
+        // The handle and the mark pick their own colours: again on a change
+        // of theme or high contrast while the rail lives.
+        ThemeBrushes.Changed += TintMarks;
+        Closed += (_, _) => ThemeBrushes.Changed -= TintMarks;
         _root.Children.Add(_closed);
         _root.Children.Add(_open);
         _open.Visibility = Visibility.Collapsed;
@@ -120,15 +126,8 @@ internal sealed class EdgeRailWindow : Window
             // A click on the card or the zone focuses nothing, and with
             // nothing focused Escape never reaches the rail (tc-win-az5: the
             // rail stayed open). The first control takes focus without a
-            // ring, as a pointer click gives it, once the rail is laid out
-            // and active.
-            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
-            {
-                if (_hover.HoldsKeyboard && FocusManager.FindFirstFocusableElement(_open) is Control first)
-                {
-                    first.Focus(FocusState.Pointer);
-                }
-            });
+            // ring, as a pointer click gives it.
+            ToolWindows.FocusFirst(_open, FocusState.Pointer, () => _hover.HoldsKeyboard);
         };
         _root.KeyDown += (_, e) =>
         {
@@ -256,17 +255,17 @@ internal sealed class EdgeRailWindow : Window
 
     private void BuildClosed()
     {
-        Color handle = Argb(ActualDark ? HomeTrayInks.Dark.EdgeRailHandle : HomeTrayInks.Light.EdgeRailHandle);
-        _closed.Children.Add(new Rectangle
+        _handle = new Rectangle
         {
             Width = EdgeRailGeometry.HandleWidth,
             Height = EdgeRailGeometry.HandleHeight,
             RadiusX = EdgeRailGeometry.HandleWidth / 2 + 0.5,
             RadiusY = EdgeRailGeometry.HandleWidth / 2 + 0.5,
-            Fill = new SolidColorBrush(handle),
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
-        });
+        };
+        _closed.Children.Add(_handle);
+        TintMarks();
         AutomationProperties.SetName(_closed, MonitorShellCopy.Section("edge_rail", "handle_label"));
     }
 
@@ -282,10 +281,10 @@ internal sealed class EdgeRailWindow : Window
         {
             Padding = new Thickness(HomeTrayInks.Measures.PanePadding),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
             Child = _peek,
             VerticalAlignment = VerticalAlignment.Center,
         };
+        ThemeBrushes.Bind(peekCard, Border.BackgroundProperty, "TcSurfaceCardBrush");
         _open.Children.Add(peekCard);
 
         var icons = new StackPanel
@@ -297,14 +296,17 @@ internal sealed class EdgeRailWindow : Window
         };
         icons.Children.Add(Tile(MonitorTab.Inference, new FontIcon { Glyph = "", FontSize = 17 }));
         icons.Children.Add(Tile(MonitorTab.Traces, TraceNodes()));
-        icons.Children.Add(new Rectangle
+        var rule = new Rectangle
         {
             Width = EdgeRailGeometry.RuleWidth,
             Height = 1,
-            Fill = (Brush)Application.Current.Resources["TcHairlineBrush"],
             Margin = new Thickness(0, HomeTrayInks.Measures.S2, 0, HomeTrayInks.Measures.S2),
-        });
-        var app = new Button { Width = EdgeRailGeometry.Tile, Height = EdgeRailGeometry.Tile, Content = Mark(20) };
+        };
+        ThemeBrushes.Bind(rule, Shape.FillProperty, "TcHairlineBrush");
+        icons.Children.Add(rule);
+        _mark = Mark(20);
+        TintMarks();
+        var app = new Button { Width = EdgeRailGeometry.Tile, Height = EdgeRailGeometry.Tile, Content = _mark };
         string openApp = MonitorShellCopy.Section("edge_rail", "open_app");
         AutomationProperties.SetName(app, openApp);
         ToolTipService.SetToolTip(app, openApp);
@@ -365,7 +367,7 @@ internal sealed class EdgeRailWindow : Window
         }
     }
 
-    private bool ActualDark => Application.Current.RequestedTheme == ApplicationTheme.Dark;
+    private static bool ActualDark => ThemeBrushes.Key != "Light";
 
     /// <summary>Four nodes in a T (<c>GlassTraceNodesGlyph</c>, Logos/GlassTraceNodesGlyph.swift), 20 points.</summary>
     private static UIElement TraceNodes()
@@ -373,26 +375,27 @@ internal sealed class EdgeRailWindow : Window
         const double side = 20;
         var canvas = new Canvas { Width = side, Height = side };
         (double X, double Y)[] nodes = { (0.16, 0.3), (0.5, 0.3), (0.84, 0.3), (0.5, 0.84) };
-        Brush ink = (Brush)Application.Current.Resources["TcInkPrimaryBrush"];
         foreach ((int from, int to) in new[] { (0, 2), (1, 3) })
         {
-            canvas.Children.Add(new Line
+            var line = new Line
             {
                 X1 = nodes[from].X * side,
                 Y1 = nodes[from].Y * side,
                 X2 = nodes[to].X * side,
                 Y2 = nodes[to].Y * side,
-                Stroke = ink,
                 StrokeThickness = 0.08 * side,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
-            });
+            };
+            ThemeBrushes.Bind(line, Shape.StrokeProperty, "TcInkPrimaryBrush");
+            canvas.Children.Add(line);
         }
 
         double r = 0.12 * side;
         foreach ((double x, double y) in nodes)
         {
-            var dot = new Ellipse { Width = r * 2, Height = r * 2, Fill = ink };
+            var dot = new Ellipse { Width = r * 2, Height = r * 2 };
+            ThemeBrushes.Bind(dot, Shape.FillProperty, "TcInkPrimaryBrush");
             Canvas.SetLeft(dot, x * side - r);
             Canvas.SetTop(dot, y * side - r);
             canvas.Children.Add(dot);
@@ -402,14 +405,33 @@ internal sealed class EdgeRailWindow : Window
         return canvas;
     }
 
+    /// <summary>
+    /// The handle's and the mark's colours: the Mac's fixed tints, or the
+    /// ink under high contrast (checklist D2); set again on every change.
+    /// </summary>
+    private void TintMarks()
+    {
+        bool highContrast = SystemSettingWatch.HighContrast;
+        if (_handle is not null)
+        {
+            _handle.Fill = highContrast
+                ? ThemeBrushes.Get("TcInkPrimaryBrush")
+                : new SolidColorBrush(Argb(ActualDark ? HomeTrayInks.Dark.EdgeRailHandle : HomeTrayInks.Light.EdgeRailHandle));
+        }
+
+        if (_mark is not null)
+        {
+            _mark.Fill = highContrast ? ThemeBrushes.Get("TcInkPrimaryBrush") : new SolidColorBrush(Argb(HomeTrayInks.Dark.HeroTints[1]));
+        }
+    }
+
     /// <summary>The NEAR AI N in the brand blue on the app's tile (EdgeRailView.swift:111-114).</summary>
-    private static UIElement Mark(double side)
+    private static Microsoft.UI.Xaml.Shapes.Path Mark(double side)
     {
         var path = new Microsoft.UI.Xaml.Shapes.Path
         {
             Data = NearMarkGeometry.Build(),
             Stretch = Stretch.Uniform,
-            Fill = new SolidColorBrush(Argb(HomeTrayInks.Dark.HeroTints[1])),
             Width = side,
             Height = side,
         };

@@ -27,6 +27,7 @@ using Windows.Graphics;
 using VirtualKey = Windows.System.VirtualKey;
 using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -105,6 +106,11 @@ public sealed partial class MainWindow
     private void InitializeShell()
     {
         Title = MonitorWords.AppName;
+
+        // The wake message is heard from the start, not from the first
+        // showing: a window that starts in the tray at login may never be
+        // shown, and would otherwise never ask for its flags after a wake.
+        WindowMinimumSize.Watch(WinRT.Interop.WindowNative.GetWindowHandle(this));
 
         // The toolbar row is the title bar: the window owns the bar, the
         // caption buttons stay the system's (snap layouts, window menu, their
@@ -238,6 +244,39 @@ public sealed partial class MainWindow
         privateAI.Invoked += OnTogglePrivateInferenceAccelerator;
         WindowRoot.KeyboardAccelerators.Add(privateAI);
 
+        // Escape goes back as the breadcrumb does, on the pages where the Mac
+        // binds it (MonitorNavigation.EscapeBack). Anywhere else it is left
+        // unhandled, so an open list or dialog still closes on it.
+        var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            if (MonitorNavigation.EscapeBack(_at, ViewModel.MissionsShown) is Crumb crumb)
+            {
+                args.Handled = true;
+                GoBack(crumb);
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(escape);
+
+        // Return undoes the last approval while its card offers the undo:
+        // the Mac's one Return binding (MonitorKeys.ReturnUndoes). A focused
+        // button, split button, field, list or the Traces tree keeps its own
+        // Return (a SplitButton is a ContentControl, not a ButtonBase).
+        var undo = new KeyboardAccelerator { Key = VirtualKey.Enter };
+        undo.Invoked += async (_, args) =>
+        {
+            bool undoOffered = ViewModel.HasUndo && UndoCard.Visibility == Visibility.Visible;
+            object? focused = WindowRoot.XamlRoot is XamlRoot root ? FocusManager.GetFocusedElement(root) : null;
+            bool focusTakesReturn = focused is ButtonBase or SplitButton or TextBox or PasswordBox or AutoSuggestBox or RichEditBox
+                or Selector or SelectorItem or ToggleSwitch or TracesTreeView;
+            if (MonitorKeys.ReturnUndoes(undoOffered, focusTakesReturn))
+            {
+                args.Handled = true;
+                await ViewModel.UndoAsync();
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(undo);
+
         // The accelerators belong to the window, not to any control: no
         // tooltip announces them, and no control's name is derived from one.
         WindowRoot.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
@@ -346,7 +385,7 @@ public sealed partial class MainWindow
                     Glyph = "",
                     FontSize = 10,
                     VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+                    Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
                     IsTabStop = false,
                 });
             }
@@ -700,11 +739,11 @@ public sealed partial class MainWindow
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
-        LayoutRect frame = MonitorPaneLayout.WindowFrame(
-            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, new LayoutRect(work.X, work.Y, work.Width, work.Height));
+        LayoutRect frame = MonitorPaneLayout.FirstFrame(
+            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, height, new LayoutRect(work.X, work.Y, work.Width, work.Height));
         if (!IsMaximized)
         {
-            MoveAndResize(frame with { Height = Math.Min(height, work.Height) });
+            MoveAndResize(frame);
         }
 
         _presented = new PaneVisibility(_wantsMap, inspector);
@@ -1309,6 +1348,12 @@ internal static class WindowMinimumSize
     public static void Set(IntPtr hwnd, int width, int height)
     {
         Minimums[hwnd] = (width, height);
+        Watch(hwnd);
+    }
+
+    /// <summary>Hears <see cref="Resumed"/> on <paramref name="hwnd"/>, with no minimum size yet.</summary>
+    public static void Watch(IntPtr hwnd)
+    {
         if (Installed.Add(hwnd))
         {
             SetWindowSubclass(hwnd, Proc, (UIntPtr)1, UIntPtr.Zero);

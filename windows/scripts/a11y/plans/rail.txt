@@ -1,0 +1,13 @@
+# The edge rail: Settings' switch on (sample state only), the zone, open by
+# a click on the zone, audit, Escape, then the switch back off.
+key main BC ctrl
+newwin settings
+toggle settings Show the edge rail
+sleep 1500
+newwin rail
+snap rail rail-closed
+rail-open
+audit rail rail-open 20
+key rail 1B
+state rail rail-after-esc
+toggle settings Show the edge rail
