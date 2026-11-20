@@ -885,6 +885,7 @@ public sealed partial class TracesMapView : UserControl
         {
             double now = Now;
             _player.Tick(now);
+            PlaceMovingCanvas();
             _canvas.Invalidate();
             bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
@@ -904,7 +905,88 @@ public sealed partial class TracesMapView : UserControl
     private void Redraw()
     {
         _still.Invalidate();
+        PlaceMovingCanvas();
         _canvas.Invalidate();
+    }
+
+    /// <summary>The moving layer's box (MovingLayerBounds), or null while it takes the whole pane.</summary>
+    private LayoutRect? _movingBox;
+
+    /// <summary>
+    /// Sizes the moving layer's canvas to the box its resting parts draw in,
+    /// or back to the whole pane while a run plays or the pile moves, so a
+    /// frame clears and composes only those pixels (MovingLayerBounds).
+    /// <see cref="OnDraw"/> draws through the canvas's own offset, so the
+    /// parts land where they would on a whole-pane canvas.
+    /// </summary>
+    private void PlaceMovingCanvas()
+    {
+        LayoutRect? box = MovingBox(Now);
+        if (box == _movingBox)
+        {
+            return;
+        }
+
+        _movingBox = box;
+        if (box is { } b)
+        {
+            _canvas.HorizontalAlignment = HorizontalAlignment.Left;
+            _canvas.VerticalAlignment = VerticalAlignment.Top;
+            _canvas.Margin = new Thickness(b.X, b.Y, 0, 0);
+            _canvas.Width = b.Width;
+            _canvas.Height = b.Height;
+        }
+        else
+        {
+            _canvas.HorizontalAlignment = HorizontalAlignment.Stretch;
+            _canvas.VerticalAlignment = VerticalAlignment.Stretch;
+            _canvas.Margin = default;
+            _canvas.Width = double.NaN;
+            _canvas.Height = double.NaN;
+        }
+    }
+
+    /// <summary>
+    /// Every part <see cref="OnDraw"/> draws while the layer rests, in pane
+    /// DIPs: each arc with its widest stroke, the library's frame with its
+    /// glow, the rocket at its rest. Null (the whole pane) while a transfer
+    /// plays or the pile is on this layer, since those reach anywhere.
+    /// </summary>
+    private LayoutRect? MovingBox(double now)
+    {
+        if (!_scene.DrawsMap)
+        {
+            return null;
+        }
+
+        bool whole = (Motion && WindowClocks.Running && _player.Run is not null) || PileMoves(now);
+        MapGeometry fit = Fit;
+        var parts = new List<LayoutRect>();
+        double half = MapGeometry.ArcWidth * MapGeometry.FlowingWidthFactor * fit.Scale / 2;
+        foreach (MapArc arc in _scene.Arcs)
+        {
+            parts.Add(MovingLayerBounds.Curve(fit.Point(arc.From), fit.Point(arc.Control1), fit.Point(arc.Control2), fit.Point(arc.To), half));
+        }
+
+        if (_scene.Stack is not null)
+        {
+            bool launch = _style == TracesMapStyle.Launch;
+            if (_scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
+            {
+                double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
+                double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
+                double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
+                parts.Add(MovingLayerBounds.Around(fit.Point(library.At), w + 2 * pad, h + 2 * pad));
+            }
+
+            if (launch && _scene.Nodes.FirstOrDefault(n => n.Id == "hub") is { } hub)
+            {
+                double reach = 2 * TransferDrawing.RocketLength * fit.Scale;
+                parts.Add(MovingLayerBounds.Around(fit.Point(TransferDrawing.RocketRest(hub.At)), reach, reach));
+            }
+        }
+
+        return MovingLayerBounds.Resting(PaneSize, XamlRoot?.RasterizationScale ?? 1, whole, parts);
     }
 
     // ---- The pointer --------------------------------------------------
@@ -1000,6 +1082,10 @@ public sealed partial class TracesMapView : UserControl
             return;
         }
 
+        // The canvas may be sized to the moving parts' box (PlaceMovingCanvas):
+        // draw through its offset in the pane, read from where layout put it.
+        Vector3 offset = sender.ActualOffset;
+        ds.Transform = Matrix3x2.CreateTranslation(-offset.X, -offset.Y);
         MapGeometry fit = Fit;
         DrawArcs(ds, sender, fit, motion ? now : 0, motion);
         if (_scene.Stack is { } stack)

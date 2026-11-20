@@ -1,0 +1,26 @@
+# The Traces map (armedFolder: one folder, the station, flowing arcs).
+# The station's first turn fills its frame cache (26 s); the field's shimmer
+# passes 1 s after the map shows and every 40 s after.
+animations on
+launch armedFolder {throttle}
+size 1020 725
+tab TabTraces
+click Show the flow map
+respond search Search      # a click during the first turn, to pixels on screen
+key 1B
+measure first 3            # 0-30 s: the first turn
+measure steady 3           # 30-60 s: cached turn, arcs, shimmer at 41 s
+minimize
+measure minimised 2
+restore
+measure restored 1
+hide
+measure hidden 2
+quit
+animations off
+launch armedFolder {throttle}
+size 1020 725
+tab TabTraces
+click Show the flow map
+measure animations-off 2
+quit
