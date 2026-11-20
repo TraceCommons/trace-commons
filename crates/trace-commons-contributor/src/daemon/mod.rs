@@ -7402,7 +7402,10 @@ mod tests {
         // `now` and `now` plus what the pass took. Seventeen earlier
         // failures add nothing.
         let spread = witness_capacity_jitter(id, 45);
-        assert!(spread <= chrono::Duration::seconds(22), "at most half the delay");
+        assert!(
+            spread <= chrono::Duration::seconds(22),
+            "at most half the delay"
+        );
         let wait = chrono::Duration::seconds(45) + spread;
         let retry_after = entry.retry_after.unwrap();
         assert!(retry_after >= now + wait, "{entry:?}");
