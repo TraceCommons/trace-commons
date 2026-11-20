@@ -945,13 +945,7 @@ mod imp {
             {
                 return node.clone();
             }
-            let arcs = gtk::Snapshot::new();
-            let cr = arcs.append_cairo(bounds);
-            draw_arcs(&cr, scene, fit, palette, healthy, phase);
-            drop(cr);
-            let node = arcs
-                .to_node()
-                .unwrap_or_else(|| gtk::gsk::ContainerNode::new(&[]).upcast());
+            let node = arcs_node_in(scene, fit, palette, healthy, phase, bounds);
             let key = ArcsKey {
                 phase,
                 healthy,
@@ -2420,6 +2414,66 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 /// a flowing arc lit; otherwise it is still and dashed, never live.
 /// `phase` is how far a flowing arc's dashes have moved, in design units:
 /// 0 under reduced motion, where they stand still.
+/// The box the arcs draw in, within `pane`: each arc lies inside its
+/// curve's four control points, widened by the widest line it is drawn
+/// with (the dashes', 1.3 times the arc's, with round caps) and a point
+/// for anti-aliasing, then rounded out to whole points, which at a whole
+/// display scale are whole device pixels, so the arcs fall on the same
+/// pixels as in a node over the whole pane. `None` with no arcs.
+pub fn arcs_extent(
+    scene: &Scene,
+    fit: &MapGeometry,
+    pane: &gtk::graphene::Rect,
+) -> Option<gtk::graphene::Rect> {
+    let pad = 1.4 * fit.scale * 1.3 / 2.0 + 1.0;
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for arc in &scene.arcs {
+        for at in [arc.from, arc.control1, arc.control2, arc.to] {
+            let p = fit.point(at);
+            x0 = x0.min(p.x - pad);
+            y0 = y0.min(p.y - pad);
+            x1 = x1.max(p.x + pad);
+            y1 = y1.max(p.y + pad);
+        }
+    }
+    let (left, top) = (f64::from(pane.x()), f64::from(pane.y()));
+    let (right, bottom) = (
+        left + f64::from(pane.width()),
+        top + f64::from(pane.height()),
+    );
+    let (x0, y0) = (x0.floor().max(left), y0.floor().max(top));
+    let (x1, y1) = (x1.ceil().min(right), y1.ceil().min(bottom));
+    (x1 > x0 && y1 > y0)
+        .then(|| gtk::graphene::Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32))
+}
+
+/// The arcs as a node over only the box they draw in (`arcs_extent`), not
+/// the whole pane: they are drawn again on every frame their dashes move,
+/// and the renderer redraws what a changed node covers.
+fn arcs_node_in(
+    scene: &Scene,
+    fit: &MapGeometry,
+    palette: &Palette,
+    healthy: bool,
+    phase: f64,
+    pane: &gtk::graphene::Rect,
+) -> gtk::gsk::RenderNode {
+    use gtk::gsk::prelude::IsRenderNode;
+    match arcs_extent(scene, fit, pane) {
+        Some(extent) => {
+            let node = gtk::gsk::CairoNode::new(&extent);
+            draw_arcs(&node.draw_context(), scene, fit, palette, healthy, phase);
+            node.upcast()
+        }
+        None => gtk::gsk::ContainerNode::new(&[]).upcast(),
+    }
+}
+
 fn draw_arcs(
     cr: &gtk::cairo::Context,
     scene: &Scene,
@@ -4860,6 +4914,198 @@ mod tests {
                 std::fs::write(name, &*surface.data().unwrap()).unwrap();
             }
         }
+    }
+
+    /// A Traces scene with five tools whose arcs take every style in turn,
+    /// the flowing one first.
+    fn every_arc_scene() -> Scene {
+        let entries: Vec<QueueEntry> = ["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+            .iter()
+            .enumerate()
+            .map(|(i, source)| entry(&format!("e{i}"), &format!("p{i}"), source))
+            .collect();
+        let mut scene = traces_scene(&entries);
+        let styles = [
+            ArcStyle::Flowing,
+            ArcStyle::Quiet,
+            ArcStyle::Dashed,
+            ArcStyle::Shared,
+            ArcStyle::Unknown,
+        ];
+        for (i, arc) in scene.arcs.iter_mut().enumerate() {
+            arc.style = styles[i % styles.len()];
+        }
+        scene
+    }
+
+    /// The arcs, drawn again on every frame their dashes move, are a node
+    /// over the box they draw in, not over the whole pane, so the renderer
+    /// redraws that box and not the pane; and in that box they land on
+    /// exactly the pixels they did over the whole pane, at both display
+    /// scales, zoomed and not, healthy or not, at any phase.
+    #[test]
+    fn the_arcs_are_drawn_in_their_own_box_on_the_same_pixels() {
+        use gtk::gsk::prelude::IsRenderNode;
+        let scene = every_arc_scene();
+        assert!(scene.flows() && scene.arcs.len() >= 5);
+        let palette = Palette::fixed();
+        let hub = map_scene::Scene::hub(scene.space);
+        for (w, h, zoom, focus) in [
+            (580, 760, 1.0, None),
+            (900, 500, 1.0, None),
+            (580, 760, 2.4, Some(hub)),
+        ] {
+            let fit = MapGeometry::new(
+                Size::new(f64::from(w), f64::from(h)),
+                zoom,
+                focus,
+                scene.space,
+            );
+            let pane = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let extent = arcs_extent(&scene, &fit, &pane).expect("the arcs have a box");
+            assert!(
+                extent.x() >= 0.0
+                    && extent.y() >= 0.0
+                    && extent.x() + extent.width() <= w as f32
+                    && extent.y() + extent.height() <= h as f32,
+                "the box stays in the pane"
+            );
+            assert_eq!(extent.x().fract(), 0.0, "whole points");
+            assert_eq!(extent.width().fract(), 0.0, "whole points");
+            if zoom == 1.0 {
+                let share = extent.width() * extent.height() / (w * h) as f32;
+                assert!(share < 0.5, "the arcs' box is {share} of the pane");
+            }
+            // The map's arcs node is that box, not the pane.
+            let node = arcs_node_in(&scene, &fit, &palette, true, 0.0, &pane);
+            assert_eq!(
+                node.bounds(),
+                extent,
+                "the arcs node covers {:?}",
+                node.bounds()
+            );
+            for scale in [1, 2] {
+                for (healthy, phase) in [(true, 0.0), (true, 7.3), (false, 3.0)] {
+                    let render = |rect: &gtk::graphene::Rect| {
+                        let node = gtk::gsk::CairoNode::new(rect);
+                        draw_arcs(&node.draw_context(), &scene, &fit, &palette, healthy, phase);
+                        let mut surface = gtk::cairo::ImageSurface::create(
+                            gtk::cairo::Format::ARgb32,
+                            w * scale,
+                            h * scale,
+                        )
+                        .unwrap();
+                        {
+                            let cr = gtk::cairo::Context::new(&surface).unwrap();
+                            cr.scale(f64::from(scale), f64::from(scale));
+                            node.upcast().draw(&cr);
+                        }
+                        surface.flush();
+                        surface.data().unwrap().to_vec()
+                    };
+                    let whole = render(&pane);
+                    assert!(whole.iter().any(|&b| b > 0), "the arcs drew nothing");
+                    assert!(
+                        render(&extent) == whole,
+                        "the arcs moved off their pixels at {w}x{h} zoom {zoom} scale {scale} phase {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What a frame of the moving map costs the cairo renderer (software
+    /// rendering), which repaints what changed: with the arcs over the
+    /// whole pane every frame repaints the pane; with the arcs in their
+    /// box, the box and, on the station's frames, the station's. Prints
+    /// the share of the pane and the time to repaint it at twice the size.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_the_maps_redraw_region() {
+        use gtk::gsk::prelude::IsRenderNode;
+        let scene = every_arc_scene();
+        let (w, h) = (580, 760);
+        let fit = MapGeometry::new(
+            Size::new(f64::from(w), f64::from(h)),
+            1.0,
+            None,
+            scene.space,
+        );
+        let palette = Palette::fixed();
+        let pane = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+        let field = field::Field::default();
+        let ground = field.node(w, h, false, &palette.map);
+        let still = gtk::gsk::CairoNode::new(&pane);
+        {
+            let cr = still.draw_context();
+            for node in &scene.nodes {
+                draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
+            }
+        }
+        let still: gtk::gsk::RenderNode = still.upcast();
+        let art = LibraryArt::default();
+        let station = library_frame(&scene, &fit, MapStyle::Launch).unwrap();
+        let extent = arcs_extent(&scene, &fit, &pane).unwrap();
+        let station_rect = gtk::graphene::Rect::new(
+            (station.origin.0 - station::GLOW_MARGIN) as f32,
+            (station.origin.1 - station::GLOW_MARGIN) as f32,
+            (station.width + station::GLOW_MARGIN * 2.0) as f32,
+            (station.height + station::GLOW_MARGIN * 2.0) as f32,
+        );
+        let frames = 120;
+        let time = |rects: &[gtk::graphene::Rect], whole_arcs: bool| {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2).unwrap();
+            let start = std::time::Instant::now();
+            for i in 0..frames {
+                let now = 100.0 + f64::from(i) / 30.0;
+                let arcs_rect = if whole_arcs { pane } else { extent };
+                let arcs = gtk::gsk::CairoNode::new(&arcs_rect);
+                draw_arcs(
+                    &arcs.draw_context(),
+                    &scene,
+                    &fit,
+                    &palette,
+                    true,
+                    now * 18.0,
+                );
+                let lib = art.node(MapStyle::Launch, &station, library_seconds(now), false, 2.0);
+                let frame = gtk::gsk::ContainerNode::new(&[
+                    ground.clone(),
+                    arcs.upcast(),
+                    still.clone(),
+                    lib,
+                ]);
+                let cr = gtk::cairo::Context::new(&mut surface).unwrap();
+                cr.scale(2.0, 2.0);
+                for rect in rects {
+                    cr.rectangle(
+                        f64::from(rect.x()),
+                        f64::from(rect.y()),
+                        f64::from(rect.width()),
+                        f64::from(rect.height()),
+                    );
+                }
+                cr.clip();
+                frame.upcast().draw(&cr);
+            }
+            start.elapsed().as_secs_f64() * 1e3 / f64::from(frames)
+        };
+        time(&[pane], true);
+        let whole = time(&[pane], true);
+        let boxed = time(&[extent, station_rect], false);
+        let area = |r: &gtk::graphene::Rect| r.width() * r.height();
+        let share = (area(&extent) + area(&station_rect)) / area(&pane);
+        eprintln!(
+            "map redraw: pane {w}x{h}, arcs box {}x{} at ({}, {}), station box {}x{}; \
+             redrawn share {share:.3}; whole pane {whole:.2} ms, boxes {boxed:.2} ms a frame",
+            extent.width(),
+            extent.height(),
+            extent.x(),
+            extent.y(),
+            station_rect.width(),
+            station_rect.height(),
+        );
     }
 
     /// Renders the Traces map's drawing (no words: they need a widget's
