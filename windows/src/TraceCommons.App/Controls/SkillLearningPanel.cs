@@ -29,7 +29,7 @@ public sealed class SkillLearningPanel : UserControl
     private readonly string _id;
     private readonly SkillLearningCopy _copy;
     private readonly StackPanel _stage = new() { Spacing = 16 };
-    private readonly StackPanel _failure = new() { Orientation = Orientation.Horizontal, Spacing = 12 };
+    private readonly Grid _failure = new() { ColumnSpacing = 12 };
     private readonly DispatcherQueueTimer _validate;
 
     // The editor's draft (SkillLearningView.swift:15-24).
@@ -71,6 +71,8 @@ public sealed class SkillLearningPanel : UserControl
         body.Children.Add(_failure);
         panel.Children.Add(body);
         Content = Card(panel);
+        _failure.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _failure.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         Loaded += OnLoaded;
     }
@@ -134,7 +136,8 @@ public sealed class SkillLearningPanel : UserControl
             TextBlock line = Text(message, "TcBodyTextStyle", "TcStatusOutsideTextBrush");
             AutomationProperties.SetLiveSetting(line, AutomationLiveSetting.Assertive);
             _failure.Children.Add(line);
-            var dismiss = new HyperlinkButton { Content = MonitorWords.Dismiss };
+            var dismiss = new HyperlinkButton { Content = MonitorWords.Dismiss, VerticalAlignment = VerticalAlignment.Top };
+            Grid.SetColumn(dismiss, 1);
             dismiss.Click += (_, _) =>
             {
                 _dismissedFailure = message;
@@ -253,9 +256,15 @@ public sealed class SkillLearningPanel : UserControl
     {
         _stage.Children.Add(Strong(_copy.ExactPackage));
         _stage.Children.Add(CodeBlock(review.SkillMd));
-        var digest = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        // The digest wraps beside its label rather than run past the pane.
+        var digest = new Grid { ColumnSpacing = 12 };
+        digest.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        digest.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         digest.Children.Add(FieldLabel(_copy.Digest));
-        digest.Children.Add(Selectable(review.SkillSha256, "TcMonoCodeTextStyle", "TcInkPrimaryBrush"));
+        TextBlock sha = Selectable(review.SkillSha256, "TcMonoCodeTextStyle", "TcInkPrimaryBrush");
+        sha.TextWrapping = TextWrapping.Wrap;
+        Grid.SetColumn(sha, 1);
+        digest.Children.Add(sha);
         _stage.Children.Add(digest);
         _stage.Children.Add(Caption(_copy.EvaluationDisclosure));
         SkillEvaluationContract contract = candidate.EvaluationContract;
