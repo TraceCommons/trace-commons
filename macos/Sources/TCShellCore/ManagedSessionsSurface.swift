@@ -587,8 +587,12 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     /// selectable `models` list is a filtered subset (e.g. Red Team's
     /// abliterated main models paired with Flash background models).
     public let backgroundModels: [ManagedModel]
+    /// For Claude: the models Claude Desktop's route accepts
+    /// (`desktop_models`). Nil from an older daemon or another tool.
+    public let desktopModels: [String]?
 
     private enum CodingKeys: String, CodingKey {
+        case desktopModels = "desktop_models"
         case models, `default`, favorites
         case unavailableFavorites = "unavailable_favorites"
         case tierOrder = "tier_order"
@@ -607,11 +611,12 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         background = try container.decodeIfPresent([String: ManagedBackgroundEntry].self, forKey: .background) ?? [:]
         backgroundSets = try container.decodeIfPresent([[String]].self, forKey: .backgroundSets) ?? []
         backgroundModels = try container.decodeIfPresent([ManagedModel].self, forKey: .backgroundModels) ?? []
+        desktopModels = try container.decodeIfPresent([String].self, forKey: .desktopModels)
     }
 
     private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String],
                  tierOrder: [String], background: [String: ManagedBackgroundEntry], backgroundSets: [[String]],
-                 backgroundModels: [ManagedModel] = []) {
+                 backgroundModels: [ManagedModel] = [], desktopModels: [String]? = nil) {
         self.models = models
         self.default = `default`
         self.favorites = favorites
@@ -620,6 +625,18 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         self.background = background
         self.backgroundSets = backgroundSets
         self.backgroundModels = backgroundModels
+        self.desktopModels = desktopModels
+    }
+
+    /// The catalogue Claude Desktop's setup sheet lists: cut to the models
+    /// its route accepts, with the default moved to the first of them when
+    /// it is not one. Unchanged when the daemon sends no such list.
+    public func forClaudeDesktop() -> ManagedModelCatalogue {
+        guard let desktopModels else { return self }
+        let allowed = Set(desktopModels)
+        let def = `default`.flatMap { allowed.contains($0) ? $0 : nil }
+            ?? models.first { allowed.contains($0.id) }?.id
+        return restricted(to: allowed, default: def)
     }
 
     /// This catalogue cut to `allowed`, its default replaced: the shape the

@@ -401,7 +401,11 @@ pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result
         .await
         .map_err(|e| anyhow::anyhow!("red-team session task failed: {e}"))?
         .map_err(anyhow::Error::msg)?;
-    if let Some(output_dir) = context.sandbox.as_ref().and_then(|s| s.output_dir.as_deref()) {
+    if let Some(output_dir) = context
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.output_dir.as_deref())
+    {
         export_outputs(&outcome.session_dir, output_dir)?;
     }
     Ok(finalize_outcome(

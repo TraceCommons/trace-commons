@@ -20,7 +20,7 @@ struct ClaudeDesktopSetupPrompt: View {
     private var featureOn: Bool { model.featureIsEnabled(ClaudeDesktopSetupModel.featureID) }
     /// Looked up once per launch: a Claude Desktop installed later shows
     /// the offer after the next launch.
-    private static let desktopInstalled = NSWorkspace.shared.urlForApplication(
+    static let desktopInstalled = NSWorkspace.shared.urlForApplication(
         withBundleIdentifier: ClaudeDesktopPrompt.desktopBundleID) != nil
 
     var body: some View {

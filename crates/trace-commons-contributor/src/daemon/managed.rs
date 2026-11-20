@@ -1523,7 +1523,11 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
                 .iter()
                 .filter(|m| bg_ids.contains(m.id.as_str()) && !main_ids.contains(m.id.as_str()))
                 .collect();
+            // Claude Desktop's sheet lists only the models its route accepts.
+            let desktop_models =
+                (p.tool == ToolId::Claude).then(|| super::claude_desktop::desktop_models(&main));
             Ok(json!({
+                "desktop_models":desktop_models,
                 "models":main,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,

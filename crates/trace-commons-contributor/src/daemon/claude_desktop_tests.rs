@@ -270,25 +270,28 @@ async fn corrupt_saved_binding_and_port_conflict_do_not_pick_another_port() {
         "unavailable"
     );
     call(&shared, "claude_desktop_disconnect", json!({})).await;
+    // The conflict is a port this test holds throughout. Rebinding the port
+    // the route had just released raced on Windows: there the OS can keep it
+    // listening for a moment after the listener-stopped acknowledgement.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let taken = listener.local_addr().unwrap().port();
     configure(&shared).await;
-    let binding = shared
-        .claude_desktop
-        .lock()
-        .unwrap()
-        .binding
-        .clone()
-        .unwrap();
     stop(&shared, false).await;
     finish_drains(&shared).await;
-    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, binding.port))
-        .await
+    let mut binding = load(&store).unwrap().unwrap();
+    assert_ne!(binding.port, taken);
+    binding.port = taken;
+    store
+        .write_daemon_file(FILE, &serde_json::to_vec(&binding).unwrap())
         .unwrap();
+    shared.claude_desktop.lock().unwrap().binding = Some(binding.clone());
     reconcile(&shared).await;
     assert_eq!(
         call(&shared, "claude_desktop_status", json!({})).await["state"],
         "unavailable"
     );
-    assert_eq!(load(&store).unwrap().unwrap().port, binding.port);
+    assert!(shared.claude_desktop.lock().unwrap().route.is_none());
+    assert!(load(&store).unwrap().unwrap() == binding);
     drop(listener);
     call(&shared, "claude_desktop_disconnect", json!({})).await;
     task.abort();
@@ -1398,4 +1401,60 @@ fn the_status_copy_carries_the_setup_prompt_words() {
             "{key}"
         );
     }
+}
+
+/// The setup sheet's intro and steps; the shell falls back to
+/// `instructions` without them.
+#[test]
+fn the_status_copy_carries_the_setup_steps() {
+    let copy = copy();
+    for key in [
+        "sheet_intro",
+        "sheet_step_models",
+        "sheet_step_copy",
+        "sheet_step_environment",
+        "sheet_step_session",
+    ] {
+        assert!(
+            copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),
+            "{key}"
+        );
+    }
+}
+
+/// The setup sheet offers only models the route will accept: each one
+/// alone passes `context_budget` (a pair of such models always does, as the
+/// pair's window is the smaller one and each leaves room for its output).
+#[test]
+fn desktop_models_are_those_the_route_accepts() {
+    use crate::managed::models::ChatModel;
+    let model = |id: &str, context: Option<u64>, output: Option<u64>| -> ChatModel {
+        serde_json::from_value(json!({
+            "id": id, "context_length": context, "max_output_length": output
+        }))
+        .unwrap()
+    };
+    let models = vec![
+        model("big/model", Some(262_144), Some(8_192)),
+        model("huge/model", Some(1_000_000), Some(128_000)),
+        model("small/model", Some(32_768), Some(8_192)),
+        model("unknown/context", None, Some(8_192)),
+        model("unknown/output", Some(262_144), None),
+    ];
+    assert_eq!(desktop_models(&models), ["big/model", "huge/model"]);
+    for a in desktop_models(&models) {
+        for b in desktop_models(&models) {
+            assert!(context_budget(&a, &b, &models).is_some(), "{a} + {b}");
+        }
+    }
+}
+
+/// The setup sheet's button that opens Claude Desktop's Code tab.
+#[test]
+fn the_status_copy_carries_the_open_desktop_label() {
+    assert!(
+        copy()["open_desktop"]
+            .as_str()
+            .is_some_and(|w| !w.trim().is_empty())
+    );
 }
