@@ -334,13 +334,13 @@ jobs:
           set -euo pipefail
           config_dir="$(mktemp -d)"
           trap 'rmdir "$config_dir"' EXIT
-          export TRACE_COMMONS_FEATURE_FLAGS='{"insights_skills":true,"red_team_sessions":true,"claude_desktop_private_ai":true}'
+          export TRACE_COMMONS_FEATURE_FLAGS='{"insights_skills":true,"claude_desktop_private_ai":true}'
           macos/.build/Near.ai.app/Contents/MacOS/near-ai --config-dir "$config_dir" --json feature-flags |
             jq -e '
               . as $snapshot |
               .environment == "production" and
               .environment_variable_error == "feature-environment-override-unavailable" and
-              all("insights_skills", "red_team_sessions", "claude_desktop_private_ai";
+              all("insights_skills", "claude_desktop_private_ai";
                 . as $flag |
                 $snapshot.flags[$flag].enabled == false and
                 $snapshot.local_override_allowed[$flag] == false)

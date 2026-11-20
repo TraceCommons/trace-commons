@@ -7,7 +7,6 @@
   "flags": {
     "claude_desktop_private_ai": false,
     "insights_skills": false,
-    "red_team_sessions": true,
     "skills_catalog_suggestions": false,
     "skills_server_catalog": false
   }
