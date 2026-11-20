@@ -42,22 +42,28 @@ public class MapClockTests
     }
 
     /// <summary>
-    /// #2268: the station turns on its own clock at 15 a second, not on the
-    /// dashes' 30. The moving layer's clock leaves it alone, unless the
-    /// station is drawn on that layer (a run or an open pile takes the
-    /// whole pane), when that clock turns it as before and its own stops.
+    /// #2268: the station is not redrawn at the dashes' rate, only when its
+    /// own 15-a-second frame changes. On Windows one tick source serves both
+    /// layers, so they are composed together: the moving layer's clock turns
+    /// the station whenever it runs at least that fast, and the station's own
+    /// clock runs only while the moving one is slower (no dashes, waiting for
+    /// the shimmer). A second clock beside the dashes' composed the window
+    /// about 12 more times a second and cost CPU (PR #2278).
     /// </summary>
     [Fact]
-    public void TheStationTurnsOnItsOwnClockApartFromTheDashes()
+    public void TheStationTurnsAtItsOwnRateOnOneTickSource()
     {
         // At rest the moving layer's clock runs for the dashes only.
         Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true })!.Value, 9);
         Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false })!.Value, 9);
         Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
 
-        // The station's own clock: 15 a second, with or without dashes.
+        // The station's own clock runs only while the moving one is slower than 15 a second.
         Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true }));
-        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true }));
+        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, SecondsShown = 1.5 }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, LightFading = true }));
         Assert.Null(MapMotion.LibraryInterval(Idle));
 
         // On the moving layer, the moving clock turns it and its own stops.
@@ -72,6 +78,36 @@ public class MapClockTests
         Assert.Null(MapMotion.LibraryInterval(turning with { Loaded = false }));
         Assert.Null(MapMotion.LibraryInterval(turning with { PaneShown = false }));
         Assert.Null(MapMotion.LibraryInterval(turning with { AnimationsEnabled = false }));
+    }
+
+    /// <summary>The station's frame of the turn: 15 a second, 390 a turn, the same a turn later.</summary>
+    [Fact]
+    public void TheStationsFrameIsFifteenASecondAroundTheTurn()
+    {
+        double turn = LibraryStation.TurnSeconds;
+        Assert.Equal(390, MapMotion.LibraryFrames(turn));
+        Assert.Equal(0, MapMotion.LibraryFrameIndex(0, turn));
+        Assert.Equal(0, MapMotion.LibraryFrameIndex(1.0 / 15 - 1e-9, turn));
+        Assert.Equal(1, MapMotion.LibraryFrameIndex(1.0 / 15 + 1e-9, turn));
+        Assert.Equal(15, MapMotion.LibraryFrameIndex(1.0 + 1e-9, turn));
+        Assert.Equal(389, MapMotion.LibraryFrameIndex(turn - 1e-6, turn));
+        foreach (double t in new[] { 3.31, 17.03, 7e8 + 0.52, -2.23 })
+        {
+            int index = MapMotion.LibraryFrameIndex(t, turn);
+            Assert.InRange(index, 0, 389);
+            Assert.Equal(index, MapMotion.LibraryFrameIndex(t + turn, turn));
+        }
+
+        // Fifteen changes in a second, at whatever rate it is asked.
+        int changes = 0, last = MapMotion.LibraryFrameIndex(100, turn);
+        for (int tick = 1; tick <= 210; tick++)
+        {
+            int index = MapMotion.LibraryFrameIndex(100 + tick / 210.0 * 1.0, turn);
+            changes += index != last ? 1 : 0;
+            last = index;
+        }
+
+        Assert.InRange(changes, 15, 16);
     }
 
     [Fact]

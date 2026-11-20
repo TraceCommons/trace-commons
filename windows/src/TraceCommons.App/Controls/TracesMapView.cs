@@ -51,8 +51,9 @@ public enum MapView
 /// dashes at 30 frames a second, the station and orb at 15, transfers and
 /// the pile at 60, the shimmer and the pointer light on their own curves.
 /// One <see cref="DispatcherQueueTimer"/> drives the moving layer at the
-/// fastest rate it needs, and the library turns on a second one on its own
-/// layer (#2268); each runs only while the control is loaded, the window can
+/// fastest rate it needs and turns the library's own layer when its frame
+/// changes (#2268); a second drives the library alone while the first is
+/// slower than it. Each runs only while the control is loaded, the window can
 /// be seen (<see cref="WindowClocks"/>) and the system lets things move
 /// (<see cref="UISettings.AnimationsEnabled"/>, read on every tick and on
 /// every activation, so a change applies at once). With motion off the map
@@ -72,10 +73,11 @@ public sealed partial class TracesMapView : UserControl
     private readonly CanvasControl _still = new();
 
     /// <summary>
-    /// The library's own layer over the moving one, on its own clock (#2268):
-    /// the station turns at 15 a second, not at the dashes' 30. While a run
-    /// plays or the pile is on the moving layer, the library is drawn there
-    /// instead, under the run and the pile as before.
+    /// The library's own layer over the moving one (#2268): drawn again only
+    /// when the station's 15-a-second frame changes, not at the dashes' 30
+    /// (<see cref="TurnLibrary"/>). While a run plays or the pile is on the
+    /// moving layer, the library is drawn there instead, under the run and
+    /// the pile as before.
     /// </summary>
     private readonly CanvasControl _libraryCanvas = new();
     private readonly Canvas _targets = new();
@@ -911,6 +913,7 @@ public sealed partial class TracesMapView : UserControl
             _player.Tick(now);
             PlaceMovingCanvas();
             _canvas.Invalidate();
+            TurnLibrary();
             bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
             // The pile moves between the layers as it starts and stops.
@@ -924,7 +927,7 @@ public sealed partial class TracesMapView : UserControl
         return timer;
     }
 
-    /// <summary>The library's own clock (#2268), under the same window rule.</summary>
+    /// <summary>The library's own clock while the moving one is slower (#2268), under the same window rule.</summary>
     private void KickLibrary()
     {
         if (LibraryInterval() is not { } library || WindowClocks.Windows.Interval(XamlRoot, library) is not { } interval)
@@ -949,8 +952,28 @@ public sealed partial class TracesMapView : UserControl
     {
         DispatcherQueueTimer timer = DispatcherQueue.CreateTimer();
         timer.IsRepeating = true;
-        timer.Tick += (_, _) => _libraryCanvas.Invalidate();
+        timer.Tick += (_, _) => TurnLibrary();
         return timer;
+    }
+
+    /// <summary>The library's frame last asked for on a tick.</summary>
+    private int _libraryIndex = -1;
+
+    /// <summary>
+    /// Draws the library's layer again when the station's (or orb's) frame of
+    /// its turn has changed, at most 15 a second, from whichever clock ticks
+    /// (#2268: not at the dashes' rate). The moving layer has it while a run
+    /// plays or the pile is on that layer.
+    /// </summary>
+    private void TurnLibrary()
+    {
+        double turn = _style == TracesMapStyle.Launch ? LibraryStation.TurnSeconds : LibraryOrb.TurnSeconds;
+        int index = MapMotion.LibraryFrameIndex(LibrarySeconds(true), turn);
+        if (index != _libraryIndex)
+        {
+            _libraryIndex = index;
+            _libraryCanvas.Invalidate();
+        }
     }
 
     private void StopTimer()
@@ -1799,8 +1822,8 @@ public sealed partial class TracesMapView : UserControl
         MapPoint at = fit.Point(library.At);
         bool launch = _style == TracesMapStyle.Launch;
         double turn = launch ? LibraryStation.TurnSeconds : LibraryOrb.TurnSeconds;
-        int frames = (int)Math.Round(turn / LibraryStation.FrameInterval);
-        int index = still ? -1 : (int)Math.Floor(((seconds % turn) + turn) % turn / LibraryStation.FrameInterval) % frames;
+        int frames = MapMotion.LibraryFrames(turn);
+        int index = still ? -1 : MapMotion.LibraryFrameIndex(seconds, turn);
         _libraryFrames.Look($"{_style}|{library.Active}|{Math.Round(fit.Scale, 3)}|{Dark}|{HighContrast}");
 
         double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;

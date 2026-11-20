@@ -184,8 +184,10 @@ $animBefore = [W]::Anim()
 Log "dwm timing: $([PerfProbe]::DwmDebug())"
 Log "== $Tag exe=$Exe display=$([W]::GetSystemMetrics(0))x$([W]::GetSystemMetrics(1)) cores=$([Environment]::ProcessorCount) animations=$animBefore session=$((Get-Process -Id $PID).SessionId)"
 "tag`tlabel`twindow`tapp_ms`tui_ms`tother_ms`tdwm_ms`tmachine_ms`tharness_ms`tdwm_frames`tping_n`tping_p50`tping_p95`tping_max`tping_over50`tws_mb`tprivate_mb`tsince_s`tsecs`tother_threads_by_start_module`tframes_by_surface" | Set-Content -Path $tsv -Encoding ascii
+$abortPlan = $false
 try {
     foreach ($raw in Get-Content $Plan) {
+        if ($abortPlan) { Log 'plan aborted'; break }
         $line = ($raw -replace '#.*$', '').Trim().Replace('{throttle}', $Throttle)
         if (-not $line) { continue }
         $a = $line -split '\s+'
@@ -232,10 +234,17 @@ try {
                 }
                 'animations' { [W]::SetAnim($a[1] -eq 'on'); Start-Sleep -Milliseconds 1500; Log "  animations now $([W]::Anim())" }
                 'unfocus' {
-                    # Another window takes the focus (the desktop); the app stays on screen.
-                    $desk = [W]::FindWindow('Progman', $null)
-                    [W]::Fg($desk); Start-Sleep -Milliseconds 1500
-                    Log "  foreground now 0x$([W]::GetForegroundWindow().ToString('X')) $([W]::Cls([W]::GetForegroundWindow())); app visible=$([W]::IsWindowVisible($main))"
+                    # The desktop takes the focus and the app stays on screen,
+                    # uncovered: a click on bare desktop beside the window
+                    # (SetForegroundWindow on the desktop is refused).
+                    $f = [W]::Frame($main); $sw = [W]::GetSystemMetrics(0); $sh = [W]::GetSystemMetrics(1)
+                    if ($f.Right -lt $sw - 12) { $x = [int](($f.Right + $sw) / 2); $y = [int]($f.Top + 12) }
+                    elseif ($f.Left -gt 12) { $x = [int]($f.Left / 2); $y = [int]($f.Top + 12) }
+                    else { $x = [int]($f.Left + 12); $y = [int]($f.Top / 2) }
+                    [W]::Move($x, $y); Start-Sleep -Milliseconds 200; [W]::Click(); Start-Sleep -Milliseconds 1500
+                    $fg = [W]::GetForegroundWindow()
+                    Log "  clicked desktop at $x,$y (window $([W]::R($main)), screen ${sw}x${sh}); foreground now 0x$($fg.ToString('X')) $([W]::Cls($fg)); app focused=$($fg -eq $main) visible=$([W]::IsWindowVisible($main))"
+                    if ($fg -eq $main) { Log '  UNFOCUS FAILED: the app still has the focus'; $abortPlan = $true }
                 }
                 'focus' { [W]::Fg($main); Start-Sleep -Milliseconds 1500; Log "  foreground is the app: $([W]::GetForegroundWindow() -eq $main)" }
                 'minimize' { [W]::ShowWindow($main, 6) | Out-Null; Start-Sleep -Milliseconds 1500; Log "  iconic=$([W]::IsIconic($main))" }

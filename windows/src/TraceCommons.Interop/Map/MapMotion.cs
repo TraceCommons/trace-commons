@@ -113,14 +113,30 @@ public static class MapMotion
 
     /// <summary>
     /// The library's own clock (#2268): its frame interval while it turns on
-    /// its own layer, or null when it must not tick (as for
-    /// <see cref="ClockInterval"/>), when there is no library, or while it
-    /// is drawn on the moving layer, whose clock then turns it.
+    /// its own layer and the moving layer's clock is slower than that, or
+    /// null. The moving clock turns it whenever it runs at least as fast, so
+    /// both layers are drawn on one tick source and composed together; a
+    /// second clock beside the dashes' composed the window about 12 more
+    /// times a second (PR #2278). Null too when no map clock may tick
+    /// (<see cref="ClockInterval"/>), with no library, or while it is drawn
+    /// on the moving layer.
     /// </summary>
-    public static double? LibraryInterval(MapClockInputs i) =>
-        ClockRuns(i.AnimationsEnabled, i.Loaded, i.WindowVisible) && i.PaneShown && i.HasLibrary && !i.LibraryOnMovingLayer
-            ? LibraryStation.FrameInterval
-            : null;
+    public static double? LibraryInterval(MapClockInputs i)
+    {
+        if (!ClockRuns(i.AnimationsEnabled, i.Loaded, i.WindowVisible) || !i.PaneShown || !i.HasLibrary || i.LibraryOnMovingLayer)
+        {
+            return null;
+        }
+
+        return ClockInterval(i) is { } moving && moving <= LibraryStation.FrameInterval ? null : LibraryStation.FrameInterval;
+    }
+
+    /// <summary>How many frames a turn of <paramref name="turn"/> seconds has at the library's 15 a second.</summary>
+    public static int LibraryFrames(double turn) => (int)Math.Round(turn / LibraryStation.FrameInterval);
+
+    /// <summary>The library's frame of its turn at <paramref name="seconds"/>: what is drawn, and when it changes, the layer is drawn again.</summary>
+    public static int LibraryFrameIndex(double seconds, double turn) =>
+        (int)Math.Floor(((seconds % turn) + turn) % turn / LibraryStation.FrameInterval) % LibraryFrames(turn);
 
     /// <summary>The transfer layer and the pile tick at 60 a second while a run moves (:107, :140).</summary>
     public const double TransferFrameInterval = 1.0 / 60;

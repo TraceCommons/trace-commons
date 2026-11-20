@@ -133,6 +133,15 @@ public class MovingLayerBoundsTests
             source, StringComparison.Ordinal);
         Assert.Contains("PlaceLibraryCanvas(now);", Method(source, "private void PlaceMovingCanvas("), StringComparison.Ordinal);
 
+        // One tick source: the moving tick and the station's own both turn
+        // the library layer, which is drawn again only when its frame changes.
+        Assert.Contains("TurnLibrary();", Method(source, "private DispatcherQueueTimer CreateTimer("), StringComparison.Ordinal);
+        Assert.Contains("TurnLibrary();", Method(source, "private DispatcherQueueTimer CreateLibraryTimer("), StringComparison.Ordinal);
+        string turn = Method(source, "private void TurnLibrary(");
+        Assert.Contains("MapMotion.LibraryFrameIndex(", turn, StringComparison.Ordinal);
+        Assert.Contains("_libraryCanvas.Invalidate();", turn, StringComparison.Ordinal);
+        Assert.Contains("MapMotion.LibraryFrameIndex(", Method(source, "private void DrawLibrary("), StringComparison.Ordinal);
+
         // The box is checked on every tick and on every redraw.
         Assert.Contains("PlaceMovingCanvas();", Method(source, "private DispatcherQueueTimer CreateTimer("), StringComparison.Ordinal);
         Assert.Contains("PlaceMovingCanvas();", Method(source, "private void Redraw("), StringComparison.Ordinal);

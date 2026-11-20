@@ -147,8 +147,9 @@ public class FocusFrameRuleTests
                 name + " draws on the display's frames without the window's rule");
         }
 
-        // The timers: the map's two clocks (the moving layer's and the
-        // station's own, #2268) and Home's glyph and count clocks.
+        // The timers: the map's two clocks (the moving layer's, and the
+        // station's own while the moving one is slower, #2268) and Home's
+        // glyph and count clocks.
         string map = files.Single(f => f.Name == "Controls/TracesMapView.cs.txt").Text;
         Assert.Equal(2, Regex.Matches(map, @"WindowClocks\.Windows\.Interval\(XamlRoot, ").Count);
         Assert.Contains("WindowClocks.Windows.Interval(XamlRoot, own)", map, StringComparison.Ordinal);
