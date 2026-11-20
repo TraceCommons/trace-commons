@@ -34,6 +34,8 @@ public sealed class FirstRunStagePainter : IDisposable
     private CanvasDevice? _device;
     private CanvasGeometry? _unitMark;
     private CanvasRenderTarget? _sweep;
+    private CanvasRenderTarget? _backdrop;
+    private readonly FirstRunBackdropCache _backdropCache = new();
 
     /// <param name="names">Each tool's display name, by source; the tile draws the initials when it has no logo.</param>
     public FirstRunStagePainter(Dictionary<string, string> names) => _names = names;
@@ -49,6 +51,9 @@ public sealed class FirstRunStagePainter : IDisposable
     {
         _unitMark?.Dispose();
         _sweep?.Dispose();
+        _backdrop?.Dispose();
+        _backdrop = null;
+        _backdropCache.Forget();
     }
 
     /// <summary>
@@ -88,17 +93,37 @@ public sealed class FirstRunStagePainter : IDisposable
         Matrix3x2 fit = scale < 1
             ? Matrix3x2.CreateScale((float)scale) * Matrix3x2.CreateTranslation((float)((width - stageWidth * scale) / 2), (float)((height - stageHeight * scale) / 2))
             : Matrix3x2.Identity;
-        if (scale < 1)
+        // The backdrop, drawn once per phase of its 30-a-second timeline into
+        // a bitmap the canvas's size and DPI, and copied on the frames in
+        // between (FirstRunBackdropCache): the same pixels, at a copy's cost.
+        float dpi = rc is ICanvasResourceCreatorWithDpi withDpi ? withDpi.Dpi : 96;
+        if (_backdrop is null || _backdrop.Size.Width != width || _backdrop.Size.Height != height || _backdrop.Dpi != dpi)
         {
-            // The scene at the window's size behind the scaled stage, as the
-            // Mac's window draws FirstRunBackdrop under FirstRunStageFit
-            // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
-            ds.Transform = Matrix3x2.Identity;
-            Backdrop(ds, rc, width, height, now, reduce);
+            _backdrop?.Dispose();
+            _backdrop = new CanvasRenderTarget(rc, (float)width, (float)height, dpi);
+            _backdropCache.Forget();
         }
 
+        if (_backdropCache.Redraw(width, height, scale, dpi, FirstRunBackdropCache.Phase(now, reduce)))
+        {
+            using CanvasDrawingSession layer = _backdrop.CreateDrawingSession();
+            layer.Clear(Color.FromArgb(0, 0, 0, 0));
+            if (scale < 1)
+            {
+                // The scene at the window's size behind the scaled stage, as the
+                // Mac's window draws FirstRunBackdrop under FirstRunStageFit
+                // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
+                layer.Transform = Matrix3x2.Identity;
+                Backdrop(layer, rc, width, height, now, reduce);
+            }
+
+            layer.Transform = fit;
+            Backdrop(layer, rc, stageWidth, stageHeight, now, reduce);
+        }
+
+        ds.Transform = Matrix3x2.Identity;
+        ds.DrawImage(_backdrop, 0, 0);
         ds.Transform = fit;
-        Backdrop(ds, rc, stageWidth, stageHeight, now, reduce);
         Matrix3x2 graphic = Matrix3x2.CreateTranslation((float)left, 0) * fit;
         ds.Transform = graphic;
         double top = s.GraphicTop;
