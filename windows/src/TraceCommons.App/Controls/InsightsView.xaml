@@ -11,18 +11,100 @@
         rectangles, never a ring. There is no Spend tab: a tab that can't
         be used is hidden, not drawn disabled.
     -->
-    <Pivot x:Name="Tabs" SelectionChanged="OnTabChanged">
+    <Grid RowDefinitions="Auto,*">
         <!--
-            The Mac's tab bar labels (GlassSegmentedTabs, Navigation.swift:
-            TypeScale.label, 12, and 8 either side), so all five headers fit
-            the 440 pane rather than scrolling Overview off to the left
-            (review round 2, low 6). The keys are the Pivot template's own.
+            The tabs, as the Mac draws them (GlassSegmentedTabs,
+            TCDesign/Components/Navigation.swift:84-150): one button per
+            tab in a well, the selected one filled, each its own keyboard
+            stop named by its title. A Pivot's headers could not take the
+            keyboard at all (box tab walk, 2026-11-19: Tab went from the
+            window's tabs straight into the page), and a focusable Pivot is
+            a nameless stop that draws no focus. The pages below are plain
+            containers, so no second, hidden set of tabs is announced.
+            Track 30 with 2 inside and 2 between, items 26 high with 8
+            either side, the label type (GlassTokens.swift:576-577, 727);
+            the pane's 16 either side (InsightsView.swift:234-235).
         -->
-        <Pivot.Resources>
-            <x:Double x:Key="PivotHeaderItemFontSize">12</x:Double>
-            <Thickness x:Key="PivotHeaderItemMargin">8,0,8,0</Thickness>
-        </Pivot.Resources>
-        <PivotItem Header="{Binding [analytics_tab_overview]}">
+        <Border Grid.Row="0"
+                Margin="16,8,16,0"
+                Padding="2"
+                MinHeight="{StaticResource TcGlassSizeSegmentedTrack}"
+                CornerRadius="{StaticResource TcGlassRadiusPill}"
+                Background="{ThemeResource TcGlassWellBrush}">
+            <Grid x:Name="TabBar" ColumnSpacing="2">
+                <Grid.Resources>
+                    <!-- The stock toggle's own keys, so the template, its
+                         focus visual and its automation peer stay WinUI's.
+                         High contrast keeps the system's checked colours. -->
+                    <ResourceDictionary>
+                        <ResourceDictionary.ThemeDictionaries>
+                            <ResourceDictionary x:Key="Default">
+                                <StaticResource x:Key="ToggleButtonBackground" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonForeground" ResourceKey="TcGlassInkTertiaryBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcGlassInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="TcGlassInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcGlassSelectedInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcGlassSelectedInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcGlassSelectedInkBrush" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrush" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushPressed" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushChecked" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="Transparent" />
+                            </ResourceDictionary>
+                            <ResourceDictionary x:Key="Light">
+                                <StaticResource x:Key="ToggleButtonBackground" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundPointerOver" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundPressed" ResourceKey="TcGlassWellBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcGlassControlSelectedBrush" />
+                                <StaticResource x:Key="ToggleButtonForeground" ResourceKey="TcGlassInkTertiaryBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcGlassInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundPressed" ResourceKey="TcGlassInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcGlassSelectedInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcGlassSelectedInkBrush" />
+                                <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcGlassSelectedInkBrush" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrush" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushPressed" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushChecked" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPointerOver" Color="Transparent" />
+                                <SolidColorBrush x:Key="ToggleButtonBorderBrushCheckedPressed" Color="Transparent" />
+                            </ResourceDictionary>
+                        </ResourceDictionary.ThemeDictionaries>
+                        <Style x:Key="InsightsSegmentStyle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
+                            <Setter Property="HorizontalAlignment" Value="Stretch" />
+                            <Setter Property="MinHeight" Value="{StaticResource TcGlassSizeTab}" />
+                            <Setter Property="Padding" Value="8,0,8,0" />
+                            <Setter Property="FontSize" Value="{StaticResource TcGlassTypeLabelFontSize}" />
+                            <Setter Property="FontWeight" Value="Medium" />
+                            <Setter Property="CornerRadius" Value="{StaticResource TcGlassRadiusPill}" />
+                        </Style>
+                    </ResourceDictionary>
+                </Grid.Resources>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <local:MonitorTabButton x:Name="Segment0" Grid.Column="0" Tag="0" Style="{StaticResource InsightsSegmentStyle}" Content="{Binding [analytics_tab_overview]}" Click="OnSegment" />
+                <local:MonitorTabButton x:Name="Segment1" Grid.Column="1" Tag="1" Style="{StaticResource InsightsSegmentStyle}" Content="{Binding [analytics_tab_patterns]}" Click="OnSegment" />
+                <local:MonitorTabButton x:Name="Segment2" Grid.Column="2" Tag="2" Style="{StaticResource InsightsSegmentStyle}" Content="{Binding [analytics_tab_benchmarks]}" Click="OnSegment" />
+                <local:MonitorTabButton x:Name="Segment3" Grid.Column="3" Tag="3" Style="{StaticResource InsightsSegmentStyle}" Content="{Binding [analytics_tab_sessions]}" Click="OnSegment" />
+                <local:MonitorTabButton x:Name="Segment4" Grid.Column="4" Tag="4" Style="{StaticResource InsightsSegmentStyle}" Content="{Binding [analytics_tab_analyze]}" Click="OnSegment" />
+            </Grid>
+        </Border>
+        <Grid x:Name="Pages" Grid.Row="1">
+        <Grid x:Name="Page0">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="16">
@@ -165,8 +247,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_patterns]}">
+        </Grid>
+        <Grid x:Name="Page1" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="16">
@@ -255,7 +337,7 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
+        </Grid>
         <!--
             Benchmarks (spec W20, InsightsBenchmarksTab.swift:245-421): the
             intro over the person's own traces, the population and period
@@ -264,7 +346,7 @@
             the person's own figures and one observation. Every word is the
             core's; a sample window draws the Mac's sample (InsightsSample).
         -->
-        <PivotItem Header="{Binding [analytics_tab_benchmarks]}">
+        <Grid x:Name="Page2" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="10" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
@@ -387,8 +469,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_sessions]}">
+        </Grid>
+        <Grid x:Name="Page3" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <ComboBox x:Name="SessionChoice" ItemsSource="{Binding Sessions.Choices}" DisplayMemberPath="Label"
@@ -448,8 +530,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_analyze]}">
+        </Grid>
+        <Grid x:Name="Page4" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <TextBlock Text="{Binding Title}" FontSize="28" />
@@ -658,6 +740,7 @@
                     <Button Content="{Binding [contributions]}" Click="OnContributions" />
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-    </Pivot>
+        </Grid>
+        </Grid>
+    </Grid>
 </UserControl>

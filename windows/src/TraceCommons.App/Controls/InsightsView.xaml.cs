@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using Windows.Storage.Pickers;
@@ -28,22 +29,48 @@ public sealed partial class InsightsView : UserControl, IDisposable
         InitializeComponent();
         _window = window;
         DataContext = ViewModel;
+        _segments = new[] { Segment0, Segment1, Segment2, Segment3, Segment4 };
+        _pages = new FrameworkElement[] { Page0, Page1, Page2, Page3, Page4 };
+        ShowPage(0);
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
     }
     public async Task ActivateAsync()
     {
         await ViewModel.LoadAsync();
         _activated = true;
-        await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+        await ViewModel.SelectTabAsync(_tab);
     }
-    // Set once the core's words are loaded. The Pivot selects its first tab
-    // while the control is built, before then, and that read would present
-    // with no words; ActivateAsync reads the tab on screen instead.
+    // Set once the core's words are loaded. The first tab is shown while the
+    // control is built, before then, and that read would present with no
+    // words; ActivateAsync reads the tab on screen instead.
     private bool _activated;
-    // The tabs read their figures when shown; Analyze reads nothing new.
-    private async void OnTabChanged(object sender, SelectionChangedEventArgs args)
+    private readonly ToggleButton[] _segments;
+    private readonly FrameworkElement[] _pages;
+    private int _tab;
+    // A segment shows its page. Pressing the one already shown keeps it
+    // checked: exactly one tab is always the selected one, as on the Mac
+    // (Navigation.swift:101-104 sets the selection, never clears it).
+    private async void OnSegment(object sender, RoutedEventArgs args)
     {
-        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+        int tab = Array.IndexOf(_segments, sender);
+        if (tab < 0) return;
+        bool changed = tab != _tab;
+        ShowPage(tab);
+        // The tabs read their figures when shown; Analyze reads nothing new.
+        if (changed && !_closed && _activated) await ViewModel.SelectTabAsync(_tab);
+    }
+    private void ShowPage(int tab)
+    {
+        _tab = tab;
+        for (int i = 0; i < _pages.Length; i++)
+        {
+            bool shown = i == tab;
+            _pages[i].Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            _segments[i].IsChecked = shown;
+            // The Mac's label weight: semibold selected, medium otherwise
+            // (Navigation.swift:109).
+            _segments[i].FontWeight = shown ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Medium;
+        }
     }
     // A week picker's own index follows the model; only a choice the model
     // is not already showing reads again.

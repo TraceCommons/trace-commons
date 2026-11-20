@@ -597,18 +597,19 @@ public sealed class InsightsAnalyticsTests
     {
         string xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.txt"));
         string code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "InsightsView.xaml.cs.txt"));
-        int overview = xaml.IndexOf("Header=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
-        int patterns = xaml.IndexOf("Header=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
-        int benchmarks = xaml.IndexOf("Header=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
-        int sessions = xaml.IndexOf("Header=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
-        int analyze = xaml.IndexOf("Header=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
+        int overview = xaml.IndexOf("Content=\"{Binding [analytics_tab_overview]}\"", StringComparison.Ordinal);
+        int patterns = xaml.IndexOf("Content=\"{Binding [analytics_tab_patterns]}\"", StringComparison.Ordinal);
+        int benchmarks = xaml.IndexOf("Content=\"{Binding [analytics_tab_benchmarks]}\"", StringComparison.Ordinal);
+        int sessions = xaml.IndexOf("Content=\"{Binding [analytics_tab_sessions]}\"", StringComparison.Ordinal);
+        int analyze = xaml.IndexOf("Content=\"{Binding [analytics_tab_analyze]}\"", StringComparison.Ordinal);
         // The Mac's Overview, Breakdown, Benchmarks (InsightsView.swift:162), then this app's own two.
         Assert.True(overview >= 0 && overview < patterns && patterns < benchmarks && benchmarks < sessions && sessions < analyze);
         Assert.DoesNotContain("analytics_tab_spend", xaml);
         Assert.DoesNotContain("analytics_later", xaml);
-        // One spinner, Benchmarks' while it reads (InsightsBenchmarksTab.swift:270 GlassSpinner).
+        // One spinner, Benchmarks' while it reads (InsightsBenchmarksTab.swift:270
+        // GlassSpinner): inside the third page, before the fourth.
         int ring = xaml.IndexOf("ProgressRing", StringComparison.Ordinal);
-        Assert.True(ring > benchmarks && ring < sessions);
+        Assert.True(ring > xaml.IndexOf("x:Name=\"Page2\"", StringComparison.Ordinal) && ring < xaml.IndexOf("x:Name=\"Page3\"", StringComparison.Ordinal));
         Assert.Equal(ring, xaml.LastIndexOf("<ProgressRing", StringComparison.Ordinal) + 1);
         Assert.Contains("ViewModel.SelectTabAsync(", code);
     }
