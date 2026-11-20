@@ -114,25 +114,26 @@ internal static class MapPainter
     /// The station at <paramref name="angle"/> in a <paramref name="width"/>
     /// by <paramref name="height"/> frame whose top-left is
     /// <paramref name="origin"/>: each face filled and edged 0.6 in its own
-    /// colour, far to near (LibraryStation.swift:253-304).
+    /// colour, far to near (LibraryStation.swift:253-304), the edge drawn as
+    /// part of the fill (<see cref="StationSeam"/>).
     /// </summary>
     public static void Station(CanvasDrawingSession ds, ICanvasResourceCreator device, Vector2 origin, double width, double height, double angle)
     {
-        using var seam = new CanvasStrokeStyle { LineJoin = CanvasLineJoin.Round };
+        // Each face once, through its outline pushed out by half the seam
+        // (StationSeam): the same pixels as a fill and a 0.6 stroke, in one
+        // fill (checklist O3).
         foreach (DrawnFace face in LibraryStation.Frame(width, height, angle))
         {
-            using var builder = new CanvasPathBuilder(device);
-            builder.BeginFigure(origin.X + (float)face.Points[0].X, origin.Y + (float)face.Points[0].Y);
-            for (int i = 1; i < face.Points.Count; i++)
+            IReadOnlyList<MapPoint> outline = StationSeam.Outset(face.Points, StationSeam.Width / 2);
+            var corners = new Vector2[outline.Count];
+            for (int i = 0; i < corners.Length; i++)
             {
-                builder.AddLine(origin.X + (float)face.Points[i].X, origin.Y + (float)face.Points[i].Y);
+                corners[i] = new Vector2(origin.X + (float)outline[i].X, origin.Y + (float)outline[i].Y);
             }
 
-            builder.EndFigure(CanvasFigureLoop.Closed);
-            using CanvasGeometry polygon = CanvasGeometry.CreatePath(builder);
+            using CanvasGeometry polygon = CanvasGeometry.CreatePolygon(device, corners);
             Color colour = Color.FromArgb(255, (byte)Math.Round(face.R * 255), (byte)Math.Round(face.G * 255), (byte)Math.Round(face.B * 255));
             ds.FillGeometry(polygon, colour);
-            ds.DrawGeometry(polygon, colour, 0.6f, seam);
         }
     }
 
