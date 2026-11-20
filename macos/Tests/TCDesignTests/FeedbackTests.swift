@@ -24,8 +24,9 @@ final class FeedbackTests: XCTestCase {
     }
 
     func test_theSkeletonPulsesOnTheTokenCurveAndNotUnderReduceMotion() {
-        XCTAssertNil(GlassSkeleton.pulse(true))
-        XCTAssertNotNil(GlassSkeleton.pulse(false))
+        XCTAssertEqual(GlassSkeleton.opacity(at: GlassTokens.Motion.pulse / 2, reduceMotion: true), 1)
+        XCTAssertEqual(GlassSkeleton.opacity(at: GlassTokens.Motion.pulse / 2, reduceMotion: false),
+                       GlassTokens.Opacity.skeletonDim, accuracy: 1e-6)
         XCTAssertEqual(GlassSkeleton.opacity(dim: true), GlassTokens.Opacity.skeletonDim)
         XCTAssertEqual(GlassSkeleton.opacity(dim: false), 1)
     }
