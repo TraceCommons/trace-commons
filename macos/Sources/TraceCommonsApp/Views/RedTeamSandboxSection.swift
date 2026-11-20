@@ -3,29 +3,41 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// Files and Network settings shown inside `ManagedLaunchSheet` only for Red Team.
+/// Input folder, Output folder, and Firewall settings shown for Red Team
+/// sandbox launches in `ManagedFolderExplainerSheet` and `ManagedLaunchSheet`.
 struct RedTeamSandboxSection: View {
     @EnvironmentObject private var model: AppModel
     @Binding var draft: RedTeamSandboxDraft
     @State private var hostInput = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-            GlassSectionRule(model.managedText("red_team_files"))
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                GlassSectionRule(model.managedText("red_team_input_folder"))
                 if draft.inputs.isEmpty {
-                    Text(model.managedText("red_team_files_empty"))
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .foregroundStyle(GlassColor.textTertiary)
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        GlassToolTile(.folder)
+                        Text(model.managedText("red_team_input_empty"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textTertiary)
+                        Spacer(minLength: 0)
+                        Button(model.managedText("red_team_pick_input")) {
+                            pickInputs()
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .accessibilityLabel(model.managedText("red_team_pick_input_accessibility"))
+                    }
                 } else {
                     ForEach(draft.inputs, id: \.self) { path in
                         HStack(spacing: GlassTokens.Space.s2) {
+                            GlassToolTile(.folder)
                             Text(path)
                                 .glassType(GlassTokens.TypeScale.mono)
                                 .foregroundStyle(GlassColor.textPrimary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .textSelection(.enabled)
+                                .help(path)
                             Spacer(minLength: 0)
                             Button {
                                 draft.inputs.removeAll { $0 == path }
@@ -36,18 +48,60 @@ struct RedTeamSandboxSection: View {
                             .accessibilityLabel(model.managedText("red_team_remove_file_accessibility"))
                         }
                     }
+                    Button(model.managedText("red_team_pick_input")) {
+                        pickInputs()
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    .accessibilityLabel(model.managedText("red_team_pick_input_accessibility"))
                 }
-                Button(model.managedText("red_team_add_files")) {
-                    pickInputs()
-                }
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-                .accessibilityLabel(model.managedText("red_team_add_files_accessibility"))
             }
 
-            GlassSectionRule(model.managedText("red_team_network"))
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                GlassSectionRule(model.managedText("red_team_output_folder"))
+                HStack(spacing: GlassTokens.Space.s3) {
+                    GlassToolTile(.folder)
+                    if let outputDir = draft.outputDir {
+                        Text(outputDir)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .help(outputDir)
+                    } else {
+                        Text(model.managedText("red_team_output_default"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: GlassTokens.Space.s3)
+                    if draft.outputDir != nil {
+                        Button(model.managedText("red_team_clear_output")) {
+                            draft.outputDir = nil
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .fixedSize()
+                        .accessibilityLabel(model.managedText("red_team_clear_output_accessibility"))
+                    }
+                    Button(model.managedText("red_team_pick_output")) {
+                        if let chosen = FolderPanel.choose() {
+                            draft.outputDir = chosen
+                        }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    .fixedSize()
+                    .accessibilityLabel(model.managedText("red_team_pick_output_accessibility"))
+                }
+            }
+
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                GlassSectionRule(model.managedText("red_team_firewall"))
                 Toggle(model.managedText("red_team_network_allow"), isOn: $draft.networkEnabled)
-                    .toggleStyle(.switch)
+                    .toggleStyle(GlassToggleStyle(.settings))
+                Text(model.managedText(draft.networkEnabled ? "red_team_firewall_allowed" : "red_team_firewall_blocked"))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if draft.networkEnabled {
                     HStack(alignment: .bottom, spacing: GlassTokens.Space.s2) {
                         GlassTextField(
@@ -79,7 +133,7 @@ struct RedTeamSandboxSection: View {
                         }
                     }
                     Toggle(model.managedText("red_team_packages"), isOn: $draft.packages)
-                        .toggleStyle(.switch)
+                        .toggleStyle(GlassToggleStyle(.settings))
                 }
             }
         }

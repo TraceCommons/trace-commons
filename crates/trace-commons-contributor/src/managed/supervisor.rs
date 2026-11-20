@@ -153,35 +153,62 @@ async fn run_native(
         if login {
             return Err(ManagedError::InvalidRequest.into());
         }
+        let pid = Some(std::process::id());
+        let identity = Some(format!("{}:red-team", std::process::id()));
         let running = LifecycleReport {
-            model: row.model.clone(),
+            model: None,
             collection: None,
             session_id: row.id,
             proof: context.proof.clone(),
             state: SessionState::Running,
-            process_id: Some(std::process::id()),
-            process_identity: Some(format!("{}:red-team", std::process::id())),
+            process_id: pid,
+            process_identity: identity.clone(),
             exit_code: None,
         };
         let _: anyhow::Result<Value> = call(store, "managed_session_report", json!(running));
-        let outcome = super::red_team::run(store, context).await?;
         *spawned = true;
-        let report = LifecycleReport {
-            model: row.model.clone(),
-            collection: outcome.collection,
-            session_id: row.id,
-            proof: context.proof.clone(),
-            state: outcome.state,
-            process_id: None,
-            process_identity: None,
-            exit_code: Some(outcome.exit_code),
-        };
-        let _ = super::sessions::persist_exit(store, &report);
-        let response: anyhow::Result<Value> = call(store, "managed_session_report", json!(report));
-        if response.is_ok() {
-            super::sessions::clear_exit(store, row.id);
+        match super::red_team::run(store, context).await {
+            Ok(outcome) => {
+                let report = LifecycleReport {
+                    model: None,
+                    collection: outcome.collection,
+                    session_id: row.id,
+                    proof: context.proof.clone(),
+                    state: outcome.state,
+                    process_id: pid,
+                    process_identity: identity,
+                    exit_code: Some(outcome.exit_code),
+                };
+                let _ = super::sessions::persist_exit(store, &report);
+                let response: anyhow::Result<Value> =
+                    call(store, "managed_session_report", json!(report));
+                if response.is_ok() {
+                    super::sessions::clear_exit(store, row.id);
+                }
+                return Ok(outcome.exit_code);
+            }
+            Err(error) => {
+                let report = LifecycleReport {
+                    model: None,
+                    collection: row
+                        .collect_traces
+                        .then_some(super::sessions::CollectionState::Failed),
+                    session_id: row.id,
+                    proof: context.proof.clone(),
+                    state: SessionState::Failed,
+                    process_id: pid,
+                    process_identity: identity,
+                    exit_code: None,
+                };
+                let _ = super::sessions::persist_exit(store, &report);
+                let response: anyhow::Result<Value> =
+                    call(store, "managed_session_report", json!(report));
+                if response.is_ok() {
+                    super::sessions::clear_exit(store, row.id);
+                }
+                return Err(error);
+            }
         }
-        return Ok(outcome.exit_code);
     }
     let account = AccountView {
         id: row.account_id,
