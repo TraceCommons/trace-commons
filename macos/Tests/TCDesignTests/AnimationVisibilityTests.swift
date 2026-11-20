@@ -14,10 +14,15 @@ final class AnimationVisibilityTests: XCTestCase {
     /// An animation runs only when its caller would run it and it can be
     /// seen.
     func test_pausedWhenCallerPausesOrCannotBeSeen() {
-        XCTAssertFalse(GlassAnimationGate.paused(false, visible: true))
-        XCTAssertTrue(GlassAnimationGate.paused(false, visible: false))
-        XCTAssertTrue(GlassAnimationGate.paused(true, visible: true))
-        XCTAssertTrue(GlassAnimationGate.paused(true, visible: false))
+        func paused(_ paused: Bool, _ presence: GlassWindowPresence) -> Bool {
+            GlassAnimationGate.schedule(minimumInterval: nil, paused: paused, presence: presence).paused
+        }
+        XCTAssertFalse(paused(false, .focused))
+        XCTAssertFalse(paused(false, .unfocused))
+        XCTAssertTrue(paused(false, .hidden))
+        XCTAssertTrue(paused(true, .focused))
+        XCTAssertTrue(paused(true, .unfocused))
+        XCTAssertTrue(paused(true, .hidden))
     }
 
     /// A view can be seen only in a window AppKit reports as visible, not
@@ -40,10 +45,10 @@ final class AnimationVisibilityTests: XCTestCase {
         XCTAssertFalse(GlassAnimationGate.isVisible(window))
     }
 
-    /// With no root keeping it, the environment says visible, so a
+    /// With no root keeping it, the environment says focused, so a
     /// preview, a test or an `ImageRenderer` image animates as before.
     func test_visibleByDefault() {
-        XCTAssertTrue(EnvironmentValues().glassAnimationsVisible)
+        XCTAssertEqual(EnvironmentValues().glassWindowPresence, .focused)
     }
 
     /// The probe reports its window's state once it is in one, and again
@@ -51,22 +56,22 @@ final class AnimationVisibilityTests: XCTestCase {
     /// reported twice.
     @MainActor
     func test_probeReportsItsWindowAndLeavingIt() {
-        var reports: [Bool] = []
+        var reports: [GlassWindowPresence] = []
         let probe = GlassWindowVisibilityProbe.ProbeView()
         probe.onChange = { reports.append($0) }
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 40, height: 40),
                               styleMask: [.borderless], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
         window.contentView?.addSubview(probe)
-        XCTAssertEqual(probe.reported, false, "a window never ordered in cannot be seen")
+        XCTAssertEqual(probe.reported, .hidden, "a window never ordered in cannot be seen")
         probe.refresh()
         probe.removeFromSuperview()
-        XCTAssertEqual(probe.reported, false)
+        XCTAssertEqual(probe.reported, .hidden)
 
         let delivered = expectation(description: "reports delivered")
         DispatchQueue.main.async { delivered.fulfill() }
         wait(for: [delivered], timeout: 2)
-        XCTAssertEqual(reports, [false], "one report: the state never changed")
+        XCTAssertEqual(reports, [.hidden], "one report: the state never changed")
     }
 
     // MARK: Colours

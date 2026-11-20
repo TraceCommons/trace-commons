@@ -200,11 +200,7 @@ fn production_cli_cannot_enable_experimental_features() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
-    let flags = [
-        "insights_skills",
-        "red_team_sessions",
-        "claude_desktop_private_ai",
-    ];
+    let flags = ["insights_skills", "claude_desktop_private_ai"];
     let overrides: std::collections::BTreeMap<_, _> =
         flags.into_iter().map(|id| (id, true)).collect();
     let result = Command::new(env!("CARGO_BIN_EXE_near-ai"))
