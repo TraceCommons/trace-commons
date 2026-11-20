@@ -108,6 +108,8 @@ public sealed class InsightsDetailsTests
         Assert.Equal("$2.00", rows[0].Spend);
         Assert.Equal(Dash, rows[1].Spend);
         Assert.Equal(new InsightsProjectRows.Columns(Spend: true, Claude: true, Codex: true, NearAi: false), InsightsProjectRows.ColumnsOf(week, rows));
+        // A week whose cache saved nothing at API prices draws no savings line.
+        Assert.Null(InsightsDetailsWords.CacheSavings(week, Copy));
     }
 
     /// <summary>A tool's column shows only while some folder has a trace of it; NEAR AI's only while it was called this week.</summary>
