@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop.Shell;
 using Windows.Foundation;
@@ -111,11 +112,28 @@ public sealed partial class MainWindow
             AutomationProperties.SetAccessibilityView(control, view);
         }
 
+        bool hadFocus = false;
         foreach (Control control in change.Hide)
         {
+            hadFocus |= control.FocusState != FocusState.Unfocused;
             _coveredByNotice[control] = (control.IsTabStop, AutomationProperties.GetAccessibilityView(control));
             control.IsTabStop = false;
             AutomationProperties.SetAccessibilityView(control, AccessibilityView.Raw);
+        }
+
+        // Focus does not stay on a control the card now covers: it goes to
+        // the card's own X, the control drawn in its place, or else to the
+        // card's first control.
+        if (hadFocus)
+        {
+            if (NoticeClose.Visibility == Visibility.Visible)
+            {
+                NoticeClose.Focus(FocusState.Keyboard);
+            }
+            else if (FocusManager.FindFirstFocusableElement(NoticeFront) is Control first)
+            {
+                first.Focus(FocusState.Keyboard);
+            }
         }
     }
 

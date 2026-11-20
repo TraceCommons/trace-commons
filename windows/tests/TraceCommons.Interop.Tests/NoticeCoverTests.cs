@@ -88,6 +88,8 @@ public class NoticeCoverTests
         Assert.Contains("IsTabStop = false", source, StringComparison.Ordinal);
         Assert.Contains("AccessibilityView.Raw", source, StringComparison.Ordinal);
         Assert.Contains("FindElementsInHostCoordinates", source, StringComparison.Ordinal);
+        // A covered control that held focus hands it to the card's X.
+        Assert.Contains("NoticeClose.Focus(FocusState.Keyboard)", source, StringComparison.Ordinal);
 
         // Re-read whenever the notices change, the card resizes, or the tab scrolls under it.
         string shell = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.Shell.cs.txt"));
