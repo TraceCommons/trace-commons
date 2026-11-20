@@ -241,18 +241,87 @@ fn tip_halo(cr: &cairo::Context, at: Point, radius: f64, c: Rgba) {
 // ---- The scene -----------------------------------------------------------
 
 /// The navy base every step shares, with the brand-blue glow breathing from
-/// the top-left corner (`FirstRunBackdrop`), over `w` by `h`.
+/// the top-left corner (`FirstRunBackdrop`), over `w` by `h`. The stage
+/// paints it through `backdrop_cached`; this draws it whole, for the
+/// renders and as what the cached one must match.
+#[cfg(test)]
 pub fn backdrop(cr: &cairo::Context, w: f64, h: f64, p: &Palette, phase: f64) {
+    backdrop_in(cr, w, h, p, phase, stage::Backdrop::Full);
+}
+
+/// The backdrop as much as `detail` keeps (`stage::Backdrop`): the
+/// lighter looks leave out the breathing ellipse, then the ground's
+/// gradients too, leaving the navy base.
+#[cfg(test)]
+pub fn backdrop_in(
+    cr: &cairo::Context,
+    w: f64,
+    h: f64,
+    p: &Palette,
+    phase: f64,
+    detail: stage::Backdrop,
+) {
     let _ = cr.save();
     cr.rectangle(0.0, 0.0, w, h);
     cr.clip();
+    match detail {
+        stage::Backdrop::Base => base(cr, p),
+        _ => ground(cr, w, h, p),
+    }
+    if detail == stage::Backdrop::Full {
+        breath(cr, p, phase);
+    }
+    let _ = cr.restore();
+}
+
+/// `backdrop_in`, its ground painted from `cache` (drawn there once per
+/// size, scheme and display `scale`) rather than drawn again: the same
+/// pixels. The ground's two gradients are most of what a frame of the
+/// stage costs, and they never move.
+#[allow(clippy::too_many_arguments)]
+pub fn backdrop_cached(
+    cr: &cairo::Context,
+    cache: &GroundCache,
+    w: f64,
+    h: f64,
+    scale: i32,
+    p: &Palette,
+    phase: f64,
+    detail: stage::Backdrop,
+) {
+    let _ = cr.save();
+    cr.rectangle(0.0, 0.0, w, h);
+    cr.clip();
+    match detail {
+        stage::Backdrop::Base => base(cr, p),
+        _ => cache.paint(cr, w, h, scale, p),
+    }
+    if detail == stage::Backdrop::Full {
+        breath(cr, p, phase);
+    }
+    let _ = cr.restore();
+}
+
+/// The navy base alone, flat.
+fn base(cr: &cairo::Context, p: &Palette) {
+    source(cr, p.scene_base);
+    let _ = cr.paint();
+}
+
+/// The glow's strengths in the scheme: its strongest and its soft stop.
+fn glow_strengths(p: &Palette) -> (f64, f64) {
+    if p.dark { (0.5, 0.14) } else { (0.3, 0.08) }
+}
+
+/// The ground: the warm-to-navy base and the elliptical corner glow.
+fn ground(cr: &cairo::Context, w: f64, h: f64, p: &Palette) {
     let reach = w.max(h) * 0.9;
     let base = cairo::RadialGradient::new(w / 2.0, 0.0, 0.0, w / 2.0, 0.0, reach);
     stop(&base, 0.0, p.scene_warm);
     stop(&base, 1.0, p.scene_base);
     let _ = cr.set_source(&base);
     let _ = cr.paint();
-    let (strong, soft) = if p.dark { (0.5, 0.14) } else { (0.3, 0.08) };
+    let (strong, soft) = glow_strengths(p);
     // The elliptical glow: centred on the top-left corner, 1.2 widths by
     // 0.95 heights across.
     let _ = cr.save();
@@ -265,8 +334,12 @@ pub fn backdrop(cr: &cairo::Context, w: f64, h: f64, p: &Palette, phase: f64) {
     cr.arc(0.0, 0.0, 1.0, 0.0, TAU);
     let _ = cr.fill();
     let _ = cr.restore();
-    // The breathing ellipse: 640 by 580 from (-140, -140), scaled from its
-    // top-left corner, its gradient a 300-point circle.
+}
+
+/// The breathing ellipse: 640 by 580 from (-140, -140), scaled from its
+/// top-left corner, its gradient a 300-point circle.
+fn breath(cr: &cairo::Context, p: &Palette, phase: f64) {
+    let (strong, _) = glow_strengths(p);
     let scale = 0.9 + 0.25 * phase;
     let opacity = 0.6 + 0.4 * phase;
     let _ = cr.save();
@@ -283,7 +356,65 @@ pub fn backdrop(cr: &cairo::Context, w: f64, h: f64, p: &Palette, phase: f64) {
     let _ = cr.restore();
     let _ = cr.fill();
     let _ = cr.restore();
-    let _ = cr.restore();
+}
+
+/// What the ground was drawn for: its size, the display's scale and the
+/// scheme.
+type GroundKey = (u64, u64, i32, bool);
+
+/// The backdrop's ground, drawn once per size, display scale and scheme
+/// at the display's pixels and then painted, one to one, on every frame.
+#[derive(Default)]
+pub struct GroundCache {
+    kept: std::cell::RefCell<Option<(GroundKey, cairo::ImageSurface)>>,
+    builds: std::cell::Cell<usize>,
+}
+
+impl GroundCache {
+    /// Paints the ground for `w` by `h` at `scale` device pixels a point.
+    pub fn paint(&self, cr: &cairo::Context, w: f64, h: f64, scale: i32, p: &Palette) {
+        let scale = scale.max(1);
+        let key = (w.to_bits(), h.to_bits(), scale, p.dark);
+        let fresh = self
+            .kept
+            .borrow()
+            .as_ref()
+            .is_none_or(|(kept, _)| *kept != key);
+        if fresh {
+            let width = (w * f64::from(scale)).ceil() as i32;
+            let height = (h * f64::from(scale)).ceil() as i32;
+            let Ok(surface) = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)
+            else {
+                ground(cr, w, h, p);
+                return;
+            };
+            if let Ok(c) = cairo::Context::new(&surface) {
+                c.scale(f64::from(scale), f64::from(scale));
+                c.rectangle(0.0, 0.0, w, h);
+                c.clip();
+                ground(&c, w, h, p);
+            }
+            surface.flush();
+            self.builds.set(self.builds.get() + 1);
+            self.kept.replace(Some((key, surface)));
+        }
+        let kept = self.kept.borrow();
+        let Some((_, surface)) = kept.as_ref() else {
+            return;
+        };
+        let _ = cr.save();
+        cr.scale(1.0 / f64::from(scale), 1.0 / f64::from(scale));
+        let _ = cr.set_source_surface(surface, 0.0, 0.0);
+        cr.source().set_filter(cairo::Filter::Nearest);
+        let _ = cr.paint();
+        let _ = cr.restore();
+    }
+
+    /// How many times the ground has been drawn.
+    #[cfg(test)]
+    pub fn builds(&self) -> usize {
+        self.builds.get()
+    }
 }
 
 // ---- The step thread -----------------------------------------------------
@@ -1856,6 +1987,121 @@ mod tests {
     /// sizes, the same clock, at 2x), each step's graphic, and each step's
     /// stage at the first-run window's default size, as raw premultiplied
     /// BGRA into `TC_STAGE_RENDER_DIR`.
+    /// The backdrop painted from its cached ground is the backdrop drawn
+    /// whole, byte for byte, as GTK renders a drawing area (recorded in
+    /// points, played back at the display's scale), at both scales, in
+    /// both schemes and at several breaths; and the ground is drawn once.
+    #[test]
+    fn the_cached_ground_paints_the_same_backdrop() {
+        use gtk::gsk::prelude::IsRenderNode;
+        let (w, h) = (860.0, 760.0);
+        let through_gtk = |scale: i32, paint: &dyn Fn(&cairo::Context)| {
+            let node =
+                gtk::gsk::CairoNode::new(&gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
+            paint(&node.draw_context());
+            let mut out = surface(860 * scale, 760 * scale);
+            {
+                let cr = cairo::Context::new(&out).unwrap();
+                cr.scale(f64::from(scale), f64::from(scale));
+                node.upcast().draw(&cr);
+            }
+            out.flush();
+            out.data().unwrap().to_vec()
+        };
+        for dark in [true, false] {
+            let p = Palette::scheme(dark);
+            for scale in [1, 2] {
+                let cache = GroundCache::default();
+                for phase in [0.0, 0.37, 1.0] {
+                    for detail in [stage::Backdrop::Full, stage::Backdrop::Ground] {
+                        let whole =
+                            through_gtk(scale, &|cr| backdrop_in(cr, w, h, &p, phase, detail));
+                        let cached = through_gtk(scale, &|cr| {
+                            backdrop_cached(cr, &cache, w, h, scale, &p, phase, detail)
+                        });
+                        assert!(
+                            whole == cached,
+                            "the cached ground differs at {scale}x, dark {dark}, phase {phase}, {detail:?}"
+                        );
+                    }
+                }
+                assert_eq!(cache.builds(), 1, "the ground is drawn once");
+            }
+        }
+        // A new size or scale draws it again.
+        let p = Palette::scheme(true);
+        let cache = GroundCache::default();
+        let s = surface(10, 10);
+        let cr = cairo::Context::new(&s).unwrap();
+        cache.paint(&cr, 860.0, 760.0, 1, &p);
+        cache.paint(&cr, 860.0, 760.0, 1, &p);
+        cache.paint(&cr, 800.0, 760.0, 1, &p);
+        cache.paint(&cr, 800.0, 760.0, 2, &p);
+        assert_eq!(cache.builds(), 3);
+    }
+
+    /// What a frame of the stage costs to paint with cairo, the same on
+    /// every renderer (the stage is a cairo drawing), at 860 by 760 at
+    /// both display scales: the backdrop at each detail, and the Traces
+    /// and Uses graphics drawn over it. Prints milliseconds a frame.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_the_stage_paint() {
+        let p = Palette::scheme(true);
+        let frames = 120;
+        for scale in [1, 2] {
+            let mut s = surface(860 * scale, 760 * scale);
+            let time = |s: &mut cairo::ImageSurface, draw: &dyn Fn(&cairo::Context, f64)| {
+                let start = std::time::Instant::now();
+                for i in 0..frames {
+                    let t = 1000.0 + f64::from(i) / 60.0;
+                    let cr = cairo::Context::new(&*s).unwrap();
+                    cr.scale(f64::from(scale), f64::from(scale));
+                    draw(&cr, t);
+                }
+                start.elapsed().as_secs_f64() * 1e3 / f64::from(frames)
+            };
+            let mut line = format!("stage paint at {scale}x:");
+            for detail in [
+                stage::Backdrop::Full,
+                stage::Backdrop::Ground,
+                stage::Backdrop::Base,
+            ] {
+                let ms = time(&mut s, &|cr, t| {
+                    backdrop_in(
+                        cr,
+                        860.0,
+                        760.0,
+                        &p,
+                        stage::backdrop_phase(t, false),
+                        detail,
+                    )
+                });
+                line.push_str(&format!(" backdrop {detail:?} {ms:.2} ms;"));
+            }
+            let cache = GroundCache::default();
+            for detail in [stage::Backdrop::Full, stage::Backdrop::Ground] {
+                let ms = time(&mut s, &|cr, t| {
+                    let phase = stage::backdrop_phase(t, false);
+                    backdrop_cached(cr, &cache, 860.0, 760.0, scale, &p, phase, detail)
+                });
+                line.push_str(&format!(" cached {detail:?} {ms:.2} ms;"));
+            }
+            for step in [Step::Traces, Step::Uses] {
+                let ms = time(&mut s, &|cr, t| {
+                    let scene = Scene {
+                        time: t,
+                        ..Scene::default()
+                    };
+                    cr.translate(90.0, 200.0);
+                    step_graphic(cr, step, &scene, 5.0, &p);
+                });
+                line.push_str(&format!(" {step:?} graphic {ms:.2} ms;"));
+            }
+            eprintln!("{line}");
+        }
+    }
+
     #[test]
     #[ignore = "writes comparison renders; set TC_STAGE_RENDER_DIR"]
     fn render_the_stage_for_comparison() {

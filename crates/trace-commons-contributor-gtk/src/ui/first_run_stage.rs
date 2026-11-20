@@ -542,6 +542,138 @@ pub fn breathing(time: f64, charged: bool, reduce_motion: bool) -> (f64, f64) {
     (1.0 + 0.08 * p, 1.0 - 0.25 * p)
 }
 
+/// How much of the backdrop the stage draws. `Full` is the look; where
+/// the stage cannot keep its frame rate (software rendering, or a frame
+/// rate that stays low) it first leaves out the breathing ellipse
+/// (`Ground`), then the ground's gradients as well (`Base`, the navy base
+/// alone). Nothing else on the stage is ever left out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Backdrop {
+    #[default]
+    Full,
+    Ground,
+    Base,
+}
+
+impl Backdrop {
+    /// One step lighter; `Base` stays `Base`.
+    pub fn lighter(self) -> Self {
+        match self {
+            Self::Full => Self::Ground,
+            Self::Ground | Self::Base => Self::Base,
+        }
+    }
+}
+
+/// Watches the stage's frame rate and lightens its backdrop when the
+/// stage cannot keep up: under software rendering it starts without the
+/// breath; then, each time the stage stays under `LOW_SHARE` of the rate it
+/// asks for for `LOW_WINDOWS` windows of `WINDOW` seconds in a row, it
+/// drops one more layer (`Backdrop::lighter`). It never comes back during
+/// a first run: a look that changes back and forth is worse than one that
+/// stays lighter.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lighten {
+    level: Backdrop,
+    /// The window being counted: when it began, the rate it judges by,
+    /// and the frames since.
+    window: Option<(f64, f64, u32)>,
+    /// The last frame counted.
+    last: Option<f64>,
+    /// Low windows in a row.
+    low: u32,
+}
+
+impl Lighten {
+    /// Seconds a window counts frames over.
+    pub const WINDOW: f64 = 2.0;
+    /// Under this share of the rate asked for, a window is low.
+    pub const LOW_SHARE: f64 = 2.0 / 3.0;
+    /// Low windows in a row before a layer is dropped: one stall, as the
+    /// window opens, is not a slow machine.
+    pub const LOW_WINDOWS: u32 = 2;
+    /// Only a stage asking for at least this many frames a second is
+    /// judged: the slower steps keep up anywhere.
+    pub const JUDGED_FPS: f64 = 30.0;
+    /// A gap this long between frames (the window hidden, a stall) starts
+    /// the count again.
+    pub const GAP: f64 = 3.0;
+
+    /// The watch for a stage on a software renderer (`software`) or not.
+    pub fn new(software: bool) -> Self {
+        Self {
+            level: if software {
+                Backdrop::Ground
+            } else {
+                Backdrop::Full
+            },
+            ..Self::default()
+        }
+    }
+
+    /// The backdrop to draw now.
+    pub fn level(&self) -> Backdrop {
+        self.level
+    }
+
+    /// Starts the count again, as the stage starts ticking again.
+    pub fn reset(&mut self) {
+        self.window = None;
+        self.last = None;
+        self.low = 0;
+    }
+
+    /// The rate a stage that wants a frame every `interval` seconds (0:
+    /// every frame the display draws) can be asked to keep on a display of
+    /// `refresh_hz` (60 when unknown): the lower of the two.
+    pub fn asked_fps(interval: f64, refresh_hz: Option<f64>) -> f64 {
+        let display = refresh_hz.filter(|hz| *hz > 0.0).unwrap_or(60.0);
+        if interval > 0.0 {
+            (1.0 / interval).min(display)
+        } else {
+            display
+        }
+    }
+
+    /// A frame the stage drew at `at` (seconds) while it asked for
+    /// `asked` frames a second (`asked_fps`), or `None` when this frame's
+    /// rate is not the stage's to keep (the window unfocused and held to
+    /// 15 a second, or hidden). True when the backdrop just got lighter.
+    pub fn frame(&mut self, at: f64, asked: Option<f64>) -> bool {
+        let Some(asked) = asked.filter(|fps| *fps >= Self::JUDGED_FPS) else {
+            self.reset();
+            return false;
+        };
+        let gap = self.last.is_some_and(|last| at - last > Self::GAP);
+        self.last = Some(at);
+        let Some((start, rate, frames)) = self.window.filter(|w| w.1 == asked && !gap) else {
+            if gap || self.window.is_some_and(|w| w.1 != asked) {
+                self.low = 0;
+            }
+            self.window = Some((at, asked, 0));
+            return false;
+        };
+        let frames = frames + 1;
+        let elapsed = at - start;
+        if elapsed < Self::WINDOW {
+            self.window = Some((start, rate, frames));
+            return false;
+        }
+        self.window = Some((at, rate, 0));
+        if f64::from(frames) / elapsed < Self::LOW_SHARE * rate {
+            self.low += 1;
+        } else {
+            self.low = 0;
+        }
+        if self.low >= Self::LOW_WINDOWS && self.level != Backdrop::Base {
+            self.level = self.level.lighter();
+            self.low = 0;
+            return true;
+        }
+        false
+    }
+}
+
 /// The corner glow's breath on the scene: seven seconds each way, eased at
 /// both ends. Reduced motion holds it at its fullest.
 pub fn backdrop_phase(time: f64, reduce_motion: bool) -> f64 {
@@ -1389,6 +1521,112 @@ pub fn spring_settle(duration: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The backdrop gets lighter one layer at a time, the breath first,
+    /// and never lighter than the navy base.
+    #[test]
+    fn the_backdrop_drops_the_breath_then_the_ground() {
+        assert_eq!(Backdrop::default(), Backdrop::Full);
+        assert_eq!(Backdrop::Full.lighter(), Backdrop::Ground);
+        assert_eq!(Backdrop::Ground.lighter(), Backdrop::Base);
+        assert_eq!(Backdrop::Base.lighter(), Backdrop::Base);
+    }
+
+    /// Frames at `fps` for `seconds` from `from`, asked at `asked`; true
+    /// if the backdrop got lighter on any of them.
+    fn run(watch: &mut Lighten, from: f64, seconds: f64, fps: f64, asked: Option<f64>) -> bool {
+        let mut lighter = false;
+        let mut at = from;
+        while at < from + seconds {
+            lighter |= watch.frame(at, asked);
+            at += 1.0 / fps;
+        }
+        lighter
+    }
+
+    /// A stage that keeps its rate keeps its whole look; one that stays
+    /// under two thirds of it for two windows in a row loses the breath,
+    /// then after two more the ground's gradients, and nothing else.
+    #[test]
+    fn a_stage_that_cannot_keep_up_drops_the_breath_then_the_ground() {
+        let mut fast = Lighten::new(false);
+        assert!(!run(&mut fast, 0.0, 30.0, 58.0, Some(60.0)));
+        assert_eq!(fast.level(), Backdrop::Full);
+
+        let mut slow = Lighten::new(false);
+        assert!(
+            !run(&mut slow, 0.0, 3.9, 20.0, Some(60.0)),
+            "one window is not enough"
+        );
+        assert_eq!(slow.level(), Backdrop::Full);
+        assert!(run(&mut slow, 3.9, 0.5, 20.0, Some(60.0)));
+        assert_eq!(slow.level(), Backdrop::Ground, "the breath goes first");
+        run(&mut slow, 4.4, 5.0, 20.0, Some(60.0));
+        assert_eq!(slow.level(), Backdrop::Base, "then the ground");
+        run(&mut slow, 9.4, 20.0, 5.0, Some(60.0));
+        assert_eq!(slow.level(), Backdrop::Base, "and never more");
+        // A good minute later it stays light: no flicker back and forth.
+        run(&mut slow, 30.0, 60.0, 60.0, Some(60.0));
+        assert_eq!(slow.level(), Backdrop::Base);
+    }
+
+    /// Software rendering starts without the breath, and goes on to the
+    /// navy base only if it still cannot keep up.
+    #[test]
+    fn software_rendering_starts_without_the_breath() {
+        let mut soft = Lighten::new(true);
+        assert_eq!(soft.level(), Backdrop::Ground);
+        run(&mut soft, 0.0, 30.0, 59.0, Some(60.0));
+        assert_eq!(soft.level(), Backdrop::Ground);
+        run(&mut soft, 30.0, 10.0, 12.0, Some(60.0));
+        assert_eq!(soft.level(), Backdrop::Base);
+    }
+
+    /// What is not the stage's rate to keep is not judged: an unfocused
+    /// window held to 15 a second, a step asking for less than 30, a
+    /// 30 Hz display, and one stall as the window opens.
+    #[test]
+    fn only_a_rate_the_stage_could_keep_is_judged() {
+        let mut held = Lighten::new(false);
+        run(&mut held, 0.0, 30.0, 15.0, None);
+        assert_eq!(held.level(), Backdrop::Full, "unfocused");
+
+        let mut slow_step = Lighten::new(false);
+        run(&mut slow_step, 0.0, 30.0, 12.0, Some(20.0));
+        assert_eq!(slow_step.level(), Backdrop::Full, "a step asking for 20");
+
+        assert_eq!(Lighten::asked_fps(1.0 / 60.0, Some(30.0)), 30.0);
+        assert_eq!(Lighten::asked_fps(0.0, None), 60.0);
+        assert_eq!(Lighten::asked_fps(0.0, Some(144.0)), 144.0);
+        assert_eq!(Lighten::asked_fps(1.0 / 30.0, Some(144.0)), 30.0);
+        let mut thirty_hz = Lighten::new(false);
+        run(
+            &mut thirty_hz,
+            0.0,
+            30.0,
+            29.5,
+            Some(Lighten::asked_fps(1.0 / 60.0, Some(30.0))),
+        );
+        assert_eq!(thirty_hz.level(), Backdrop::Full, "a 30 Hz display");
+
+        // A stall of a second at the start, then full speed.
+        let mut stalled = Lighten::new(false);
+        stalled.frame(0.0, Some(60.0));
+        run(&mut stalled, 1.0, 30.0, 60.0, Some(60.0));
+        assert_eq!(stalled.level(), Backdrop::Full, "one stall");
+
+        // Low windows broken by a focus change start over.
+        let mut broken = Lighten::new(false);
+        run(&mut broken, 0.0, 2.5, 20.0, Some(60.0));
+        run(&mut broken, 2.5, 1.0, 15.0, None);
+        run(&mut broken, 3.5, 2.5, 20.0, Some(60.0));
+        assert_eq!(broken.level(), Backdrop::Full, "the count started over");
+        // A step that asks a new rate starts the window again too.
+        let mut moved = Lighten::new(false);
+        run(&mut moved, 0.0, 2.5, 20.0, Some(60.0));
+        run(&mut moved, 2.5, 2.5, 20.0, Some(30.0));
+        assert_eq!(moved.level(), Backdrop::Full);
+    }
 
     /// Values printed by the Mac's own Swift (copied verbatim into a probe),
     /// to nine places.
