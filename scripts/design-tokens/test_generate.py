@@ -415,6 +415,27 @@ class WindowsGlassTokensTests(unittest.TestCase):
         for key in ("TcGlassTabEmberHaloColor", "TcGlassTabEmberHaloClearColor"):
             self.assertIn(f'<Color x:Key="{key}">Transparent</Color>', hc)
 
+    def test_high_contrast_keeps_every_label_off_its_fill(self):
+        # Each pair the light and dark checks hold to 4.5:1 must also differ
+        # under High Contrast: a label on the system's ground over a fill on
+        # the system's ground is the same colour on itself. The selected
+        # segment (Navigation.swift:121-123, textOnSelected on
+        # controlSelected) was ground on ground until W25.
+        xaml = generate.render_windows_glass(self.tokens)
+        hc = xaml[xaml.index('<ResourceDictionary x:Key="HighContrast">'):]
+        hc = hc[:hc.index("</ResourceDictionary>")]
+
+        def system(key):
+            marker = f'<StaticResource x:Key="{key}" ResourceKey="'
+            start = hc.index(marker) + len(marker)
+            return hc[start:hc.index('"', start)]
+
+        for fill, label in generate.WINDOWS_GLASS_LABEL_PAIRS:
+            for twin in (fill, fill.replace("Brush", "InactiveBrush")):
+                if f'x:Key="{twin}"' not in hc:
+                    continue
+                self.assertNotEqual(system(label), system(twin), f"{label} on {twin} under High Contrast")
+
     def test_veil_over_material_is_translucent(self):
         palette = generate.windows_glass_palette(self.tokens, "dark")
         self.assertNotEqual(palette["TcGlassPaneOverMaterialBrush"][1:3], "FF")

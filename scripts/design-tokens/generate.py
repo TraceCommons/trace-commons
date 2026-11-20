@@ -1740,6 +1740,12 @@ WINDOWS_HC = {
     "tertiary": "TextFillColorTertiaryBrush",
     "rule": "DividerStrokeColorDefaultBrush",
 }
+# A label and the fill it is drawn on: 4.5:1 in light and dark, and two
+# different system colours under High Contrast.
+WINDOWS_GLASS_LABEL_PAIRS = (
+    ("TcGlassCtaBrush", "TcGlassCtaInkBrush"),
+    ("TcGlassControlSelectedBrush", "TcGlassSelectedInkBrush"),
+)
 # High contrast: every key aliases the system colour of its job.
 WINDOWS_HC_GLASS = {
     "TcGlassSceneBrush": "ground", "TcGlassInkBrush": "ink", "TcGlassInkSecondaryBrush": "secondary",
@@ -1757,6 +1763,9 @@ WINDOWS_HC_GLASS = {
     "TcSurfaceInsetBrush": "ground", "TcHairlineBrush": "rule", "TcHairlineDividerBrush": "rule",
     "TcInkPrimaryBrush": "ink", "TcInkSecondaryBrush": "secondary", "TcInkTertiaryBrush": "tertiary",
     "TcSurfaceScrimBrush": "ground", "TcSurfaceSelectedBrush": "ground",
+    # The selected segment is filled with the ink and labelled with the
+    # ground, as the CTA is, so its label reads (WINDOWS_GLASS_LABEL_PAIRS).
+    "TcGlassControlSelectedBrush": "ink", "TcGlassControlSelectedInactiveBrush": "ink",
 }
 # Legacy type and spacing keys whose value a token now gives: (key, token).
 WINDOWS_LEGACY_TYPE_SIZES = [
@@ -1867,7 +1876,7 @@ def windows_glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
             ratio = contrast(painted[ink], painted[well])
             if ratio < 4.5:
                 raise TokenError(f"windows {scheme}: {ink} on {well} is {ratio:.2f}:1, under 4.5:1")
-    for fill, label in (("TcGlassCtaBrush", "TcGlassCtaInkBrush"), ("TcGlassControlSelectedBrush", "TcGlassSelectedInkBrush")):
+    for fill, label in WINDOWS_GLASS_LABEL_PAIRS:
         ratio = contrast("#" + out[label][3:], "#" + out[fill][3:])
         if ratio < 4.5:
             raise TokenError(f"windows {scheme}: {label} on {fill} is {ratio:.2f}:1, under 4.5:1")
