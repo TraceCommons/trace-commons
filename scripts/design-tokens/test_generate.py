@@ -812,9 +812,11 @@ class LightContrastRaiseTests(unittest.TestCase):
             self.assertGreaterEqual(generate.contrast(ink[0], ground[0]), 3.0)
 
     def test_this_computer_glyph_clears_3_to_1(self):
-        # 3. "This computer" on the map: statusOff, its laptop's lid drawn
-        # at 0.85 (FlowMapView.swift drawLaptop, TracesMapView.DrawLaptop),
-        # the glyph's main shape.
+        # 3. "This computer" on the map: statusOff (FlowMapView.swift
+        # drawLaptop/drawPad, TracesMapView.DrawLaptop/DrawPad). Held at
+        # 0.85 coverage: the standard map's laptop lid, and the audit's own
+        # pixel (#8f8f95, about 0.95). The launch pad, the default style,
+        # draws its slab 0.75 to 1 and its tower at 0.7; those stay under.
         for hex_, alpha in (self.swift_flat_light("statusOff"), self.map_art_light("statusOff")):
             for coverage in (1.0, 0.85):
                 with self.subTest(hex=hex_, coverage=coverage):
