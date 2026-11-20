@@ -504,7 +504,7 @@ public class SentTracesTrainingTests
         int summary = inspector.IndexOf("_root.Children.Add(Summary(copy));", StringComparison.Ordinal);
         int section = inspector.IndexOf("_root.Children.Add(_trainingSlot);", StringComparison.Ordinal);
         Assert.True(summary > 0 && section > summary);
-        Assert.Contains("new HistoryDetailInspector(_host, record, SentTraining)", Shell("TraceCommons.App/MainWindow.HistoryDetail.cs"));
+        Assert.Contains("new HistoryDetailInspector(_host, record, SentTraining, SkillLearning)", Shell("TraceCommons.App/MainWindow.HistoryDetail.cs"));
 
         string views = Shell("TraceCommons.App/Controls/SentTracesTrainingViews.cs");
         Assert.Contains("AutomationProperties.SetName(button, copy.ReviewAccessibilityName);", views);
