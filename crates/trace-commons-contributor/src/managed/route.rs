@@ -119,6 +119,11 @@ const RELEASED_PORT_PAUSE: std::time::Duration = std::time::Duration::from_milli
 /// that window; a port another listener holds does not, and its refusal is
 /// returned unchanged, so the caller never moves to another port. Port 0
 /// asks the OS for any port and is never retried.
+/// Each fixed port a test build was refused and asked for again, so a
+/// daemon-level test can let go of a port only once the restart has met it.
+#[cfg(test)]
+pub(crate) static REFUSED_PORTS: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+
 pub(crate) async fn start_on_released_port<T, F, Fut>(
     port: u16,
     within: std::time::Duration,
@@ -135,6 +140,8 @@ where
             Err(embed::EmbedError::PortInUse { .. })
                 if port != 0 && tokio::time::Instant::now() < deadline =>
             {
+                #[cfg(test)]
+                REFUSED_PORTS.lock().unwrap().push(port);
                 tokio::time::sleep(pause.min(deadline - tokio::time::Instant::now())).await;
             }
             result => return result,

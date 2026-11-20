@@ -259,6 +259,59 @@ async fn no_enable_invalid_model_privacy_and_context_fail_closed() {
     task.abort();
 }
 #[tokio::test]
+async fn a_restart_takes_its_saved_port_once_the_os_lets_it_go() {
+    // Windows can keep a just-released port listening for about a second,
+    // so a restart straight after a stop finds its saved port still in use.
+    // The test's own listener stands for that port and lets go of it after
+    // the restart has been refused at least once.
+    let (base, _, task) = fixture().await;
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let shared = shared(store.clone(), &base);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let held = listener.local_addr().unwrap().port();
+    configure(&shared).await;
+    stop(&shared, false).await;
+    finish_drains(&shared).await;
+    let mut binding = load(&store).unwrap().unwrap();
+    assert_ne!(binding.port, held);
+    binding.port = held;
+    store
+        .write_daemon_file(FILE, &serde_json::to_vec(&binding).unwrap())
+        .unwrap();
+    shared.claude_desktop.lock().unwrap().binding = Some(binding.clone());
+    let release = tokio::spawn(async move {
+        let refused = async {
+            while !crate::managed::route::REFUSED_PORTS
+                .lock()
+                .unwrap()
+                .contains(&held)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        // Bounded so a route that never asks again fails the test rather
+        // than hanging it.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), refused).await;
+        drop(listener);
+    });
+    reconcile(&shared).await;
+    // Read before anything else reconciles: a status request would start
+    // the route again once the port is free, hiding a refused restart.
+    let (route_port, unavailable) = {
+        let held = shared.claude_desktop.lock().unwrap();
+        (
+            held.route.as_ref().map(|route| route.port()),
+            held.unavailable,
+        )
+    };
+    release.await.unwrap();
+    assert_eq!(route_port, Some(held));
+    assert!(!unavailable);
+    assert!(load(&store).unwrap().unwrap() == binding);
+    call(&shared, "claude_desktop_disconnect", json!({})).await;
+    task.abort();
+}
+#[tokio::test]
 async fn corrupt_saved_binding_and_port_conflict_do_not_pick_another_port() {
     let (base, _, task) = fixture().await;
     let (_dir, store) = crate::config::tests_support::temp_store();
