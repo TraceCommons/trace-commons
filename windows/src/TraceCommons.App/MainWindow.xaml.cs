@@ -1274,7 +1274,19 @@ public sealed partial class MainWindow : Window
         {
             // The Mac's sample week (feed T) on Overview and Breakdown, as its
             // sample windows draw it (InsightsSampleModels, InsightsSample.swift:208-232).
+            // Skills answers from the sample too, on the sample's own instant
+            // when it has one (the skillsHome extra: Home's stories and bars).
             return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word),
+                copy =>
+                {
+                    InsightsSkillsModel skills = InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy);
+                    if (SampleDaemon.FromEnvironment()?.PinnedNow is { } pinned)
+                    {
+                        skills.Now = () => pinned;
+                    }
+
+                    return skills;
+                },
                 weekReader: InsightsViewModel.SampleWeekReader);
         }
 #endif

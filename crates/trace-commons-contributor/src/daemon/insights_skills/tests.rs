@@ -2000,3 +2000,113 @@ fn home_news_returns_each_partition_newest_first_with_stable_id_ties() {
         vec!["poteto:001:", "slack:000:", "poteto:002:"]
     );
 }
+
+/// The Windows `skillsHome` sample extra holds this snapshot: three creators'
+/// catalogs refreshed twice (a baseline, then one skill updated and one
+/// added), Obra followed. Everything but `usage` is the daemon's own reply;
+/// `usage` is hand-written there (the counter pass reads real sessions, and
+/// its windows are drawn against the daemon's clock), as is `_sample`.
+#[test]
+fn the_windows_skills_home_sample_is_this_snapshot() {
+    let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+    let (_dir, store) = crate::config::tests_support::temp_store();
+    let mut state = PublicState::default();
+    let named: &[(&str, &[(&str, &str)])] = &[
+        (
+            "obra",
+            &[
+                (
+                    "brainstorming",
+                    "Turns a rough idea into a design before any code is written.",
+                ),
+                (
+                    "test-driven-development",
+                    "Write the failing test first, then the code that passes it.",
+                ),
+                (
+                    "systematic-debugging",
+                    "Find the root cause before proposing a fix.",
+                ),
+                (
+                    "writing-plans",
+                    "Break an approved design into small, checked steps.",
+                ),
+            ],
+        ),
+        (
+            "poteto",
+            &[
+                (
+                    "code-review",
+                    "Review a change for correctness and simplicity.",
+                ),
+                (
+                    "refactor",
+                    "Restructure code without changing what it does.",
+                ),
+            ],
+        ),
+        (
+            "slack",
+            &[
+                ("slack-search", "Search channels and threads for context."),
+                ("slack-summarize", "Summarise a long thread."),
+            ],
+        ),
+    ];
+    let make = |publisher: &Publisher, name: &str, desc: &str, hash: &str| {
+        let path = format!("{}/{name}/SKILL.md", publisher.skills_root);
+        let mut skill = catalog_skill(publisher.id, &path, hash);
+        skill.name = name.into();
+        skill.description = desc.into();
+        skill.repository = publisher.repository.into();
+        skill.source_url = source_url(publisher, &skill.revision, &path);
+        skill.instructions_url = publisher.instructions_url.into();
+        skill
+    };
+    for (id, skills) in named {
+        let publisher = publishers().into_iter().find(|p| p.id == *id).unwrap();
+        // Baseline three days before, all but the last skill.
+        let base: Vec<_> = skills[..skills.len() - 1]
+            .iter()
+            .map(|(n, d)| make(&publisher, n, d, "a"))
+            .collect();
+        state.accept(id, base, at("2026-11-15T09:00:00Z"));
+        // Then the last one added and the first one updated.
+        let mut now: Vec<_> = skills
+            .iter()
+            .map(|(n, d)| make(&publisher, n, d, "a"))
+            .collect();
+        now[0] = make(&publisher, skills[0].0, skills[0].1, "b");
+        state.accept(id, now, at("2026-11-18T14:00:00Z"));
+    }
+    state.follow("obra", true).unwrap();
+    validate_state(&state).unwrap();
+    persist(store.dir(), &state).unwrap();
+    let shared = with_feature_runtime(DaemonShared::load(store).unwrap());
+    set_skills_flag(&shared, 1, true);
+    shared.settings.lock().unwrap().insights_counter_pass = true;
+    let mut value = snapshot(&shared);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../windows/src/TraceCommons.Interop/SampleExtras/skillsHome/insights_skills.json",
+    );
+    let mut recorded: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    for key in ["copy", "usage"] {
+        value.as_object_mut().unwrap().remove(key);
+    }
+    // The scan is stamped with the daemon's clock; the sample's is pinned.
+    let scanned = value["inventory"]["scanned_at"].as_str().unwrap();
+    assert!(DateTime::parse_from_rfc3339(scanned).is_ok());
+    value["inventory"]["scanned_at"] = recorded["inventory"]["scanned_at"].clone();
+    for key in ["_sample", "usage"] {
+        recorded.as_object_mut().unwrap().remove(key);
+    }
+    assert_eq!(
+        recorded,
+        value,
+        "update {} (keeping its usage and _sample) to:\n{}",
+        path.display(),
+        serde_json::to_string_pretty(&value).unwrap()
+    );
+}

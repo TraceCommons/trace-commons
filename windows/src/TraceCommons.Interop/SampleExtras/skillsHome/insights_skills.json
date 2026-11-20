@@ -1,0 +1,571 @@
+{
+  "enabled": true,
+  "readable": true,
+  "inventory": {
+    "scanned_at": "2026-11-18T15:30:00Z",
+    "skills": [],
+    "details": {},
+    "coverage": [
+      {
+        "location": "~/.codex/skills",
+        "status": "missing"
+      },
+      {
+        "location": "~/.claude/skills",
+        "status": "missing"
+      },
+      {
+        "location": "~/.config/opencode/skills",
+        "status": "missing"
+      },
+      {
+        "location": "~/.config/opencode/skill",
+        "status": "missing"
+      },
+      {
+        "location": "~/.opencode/skills",
+        "status": "missing"
+      },
+      {
+        "location": "~/.opencode/skill",
+        "status": "missing"
+      },
+      {
+        "location": "~/.agents/skills",
+        "status": "missing"
+      }
+    ],
+    "partial": false
+  },
+  "catalog": {
+    "publishers": [
+      {
+        "id": "poteto",
+        "name": "Poteto",
+        "repository": "cursor/plugins",
+        "skills_root": "pstack/skills",
+        "instructions_url": "https://github.com/cursor/plugins/blob/main/pstack/README.md"
+      },
+      {
+        "id": "obra",
+        "name": "Obra",
+        "repository": "obra/superpowers",
+        "skills_root": "skills",
+        "instructions_url": "https://github.com/obra/superpowers#installation"
+      },
+      {
+        "id": "slack",
+        "name": "Slack",
+        "repository": "slackapi/slack-skills-plugin",
+        "skills_root": "skills",
+        "instructions_url": "https://github.com/slackapi/slack-skills-plugin#installation"
+      },
+      {
+        "id": "rex",
+        "name": "Rex",
+        "repository": "",
+        "skills_root": "",
+        "instructions_url": "https://www.superlogical.com/rex/docs/automate/agent-skill"
+      }
+    ],
+    "skills": [
+      {
+        "id": "obra:skills/brainstorming/SKILL.md",
+        "publisher_id": "obra",
+        "name": "brainstorming",
+        "description": "Turns a rough idea into a design before any code is written.",
+        "repository": "obra/superpowers",
+        "path": "skills/brainstorming/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_url": "https://github.com/obra/superpowers/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/brainstorming/SKILL.md",
+        "instructions_url": "https://github.com/obra/superpowers#installation"
+      },
+      {
+        "id": "obra:skills/systematic-debugging/SKILL.md",
+        "publisher_id": "obra",
+        "name": "systematic-debugging",
+        "description": "Find the root cause before proposing a fix.",
+        "repository": "obra/superpowers",
+        "path": "skills/systematic-debugging/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "https://github.com/obra/superpowers/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/systematic-debugging/SKILL.md",
+        "instructions_url": "https://github.com/obra/superpowers#installation"
+      },
+      {
+        "id": "obra:skills/test-driven-development/SKILL.md",
+        "publisher_id": "obra",
+        "name": "test-driven-development",
+        "description": "Write the failing test first, then the code that passes it.",
+        "repository": "obra/superpowers",
+        "path": "skills/test-driven-development/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "https://github.com/obra/superpowers/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/test-driven-development/SKILL.md",
+        "instructions_url": "https://github.com/obra/superpowers#installation"
+      },
+      {
+        "id": "obra:skills/writing-plans/SKILL.md",
+        "publisher_id": "obra",
+        "name": "writing-plans",
+        "description": "Break an approved design into small, checked steps.",
+        "repository": "obra/superpowers",
+        "path": "skills/writing-plans/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "https://github.com/obra/superpowers/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/writing-plans/SKILL.md",
+        "instructions_url": "https://github.com/obra/superpowers#installation"
+      },
+      {
+        "id": "poteto:pstack/skills/code-review/SKILL.md",
+        "publisher_id": "poteto",
+        "name": "code-review",
+        "description": "Review a change for correctness and simplicity.",
+        "repository": "cursor/plugins",
+        "path": "pstack/skills/code-review/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_url": "https://github.com/cursor/plugins/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pstack/skills/code-review/SKILL.md",
+        "instructions_url": "https://github.com/cursor/plugins/blob/main/pstack/README.md"
+      },
+      {
+        "id": "poteto:pstack/skills/refactor/SKILL.md",
+        "publisher_id": "poteto",
+        "name": "refactor",
+        "description": "Restructure code without changing what it does.",
+        "repository": "cursor/plugins",
+        "path": "pstack/skills/refactor/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "https://github.com/cursor/plugins/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/pstack/skills/refactor/SKILL.md",
+        "instructions_url": "https://github.com/cursor/plugins/blob/main/pstack/README.md"
+      },
+      {
+        "id": "slack:skills/slack-search/SKILL.md",
+        "publisher_id": "slack",
+        "name": "slack-search",
+        "description": "Search channels and threads for context.",
+        "repository": "slackapi/slack-skills-plugin",
+        "path": "skills/slack-search/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "source_url": "https://github.com/slackapi/slack-skills-plugin/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/slack-search/SKILL.md",
+        "instructions_url": "https://github.com/slackapi/slack-skills-plugin#installation"
+      },
+      {
+        "id": "slack:skills/slack-summarize/SKILL.md",
+        "publisher_id": "slack",
+        "name": "slack-summarize",
+        "description": "Summarise a long thread.",
+        "repository": "slackapi/slack-skills-plugin",
+        "path": "skills/slack-summarize/SKILL.md",
+        "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "source_url": "https://github.com/slackapi/slack-skills-plugin/blob/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/skills/slack-summarize/SKILL.md",
+        "instructions_url": "https://github.com/slackapi/slack-skills-plugin#installation"
+      }
+    ],
+    "partial": false,
+    "checked_at": "2026-11-18T14:00:00Z",
+    "publisher_states": [
+      {
+        "publisher_id": "poteto",
+        "status": "unknown",
+        "checked_at": "2026-11-18T14:00:00Z"
+      },
+      {
+        "publisher_id": "obra",
+        "status": "unknown",
+        "checked_at": "2026-11-18T14:00:00Z"
+      },
+      {
+        "publisher_id": "slack",
+        "status": "unknown",
+        "checked_at": "2026-11-18T14:00:00Z"
+      },
+      {
+        "publisher_id": "rex",
+        "status": "unavailable",
+        "checked_at": null
+      }
+    ],
+    "source": "github",
+    "revision": null,
+    "issued_at": null,
+    "expires_at": null,
+    "total_skills": null,
+    "active_publishers": null
+  },
+  "suggestions": {
+    "available": false,
+    "opted_in": false
+  },
+  "followed_publishers": [
+    "obra"
+  ],
+  "updates": [],
+  "feed": [
+    {
+      "id": "obra:skills/brainstorming/SKILL.md:1795010400000:updated",
+      "publisher_id": "obra",
+      "skill_id": "obra:skills/brainstorming/SKILL.md",
+      "kind": "updated",
+      "observed_at": "2026-11-18T14:00:00Z"
+    },
+    {
+      "id": "obra:skills/writing-plans/SKILL.md:1795010400000:added",
+      "publisher_id": "obra",
+      "skill_id": "obra:skills/writing-plans/SKILL.md",
+      "kind": "added",
+      "observed_at": "2026-11-18T14:00:00Z"
+    }
+  ],
+  "feed_partial": false,
+  "default_publishers": [
+    "obra",
+    "poteto",
+    "slack"
+  ],
+  "home_feed": [
+    {
+      "id": "poteto:pstack/skills/code-review/SKILL.md:1795010400000:updated",
+      "publisher_id": "poteto",
+      "skill_id": "poteto:pstack/skills/code-review/SKILL.md",
+      "kind": "updated",
+      "observed_at": "2026-11-18T14:00:00Z"
+    },
+    {
+      "id": "poteto:pstack/skills/refactor/SKILL.md:1795010400000:added",
+      "publisher_id": "poteto",
+      "skill_id": "poteto:pstack/skills/refactor/SKILL.md",
+      "kind": "added",
+      "observed_at": "2026-11-18T14:00:00Z"
+    },
+    {
+      "id": "slack:skills/slack-search/SKILL.md:1795010400000:updated",
+      "publisher_id": "slack",
+      "skill_id": "slack:skills/slack-search/SKILL.md",
+      "kind": "updated",
+      "observed_at": "2026-11-18T14:00:00Z"
+    },
+    {
+      "id": "slack:skills/slack-summarize/SKILL.md:1795010400000:added",
+      "publisher_id": "slack",
+      "skill_id": "slack:skills/slack-summarize/SKILL.md",
+      "kind": "added",
+      "observed_at": "2026-11-18T14:00:00Z"
+    }
+  ],
+  "home_feed_partial": false,
+  "usage": {
+    "enabled": true,
+    "last_analysis_at": "2026-11-18T15:30:00Z",
+    "earliest_evidence": "2026-10-21T10:00:00Z",
+    "sessions_partial": 0,
+    "child_sessions_unavailable": 0,
+    "delegated_sessions_observed": 0,
+    "delegated_sessions_unknown": 0,
+    "unclassified_sessions_observed": 0,
+    "unclassified_sessions_unknown": 0,
+    "sessions_observed": 19,
+    "sessions_unknown": 0,
+    "partial": false,
+    "partial_agents": [],
+    "skills": [
+      {
+        "name": "brainstorming",
+        "agent": "claude_code",
+        "invocations": 11,
+        "loads": 0,
+        "sessions": 7,
+        "last_seen": "2026-11-17T17:20:00Z",
+        "population": "direct",
+        "session_refs": [],
+        "parent_session_refs": [],
+        "evidence": [],
+        "windows": [
+          {
+            "days": 7,
+            "invocations": 9,
+            "loads": 0,
+            "sessions": 5
+          },
+          {
+            "days": 30,
+            "invocations": 11,
+            "loads": 0,
+            "sessions": 7
+          }
+        ],
+        "daily": [
+          {
+            "day": "2026-11-05",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-08",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-11",
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          },
+          {
+            "day": "2026-11-12",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-14",
+            "invocations": 3,
+            "loads": 0,
+            "sessions": 3
+          },
+          {
+            "day": "2026-11-15",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-17",
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          }
+        ],
+        "undated_events": 0
+      },
+      {
+        "name": "test-driven-development",
+        "agent": "claude_code",
+        "invocations": 9,
+        "loads": 0,
+        "sessions": 7,
+        "last_seen": "2026-11-16T11:05:00Z",
+        "population": "direct",
+        "session_refs": [],
+        "parent_session_refs": [],
+        "evidence": [],
+        "windows": [
+          {
+            "days": 7,
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          },
+          {
+            "days": 30,
+            "invocations": 9,
+            "loads": 0,
+            "sessions": 7
+          }
+        ],
+        "daily": [
+          {
+            "day": "2026-10-21",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-04",
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          },
+          {
+            "day": "2026-11-05",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-06",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-08",
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          },
+          {
+            "day": "2026-11-12",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-15",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          }
+        ],
+        "undated_events": 0
+      },
+      {
+        "name": "systematic-debugging",
+        "agent": "claude_code",
+        "invocations": 5,
+        "loads": 0,
+        "sessions": 4,
+        "last_seen": "2026-11-17T09:40:00Z",
+        "population": "direct",
+        "session_refs": [],
+        "parent_session_refs": [],
+        "evidence": [],
+        "windows": [
+          {
+            "days": 7,
+            "invocations": 5,
+            "loads": 0,
+            "sessions": 4
+          },
+          {
+            "days": 30,
+            "invocations": 5,
+            "loads": 0,
+            "sessions": 4
+          }
+        ],
+        "daily": [
+          {
+            "day": "2026-11-13",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-14",
+            "invocations": 2,
+            "loads": 0,
+            "sessions": 2
+          },
+          {
+            "day": "2026-11-16",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-17",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          }
+        ],
+        "undated_events": 0
+      },
+      {
+        "name": "writing-plans",
+        "agent": "claude_code",
+        "invocations": 6,
+        "loads": 0,
+        "sessions": 6,
+        "last_seen": "2026-11-17T13:10:00Z",
+        "population": "direct",
+        "session_refs": [],
+        "parent_session_refs": [],
+        "evidence": [],
+        "windows": [
+          {
+            "days": 7,
+            "invocations": 3,
+            "loads": 0,
+            "sessions": 3
+          },
+          {
+            "days": 30,
+            "invocations": 6,
+            "loads": 0,
+            "sessions": 6
+          }
+        ],
+        "daily": [
+          {
+            "day": "2026-11-04",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-06",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-09",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-12",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-14",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          },
+          {
+            "day": "2026-11-17",
+            "invocations": 1,
+            "loads": 0,
+            "sessions": 1
+          }
+        ],
+        "undated_events": 0
+      }
+    ],
+    "coverage": [
+      {
+        "agent": "claude_code",
+        "status": "explicit_invocations"
+      },
+      {
+        "agent": "codex",
+        "status": "loads_only"
+      },
+      {
+        "agent": "opencode",
+        "status": "explicit_invocations"
+      },
+      {
+        "agent": "matching",
+        "status": "name_only"
+      },
+      {
+        "agent": "child_sessions",
+        "status": "partial"
+      },
+      {
+        "agent": "claude_child_sessions",
+        "status": "explicit_invocations"
+      },
+      {
+        "agent": "codex_child_sessions",
+        "status": "unsupported"
+      }
+    ]
+  },
+  "refreshing": false,
+  "error": null,
+  "_sample": "catalog, feed, home_feed, publishers and follows: the daemon's own snapshot() over authored catalog refreshes (insights_skills::tests::the_windows_skills_home_sample_is_this_snapshot pins them). usage: hand-written, shaped as insights_week::skills_usage serves it, because the counter pass reads real sessions and its windows are drawn against the daemon's clock; sample_clock.json is the instant it is read at."
+}

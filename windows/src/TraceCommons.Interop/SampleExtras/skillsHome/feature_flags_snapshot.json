@@ -1,0 +1,22 @@
+{
+  "_sample": "insights_skills on, for this build's own profile: environment and profile_digest are filled from the library at launch (SampleDaemon). A production daemon never turns it on (no insights_skills_v1).",
+  "_sample_build_profile": true,
+  "schema_version": 1,
+  "environment": "",
+  "profile_digest": "",
+  "instance_id": "5a3c1f4e-0d2b-4c6a-9e71-2b8f0c4d6a10",
+  "sampled_at": "2026-11-18T16:00:00Z",
+  "generation": 1,
+  "source": "default",
+  "revision": null,
+  "expires_at": null,
+  "fresh": true,
+  "flags": {
+    "insights_skills": {
+      "enabled": true,
+      "pending": false,
+      "capability_blocked": false,
+      "timing": "live"
+    }
+  }
+}

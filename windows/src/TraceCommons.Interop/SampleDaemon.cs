@@ -108,6 +108,47 @@ public sealed class SampleDaemon
     /// </summary>
     public const string SkillLearningExtra = "skillLearning";
 
+    /// <summary>
+    /// Insights &gt; Skills with Home's story cards and usage bars: the
+    /// daemon's own catalog and feed, hand-written usage, a flag snapshot
+    /// with <c>insights_skills</c> on for this build's profile, and the
+    /// instant Skills reads them at (<c>sample_clock.json</c>).
+    /// </summary>
+    public const string SkillsHomeExtra = "skillsHome";
+
+    /// <summary>
+    /// This build's flag profile, which an extra's flag snapshot marked
+    /// <c>_sample_build_profile</c> takes its environment and digest from,
+    /// so the window accepts it as this build's.
+    /// </summary>
+    public Func<BuildFeatureProfile?> BuildProfile { get; init; } = BuildFeatureProfile.FromLibrary;
+
+    /// <summary>The instant this launch's extra is read at, or null for the clock.</summary>
+    public DateTimeOffset? PinnedNow
+    {
+        get
+        {
+            if (_extra is null)
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument clock = JsonDocument.Parse(File.ReadAllText(Path.Combine(_extra, "sample_clock.json")));
+                return clock.RootElement.TryGetProperty("now", out JsonElement now) && now.ValueKind == JsonValueKind.String
+                    && DateTimeOffset.TryParse(now.GetString(), System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out DateTimeOffset at)
+                    ? at
+                    : null;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException)
+            {
+                return null;
+            }
+        }
+    }
+
     /// <summary>The directory beside the assembly that holds the extras.</summary>
     public const string ExtrasDir = "SampleExtras";
 
@@ -179,7 +220,7 @@ public sealed class SampleDaemon
     /// null for unset or anything else.
     /// </summary>
     public static string? Extra(string? value, string root) =>
-        value is SpendOrganizationsExtra or SkillLearningExtra
+        value is SpendOrganizationsExtra or SkillLearningExtra or SkillsHomeExtra
             ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, value)
             : null;
 
@@ -337,7 +378,19 @@ public sealed class SampleDaemon
 
             try
             {
-                return new JsonObject { ["result"] = JsonNode.Parse(text) }.ToJsonString();
+                JsonNode? result = JsonNode.Parse(text);
+                if (result is JsonObject recorded && recorded["_sample_build_profile"] is JsonValue marked && marked.TryGetValue(out bool fill) && fill)
+                {
+                    if (BuildProfile() is not { Valid: true } build)
+                    {
+                        return ErrorFrame(UnrecordedLabel);
+                    }
+
+                    recorded["environment"] = build.Environment;
+                    recorded["profile_digest"] = build.ProfileDigest;
+                }
+
+                return new JsonObject { ["result"] = result }.ToJsonString();
             }
             catch (JsonException)
             {

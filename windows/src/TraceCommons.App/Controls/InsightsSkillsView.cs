@@ -340,7 +340,7 @@ public sealed class InsightsSkillsView : UserControl
         if (_model.FollowFailurePublisherId is not { } failed || _model.Shown is not { Enabled: true } snapshot) return false;
         return _section switch
         {
-            "home" => InsightsSkillsHome.Make(snapshot, _model, DateTimeOffset.Now, TimeZoneInfo.Local).DefaultCreators.Any(c => c.Id == failed),
+            "home" => InsightsSkillsHome.Make(snapshot, _model, _model.Now(), TimeZoneInfo.Local).DefaultCreators.Any(c => c.Id == failed),
             "catalog" => _selectedCatalogId is null && snapshot.Catalog.Publishers.Any(p => p.Id == failed),
             _ => false,
         };
@@ -467,7 +467,7 @@ public sealed class InsightsSkillsView : UserControl
 
     private UIElement Home(SkillsSnapshot snapshot)
     {
-        DateTimeOffset now = DateTimeOffset.Now;
+        DateTimeOffset now = _model.Now();
         InsightsSkillsHome.Snapshot feed = InsightsSkillsHome.Make(snapshot, _model, now, TimeZoneInfo.Local);
         IReadOnlyList<InsightsSkillsHome.Story> stories = feed.RankedStories(now, TimeZoneInfo.Local);
         string? hero = InsightsSkillsHome.Snapshot.RankedHeroId(stories);
@@ -1392,7 +1392,7 @@ public sealed class InsightsSkillsView : UserControl
 
     private UIElement Usage(SkillsSnapshot snapshot)
     {
-        DateTimeOffset now = DateTimeOffset.Now;
+        DateTimeOffset now = _model.Now();
         IReadOnlyList<InsightsSkillsUsage.Skill> ranked = InsightsSkillsUsage.Ranked(snapshot.Usage, _usageDays, now, TimeZoneInfo.Local, _selectedUsageId);
         InsightsSkillsUsage.Skill? picked = _selectedUsageId is null ? ranked.FirstOrDefault() : ranked.FirstOrDefault(s => s.Id == _selectedUsageId);
         IReadOnlyList<InstalledSkill> candidates = InsightsSkillsUsage.RemovalCandidates(snapshot, _usageDays, _model, now, TimeZoneInfo.Local);
