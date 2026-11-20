@@ -44,6 +44,7 @@ public partial class App : Application
         if (!Program.IsSampleLaunch)
         {
             UrlSchemeRegistration.EnsureRegistered();
+            RunAtLogin.Refresh();
         }
 
         var activation = AppInstance.GetCurrent().GetActivatedEventArgs();
@@ -66,6 +67,14 @@ public partial class App : Application
             };
             window.DispatcherQueue.TryEnqueue(() => window.ReceiveActivation(invite));
         });
-        _window.Activate();
+        bool login = AutostartCommand.IsLoginLaunch(Environment.GetCommandLineArgs(), activation.Kind == ExtendedActivationKind.StartupTask);
+        if (AutostartCommand.OpensWindow(login, window.TrayPresent, PendingInvite is not null))
+        {
+            _window.Activate();
+        }
+        else
+        {
+            window.StartInTray();
+        }
     }
 }

@@ -234,6 +234,14 @@ administrator rights. The MSIX declares `TraceCommonsStartup` through the
 `Windows.ApplicationModel.StartupTask` to read or change it. It never writes
 the Run key from inside `WindowsApps`.
 
+A launch at login starts in the tray, as the Mac's login item does: the Run
+entry carries `--at-login` (`AutostartCommand.For`) and the packaged task
+arrives as a `StartupTask` activation. The daemon and its feature flags start
+without the window; the window opens only when the start is refused or setup
+is unfinished (`AutostartCommand.OpensAfterQuietStart`), or when there is no
+tray icon or an invite. An entry written before the argument existed is
+rewritten at the next launch (`RunAtLogin.Refresh`).
+
 Both registrations appear in Windows' Startup Apps surface. If a contributor
 disables the packaged task there, the API reports `DisabledByUser`; Settings
 shows where to turn it back on and does not pretend that the app can override

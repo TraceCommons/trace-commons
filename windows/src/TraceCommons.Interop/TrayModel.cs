@@ -139,6 +139,14 @@ public sealed class TrayModel
         return new TrayModel(state, owed, Truncate($"{Shell.MonitorWords.AppName} — {detail}"), detail);
     }
 
+    /// <summary>
+    /// The rail badge's tooltip: the unknown-count sentence behind its "?",
+    /// and none at all for a known count. Null rather than empty, because
+    /// WinUI draws an empty string as an empty bubble.
+    /// </summary>
+    public static string? DecisionCountToolTip(int? decisionsOwed) =>
+        decisionsOwed is null ? DecisionCountUnavailable : null;
+
     /// <summary>The rail badge: unknown stays distinct from an exact zero.</summary>
     public static string DecisionCountText(int? decisionsOwed) => decisionsOwed switch
     {
