@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.12" date="2026-11-20">
+      <description>
+        <p>Gateway for macOS adds Red Team SandBox: sandboxed security sessions in a microVM on your Mac, using attested NEAR AI private inference.</p>
+      </description>
+    </release>
     <!--
       DRAFT, NOT APPROVED. Proposed note for the first Linux release since
       0.23.0. The owner approves release-note text; until then it stays in
