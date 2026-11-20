@@ -105,6 +105,11 @@ internal sealed class TrayFlyoutWindow : Window
         ToolWindows.PlaceAndShow(this, (x, y, width, height));
         ToolWindows.TakeKeyboard(_hwnd);
         _shown = true;
+
+        // The first action takes focus: a ring only when the panel was
+        // opened from the keyboard (FocusState.Programmatic follows the last
+        // input), never a nameless stop on the window itself.
+        ToolWindows.FocusFirst(_body, FocusState.Programmatic, () => _shown);
     }
 
     private void Line(string text, string style)

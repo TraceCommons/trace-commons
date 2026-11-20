@@ -154,5 +154,11 @@ public sealed class AboutWindow : Window
 
         AppWindow.Show();
         Activate();
+
+        // Copy takes focus, never the bare window (box tab walk, 2026-11-19).
+        if (Content is FrameworkElement root)
+        {
+            ToolWindows.FocusFirst(root, FocusState.Programmatic, () => AppWindow.IsVisible);
+        }
     }
 }

@@ -5,7 +5,6 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.Interop;
@@ -120,15 +119,8 @@ internal sealed class EdgeRailWindow : Window
             // A click on the card or the zone focuses nothing, and with
             // nothing focused Escape never reaches the rail (tc-win-az5: the
             // rail stayed open). The first control takes focus without a
-            // ring, as a pointer click gives it, once the rail is laid out
-            // and active.
-            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
-            {
-                if (_hover.HoldsKeyboard && FocusManager.FindFirstFocusableElement(_open) is Control first)
-                {
-                    first.Focus(FocusState.Pointer);
-                }
-            });
+            // ring, as a pointer click gives it.
+            ToolWindows.FocusFirst(_open, FocusState.Pointer, () => _hover.HoldsKeyboard);
         };
         _root.KeyDown += (_, e) =>
         {
