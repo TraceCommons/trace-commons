@@ -87,8 +87,9 @@ public class ShellWordingTests
             // of its wording is unmoved. Four of its sentences moved into
             // WatchCopy.cs, which is why this entry ratcheted down. Lowered
             // from 10 (2026-11-19): the Watching timing card's notification
-            // owner line and range notice went with the card.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 7 },
+            // owner line and range notice went with the card. 6 (2026-11-19):
+            // the queue-expiry sentence no control drew any more (W17 review F7).
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 6 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             // The approval failure sentence is shared with the tested decision factory.

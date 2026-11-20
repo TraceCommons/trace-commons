@@ -24,7 +24,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private bool _startAtLogin;
     private bool _startupSupported = true;
     private bool _connected;
-    private long _queueTtlDays;
     private string _notice = string.Empty;
 
     /// <summary>
@@ -115,6 +114,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     public ContributorSettingsViewModel(DaemonHost host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        Audit = new TraceCommons.Interop.Shell.AuditLogRead((method, json) => _host.CallAsync(method, json));
 
         // The routing card is the daemon's state, not this window's: the
         // reader moves from awaiting-rows to rows-seen on its own, the proxy
@@ -1329,12 +1329,23 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     public bool HasNoProjects => Projects.Count == 0;
 
+    /// <summary>
+    /// The change log's read (<see cref="TraceCommons.Interop.Shell.AuditLogRead"/>): the read notice
+    /// stands in the log's place until <c>list_audit</c> answers, and "No
+    /// changes yet." is said only of an answered, empty log
+    /// (ChangesSection.swift:11-15).
+    /// </summary>
+    public TraceCommons.Interop.Shell.AuditLogRead Audit { get; }
+
     public bool HasAuditEntries => AuditEntries.Count > 0;
 
-    public bool HasNoAuditEntries => AuditEntries.Count == 0;
+    public bool HasNoAuditEntries => Audit.ShowsNothingChanged;
 
-    public string QueueExpiryText =>
-        $"Undecided traces are dropped after {_queueTtlDays} days. Dropped means never sent.";
+    /// <summary>Raised when the change log's read state changes, for the read notice drawn in code.</summary>
+    public event Action? AuditReadChanged;
+
+    /// <summary>Retry on the change log's read notice.</summary>
+    public Task RetryAuditAsync() => LoadAuditAsync();
 
     public async Task LoadAsync()
     {
@@ -1578,8 +1589,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
         AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
 
-        _queueTtlDays = settings.QueueTtlDays;
-        Raise(nameof(QueueExpiryText));
     }
 
     private void FillConsent(ConsentOptionsPayload? options, IReadOnlyCollection<string> granted)
@@ -1660,19 +1669,18 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
 
     private async Task LoadAuditAsync()
     {
-        DaemonResponse response = await _host
-            .CallAsync(DaemonProtocol.Methods.ListAudit, "{\"limit\":20}")
-            .ConfigureAwait(true);
+        await Audit.ReadAsync().ConfigureAwait(true);
 
+        // A failed read keeps the last answered log (AuditLogRead.Entries).
         AuditEntries.Clear();
-        foreach (AuditSettingEntry entry in response.ResultAs<AuditSettingsPayload>()?.Entries
-                 ?? new List<AuditSettingEntry>())
+        foreach (AuditSettingEntry entry in Audit.Entries)
         {
             AuditEntries.Add(new AuditSettingViewModel(entry));
         }
 
         Raise(nameof(HasAuditEntries));
         Raise(nameof(HasNoAuditEntries));
+        AuditReadChanged?.Invoke();
     }
 
     // --- The routing surface --------------------------------------------

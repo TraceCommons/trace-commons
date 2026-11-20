@@ -680,11 +680,14 @@
                     The change log (ChangesSection.swift): the core's heading
                     over the changes, newest first, each its time then the
                     core's sentence for it; the core's line when there is none.
+                    Until list_audit answers, the read notice stands in the
+                    log's place (ChangesSection.swift:11-15), set from code.
                 -->
                 <Border Style="{StaticResource SettingsCardStyle}">
                     <StackPanel Spacing="8">
                         <TextBlock Text="{x:Bind interop:SettingsLegacyWords.ChangesHeading}"
                                    Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ContentControl x:Name="AuditNoticeHost" IsTabStop="False" HorizontalContentAlignment="Stretch" />
                         <TextBlock Text="{x:Bind interop:SettingsLegacyWords.NothingChanged}"
                                    Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionTextStyle}" />

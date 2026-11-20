@@ -37,7 +37,22 @@ public sealed partial class SettingsView : UserControl
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
+        Settings.AuditReadChanged += DrawAuditNotice;
+        DrawAuditNotice();
         Loaded += OnFirstLoaded;
+    }
+
+    /// <summary>
+    /// The change log's read notice: a spinner until list_audit answers,
+    /// then the failure line with Retry while nothing has answered
+    /// (ChangesSection.swift:11-15); nothing once a read answered.
+    /// </summary>
+    private void DrawAuditNotice()
+    {
+        AuditLogRead audit = Settings.Audit;
+        AuditNoticeHost.Content = audit.ShowsReadNotice
+            ? global::TraceCommons.App.Controls.Settings.SettingsCards.ReadNotice(audit.ReadFailed, async (_, _) => await Settings.RetryAuditAsync())
+            : null;
     }
 
     public PublicProfileViewModel ViewModel { get; }
