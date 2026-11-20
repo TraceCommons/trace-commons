@@ -156,6 +156,13 @@ public sealed partial class MainWindow : Window
         _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
         _flags.Changed += OnFeatureFlagsChanged;
         _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
+#if DEBUG
+        // A sample's host never starts: read the extra's flags once.
+        if (_host.IsSample && !ReadsNoFlags())
+        {
+            _ = _flags.RefreshAsync();
+        }
+#endif
         _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
         WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
 #if DEBUG
@@ -235,7 +242,9 @@ public sealed partial class MainWindow : Window
     private bool ReadsNoFlags()
     {
 #if DEBUG
-        return _host.IsSample;
+        // A sample reads no flags, unless its extra records a snapshot
+        // (skillsHome: Insights > Skills).
+        return _host.IsSample && SampleDaemon.FromEnvironment()?.AnswersFlags != true;
 #else
         return false;
 #endif

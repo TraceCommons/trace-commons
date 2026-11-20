@@ -50,6 +50,24 @@ public class SkillsHomeSampleTests
     }
 
     [Fact]
+    public void OnlyASampleWithTheExtraAnswersFlags()
+    {
+        Assert.True(Sample().AnswersFlags);
+        Assert.False(new SampleDaemon("normalDay", Root).AnswersFlags);
+    }
+
+    [Fact]
+    public void TheWindowReadsTheExtrasFlagsOnceAndNoOtherSamplesFlags()
+    {
+        string window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.xaml.cs.txt"));
+        int at = window.IndexOf("private bool ReadsNoFlags()", StringComparison.Ordinal);
+        Assert.True(at >= 0, "ReadsNoFlags is gone");
+        string body = window[at..window.IndexOf("\n    }\n", at, StringComparison.Ordinal)];
+        Assert.Contains("_host.IsSample && SampleDaemon.FromEnvironment()?.AnswersFlags != true", body, StringComparison.Ordinal);
+        Assert.Contains("if (_host.IsSample && !ReadsNoFlags())", window, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheExtraCarriesItsInstant()
     {
         Assert.Equal(DateTimeOffset.Parse("2026-11-18T16:00:00Z", System.Globalization.CultureInfo.InvariantCulture), Sample().PinnedNow);

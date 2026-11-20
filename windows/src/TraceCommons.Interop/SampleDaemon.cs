@@ -123,6 +123,12 @@ public sealed class SampleDaemon
     /// </summary>
     public Func<BuildFeatureProfile?> BuildProfile { get; init; } = BuildFeatureProfile.FromLibrary;
 
+    /// <summary>
+    /// Whether this launch answers <c>feature_flags_snapshot</c>: only an
+    /// extra that records one does; every other sample reads no flags.
+    /// </summary>
+    public bool AnswersFlags => _extra is not null && File.Exists(Path.Combine(_extra, "feature_flags_snapshot.json"));
+
     /// <summary>The instant this launch's extra is read at, or null for the clock.</summary>
     public DateTimeOffset? PinnedNow
     {
