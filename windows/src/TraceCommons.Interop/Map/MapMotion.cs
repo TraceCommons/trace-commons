@@ -151,25 +151,6 @@ public static class MapMotion
     }
 
     /// <summary>
-    /// Whether a tick draws the main layer (arcs, station, transfers): every
-    /// tick while a transfer, the pile or the pointer's light moves;
-    /// otherwise at the layer's own resting rate (30 a second for the arcs,
-    /// 20 for the station), so a field pass, which ticks the clock at 60, does
-    /// not draw them three times as often (checklist O3). A clock that only
-    /// waits draws when it fires, as before.
-    /// </summary>
-    public static bool MainLayerDue(MapClockInputs i, double sinceLastDraw)
-    {
-        if (i.TransferPlaying || i.PileMoving || i.LightFading)
-        {
-            return true;
-        }
-
-        (double interval, bool paused) = Resting(false, i.Flows, i.Healthy, i.HasLibrary);
-        return paused || sinceLastDraw >= interval - TransferFrameInterval / 2;
-    }
-
-    /// <summary>
     /// Whether any map clock may tick: only while the map is loaded and its
     /// window can be seen (<c>GlassAnimationGate.paused</c>, AnimationTimeline.swift:84-87).
     /// </summary>
