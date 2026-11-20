@@ -50,6 +50,18 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
         find.Invoked += OnFindInvoked;
         KeyboardAccelerators.Add(find);
+
+        // Escape closes, as Close does: the Mac binds its Close to the
+        // cancel action, and hangs it from an unseen control when the core
+        // has no Close word (PreviewSheet.swift:234-243, :543-549). An open
+        // dialog or list takes its own Escape first.
+        var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            CloseRequested?.Invoke();
+        };
+        KeyboardAccelerators.Add(escape);
         KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
 
         Loaded += OnFirstLoaded;
