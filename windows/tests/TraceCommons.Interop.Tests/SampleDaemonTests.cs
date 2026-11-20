@@ -551,4 +551,29 @@ public class SampleDaemonTests
         DaemonResponse down = Answer(WithExtra(SampleDaemon.CoreDown, SampleDaemon.SpendOrganizationsExtra), SpendOrganizationModel.ListMethod);
         Assert.Equal(SampleDaemon.NotRunningLabel, down.Error!.Message);
     }
+
+    // ---- The skill-learning extra (W20-D2, W20-D3) ----
+
+    // Named, the offer, the detail and every skill read up to the install
+    // preview answer, and decode; a grant, commit or rollback stays unrecorded.
+    [Fact]
+    public void TheSkillLearningExtraAnswersTheReadsAndRecordsNoWrite()
+    {
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SkillLearningExtra);
+        DaemonResponse status = Answer(sample, SentTracesTrainingClient.StatusMethod);
+        Assert.False(status.IsError);
+        Assert.Equal(2UL, status.Result!.Value.GetProperty("eligible_count").GetUInt64());
+        Assert.NotNull(SessionDetail.Parse(Answer(sample, "history_detail").Result!.Value));
+        Assert.NotNull(SkillCandidate.Parse(Answer(sample, SkillLearningClient.CandidateMethod).Result!.Value));
+        Assert.NotNull(SkillReview.Parse(Answer(sample, SkillLearningClient.ReviewMethod).Result!.Value));
+        Assert.NotNull(SkillEvaluationReport.Parse(Answer(sample, SkillLearningClient.EvaluateMethod).Result!.Value));
+        Assert.NotNull(SkillInstallPlan.Parse(Answer(sample, SkillLearningClient.InstallPlanMethod).Result!.Value));
+        Assert.NotNull(SkillInstallStatus.Parse(Answer(sample, SkillLearningClient.InstallStatusMethod).Result!.Value));
+        foreach (string write in new[] { SentTracesTrainingClient.GrantMethod, SkillLearningClient.InstallCommitMethod, SkillLearningClient.RollbackMethod })
+        {
+            Assert.Equal(SampleDaemon.UnrecordedLabel, Answer(sample, write).Error!.Message);
+        }
+
+        Assert.True(Answer(WithExtra("normalDay", null), SentTracesTrainingClient.StatusMethod).IsError);
+    }
 }

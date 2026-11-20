@@ -34,7 +34,9 @@ public sealed partial class MainWindow
     private System.Func<string, string, Task<DaemonResponse>>? SkillLearningCall()
     {
 #if DEBUG
-        if (_host.IsSample)
+        // The skillLearning extra answers the flow from fixtures, so its
+        // stages can be drawn; it records no write.
+        if (_host.IsSample && !_host.SampleAnswersSkillLearning)
         {
             return null;
         }
