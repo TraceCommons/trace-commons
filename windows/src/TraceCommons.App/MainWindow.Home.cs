@@ -96,6 +96,13 @@ public sealed partial class MainWindow
             }
 
             ApplyEdgeRail();
+
+            // Home reads the promotions switch, so it changes at once
+            // (GeneralSection.swift:18-20).
+            if (ViewModel.ShowingHome)
+            {
+                ShowHome();
+            }
         });
         ApplyEdgeRail();
     }

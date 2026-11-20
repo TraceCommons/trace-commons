@@ -861,10 +861,11 @@
                 <StackPanel x:Name="BodyGeneral" Spacing="12">
                 <ContentControl IsTabStop="False" x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
                 <!--
-                    The edge rail and credit arrivals (W12, W13): the Mac's
-                    General section cards in its order, the rail after
-                    Appearance and credit arrivals last
-                    (GeneralSection.swift:26-31), each its core heading,
+                    The edge rail, promotions and credit arrivals (W11-W13):
+                    the Mac's General section cards in its order, the rail
+                    after Appearance, then promotions, credit arrivals last
+                    (GeneralSection.swift:26-31; Windows has no Traces map,
+                    so no map style card), each its core heading,
                     switch and caption, set from code (SettingsView.Shell.cs).
                     The credit switch is on and the rail off until the person
                     changes them, as on the Mac.
@@ -872,6 +873,11 @@
                 <TextBlock x:Name="EdgeRailTitle" Style="{StaticResource TcEyebrowTextStyle}" />
                 <ToggleSwitch x:Name="EdgeRailSwitch" Toggled="OnEdgeRailToggled" />
                 <TextBlock x:Name="EdgeRailCaption"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="WrapWholeWords" />
+                <TextBlock x:Name="PromotionsTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                <ToggleSwitch x:Name="PromotionsSwitch" Toggled="OnPromotionsToggled" />
+                <TextBlock x:Name="PromotionsCaption"
                            Style="{StaticResource TcCaptionTextStyle}"
                            TextWrapping="WrapWholeWords" />
                 <TextBlock x:Name="CreditAnimationTitle" Style="{StaticResource TcEyebrowTextStyle}" />

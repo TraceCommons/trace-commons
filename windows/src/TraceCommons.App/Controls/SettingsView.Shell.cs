@@ -37,6 +37,14 @@ public sealed partial class SettingsView
             MonitorShellCopy.Section("edge_rail", "setting_toggle"),
             MonitorShellCopy.Section("edge_rail", "setting_caption"),
             prefs.EdgeRail);
+
+        // Whether Home shows promotions (GeneralSection.swift:53-67).
+        Card(
+            PromotionsTitle, PromotionsSwitch, PromotionsCaption,
+            MonitorShellCopy.Section("home_history", "promotions_title"),
+            MonitorShellCopy.Section("home_history", "promotions_toggle"),
+            MonitorShellCopy.Section("home_history", "promotions_caption"),
+            prefs.ShowsPromotions);
         _settingSwitches = false;
     }
 
@@ -66,6 +74,14 @@ public sealed partial class SettingsView
         if (!_settingSwitches)
         {
             ShellPreferences.Shared.CreditIconAnimation = CreditAnimationSwitch.IsOn;
+        }
+    }
+
+    private void OnPromotionsToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_settingSwitches)
+        {
+            ShellPreferences.Shared.ShowsPromotions = PromotionsSwitch.IsOn;
         }
     }
 
