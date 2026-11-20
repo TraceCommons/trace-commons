@@ -213,6 +213,7 @@ fn inputs_are_remembered_per_folder_and_hosts_are_not() {
                 resume_of: None,
                 sandbox: Some(SandboxSettings {
                     inputs: vec![input_file],
+                    output_dir: None,
                     allow_hosts: vec!["example.com:443".to_owned()],
                     packages: false,
                     cpus: None,
@@ -235,4 +236,53 @@ fn inputs_are_remembered_per_folder_and_hosts_are_not() {
         !settings_json.contains("example.com"),
         "hosts must never be remembered in folder settings: {settings_json}"
     );
+}
+
+#[test]
+fn output_dir_must_be_an_existing_non_symlink_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("results");
+    std::fs::create_dir_all(&out).unwrap();
+    let canonical = std::fs::canonicalize(&out).unwrap();
+
+    let valid = SandboxSettings {
+        output_dir: Some(out.clone()),
+        ..Default::default()
+    };
+    let checked = validate_with_home(ToolId::RedTeam, Some(&valid), Some(dir.path()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(checked.output_dir, Some(canonical));
+
+    // A regular file is refused.
+    let file = dir.path().join("not-a-dir.txt");
+    std::fs::write(&file, b"x").unwrap();
+    let bad_file = SandboxSettings {
+        output_dir: Some(file),
+        ..Default::default()
+    };
+    assert!(matches!(
+        validate_with_home(ToolId::RedTeam, Some(&bad_file), Some(dir.path())),
+        Err(ManagedError::SandboxInputRefused(_))
+    ));
+
+    // Home directory itself is refused.
+    let bad_home = SandboxSettings {
+        output_dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    assert!(matches!(
+        validate_with_home(ToolId::RedTeam, Some(&bad_home), Some(dir.path())),
+        Err(ManagedError::SandboxInputRefused(_))
+    ));
+
+    // Filesystem root is refused.
+    let bad_root = SandboxSettings {
+        output_dir: Some(PathBuf::from("/")),
+        ..Default::default()
+    };
+    assert!(matches!(
+        validate_with_home(ToolId::RedTeam, Some(&bad_root), Some(dir.path())),
+        Err(ManagedError::SandboxInputRefused(_))
+    ));
 }

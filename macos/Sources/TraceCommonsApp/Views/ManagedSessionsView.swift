@@ -48,9 +48,9 @@ struct ManagedSessionsSection: View {
                     launching = nil
                     launch(choice.tool, in: path)
                 },
-                onOpenWithSettings: { path, settings in
+                onOpenWithSettings: { path, settings, sandbox in
                     launching = nil
-                    launch(choice.tool, in: path, settings: settings)
+                    launch(choice.tool, in: path, settings: settings, sandbox: sandbox)
                 },
                 terminal: $launchTerminal
             ).environmentObject(model)
@@ -191,9 +191,11 @@ struct ManagedSessionsSection: View {
 
     /// The launch, in the folder chosen in the dialog; with none, the daemon
     /// starts it in the person's home folder.
-    private func launch(_ tool: String, in path: String?, settings: ManagedFolderDraft? = nil) {
+    private func launch(_ tool: String, in path: String?, settings: ManagedFolderDraft? = nil,
+                        sandbox: ManagedSandboxSettings? = nil) {
         guard !model.managedBusy,
-              var params = model.managedSnapshot?.signInLaunchParams(tool: tool, cwd: path, requestID: UUID().uuidString)
+              var params = model.managedSnapshot?.signInLaunchParams(
+                tool: tool, cwd: path, requestID: UUID().uuidString, sandbox: sandbox)
         else { return }
         if let settings {
             let capabilities = model.managedSnapshot?.capabilities
@@ -680,21 +682,23 @@ struct ManagedLaunchSheet: View {
                         RedTeamSandboxSection(draft: $sandboxDraft)
                     }
                 }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Text(project?.path ?? model.managedText("home_folder"))
-                        .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
-                        .foregroundStyle(project == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                    Spacer(minLength: 0)
-                    if project != nil {
-                        Button(model.managedText("clear_folder")) { project = nil }
-                            .buttonStyle(GlassButtonStyle(.glass, small: true))
-                            .fixedSize()
-                    }
-                    GlassFolderButton(model.managedText("pick_folder")) {
-                        if let path = FolderPanel.choose() { project = URL(fileURLWithPath: path, isDirectory: true) }
+                if selectedAccount.map({ !ManagedSurface.showsSandboxSection(for: $0.tool) }) ?? true {
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Text(project?.path ?? model.managedText("home_folder"))
+                            .glassType(project == nil ? GlassTokens.TypeScale.label.weight(.regular) : GlassTokens.TypeScale.mono)
+                            .foregroundStyle(project == nil ? GlassColor.textTertiary : GlassColor.textPrimary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 0)
+                        if project != nil {
+                            Button(model.managedText("clear_folder")) { project = nil }
+                                .buttonStyle(GlassButtonStyle(.glass, small: true))
+                                .fixedSize()
+                        }
+                        GlassFolderButton(model.managedText("pick_folder")) {
+                            if let path = FolderPanel.choose() { project = URL(fileURLWithPath: path, isDirectory: true) }
+                        }
                     }
                 }
                 // The first launch asks which terminal to open in.

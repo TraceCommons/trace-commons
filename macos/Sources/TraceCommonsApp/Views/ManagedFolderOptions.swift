@@ -102,8 +102,10 @@ struct ManagedFolderOptions: View {
                 get: { draft.model ?? "" }, set: { draft.model = $0.isEmpty ? nil : $0 }))
         }
         if supportsFolderSettings {
-            GlassTextField(model.managedText("cli_options_label"), text: $draft.cliOptions)
-                .helpIfAny(model.managedText("cli_options_tooltip"))
+            if !ManagedSurface.showsSandboxSection(for: tool) {
+                GlassTextField(model.managedText("cli_options_label"), text: $draft.cliOptions)
+                    .helpIfAny(model.managedText("cli_options_tooltip"))
+            }
             Toggle(model.managedText("collect_managed_trace"), isOn: $draft.collectTraces)
                 .toggleStyle(GlassToggleStyle(.settings))
             Text(model.managedText("managed_collection_scope"))

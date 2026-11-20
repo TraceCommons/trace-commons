@@ -97,6 +97,17 @@ public sealed class SampleDaemon
     /// </summary>
     public const string SpendOrganizationsExtra = "spendOrganizations";
 
+    /// <summary>
+    /// Two sent traces offered Train coding models, an accepted contribution
+    /// with a correction, and the tested-skill replies up to the install
+    /// preview, so the sheet, Home's line, the inspector's section and every
+    /// skill stage draw (W20-D2, W20-D3). The skill replies are the fixtures
+    /// the Mac's tests use (SkillLearningTestSupport.swift), the detail is the
+    /// one <c>PublicRunTests</c> reads. No grant, commit or rollback is
+    /// recorded: each is refused as unrecorded and nothing pretends to change.
+    /// </summary>
+    public const string SkillLearningExtra = "skillLearning";
+
     /// <summary>The directory beside the assembly that holds the extras.</summary>
     public const string ExtrasDir = "SampleExtras";
 
@@ -109,6 +120,9 @@ public sealed class SampleDaemon
         _root = root ?? throw new ArgumentNullException(nameof(root));
         _extra = extra;
     }
+
+    /// <summary>The extra this client also answers from, by name; null for none.</summary>
+    public string? ExtraName { get; init; }
 
     /// <summary>The set this client answers from.</summary>
     public string Set { get; }
@@ -156,7 +170,8 @@ public sealed class SampleDaemon
             log($"tracecommons-sample:{EnvironmentVariable}-unrecognised,fallback={chosen.Set}");
         }
 
-        return new SampleDaemon(chosen.Set, root, Extra(extra, root));
+        string? extraDir = Extra(extra, root);
+        return new SampleDaemon(chosen.Set, root, extraDir) { ExtraName = extraDir is null ? null : extra };
     }
 
     /// <summary>
@@ -164,8 +179,8 @@ public sealed class SampleDaemon
     /// null for unset or anything else.
     /// </summary>
     public static string? Extra(string? value, string root) =>
-        string.Equals(value, SpendOrganizationsExtra, StringComparison.Ordinal)
-            ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, SpendOrganizationsExtra)
+        value is SpendOrganizationsExtra or SkillLearningExtra
+            ? Path.Combine(Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(root)) ?? root, ExtrasDir, value)
             : null;
 
     /// <summary>
