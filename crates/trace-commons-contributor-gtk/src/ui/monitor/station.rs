@@ -1102,16 +1102,17 @@ mod tests {
 
     /// The glow keeps the old shadow's colour, strength and radius, cast
     /// from the ring alone: outside the ring it is, pixel for pixel, the
-    /// GSK shadow the station used to carry, put on the ring's outline;
-    /// and it is blue.
+    /// GSK shadow the station used to carry, put on the ring's outline, at
+    /// both display scales; and it is blue.
     #[test]
     fn the_glow_is_the_old_shadow_cast_from_the_ring() {
         use gtk::gsk::prelude::IsRenderNode;
         use gtk::{cairo, graphene, gsk};
         let (w, h) = (150.0, 130.0);
         let m = GLOW_MARGIN;
-        let (sw, sh) = ((w + m * 2.0) as i32, (h + m * 2.0) as i32);
-        for lit in [true, false] {
+        for (lit, scale) in [(true, 1), (false, 1), (true, 2), (false, 2)] {
+            let k = f64::from(scale);
+            let (sw, sh) = (((w + m * 2.0) * k) as i32, ((h + m * 2.0) * k) as i32);
             let ring = || {
                 let node = gsk::CairoNode::new(&graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
                 let cr = node.draw_context();
@@ -1124,6 +1125,7 @@ mod tests {
             };
             // The old shadow, as the station carried it, on the ring.
             let (stride, old) = pixels(sw, sh, |cr| {
+                cr.scale(k, k);
                 cr.translate(m, m);
                 let blue = gtk::gdk::RGBA::new(
                     BRAND_BLUE[0] as f32,
@@ -1140,10 +1142,12 @@ mod tests {
             });
             // The ring itself, to leave out.
             let (_, covered) = pixels(sw, sh, |cr| {
+                cr.scale(k, k);
                 cr.translate(m, m);
                 ring().upcast().draw(cr);
             });
-            let mut glow_image = glow_surface(w, h, 1.0, lit).unwrap();
+            let mut glow_image = glow_surface(w, h, k, lit).unwrap();
+            assert_eq!((glow_image.width(), glow_image.height()), (sw, sh));
             let new = glow_image.data().unwrap().to_vec();
             let (mut compared, mut lit_pixels, mut worst) = (0, 0, 0);
             for y in 0..sh as usize {
@@ -1165,12 +1169,12 @@ mod tests {
                 }
             }
             assert!(
-                compared > 10_000 && lit_pixels > 2_000,
+                compared > 10_000 * scale * scale && lit_pixels > 2_000 * scale * scale,
                 "{compared} {lit_pixels}"
             );
             assert!(
                 worst <= 1,
-                "the glow is {worst}/255 from the old shadow (lit {lit})"
+                "the glow is {worst}/255 from the old shadow (lit {lit}, {scale}x)"
             );
         }
     }

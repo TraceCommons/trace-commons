@@ -696,3 +696,226 @@ fn mounted_the_row_menus_dismiss_asks_first() {
     app.window.close();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// One press of a folder's Automatic switch, its write answered and the
+/// reads that follow it answered as the daemon would: the folder list
+/// builds the one row that changed, and the map lays itself out once.
+/// The same press with every row built again on every render (as the list
+/// did before it kept rows) is measured first, for the comparison; both
+/// are logged (`switch-press:` lines in the weston job's log) with the
+/// process's CPU time.
+#[test]
+#[ignore = "requires an isolated Linux GTK display; run alone with --ignored --test-threads=1"]
+fn mounted_a_switch_press_builds_only_the_changed_row() {
+    use crate::worker::Outcome;
+    use std::io::Write as _;
+    fn cpu_ms() -> Option<f64> {
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split(' ').collect();
+        let ticks: f64 =
+            fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+        Some(ticks * 10.0)
+    }
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().unwrap();
+    adw::init().expect("GTK display unavailable");
+    let application = adw::Application::builder()
+        .application_id("ai.tracecommons.TracesSwitchPressTest")
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
+    application
+        .register(None::<&gtk::gio::Cancellable>)
+        .unwrap();
+    let dir = std::env::temp_dir().join(format!("tc-switch-press-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (worker, jobs, results) = Worker::fixture(dir.clone());
+    let app = App::build(&application, worker);
+
+    // Eight folders of three traces each, all Automatic.
+    let names = [
+        "api", "web", "cli", "docs", "infra", "mobile", "data", "tools",
+    ];
+    // The daemon's answers, as it sends them.
+    let projects = |off: &[&str]| -> serde_json::Value {
+        serde_json::Value::Array(
+            names
+                .iter()
+                .map(|name| {
+                    serde_json::json!({
+                        "project_id": name,
+                        "project_label": name,
+                        "project_path": format!("~/src/{name}"),
+                        "mode": if off.contains(name) { "notify_only" } else { "auto_upload" },
+                        "configured": true,
+                    })
+                })
+                .collect(),
+        )
+    };
+    let started = chrono::Utc::now();
+    let pending = serde_json::Value::Array(
+        names
+            .iter()
+            .enumerate()
+            .flat_map(|(i, name)| {
+                (0..3).map(move |n| {
+                    let at = started - chrono::Duration::minutes((i * 3 + n) as i64 + 1);
+                    serde_json::json!({
+                        "entry_id": format!("{name}-{n}"),
+                        "project_id": name,
+                        "project_label": name,
+                        "source": "claude-code",
+                        "state": "pending",
+                        "size_bytes": 96_000,
+                        "discovered_at": at,
+                        "started_at": at,
+                    })
+                })
+            })
+            .collect(),
+    );
+    *app.projects.borrow_mut() = serde_json::from_value::<Vec<Project>>(projects(&[])).unwrap();
+    *app.entries.borrow_mut() = serde_json::from_value::<Vec<QueueEntry>>(pending.clone()).unwrap();
+    crate::ui::queue::render(&app);
+    assert!(app.open_screen("queue"), "the Traces tab opens");
+    app.window.present();
+    settle(&context);
+    let page: gtk::Widget = app.queue.root.clone().upcast();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(page.is_mapped() && page.width() > 0) && Instant::now() < deadline {
+        settle(&context);
+    }
+    assert!(page.is_mapped(), "the Traces tab is not on screen");
+
+    // Answers every call the window has made: the write, `list_projects`
+    // with `off` turned off, `list_pending` with the traces, and every
+    // other read refused, until none is left.
+    let answer_all = |off: &[&str], write_ok: bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            settle(&context);
+            let mut answered = false;
+            while let Ok((id, job)) = jobs.try_recv() {
+                answered = true;
+                let reply = match job {
+                    crate::worker::Job::Call { method, .. } => {
+                        Outcome::Call(match method.as_str() {
+                            "set_project_mode" if write_ok => Ok(serde_json::json!({})),
+                            "set_project_mode" => Err("synthetic_write_refused".to_string().into()),
+                            "list_projects" => Ok(serde_json::json!({ "projects": projects(off) })),
+                            "list_pending" => Ok(serde_json::json!({ "pending": pending })),
+                            _ => Err("synthetic_read_refused".to_string().into()),
+                        })
+                    }
+                    _ => Outcome::Preview(Err("synthetic".into())),
+                };
+                let _ = results.try_send((id, reply));
+            }
+            if !answered || Instant::now() > deadline {
+                break;
+            }
+        }
+        settle(&context);
+    };
+    answer_all(&[], true);
+
+    let press = |name: &str, off: &[&str], rebuild_all: bool, write_ok: bool| {
+        crate::ui::redraw_counts::set_rebuild_all(rebuild_all);
+        let row = with_class(&page, "tc-tree-row")
+            .into_iter()
+            .find(|row| {
+                with_class(row, "tc-tree-title-folder")
+                    .first()
+                    .and_then(|label| {
+                        label
+                            .downcast_ref::<gtk::Label>()
+                            .map(|l| l.text().as_str() == name)
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| panic!("no row for {name}"));
+        let switch = with_class(&row, "tc-tree-switch").remove(0);
+        let (rows, layouts, cpu, started) = (
+            crate::ui::redraw_counts::rows_built(),
+            crate::ui::redraw_counts::layouts(),
+            cpu_ms(),
+            Instant::now(),
+        );
+        switch
+            .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+            .unwrap()
+            .set_active(false);
+        answer_all(off, write_ok);
+        let cpu = cpu.zip(cpu_ms()).map(|(a, b)| b - a);
+        crate::ui::redraw_counts::set_rebuild_all(false);
+        (
+            crate::ui::redraw_counts::rows_built() - rows,
+            crate::ui::redraw_counts::layouts() - layouts,
+            cpu,
+            started.elapsed(),
+        )
+    };
+    let mut log = std::io::stderr();
+    let (rows, layouts, cpu, took) = press("api", &["api"], true, true);
+    let _ = writeln!(
+        log,
+        "switch-press: every row built on every render: {rows} rows built, {layouts} map layouts, cpu {cpu:?} ms, {took:?} with the fixture's settling"
+    );
+    let (rows, layouts, cpu, took) = press("web", &["api", "web"], false, true);
+    let _ = writeln!(
+        log,
+        "switch-press: unchanged rows kept: {rows} rows built, {layouts} map layouts, cpu {cpu:?} ms, {took:?} with the fixture's settling"
+    );
+    assert_eq!(rows, 1, "only the pressed folder's row is built");
+    assert!(layouts <= 1, "the map laid itself out {layouts} times");
+    // And the row shows the daemon's answer.
+    let web = with_class(&page, "tc-tree-row")
+        .into_iter()
+        .find(|row| {
+            with_class(row, "tc-tree-title-folder")
+                .first()
+                .and_then(|label| {
+                    label
+                        .downcast_ref::<gtk::Label>()
+                        .map(|l| l.text().as_str() == "web")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap();
+    let switch = with_class(&web, "tc-tree-switch").remove(0);
+    let switch = switch
+        .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+        .unwrap();
+    assert!(
+        !switch.is_active() && !switch.state(),
+        "the switch shows the daemon's mode"
+    );
+
+    // A refused write: the reads that follow still say cli is Automatic,
+    // and its switch, its knob moved by the press, is built again from
+    // them rather than kept.
+    let (rows, _, _, _) = press("cli", &["api", "web"], false, false);
+    let cli = with_class(&page, "tc-tree-row")
+        .into_iter()
+        .find(|row| {
+            with_class(row, "tc-tree-title-folder")
+                .first()
+                .and_then(|label| {
+                    label
+                        .downcast_ref::<gtk::Label>()
+                        .map(|l| l.text().as_str() == "cli")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap();
+    let switch = with_class(&cli, "tc-tree-switch").remove(0);
+    let switch = switch
+        .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+        .unwrap();
+    assert!(
+        switch.is_active() && switch.state(),
+        "a refused write leaves the switch as the daemon has it"
+    );
+    assert_eq!(rows, 1, "only the pressed folder's row is built again");
+    app.window.destroy();
+}

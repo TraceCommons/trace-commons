@@ -542,6 +542,159 @@ pub fn breathing(time: f64, charged: bool, reduce_motion: bool) -> (f64, f64) {
     (1.0 + 0.08 * p, 1.0 - 0.25 * p)
 }
 
+/// How much of the backdrop the stage draws. `Full` is the look; where
+/// the stage cannot keep its frame rate and the breathing ellipse is a
+/// real share of each frame, it leaves the breath out (`Ground`). Nothing
+/// else on the stage is ever left out. (The ground's gradients, the next
+/// layer down, are drawn once and painted from an image, so leaving them
+/// out as well would save nothing: 0.6 ms a frame at twice the size on a
+/// Mac, and no frames or CPU in the weston job.)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Backdrop {
+    #[default]
+    Full,
+    Ground,
+}
+
+/// Watches the stage's frame rate. When the stage stays under
+/// `LOW_SHARE` of the rate it asks for for `LOW_WINDOWS` windows of
+/// `WINDOW` seconds in a row, it says so once, with the rate it reached
+/// (`frame`), and the stage then asks whether the breath is worth
+/// dropping at that rate (`breath_worth_dropping`): only if it is a
+/// real share of each frame, since a stage held back by something else
+/// (a compositor that delivers fewer frames, say) would lose the breath
+/// and gain nothing. Either way the judgement is made once a first run:
+/// a look that changes back and forth is worse than either.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lighten {
+    level: Backdrop,
+    /// The judgement is made.
+    judged: bool,
+    /// The window being counted: when it began, the rate it judges by,
+    /// and the frames since.
+    window: Option<(f64, f64, u32)>,
+    /// The last frame counted.
+    last: Option<f64>,
+    /// Low windows in a row, and the frames a second the last reached.
+    low: u32,
+    reached: f64,
+}
+
+impl Lighten {
+    /// Seconds a window counts frames over.
+    pub const WINDOW: f64 = 2.0;
+    /// Under this share of the rate asked for, a window is low.
+    pub const LOW_SHARE: f64 = 2.0 / 3.0;
+    /// Low windows in a row before the breath is judged: one stall, as
+    /// the window opens, is not a slow machine.
+    pub const LOW_WINDOWS: u32 = 2;
+    /// Only a stage asking for at least this many frames a second is
+    /// judged: the slower steps keep up anywhere.
+    pub const JUDGED_FPS: f64 = 30.0;
+    /// A gap this long between frames (the window hidden, a stall) starts
+    /// the count again.
+    pub const GAP: f64 = 3.0;
+    /// The breath is dropped only when drawing it takes at least this
+    /// share of the time each frame now takes.
+    pub const BREATH_SHARE: f64 = 0.2;
+
+    /// The backdrop to draw now.
+    pub fn level(&self) -> Backdrop {
+        self.level
+    }
+
+    /// Whether the judgement has been made.
+    #[cfg(test)]
+    pub fn judged(&self) -> bool {
+        self.judged
+    }
+
+    /// Starts the count again, as the stage starts ticking again.
+    pub fn reset(&mut self) {
+        self.window = None;
+        self.last = None;
+        self.low = 0;
+    }
+
+    /// The rate a stage that wants a frame every `interval` seconds (0:
+    /// every frame the display draws) can be asked to keep on a display of
+    /// `refresh_hz` (60 when unknown): the lower of the two, and never
+    /// more than `MOST_ASKED`, the most any step asks for by name, so a
+    /// fast display does not make a stage drawing 90 frames a second
+    /// slow.
+    pub fn asked_fps(interval: f64, refresh_hz: Option<f64>) -> f64 {
+        let display = refresh_hz.filter(|hz| *hz > 0.0).unwrap_or(60.0);
+        let wanted = if interval > 0.0 {
+            1.0 / interval
+        } else {
+            display
+        };
+        wanted.min(display).min(Self::MOST_ASKED)
+    }
+
+    /// The most frames a second any step asks for by name (Traces, Uses).
+    pub const MOST_ASKED: f64 = 60.0;
+
+    /// A frame the stage drew at `at` (seconds) while it asked for
+    /// `asked` frames a second (`asked_fps`), or `None` when this frame's
+    /// rate is not the stage's to keep (the window unfocused and held to
+    /// 15 a second, or hidden). `Some` with the frames a second the stage
+    /// reached, once, when it has stayed low long enough to judge.
+    pub fn frame(&mut self, at: f64, asked: Option<f64>) -> Option<f64> {
+        if self.judged {
+            return None;
+        }
+        let Some(asked) = asked.filter(|fps| *fps >= Self::JUDGED_FPS) else {
+            self.reset();
+            return None;
+        };
+        let gap = self.last.is_some_and(|last| at - last > Self::GAP);
+        self.last = Some(at);
+        let Some((start, rate, frames)) = self.window.filter(|w| w.1 == asked && !gap) else {
+            if gap || self.window.is_some_and(|w| w.1 != asked) {
+                self.low = 0;
+            }
+            self.window = Some((at, asked, 0));
+            return None;
+        };
+        let frames = frames + 1;
+        let elapsed = at - start;
+        if elapsed < Self::WINDOW {
+            self.window = Some((start, rate, frames));
+            return None;
+        }
+        self.window = Some((at, rate, 0));
+        let reached = f64::from(frames) / elapsed;
+        if reached < Self::LOW_SHARE * rate {
+            self.low += 1;
+            self.reached = reached;
+        } else {
+            self.low = 0;
+        }
+        (self.low >= Self::LOW_WINDOWS).then_some(self.reached)
+    }
+
+    /// The judgement, given that drawing the breath once takes
+    /// `breath_ms` and the stage reaches `reached` frames a second: the
+    /// breath goes only if it is at least `BREATH_SHARE` of each frame.
+    /// True when it went.
+    pub fn judge(&mut self, breath_ms: f64, reached: f64) -> bool {
+        self.judged = true;
+        self.window = None;
+        let worth = breath_worth_dropping(breath_ms, reached);
+        if worth {
+            self.level = Backdrop::Ground;
+        }
+        worth
+    }
+}
+
+/// Whether drawing the breath (`breath_ms`) is a real share of each frame
+/// of a stage reaching `reached` frames a second.
+pub fn breath_worth_dropping(breath_ms: f64, reached: f64) -> bool {
+    reached > 0.0 && breath_ms >= Lighten::BREATH_SHARE * 1000.0 / reached
+}
+
 /// The corner glow's breath on the scene: seven seconds each way, eased at
 /// both ends. Reduced motion holds it at its fullest.
 pub fn backdrop_phase(time: f64, reduce_motion: bool) -> f64 {
@@ -1389,6 +1542,140 @@ pub fn spring_settle(duration: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Frames at `fps` for `seconds` from `from`, asked at `asked`; the
+    /// rate reached when the watch says it has stayed low, if it did.
+    fn run(
+        watch: &mut Lighten,
+        from: f64,
+        seconds: f64,
+        fps: f64,
+        asked: Option<f64>,
+    ) -> Option<f64> {
+        let mut low = None;
+        let mut at = from;
+        while at < from + seconds {
+            low = low.or(watch.frame(at, asked));
+            at += 1.0 / fps;
+        }
+        low
+    }
+
+    /// A stage that keeps its rate is never judged; one that stays under
+    /// two thirds of it for two windows in a row is, once, at the rate it
+    /// reached.
+    #[test]
+    fn a_stage_that_stays_slow_is_judged_once() {
+        let mut fast = Lighten::default();
+        assert_eq!(run(&mut fast, 0.0, 30.0, 58.0, Some(60.0)), None);
+        assert_eq!(fast.level(), Backdrop::Full);
+
+        let mut slow = Lighten::default();
+        assert_eq!(
+            run(&mut slow, 0.0, 3.9, 20.0, Some(60.0)),
+            None,
+            "one window is not enough"
+        );
+        let reached = run(&mut slow, 3.9, 0.5, 20.0, Some(60.0)).expect("judged");
+        assert!((reached - 20.0).abs() < 1.0, "reached {reached}");
+        // Judged that the breath is not worth it: the full look stays, and
+        // the stage is never judged again.
+        assert!(!slow.judge(1.0, reached));
+        assert!(slow.judged());
+        assert_eq!(slow.level(), Backdrop::Full);
+        assert_eq!(run(&mut slow, 4.4, 30.0, 5.0, Some(60.0)), None);
+        assert_eq!(slow.level(), Backdrop::Full);
+
+        // Judged worth it: the breath goes, and stays gone.
+        let mut costly = Lighten::default();
+        let reached = run(&mut costly, 0.0, 4.4, 12.0, Some(60.0)).expect("judged");
+        assert!(costly.judge(30.0, reached));
+        assert_eq!(costly.level(), Backdrop::Ground);
+        run(&mut costly, 4.4, 60.0, 60.0, Some(60.0));
+        assert_eq!(costly.level(), Backdrop::Ground);
+    }
+
+    /// The breath goes only when it is a fifth or more of each frame: at
+    /// 38 frames a second (26 ms each, a compositor's cap in the weston
+    /// job) a 2.3 ms breath stays; at 11 a second (91 ms) a 19 ms one
+    /// goes and an 18 ms one stays.
+    #[test]
+    fn the_breath_goes_only_when_it_is_a_real_share_of_each_frame() {
+        assert!(!breath_worth_dropping(2.3, 38.0));
+        assert!(!breath_worth_dropping(5.0, 38.0));
+        assert!(breath_worth_dropping(5.3, 38.0));
+        assert!(breath_worth_dropping(19.0, 11.0));
+        assert!(!breath_worth_dropping(18.0, 11.0));
+        assert!(!breath_worth_dropping(50.0, 0.0));
+    }
+
+    /// What is not the stage's rate to keep is not judged: an unfocused
+    /// window held to 15 a second, a step asking for less than 30, a
+    /// 30 Hz display, and one stall as the window opens.
+    #[test]
+    fn only_a_rate_the_stage_could_keep_is_judged() {
+        let mut held = Lighten::default();
+        assert_eq!(run(&mut held, 0.0, 30.0, 15.0, None), None, "unfocused");
+        assert_eq!(held.level(), Backdrop::Full);
+
+        let mut slow_step = Lighten::default();
+        assert_eq!(
+            run(&mut slow_step, 0.0, 30.0, 12.0, Some(20.0)),
+            None,
+            "a step asking for 20"
+        );
+        assert_eq!(slow_step.level(), Backdrop::Full);
+
+        assert_eq!(Lighten::asked_fps(1.0 / 60.0, Some(30.0)), 30.0);
+        assert_eq!(Lighten::asked_fps(0.0, None), 60.0);
+        assert_eq!(Lighten::asked_fps(0.0, Some(144.0)), 60.0);
+        assert_eq!(Lighten::asked_fps(1.0 / 60.0, Some(144.0)), 60.0);
+        // A stage drawing 90 a second on a 144 Hz display is not slow.
+        let mut fast_display = Lighten::default();
+        let asked = Some(Lighten::asked_fps(0.0, Some(144.0)));
+        assert_eq!(
+            run(&mut fast_display, 0.0, 30.0, 90.0, asked),
+            None,
+            "a 144 Hz display"
+        );
+        assert_eq!(Lighten::asked_fps(1.0 / 30.0, Some(144.0)), 30.0);
+        let mut thirty_hz = Lighten::default();
+        let asked = Some(Lighten::asked_fps(1.0 / 60.0, Some(30.0)));
+        assert_eq!(
+            run(&mut thirty_hz, 0.0, 30.0, 29.5, asked),
+            None,
+            "a 30 Hz display"
+        );
+
+        // A stall of a second at the start, then full speed.
+        let mut stalled = Lighten::default();
+        stalled.frame(0.0, Some(60.0));
+        assert_eq!(
+            run(&mut stalled, 1.0, 30.0, 60.0, Some(60.0)),
+            None,
+            "one stall"
+        );
+        assert_eq!(stalled.level(), Backdrop::Full);
+
+        // Low windows broken by a focus change start over.
+        let mut broken = Lighten::default();
+        run(&mut broken, 0.0, 2.5, 20.0, Some(60.0));
+        run(&mut broken, 2.5, 1.0, 15.0, None);
+        assert_eq!(
+            run(&mut broken, 3.5, 2.5, 20.0, Some(60.0)),
+            None,
+            "the count started over"
+        );
+        assert_eq!(broken.level(), Backdrop::Full);
+        // A step that asks a new rate starts the window again too.
+        let mut moved = Lighten::default();
+        run(&mut moved, 0.0, 2.5, 20.0, Some(60.0));
+        assert_eq!(
+            run(&mut moved, 2.5, 2.5, 14.0, Some(30.0)),
+            None,
+            "a new rate"
+        );
+    }
 
     /// Values printed by the Mac's own Swift (copied verbatim into a probe),
     /// to nine places.

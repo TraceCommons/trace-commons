@@ -266,6 +266,7 @@ else
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
     ui::monitor::traces_list::mounted_tests::mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection \
     ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
+    ui::monitor::traces_list::mounted_tests::mounted_a_switch_press_builds_only_the_changed_row \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
@@ -318,6 +319,7 @@ else
     ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
     ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit \
     ui::first_run_stage_view::mounted_tests::the_stage_moves_its_widgets_on_the_macs_clock \
+    ui::first_run_stage_view::mounted_tests::mounted_the_stage_frame_rate_and_cpu_at_each_backdrop \
     ui::first_run_fade::mounted_tests::steps_crossfade_on_the_spatial_spring \
     ui::first_run_switch::mounted_tests::the_small_switch_ticks_only_while_it_slides; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
@@ -325,6 +327,15 @@ else
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
       -- --exact --ignored --test-threads=1
   done
+
+  # The first-run stage's frame rate and CPU once more under GSK's cairo
+  # renderer, the software path GTK takes with no GL at all, beside the
+  # run above on whatever renderer GTK picked here.
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory GSK_RENDERER=cairo \
+    run_ignored_test "GTK display regression failed: the stage under the cairo renderer" \
+    cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+    ui::first_run_stage_view::mounted_tests::mounted_the_stage_frame_rate_and_cpu_at_each_backdrop \
+    -- --exact --ignored --test-threads=1
 
   # Mission drafts are absent while missions are hidden and, with the switch
   # on, reachable without starting Contributions, and
