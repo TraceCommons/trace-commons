@@ -75,6 +75,7 @@ public class HomeFactsTests
         Assert.Equal(("48.0", "Pending"), Tile(48, 0, 56, 1, known));
         Assert.Equal("Pending", Tile(0, 0, 22, 1, known).Detail);
         Assert.Equal("Pending", Tile(0, 0, 22, null, known).Detail);
+        Assert.Equal(("48.0", "Pending"), Tile(48, 0, 3, null, known));
 
         Assert.True(HomeFacts.ShowsFinalFigure(48, 0, 3, 0));
         Assert.True(HomeFacts.ShowsFinalFigure(48, 2, 3, 1));
