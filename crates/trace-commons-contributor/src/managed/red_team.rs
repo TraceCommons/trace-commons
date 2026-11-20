@@ -175,6 +175,7 @@ pub(crate) fn stage_inputs(
     super::profiles::private_directory(&in_dir)?;
 
     let mut used_names = std::collections::HashSet::new();
+    let mut skipped = Vec::new();
     for src in inputs {
         let meta = std::fs::symlink_metadata(src)?;
         if meta.file_type().is_symlink() {
@@ -196,20 +197,37 @@ pub(crate) fn stage_inputs(
             idx += 1;
         }
         let dst = in_dir.join(&name);
-        copy_no_symlinks(src, &dst)?;
+        copy_no_symlinks(src, &dst, &mut skipped)?;
+    }
+    if !skipped.is_empty() {
+        let mut note =
+            String::from("Symlinks in the input folders were skipped, not followed or copied:\n");
+        for path in &skipped {
+            note.push_str(&path.display().to_string());
+            note.push('\n');
+        }
+        std::fs::write(session_root.join(SKIPPED_SYMLINKS_FILE), note)?;
+        tracing::info!(
+            count = skipped.len(),
+            "red team: skipped symlinks inside input folders"
+        );
     }
     Ok(Some(in_dir))
 }
 
+/// Beside `in/` (never inside it): the symlinks staging skipped.
 #[cfg(any(target_os = "macos", test))]
-fn copy_no_symlinks(src: &Path, dst: &Path) -> anyhow::Result<()> {
+pub(crate) const SKIPPED_SYMLINKS_FILE: &str = "skipped-symlinks.txt";
+
+/// Copies `src` to `dst`. A symlink inside a folder is never followed or
+/// copied: it is recorded in `skipped` (a project's node_modules/.bin is
+/// full of them). The selected input itself is checked by `stage_inputs`.
+#[cfg(any(target_os = "macos", test))]
+fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
-        return Err(ManagedError::SandboxInputRefused(format!(
-            "refusing to copy symlink: {}",
-            src.display()
-        ))
-        .into());
+        skipped.push(src.to_path_buf());
+        return Ok(());
     }
     if meta.is_file() {
         std::fs::copy(src, dst)?;
@@ -221,7 +239,7 @@ fn copy_no_symlinks(src: &Path, dst: &Path) -> anyhow::Result<()> {
             let entry = entry?;
             let child_src = entry.path();
             let child_dst = dst.join(entry.file_name());
-            copy_no_symlinks(&child_src, &child_dst)?;
+            copy_no_symlinks(&child_src, &child_dst, skipped)?;
         }
         return Ok(());
     }
@@ -236,6 +254,20 @@ fn copy_no_symlinks(src: &Path, dst: &Path) -> anyhow::Result<()> {
 /// use staging, production builds production, matching the channel's
 /// `NEAR_AI_INFERENCE_BASE` (a test holds the two together). rts defaults to
 /// production, which refuses a staging key.
+/// How strictly rts checks NEAR AI's attestation. Production requires the
+/// gateway and model compose hashes to be pinned. NEAR redeploys the staging
+/// gateway several times a day, so staging accepts any compose the TEE
+/// measured (mr_config_id == sha256(app_compose)); the TDX quote, TCB status,
+/// nonce binding and GPU checks still apply.
+#[cfg(target_os = "macos")]
+pub(crate) fn attest_options() -> rts::attest::AttestOptions {
+    let mut options = rts::attest::AttestOptions::default();
+    if cfg!(feature = "near-ai-staging") {
+        options.compose_policy = rts::attest::ComposePolicy::MrConfigOnly;
+    }
+    options
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     if cfg!(feature = "near-ai-staging") {
@@ -318,7 +350,7 @@ pub(crate) fn spec_for(
 
     Ok(rts::launch::LaunchSpec {
         config,
-        attest: rts::attest::AttestOptions::default(),
+        attest: attest_options(),
         credential: rts::launch::CredentialSource::Supplied(
             ironwire_proxy::embed::HostSecret::from(key_str.to_owned()),
         ),
@@ -403,7 +435,7 @@ pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::R
             continue;
         }
         let dst = output_dir.join(entry.file_name());
-        copy_no_symlinks(&src, &dst)?;
+        copy_no_symlinks(&src, &dst, &mut Vec::new())?;
     }
     Ok(())
 }

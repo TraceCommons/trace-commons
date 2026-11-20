@@ -43,6 +43,11 @@
     <InternalsVisibleTo Include="TraceCommons.Interop.Tests" />
   </ItemGroup>
 
+  <!-- The in-app update's relaunch helper (UpdateRelaunch.cs). -->
+  <ItemGroup>
+    <EmbeddedResource Include="UpdateRelaunch.ps1" LogicalName="TraceCommons.Interop.UpdateRelaunch.ps1" />
+  </ItemGroup>
+
   <!--
     The macOS app's recorded samples, copied beside a Debug build for
     SampleDaemon.cs (TRACE_COMMONS_SAMPLE). A build-time copy of the one

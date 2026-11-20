@@ -2,8 +2,8 @@
     {
         "type": "git",
         "url": "https://github.com/nearai/nearai-red-sandbox",
-        "commit": "48b3c7b12446fcbfa748404ae4acad339ee6b879",
-        "dest": "flatpak-cargo/git/nearai-red-sandbox-48b3c7b"
+        "commit": "eba374381f4180f68b9b74bdb317e712699ef7a8",
+        "dest": "flatpak-cargo/git/nearai-red-sandbox-eba3743"
     },
     {
         "type": "git",
@@ -1242,7 +1242,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/nearai-red-sandbox-48b3c7b/vendor/dcap-qvl-0.7.0\" \"cargo/vendor/dcap-qvl\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/nearai-red-sandbox-eba3743/vendor/dcap-qvl-0.7.0\" \"cargo/vendor/dcap-qvl\""
         ]
     },
     {
@@ -4650,7 +4650,7 @@
     {
         "type": "shell",
         "commands": [
-            "cp -r --reflink=auto \"flatpak-cargo/git/nearai-red-sandbox-48b3c7b/.\" \"cargo/vendor/rts\""
+            "cp -r --reflink=auto \"flatpak-cargo/git/nearai-red-sandbox-eba3743/.\" \"cargo/vendor/rts\""
         ]
     },
     {
@@ -7436,7 +7436,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/nearai-red-sandbox\"]\ngit = \"https://github.com/nearai/nearai-red-sandbox\"\nreplace-with = \"vendored-sources\"\nrev = \"48b3c7b12446fcbfa748404ae4acad339ee6b879\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"53518343781063b3c39bad9c4876488800ada89e\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/nearai/nearai-red-sandbox\"]\ngit = \"https://github.com/nearai/nearai-red-sandbox\"\nreplace-with = \"vendored-sources\"\nrev = \"eba374381f4180f68b9b74bdb317e712699ef7a8\"\n\n[source.\"https://github.com/nearai/ironclaw\"]\ngit = \"https://github.com/nearai/ironclaw\"\nreplace-with = \"vendored-sources\"\nbranch = \"main\"\n\n[source.\"https://github.com/nearai/ironwire\"]\ngit = \"https://github.com/nearai/ironwire\"\nreplace-with = \"vendored-sources\"\nrev = \"53518343781063b3c39bad9c4876488800ada89e\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }

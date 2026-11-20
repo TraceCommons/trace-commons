@@ -270,24 +270,28 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         // The frame round the content: the window less the content.
         int extraWidth = AppWindow.Size.Width - (int)Math.Round(Root.ActualWidth * scale);
         int extraHeight = AppWindow.Size.Height - (int)Math.Round(Root.ActualHeight * scale);
-        int width = (int)Math.Round(DesignWidth * scale) + extraWidth;
-        int height = (int)Math.Round(DesignHeight * scale) + extraHeight;
-        if (width != AppWindow.Size.Width || height != AppWindow.Size.Height)
+        Windows.Graphics.RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+        var workArea = new LayoutRect(work.X, work.Y, work.Width, work.Height);
+        var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
+        LayoutRect frame = FirstRunStageLayout.FirstWindowFrame(outer, scale, extraWidth, extraHeight, workArea);
+        var target = new Windows.Graphics.RectInt32((int)frame.X, (int)frame.Y, (int)frame.Width, (int)frame.Height);
+        if (target.X != AppWindow.Position.X || target.Y != AppWindow.Position.Y
+            || target.Width != AppWindow.Size.Width || target.Height != AppWindow.Size.Height)
         {
-            AppWindow.Resize(new Windows.Graphics.SizeInt32(width, height));
+            AppWindow.MoveAndResize(target);
         }
 
-        ApplyMinimumSize(extraWidth, extraHeight);
+        ApplyMinimumSize(extraWidth, extraHeight, workArea);
     }
 
-    /// <summary>The Mac's minimum window (<see cref="FirstRunStageLayout.MinimumWidth"/>), through WM_GETMINMAXINFO.</summary>
-    private void ApplyMinimumSize(int extraWidth, int extraHeight)
+    /// <summary>
+    /// The Mac's minimum window (<see cref="FirstRunStageLayout.MinimumWidth"/>),
+    /// through WM_GETMINMAXINFO, held to the work area.
+    /// </summary>
+    private void ApplyMinimumSize(int extraWidth, int extraHeight, LayoutRect workArea)
     {
-        double scale = Scale();
-        WindowMinimumSize.Set(
-            WinRT.Interop.WindowNative.GetWindowHandle(this),
-            (int)Math.Ceiling(FirstRunStageLayout.MinimumWidth * scale) + extraWidth,
-            (int)Math.Ceiling(FirstRunStageLayout.MinimumHeight * scale) + extraHeight);
+        (int width, int height) = FirstRunStageLayout.MinimumWindow(Scale(), extraWidth, extraHeight, workArea);
+        WindowMinimumSize.Set(WinRT.Interop.WindowNative.GetWindowHandle(this), width, height);
     }
 
     /// <summary>The Tools step started the daemon with the person's declaration.</summary>
