@@ -75,6 +75,20 @@ public class NoticeCoverTests
     }
 
     /// <summary>
+    /// Focus that lands on a control the card then covers (Tab brought it into
+    /// view, under the card) moves on the way it was going, so a Tab press is
+    /// never spent on a covered control; focus that arrived another way goes to
+    /// the card's X, the control drawn in its place.
+    /// </summary>
+    [Fact]
+    public void FocusOnACoveredControlMovesTheWayItWasGoing()
+    {
+        Assert.Equal(CoverFocusMove.Forward, NoticeCover.FocusMove(tabbedForward: true));
+        Assert.Equal(CoverFocusMove.Back, NoticeCover.FocusMove(tabbedForward: false));
+        Assert.Equal(CoverFocusMove.ToCard, NoticeCover.FocusMove(tabbedForward: null));
+    }
+
+    /// <summary>
     /// The window plays the decision: read as source, since the suite runs on
     /// macOS where no WinUI element can be made. The behaviour is witnessed on
     /// the box (Tab walk and UIA dump of Private AI with and without the notice).
@@ -88,8 +102,9 @@ public class NoticeCoverTests
         Assert.Contains("IsTabStop = false", source, StringComparison.Ordinal);
         Assert.Contains("AccessibilityView.Raw", source, StringComparison.Ordinal);
         Assert.Contains("FindElementsInHostCoordinates", source, StringComparison.Ordinal);
-        // A covered control that held focus hands it to the card's X.
-        Assert.Contains("NoticeClose.Focus(FocusState.Keyboard)", source, StringComparison.Ordinal);
+        // A covered control that held focus passes it on.
+        Assert.Contains("NoticeCover.FocusMove(", source, StringComparison.Ordinal);
+        Assert.Contains("GettingFocus", source, StringComparison.Ordinal);
 
         // Re-read whenever the notices change, the card resizes, or the tab scrolls under it.
         string shell = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.Shell.cs.txt"));

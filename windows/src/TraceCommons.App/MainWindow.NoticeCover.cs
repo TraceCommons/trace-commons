@@ -31,6 +31,9 @@ public sealed partial class MainWindow
     private bool _coverQueued;
     private DispatcherQueueTimer? _coverLayoutTimer;
 
+    /// <summary>How focus last arrived in the tab: true by Tab, false by Shift+Tab, null otherwise.</summary>
+    private bool? _coverTabbedForward;
+
     /// <summary>
     /// Re-reads the cover once layout has settled. Coalesced: many calls in
     /// one turn read once.
@@ -47,6 +50,12 @@ public sealed partial class MainWindow
             _coverLayoutTimer.Interval = System.TimeSpan.FromMilliseconds(250);
             _coverLayoutTimer.IsRepeating = false;
             _coverLayoutTimer.Tick += (_, _) => UpdateNoticeCover();
+            TabContent.GettingFocus += (_, args) => _coverTabbedForward = args.Direction switch
+            {
+                FocusNavigationDirection.Next => true,
+                FocusNavigationDirection.Previous => false,
+                _ => null,
+            };
             TabContent.LayoutUpdated += (_, _) =>
             {
                 if (!_coverLayoutTimer.IsRunning
@@ -121,18 +130,21 @@ public sealed partial class MainWindow
             AutomationProperties.SetAccessibilityView(control, AccessibilityView.Raw);
         }
 
-        // Focus does not stay on a control the card now covers: it goes to
-        // the card's own X, the control drawn in its place, or else to the
-        // card's first control.
+        // Focus does not stay on a control the card now covers. Tab brings a
+        // control scrolled out of view in under the card, so focus moves on
+        // the way the press was going; arrived any other way, it goes to the
+        // card's X, the control drawn in its place.
         if (hadFocus)
         {
-            if (NoticeClose.Visibility == Visibility.Visible)
+            CoverFocusMove move = NoticeCover.FocusMove(_coverTabbedForward);
+            bool moved = move != CoverFocusMove.ToCard
+                && Content?.XamlRoot?.Content is DependencyObject root
+                && FocusManager.TryMoveFocus(
+                    move == CoverFocusMove.Forward ? FocusNavigationDirection.Next : FocusNavigationDirection.Previous,
+                    new FindNextElementOptions { SearchRoot = root });
+            if (!moved && NoticeClose.Visibility == Visibility.Visible)
             {
                 NoticeClose.Focus(FocusState.Keyboard);
-            }
-            else if (FocusManager.FindFirstFocusableElement(NoticeFront) is Control first)
-            {
-                first.Focus(FocusState.Keyboard);
             }
         }
     }

@@ -13,6 +13,19 @@ public readonly record struct CoverRect(double X, double Y, double Width, double
     public bool IsEmpty => Width <= 0 || Height <= 0;
 }
 
+/// <summary>Where focus goes from a control the card has come to cover.</summary>
+public enum CoverFocusMove
+{
+    /// <summary>On to the next Tab stop.</summary>
+    Forward,
+
+    /// <summary>Back to the previous Tab stop.</summary>
+    Back,
+
+    /// <summary>To the card's X, the control drawn in its place.</summary>
+    ToCard,
+}
+
 /// <summary>What changes when the notice stack's cover is re-read.</summary>
 public sealed record NoticeCoverChange<T>(IReadOnlyList<T> Hide, IReadOnlyList<T> Restore);
 
@@ -51,4 +64,16 @@ public static class NoticeCover
             now.Where(c => !before.Contains(c)).ToArray(),
             before.Where(c => !now.Contains(c)).ToArray());
     }
+
+    /// <summary>
+    /// Where focus goes when the control holding it is covered: on the way a
+    /// Tab press was going (Tab brings a control scrolled out of view in under
+    /// the card), so no press is spent on a covered control; else to the card.
+    /// </summary>
+    public static CoverFocusMove FocusMove(bool? tabbedForward) => tabbedForward switch
+    {
+        true => CoverFocusMove.Forward,
+        false => CoverFocusMove.Back,
+        null => CoverFocusMove.ToCard,
+    };
 }
