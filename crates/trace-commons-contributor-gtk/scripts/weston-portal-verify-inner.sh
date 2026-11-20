@@ -219,6 +219,18 @@ else
     mkdir -p "$TC_RENDER_DIR"
   fi
 
+  # DIAGNOSTIC (temporary): run the test that hangs repeatedly.
+  for round in $(seq 1 30); do
+    echo "=== diagnostic round $round"
+    WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+      TEST_LIMIT_SECONDS=90 run_ignored_test "diagnostic round $round" \
+      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+      ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
+      -- --exact --ignored --test-threads=1
+  done
+  echo "=== diagnostic FAIL=$FAIL"
+  exit 1
+
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   # The background-service dialogs and the Private AI start area's "Set up"
   # (Flatpak on the host service) are mounted tests with no display
