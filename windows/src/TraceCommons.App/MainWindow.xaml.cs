@@ -756,10 +756,36 @@ public sealed partial class MainWindow : Window
     /// showing would start them; that showing, from the tray or a second
     /// launch, joins the start already made.
     /// </summary>
-    internal void StartInTray()
+    internal async void StartInTray()
     {
         SetHiddenToTray(true);
-        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
+        bool started = await LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
+        if (_closed)
+        {
+            return;
+        }
+
+        bool setupComplete = false;
+        if (started)
+        {
+            DaemonResponse status = await _host.CallAsync(DaemonProtocol.Methods.Status).ConfigureAwait(true);
+            setupComplete = !status.IsError && OnboardingState.Default().IsSetupComplete(status.ResultAs<DaemonStatus>());
+        }
+
+        if (_closed)
+        {
+            return;
+        }
+
+        if (AutostartCommand.OpensAfterQuietStart(started, setupComplete))
+        {
+            BringForward();
+            return;
+        }
+
+        // The tray is the whole app now: it shows the daemon's state at
+        // once rather than waiting for the next status event.
+        await RefreshTrayAsync();
     }
 
     internal void BringForward()

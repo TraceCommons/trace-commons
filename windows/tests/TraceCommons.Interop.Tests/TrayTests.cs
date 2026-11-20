@@ -478,6 +478,29 @@ public class AutostartCommandTests
         Assert.Equal(opens, AutostartCommand.OpensWindow(login, trayPresent, invite));
     }
 
+    [Theory]
+    // LaunchRouting.launchOpening (MonitorNavigation.swift) for a quiet
+    // launch: a refused start (undeclared folders included) and unfinished
+    // setup still open the window; a running daemon with setup done opens
+    // nothing.
+    [InlineData(false, false, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public void ATrayLaunchOpensTheWindowWhenThereIsSomethingToDo(bool started, bool setupComplete, bool opens)
+    {
+        Assert.Equal(opens, AutostartCommand.OpensAfterQuietStart(started, setupComplete));
+    }
+
+    [Fact]
+    public void TheTrayLaunchAsksAfterItsStart()
+    {
+        string window = System.IO.File.ReadAllText(System.IO.Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt"));
+        Assert.Contains("AutostartCommand.OpensAfterQuietStart(", window);
+        Assert.Contains("await RefreshTrayAsync();", window);
+    }
+
     [Fact]
     public void TheAppHoldsItsWindowBackOnALoginLaunch()
     {

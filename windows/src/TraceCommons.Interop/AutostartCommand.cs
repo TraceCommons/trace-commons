@@ -112,6 +112,16 @@ public static class AutostartCommand
         !loginLaunch || !trayPresent || hasInvite;
 
     /// <summary>
+    /// Whether a launch that stayed in the tray opens the window once its
+    /// daemon start is over (the Mac's <c>LaunchRouting.launchOpening</c>
+    /// for a quiet launch): a refused start, undeclared folders included,
+    /// or setup not yet finished is something to do, and a window opens as
+    /// an ordinary launch would.
+    /// </summary>
+    public static bool OpensAfterQuietStart(bool started, bool setupComplete) =>
+        !started || !setupComplete;
+
+    /// <summary>
     /// Whether a stored value is exactly what <see cref="For"/> writes for
     /// this executable today. An entry written before the argument existed
     /// still points here (<see cref="PointsAt"/>) but would open the window
