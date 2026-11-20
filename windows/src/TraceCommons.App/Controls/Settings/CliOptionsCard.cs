@@ -32,7 +32,7 @@ public sealed class CliOptionsCard : UserControl
         };
     }
 
-    private void Render()
+    private void Render(string? focus = null)
     {
         _saves.Clear();
         var body = new StackPanel { Spacing = 12 };
@@ -43,9 +43,10 @@ public sealed class CliOptionsCard : UserControl
         {
             body.Children.Add(SettingsCards.ReadNotice(_flow.ReadFailed, async (_, _) =>
             {
+                string? at = SettingsCards.FocusedKey(this);
                 await _flow.ReadAsync();
-                Render();
-            }));
+                Render(at);
+            }, "cli/retry"));
         }
         else if (snapshot.CliOptions is null)
         {
@@ -59,7 +60,7 @@ public sealed class CliOptionsCard : UserControl
             }
         }
 
-        Content = SettingsCards.Card(ManagedWords.Text("cli_options_title"), body);
+        SettingsCards.Replace(this, SettingsCards.Card(ManagedWords.Text("cli_options_title"), body), focus);
     }
 
     private StackPanel Row(string tool)
@@ -68,12 +69,12 @@ public sealed class CliOptionsCard : UserControl
         var row = new StackPanel { Spacing = 6 };
         row.Children.Add(SettingsCards.Text(toolName));
 
-        var field = new TextBox
+        var field = SettingsCards.Key(new TextBox
         {
             Text = _flow.Drafts.Value(tool, _flow.Snapshot?.CliOptions),
             IsEnabled = !_flow.Busy,
             FontFamily = (Microsoft.UI.Xaml.Media.FontFamily)Application.Current.Resources["TcMonoFontFamily"],
-        };
+        }, "cli/" + tool + "/field");
         // The tool and the field's own name, as the Mac's accessibility label (:36).
         AutomationProperties.SetName(field, toolName + " " + ManagedWords.Text("cli_options_label"));
         string tooltip = ManagedWords.Text("cli_options_tooltip");
@@ -86,10 +87,12 @@ public sealed class CliOptionsCard : UserControl
             ManagedWords.Text("cli_options_save"),
             async (_, _) =>
             {
+                string? at = SettingsCards.FocusedKey(this);
                 await _flow.SaveAsync(tool);
-                Render();
+                Render(at);
             },
             ManagedWords.Text("cli_options_save_accessibility").Replace("{tool}", toolName, System.StringComparison.Ordinal));
+        SettingsCards.Key(save, "cli/" + tool + "/save");
         save.IsEnabled = _flow.CanSave(tool);
         save.HorizontalAlignment = HorizontalAlignment.Right;
         _saves[tool] = save;

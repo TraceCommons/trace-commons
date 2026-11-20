@@ -1,6 +1,10 @@
+using System.Collections.Generic;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls.Settings;
 
@@ -45,7 +49,7 @@ internal static class SettingsCards
     /// What a section draws where its read has not answered: a spinner while
     /// it is out, then the core's failure line with Retry (<c>SettingsReadNotice</c>).
     /// </summary>
-    public static UIElement ReadNotice(bool failed, RoutedEventHandler retry)
+    public static UIElement ReadNotice(bool failed, RoutedEventHandler retry, string? retryKey = null)
     {
         if (!failed)
         {
@@ -56,7 +60,9 @@ internal static class SettingsCards
         row.Children.Add(Caption(TraceCommons.Interop.SettingsReadWords.Failed));
         if (TraceCommons.Interop.SettingsReadWords.Retry is { } word)
         {
-            row.Children.Add(Button(word, retry));
+            Button button = Button(word, retry);
+            Key(button, retryKey);
+            row.Children.Add(button);
         }
 
         return row;
@@ -201,5 +207,108 @@ internal static class SettingsCards
         stack.Children.Add(head);
         stack.Children.Add(content);
         return new Border { Style = Styles?["SettingsCardStyle"] as Style, Child = stack };
+    }
+
+    /// <summary>
+    /// Gives a control its focus key (its UI Automation id), by which
+    /// <see cref="Replace"/> finds it again in a redrawn card.
+    /// </summary>
+    public static T Key<T>(T control, string? key)
+        where T : FrameworkElement
+    {
+        if (!string.IsNullOrEmpty(key))
+        {
+            AutomationProperties.SetAutomationId(control, key);
+        }
+
+        return control;
+    }
+
+    /// <summary>
+    /// The focus key of the control that has focus, when it sits inside
+    /// <paramref name="host"/>; null otherwise. Read it before an action
+    /// that turns the control off, since WinUI moves focus away then.
+    /// </summary>
+    public static string? FocusedKey(UIElement host)
+    {
+        if (host.XamlRoot is null || FocusManager.GetFocusedElement(host.XamlRoot) is not DependencyObject focused)
+        {
+            return null;
+        }
+
+        string? key = null;
+        for (DependencyObject? at = focused; at is not null; at = VisualTreeHelper.GetParent(at))
+        {
+            if (ReferenceEquals(at, host))
+            {
+                return key;
+            }
+
+            if (key is null && AutomationProperties.GetAutomationId(at) is { Length: > 0 } id)
+            {
+                key = id;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Draws <paramref name="content"/> as the card, carrying keyboard focus
+    /// to the same control or its nearest neighbour (<see cref="FocusCarry"/>),
+    /// so a redraw does not drop a keyboard user's place (W17 review F2).
+    /// </summary>
+    /// <param name="focusedKey">The key read before the action began, or null to read it now.</param>
+    public static void Replace(UserControl host, UIElement content, string? focusedKey = null)
+    {
+        string? key = focusedKey ?? FocusedKey(host);
+        host.Content = content;
+        if (key is null || !host.IsLoaded || content is not FrameworkElement element)
+        {
+            return;
+        }
+
+        void OnLoaded(object sender, RoutedEventArgs e)
+        {
+            element.Loaded -= OnLoaded;
+            var controls = new List<Control>();
+            Collect(element, controls);
+            var candidates = new List<FocusCandidate>(controls.Count);
+            foreach (Control control in controls)
+            {
+                candidates.Add(new FocusCandidate(
+                    AutomationProperties.GetAutomationId(control),
+                    control.IsEnabled && control.IsTabStop && control.Visibility == Visibility.Visible));
+            }
+
+            if (FocusCarry.Target(key, candidates) is { } target)
+            {
+                foreach (Control control in controls)
+                {
+                    if (AutomationProperties.GetAutomationId(control) == target)
+                    {
+                        control.Focus(FocusState.Programmatic);
+                        break;
+                    }
+                }
+            }
+        }
+
+        element.Loaded += OnLoaded;
+    }
+
+    private static void Collect(DependencyObject parent, List<Control> into)
+    {
+        int count = VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+            if (child is Control control && AutomationProperties.GetAutomationId(control).Length > 0)
+            {
+                into.Add(control);
+            }
+
+            Collect(child, into);
+        }
     }
 }

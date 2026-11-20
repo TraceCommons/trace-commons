@@ -31,22 +31,23 @@ public sealed class InsightsSection : UserControl
         };
     }
 
-    private void Render()
+    private void Render(string? focus = null)
     {
         var root = new StackPanel { Spacing = 12 };
         if (!_switch.SettingsAnswered)
         {
             root.Children.Add(SettingsCards.ReadNotice(_switch.ReadFailed, async (_, _) =>
             {
+                string? at = SettingsCards.FocusedKey(this);
                 await _switch.ReadAsync();
-                Render();
-            }));
+                Render(at);
+            }, "insights/retry"));
         }
 
         if (_switch.On is { } on)
         {
             string label = InsightsSettingsWords.Text("analytics_setting_recap_card");
-            var toggle = new ToggleSwitch
+            var toggle = SettingsCards.Key(new ToggleSwitch
             {
                 Header = label,
                 IsOn = on,
@@ -54,7 +55,7 @@ public sealed class InsightsSection : UserControl
                 // The Mac's switch carries no On or Off words (GlassToggleStyle).
                 OnContent = string.Empty,
                 OffContent = string.Empty,
-            };
+            }, "insights/recap");
             AutomationProperties.SetName(toggle, label);
             toggle.Toggled += async (_, _) =>
             {
@@ -63,9 +64,12 @@ public sealed class InsightsSection : UserControl
                     return;
                 }
 
+                // Read before the switch turns itself off for the write, which
+                // moves focus away; the redraw puts it back (W17 review F2).
+                string? at = SettingsCards.FocusedKey(this);
                 toggle.IsEnabled = false;
                 await _switch.SetAsync(toggle.IsOn);
-                Render();
+                Render(at);
             };
 
             var body = new StackPanel { Spacing = 8 };
@@ -78,6 +82,6 @@ public sealed class InsightsSection : UserControl
             root.Children.Add(SettingsCards.Card(InsightsSettingsWords.Text("title"), body));
         }
 
-        Content = root;
+        SettingsCards.Replace(this, root, focus);
     }
 }

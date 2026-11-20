@@ -20,6 +20,13 @@ public sealed class WatchingSection : UserControl
     private readonly DaemonHost _host;
     private readonly WatcherFlow _flow;
 
+    /// <summary>
+    /// What the card was last drawn from. A status event that changes none
+    /// of it draws nothing, so the controls, and a keyboard user's focus on
+    /// them, stay (W17 review F2).
+    /// </summary>
+    private object? _drawn;
+
     public WatchingSection(DaemonHost host)
     {
         IsTabStop = false;
@@ -62,12 +69,13 @@ public sealed class WatchingSection : UserControl
 
         return SettingsCards.ReadNotice(_flow.SettingsReadFailed, async (_, _) =>
         {
+            string? at = SettingsCards.FocusedKey(this);
             await _flow.ReadSettingsAsync();
-            Render();
-        });
+            Render(at);
+        }, "watcher/retry");
     }
 
-    private void Render()
+    private void Render(string? focus = null)
     {
         WatcherCard card = _flow.Card(running: _host.IsRunning);
         if (_flow.StatusAnswered)
@@ -75,9 +83,16 @@ public sealed class WatchingSection : UserControl
             PausedChanged?.Invoke(_flow.Paused);
         }
 
+        object drawn = (card, _flow.QueueTtlDays, _flow.SettingsReadFailed, _flow.Busy);
+        if (Content is not null && Equals(drawn, _drawn))
+        {
+            return;
+        }
+
+        _drawn = drawn;
         if (!card.Drawn)
         {
-            Content = SettingsCards.Card(string.Empty, QueueLimit());
+            SettingsCards.Replace(this, SettingsCards.Card(string.Empty, QueueLimit()), focus);
             return;
         }
 
@@ -86,24 +101,26 @@ public sealed class WatchingSection : UserControl
         body.Children.Add(caption);
         body.Children.Add(QueueLimit());
 
-        Button pause = SettingsCards.Button(MonitorShellCopy.PauseWatcher, async (_, _) =>
+        Button pause = SettingsCards.Key(SettingsCards.Button(MonitorShellCopy.PauseWatcher, async (_, _) =>
         {
+            string? at = SettingsCards.FocusedKey(this);
             await _flow.PauseAsync();
-            Render();
-        });
+            Render(at);
+        }), "watcher/pause");
         pause.IsEnabled = card.PauseEnabled && !_flow.Busy;
-        Button resume = SettingsCards.Button(MonitorShellCopy.ResumeWatcher, async (_, _) =>
+        Button resume = SettingsCards.Key(SettingsCards.Button(MonitorShellCopy.ResumeWatcher, async (_, _) =>
         {
+            string? at = SettingsCards.FocusedKey(this);
             await _flow.ResumeAsync();
-            Render();
-        }, primary: true);
+            Render(at);
+        }, primary: true), "watcher/resume");
         resume.IsEnabled = card.ResumeEnabled && !_flow.Busy;
         body.Children.Add(SettingsCards.Row(pause, resume));
 
-        Content = SettingsCards.TitledCard(
+        SettingsCards.Replace(this, SettingsCards.TitledCard(
             MonitorShellCopy.Shell("watcher_eyebrow"),
             MonitorShellCopy.Shell("watcher_title"),
             card.Chip.Length > 0 ? SettingsCards.GlassChip(card.Chip, card.ChipMuted) : null,
-            body);
+            body), focus);
     }
 }
