@@ -1550,7 +1550,7 @@ impl CounterPass {
     ) -> Self {
         Self {
             rows_path,
-            keys,
+            keys: Box::new(OutsideRuntime(keys)),
             cached: Mutex::new(None),
             staged: AtomicU64::new(0),
             writer: Mutex::new(0),
@@ -4458,6 +4458,26 @@ fn default_counter_keys(store: &ConfigStore) -> Box<dyn DigestKeyStore + Send + 
     }
 }
 
+/// Every key-store call the pass makes, kept off the runtime that called it.
+/// The pass is reached from the IPC server's workers (`insights_week`,
+/// unenroll's clear) and from the watcher, and on Linux the keychain store
+/// blocks on a runtime of its own; see [`super::outside_runtime`].
+struct OutsideRuntime(Box<dyn DigestKeyStore + Send + Sync>);
+
+impl DigestKeyStore for OutsideRuntime {
+    fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
+        super::outside_runtime(|| self.0.load())
+    }
+
+    fn load_or_create(&self) -> Result<DigestKey, DigestKeyError> {
+        super::outside_runtime(|| self.0.load_or_create())
+    }
+
+    fn clear(&self) -> Result<(), DigestKeyError> {
+        super::outside_runtime(|| self.0.clear())
+    }
+}
+
 /// The daemon's counter key in the OS keychain (owner decision D16, open):
 /// its own entry, apart from the in-process Insights store's key.
 struct OsCounterKeyStore;
@@ -5777,6 +5797,73 @@ mod tests {
             ledger_present: true,
             ..WeekOptions::default()
         }
+    }
+
+    /// A key store shaped like Linux's Secret Service store: zbus's blocking
+    /// API runs every call through `Runtime::block_on` on a multi-thread
+    /// runtime of its own (`zbus::utils::block_on`). Called from a runtime
+    /// worker, that `block_on` panics, which is how the daemon's
+    /// `insights_week` handler failed under the weston job.
+    struct OwnRuntimeKeys(InMemoryDigestKeyStore);
+
+    fn own_runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        })
+    }
+
+    impl DigestKeyStore for OwnRuntimeKeys {
+        fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
+            own_runtime().block_on(async { self.0.load() })
+        }
+
+        fn load_or_create(&self) -> Result<DigestKey, DigestKeyError> {
+            own_runtime().block_on(async { self.0.load_or_create() })
+        }
+
+        fn clear(&self) -> Result<(), DigestKeyError> {
+            own_runtime().block_on(async { self.0.clear() })
+        }
+    }
+
+    /// Every key-store call the pass makes, from inside whichever runtime
+    /// runs the caller: the week answer, a fold's key, an unenroll's clear.
+    fn keys_answer_from_inside_a_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let pass = CounterPass::with_keys(
+            dir.path().join(COUNTER_ROWS_FILE),
+            Box::new(OwnRuntimeKeys(InMemoryDigestKeyStore::with_seed([3; 32]))),
+        );
+        let week = pass.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &NeverFolders::NONE,
+            WeekOptions::default(),
+        );
+        assert_eq!(week["enabled"], true);
+        assert_ne!(week["reason"], UNREADABLE_KEY);
+        assert!(pass.keys.load().unwrap().is_none());
+        pass.keys.load_or_create().unwrap();
+        assert!(pass.keys.load().unwrap().is_some());
+        pass.keys.clear().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keychain_with_its_own_runtime_answers_on_a_daemon_worker() {
+        keys_answer_from_inside_a_runtime();
+    }
+
+    /// `block_on_ipc` serves synchronous callers on a current-thread runtime.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_keychain_with_its_own_runtime_answers_on_a_current_thread_runtime() {
+        keys_answer_from_inside_a_runtime();
     }
 
     fn sessions_of(value: &serde_json::Value) -> Vec<serde_json::Value> {
