@@ -214,6 +214,8 @@ public sealed class InferenceLedgerTests
     [InlineData(0.0123, 0.00005, "$0.0124")]
     [InlineData(0.00125, 0.0, "$0.0012")]
     [InlineData(2.67435, 0.0, "$2.6744")]
+    // Far below a hundredth of a cent, and below decimal's smallest step.
+    [InlineData(1e-30, 0.0, "$0.00")]
     public void TheHeaderRoundsTheAmountTheMacDoes(double routed, double outside, string priced)
     {
         string cost(double usd) => usd.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
