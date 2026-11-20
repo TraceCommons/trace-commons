@@ -323,6 +323,23 @@ async fn account_period_spend(
     Ok(tx.query_one("SELECT COALESCE(sum(cost_used),0)::bigint FROM trace_account_admission_budget WHERE tenant_id=$1 AND account_id=$2 AND substring(period_id FROM position(':' IN period_id)+1)=$3", &[&tenant,&account,&raw_period]).await.map_err(|_|database_refused())?.get(0))
 }
 
+/// The session advisory lock key [`PgBackend::lock_admission`] takes for one
+/// submission. Public so a test can see whether a finished request's lock is
+/// gone yet: dropping the guard closes its connection, and PostgreSQL frees
+/// the lock only once that backend has seen the close.
+pub fn admission_processing_lock_key(tenant: &str, submission: Uuid) -> i64 {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"trace-admission-processing.v1:");
+    hash.update((tenant.len() as u64).to_be_bytes());
+    hash.update(tenant.as_bytes());
+    hash.update(submission.as_bytes());
+    let digest = hash.finalize();
+    let mut key = [0_u8; 8];
+    key.copy_from_slice(&digest[..8]);
+    i64::from_be_bytes(key)
+}
+
 /// Owns an isolated database session for one in-flight submission. Dropping the
 /// guard removes its connection from the pool and closes it, including cancellation;
 /// a session advisory lock can never leak into a recycled pooled connection.
@@ -1162,14 +1179,7 @@ impl PgBackend {
         tenant: &str,
         submission: Uuid,
     ) -> Result<Option<AdmissionProcessingGuard>, DatabaseError> {
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"trace-admission-processing.v1:");
-        hash.update((tenant.len() as u64).to_be_bytes());
-        hash.update(tenant.as_bytes());
-        hash.update(submission.as_bytes());
-        let digest = hash.finalize();
-        let key = i64::from_be_bytes(digest[..8].try_into().map_err(|_| database_refused())?);
+        let key = admission_processing_lock_key(tenant, submission);
         let client = self
             .trace_pool()
             .get()
