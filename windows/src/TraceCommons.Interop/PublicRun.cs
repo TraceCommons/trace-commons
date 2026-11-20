@@ -794,6 +794,17 @@ public sealed class HistoryDetailState
         ReadError = PublicRunErrors.SessionDetailLine(label);
     }
 
+    /// <summary>
+    /// A read made under an earlier account answered after a newer one
+    /// (<see cref="AccountOwnedContent.ReadSucceeded"/> refused it): nothing
+    /// from it is shown, and the core's line says so, with Retry
+    /// (AppModel.swift:4219-4225). What is held stays.
+    /// </summary>
+    public void ReadStale() => ReadError = PublicRunErrors.SessionDetailLine("session-owner-changed");
+
+    /// <summary>The window's account content was cleared: this record's goes with it.</summary>
+    public void AccountCleared() => Clear();
+
     /// <summary>A publication request is starting: its earlier error goes.</summary>
     public void PublicationStarted() => PublicationError = null;
 

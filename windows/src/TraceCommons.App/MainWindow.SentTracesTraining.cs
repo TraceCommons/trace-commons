@@ -26,6 +26,42 @@ public sealed partial class MainWindow
     private SkillLearningModel SkillLearning =>
         _skillLearning ??= SkillLearningModel.WithCore(SkillLearningCall());
 
+    private AccountOwnedContent? _accountContent;
+
+    /// <summary>
+    /// The account the window's record content belongs to
+    /// (<c>AppModel.accountOwnedContentScope</c>): every History inspector
+    /// reports its detail reads here, since each is built for one record.
+    /// Cleared by another owner, an account-ending read, or Windows' own
+    /// account boundary (a status naming another account, a sign-out, an
+    /// unenroll), so no skill work of one account survives into the next.
+    /// </summary>
+    private AccountOwnedContent AccountContent
+    {
+        get
+        {
+            if (_accountContent is null)
+            {
+                _accountContent = new AccountOwnedContent();
+                _accountContent.Cleared += ClearAccountOwnedContent;
+                _host.Account.Changed += _accountContent.AccountBoundary;
+            }
+
+            return _accountContent;
+        }
+    }
+
+    /// <summary>
+    /// Everything read under the last account goes (<c>clearAccountOwnedContent</c>,
+    /// AppModel.swift:4255-4261): the skill store, and the open record's
+    /// detail, editor and skill panel with its typed draft.
+    /// </summary>
+    private void ClearAccountOwnedContent()
+    {
+        _skillLearning?.ClearAccountOwnedContent();
+        _historyDetail?.ClearAccountOwnedContent();
+    }
+
     /// <summary>
     /// The daemon the skill flow asks, or none in a sample window: the flow
     /// spends on NEAR AI and writes into a tool's folder, and a recorded
