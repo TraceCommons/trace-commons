@@ -252,6 +252,9 @@ else
     ui::glass_feedback::tests::mounted_a_refresh_turns_until_its_read_ends \
     ui::glass_motion::tests::mounted_a_running_driver_follows_reduce_motion_live \
     ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
+    ui::glass_motion::tests::mounted_a_movement_runs_at_fifteen_fps_while_its_window_is_unfocused \
+    ui::glass_motion::tests::mounted_a_loop_runs_at_fifteen_fps_while_its_window_is_unfocused \
+    ui::glass_motion::tests::mounted_an_unfocused_window_draws_at_most_fifteen_frames_a_second \
     ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
     ui::glass_motion::tests::mounted_an_opened_expanders_details_fade_in \
     ui::glass_switch::tests::mounted_a_pressed_switch_slides_and_keeps_gtks_contract \

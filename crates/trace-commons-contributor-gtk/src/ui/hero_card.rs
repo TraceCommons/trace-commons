@@ -338,11 +338,17 @@ impl HeroCard {
                     std::time::Duration::from_secs_f64(1.0 / hero_art::field::FRAMES_PER_SECOND);
                 let paint = Rc::clone(&paint);
                 let weak = area.downgrade();
+                let pace = super::glass_motion::Pace::default();
                 let id = glib::timeout_add_local(interval, move || {
                     let Some(area) = weak.upgrade() else {
                         return glib::ControlFlow::Break;
                     };
                     let now = glib::monotonic_time();
+                    // 10 a second is under the unfocused window's 15; the
+                    // field still passes the shell's one frame-rate gate.
+                    if !pace.due(&area, now, 1.0 / hero_art::field::FRAMES_PER_SECOND) {
+                        return glib::ControlFlow::Continue;
+                    }
                     let epoch = *paint.epoch.get().get_or_insert(now);
                     paint.epoch.set(Some(epoch));
                     paint.last.set(now);

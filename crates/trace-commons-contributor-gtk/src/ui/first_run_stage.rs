@@ -1181,13 +1181,6 @@ pub mod motion {
         }
     }
 
-    /// Whether a frame `since` seconds after the last one drawn is due at
-    /// `interval`: within a tenth of the interval, so a display whose
-    /// frames land a little early does not drop every other one.
-    pub fn frame_due(since: f64, interval: f64) -> bool {
-        since >= interval * 0.9
-    }
-
     /// The beam's fade as its tile is watched or not (`GlassMotion.timed(
     /// duration: 0.5)` keyed on `isWatched`): from `from` to `to` along the
     /// token curve, `since` seconds after the change.
@@ -1564,11 +1557,16 @@ mod tests {
             assert_eq!(at(step, false, true), 0.0, "{step:?} in flight");
         }
         // 60 Hz frames land every 16.7 ms: at a 30 a second cap every
-        // other one draws, at 60 every one, a little early or not.
-        assert!(!motion::frame_due(0.0167, 1.0 / 30.0));
-        assert!(motion::frame_due(0.0333, 1.0 / 30.0));
-        assert!(motion::frame_due(0.0160, 1.0 / 60.0));
-        assert!(!motion::frame_due(0.0083, 1.0 / 60.0));
+        // other one draws, at 60 every one, a little early or not. The
+        // stage's frames pass the shell's one gate, which also holds an
+        // unfocused window to 15 a second.
+        let due = |since, interval| {
+            crate::ui::glass_motion::frame_due(Some(0.0), since, interval).is_some()
+        };
+        assert!(!due(0.0167, 1.0 / 30.0));
+        assert!(due(0.0333, 1.0 / 30.0));
+        assert!(due(0.0160, 1.0 / 60.0));
+        assert!(!due(0.0083, 1.0 / 60.0));
     }
 
     /// The beam fades over 0.5 s on the token curve (the Swift probe's

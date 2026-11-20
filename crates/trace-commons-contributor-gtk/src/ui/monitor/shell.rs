@@ -163,8 +163,11 @@ impl EmberGlide {
             return;
         }
         let weak = Rc::downgrade(glide);
-        state.tick = Some(ember.add_tick_callback(move |area, _| {
-            area.queue_draw();
+        let pace = glass_motion::Pace::default();
+        state.tick = Some(ember.add_tick_callback(move |area, clock| {
+            if pace.due(area, clock.frame_time(), 0.0) {
+                area.queue_draw();
+            }
             let Some(glide) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
