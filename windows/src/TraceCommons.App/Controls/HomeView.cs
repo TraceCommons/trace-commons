@@ -138,6 +138,23 @@ public sealed class HomeView : UserControl
     /// </summary>
     private bool MayTick => _loaded && _showing && WindowClocks.Running && AnimationsOn;
 
+    private readonly ContentControl _trainingSlot = new()
+    {
+        HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        IsTabStop = false,
+        Visibility = Visibility.Collapsed,
+    };
+
+    /// <summary>
+    /// The sent-traces training line under the Insights card, or nothing
+    /// (<c>SentTracesTrainingLine</c>, SentTracesTrainingViews.swift:95-127).
+    /// </summary>
+    public void SetTrainingLine(FrameworkElement? line)
+    {
+        _trainingSlot.Content = line;
+        _trainingSlot.Visibility = line is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     /// <summary>Draws <paramref name="model"/>. Only what changed is rebuilt; the glyphs keep their clock.</summary>
     public void Show(HomeOverviewModel model)
     {
@@ -164,6 +181,10 @@ public sealed class HomeView : UserControl
         {
             _column.Children.Add(BuildHero(hero, model));
         }
+
+        // Sent traces without Train coding models, and Review, under the
+        // Insights card while there are any (HomeViews.swift:270-273).
+        _column.Children.Add(_trainingSlot);
 
         if (model.Catalogue is HomeCard catalogue)
         {

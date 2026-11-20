@@ -45,9 +45,12 @@ public class NativeBindingTests
     /// [DllImport(Library)] declarations (133 in NativeMethods.cs, 14 in
     /// NativeMethods.Settings.cs, no entry point twice). Still 147 after
     /// the merge of #2215: its tc_nudge_copy_json is the one this branch
-    /// already binds, declared once.
+    /// already binds, declared once. 151 after the merge of #2253: its
+    /// tc_skill_learning_copy, tc_skill_draft_validate,
+    /// tc_skill_learning_error_line and tc_sent_traces_training_copy_json
+    /// (137 in NativeMethods.cs, 14 in NativeMethods.Settings.cs).
     /// </summary>
-    private const int BoundFunctions = 147;
+    private const int BoundFunctions = 151;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
     private const int HeaderFunctions = 188;

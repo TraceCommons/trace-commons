@@ -902,6 +902,8 @@ public sealed partial class MainWindow
             _settingsView = settings;
             settings.AboutRequested += (_, _) => ShowAboutWindow();
             AttachSpendOrganizations(settings);
+            settings.Settings.ConsentScopesConfirmed += (before, confirmed) =>
+                OnConsentScopesConfirmed(before, confirmed, _settingsWindow?.Content?.XamlRoot);
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += async (_, _) =>
             {
