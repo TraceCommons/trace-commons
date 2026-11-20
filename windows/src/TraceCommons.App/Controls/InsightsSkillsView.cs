@@ -893,7 +893,11 @@ public sealed class InsightsSkillsView : UserControl
     {
         int most = Math.Max(1, bars.Max(b => b.Uses));
         var grid = new Grid { Height = 44, Margin = new Thickness(0, 4, 0, 4), ColumnSpacing = 0 };
-        Brush muted = R("TcInkTertiaryBrush");
+        // The week before in the ink at 22%, as the Mac draws it; High
+        // Contrast keeps the system text colour.
+        Brush muted = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast
+            ? R("TcInkTertiaryBrush")
+            : new SolidColorBrush(((SolidColorBrush)R("TcGlassInkBrush")).Color) { Opacity = InsightsSkillsHome.EarlierBarInk };
         for (int i = 0; i < bars.Count; i++)
         {
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

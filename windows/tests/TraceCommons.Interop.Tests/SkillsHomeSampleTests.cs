@@ -101,6 +101,18 @@ public class SkillsHomeSampleTests
     }
 
     [Fact]
+    public void TheEarlierWeeksBarsAreTheMacsFaintInk()
+    {
+        // InsightsSkillsHomeView.swift:464: bar.recent ? tint : GlassColor.ink(0.22).
+        Assert.Equal(0.22, InsightsSkillsHome.EarlierBarInk);
+        string view = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/InsightsSkillsView.cs.txt"));
+        int at = view.IndexOf("private FrameworkElement UsageBars(", StringComparison.Ordinal);
+        string body = view[at..view.IndexOf("\n    }\n", at, StringComparison.Ordinal)];
+        Assert.Contains("InsightsSkillsHome.EarlierBarInk", body, StringComparison.Ordinal);
+        Assert.Contains("TcGlassInkBrush", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SkillsReadsTheModelsClockAndTheWindowPinsItInASample()
     {
         string view = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/InsightsSkillsView.cs.txt"));
