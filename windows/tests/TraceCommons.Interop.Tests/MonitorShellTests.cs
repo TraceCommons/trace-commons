@@ -139,6 +139,38 @@ public class MonitorShellTests
         Assert.False(MonitorNavigation.InspectorAvailable(MonitorTab.Home, HomePage.Missions));
     }
 
+    /// <summary>
+    /// Escape goes back as the breadcrumb does on exactly the Mac's pages:
+    /// History on either tab (HistoryPage, HomeViews.swift:926-927, hosted by
+    /// TracesHistoryPage at HomeViews.swift:105-113 with
+    /// <c>back: { tracesPage = .tree }</c>, MonitorWindowView.swift:347-353)
+    /// and the commons catalogue (MissionsPage, MissionsViews.swift:71-72).
+    /// The drafts page and every tab's first page bind no Escape on the Mac
+    /// (no other <c>onExitCommand</c> under Views/Monitor at c21aedb43).
+    /// </summary>
+    [Fact]
+    public void EscapeGoesBackFromHistoryAndTheCatalogueOnly()
+    {
+        MonitorLocation tracesHistory = MonitorLocation.Default with { Tab = MonitorTab.Traces, TracesPage = TracesPage.History };
+        Assert.Equal(new Crumb(CrumbWord.Tab, MonitorTab.Traces, true), MonitorNavigation.EscapeBack(tracesHistory, missions: true));
+        Assert.Equal(TracesPage.Tree, MonitorNavigation.Back(tracesHistory, MonitorNavigation.EscapeBack(tracesHistory, missions: false)!.Value).TracesPage);
+
+        MonitorLocation homeHistory = MonitorLocation.Default with { Tab = MonitorTab.Home, HomePage = HomePage.History };
+        Assert.Equal(new Crumb(CrumbWord.Tab, MonitorTab.Home, true), MonitorNavigation.EscapeBack(homeHistory, missions: false));
+
+        MonitorLocation catalogue = MonitorLocation.Default with { Tab = MonitorTab.Home, HomePage = HomePage.Missions };
+        Assert.Equal(new Crumb(CrumbWord.Tab, MonitorTab.Home, true), MonitorNavigation.EscapeBack(catalogue, missions: true));
+        Assert.Equal(HomePage.Overview, MonitorNavigation.Back(catalogue, MonitorNavigation.EscapeBack(catalogue, missions: true)!.Value).HomePage);
+
+        // Hidden missions show the overview, which binds no Escape.
+        Assert.Null(MonitorNavigation.EscapeBack(catalogue, missions: false));
+        Assert.Null(MonitorNavigation.EscapeBack(MonitorLocation.Default with { Tab = MonitorTab.Home, HomePage = HomePage.MissionDrafts }, missions: true));
+        foreach (MonitorTab tab in DefaultOrder)
+        {
+            Assert.Null(MonitorNavigation.EscapeBack(MonitorLocation.Default with { Tab = tab }, missions: true));
+        }
+    }
+
     [Fact]
     public void MissionDraftsIsHomesPageBehindTheBreadcrumb()
     {

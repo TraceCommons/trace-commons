@@ -237,6 +237,20 @@ public sealed partial class MainWindow
         privateAI.Invoked += OnTogglePrivateInferenceAccelerator;
         WindowRoot.KeyboardAccelerators.Add(privateAI);
 
+        // Escape goes back as the breadcrumb does, on the pages where the Mac
+        // binds it (MonitorNavigation.EscapeBack). Anywhere else it is left
+        // unhandled, so an open list or dialog still closes on it.
+        var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            if (MonitorNavigation.EscapeBack(_at, ViewModel.MissionsShown) is Crumb crumb)
+            {
+                args.Handled = true;
+                GoBack(crumb);
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(escape);
+
         // The accelerators belong to the window, not to any control: no
         // tooltip announces them, and no control's name is derived from one.
         WindowRoot.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
