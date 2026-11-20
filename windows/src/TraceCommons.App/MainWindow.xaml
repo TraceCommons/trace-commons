@@ -129,12 +129,37 @@
                     CornerRadius="{StaticResource TcPillCornerRadius}">
                 <StackPanel Orientation="Horizontal" Spacing="2">
                     <StackPanel.Resources>
-                        <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcSurfaceScrimBrush" />
-                        <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcSurfaceScrimBrush" />
-                        <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcSurfaceScrimBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                        <!-- Per theme, so a live theme or high contrast switch draws the
+                             checked title in the new ink: a plain alias resolved once,
+                             in the theme the app started in (ThemeResourceAliasTests). -->
+                        <ResourceDictionary>
+                            <ResourceDictionary.ThemeDictionaries>
+                                <ResourceDictionary x:Key="Default">
+                                    <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                                <ResourceDictionary x:Key="Light">
+                                    <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                                <ResourceDictionary x:Key="HighContrast">
+                                    <StaticResource x:Key="ToggleButtonBackgroundChecked" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPointerOver" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonBackgroundCheckedPressed" ResourceKey="TcSurfaceScrimBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                            </ResourceDictionary.ThemeDictionaries>
+                        </ResourceDictionary>
                     </StackPanel.Resources>
                     <ToggleButton x:Name="GraphToggle"
                                   Style="{StaticResource TcToolbarToggleStyle}"
@@ -198,15 +223,46 @@
                             BorderBrush="{ThemeResource TcHairlineDividerBrush}"
                             BorderThickness="0,0,0,1">
                     <StackPanel.Resources>
-                        <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent" />
-                        <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent" />
-                        <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent" />
-                        <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent" />
-                        <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent" />
-                        <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
-                        <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                        <!-- Per theme, so a live theme or high contrast switch draws the
+                             checked title in the new ink: a plain alias resolved once,
+                             in the theme the app started in (ThemeResourceAliasTests). -->
+                        <ResourceDictionary>
+                            <ResourceDictionary.ThemeDictionaries>
+                                <ResourceDictionary x:Key="Default">
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                                <ResourceDictionary x:Key="Light">
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                                <ResourceDictionary x:Key="HighContrast">
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPointerOver" Color="Transparent" />
+                                    <SolidColorBrush x:Key="ToggleButtonBackgroundPressed" Color="Transparent" />
+                                    <StaticResource x:Key="ToggleButtonForegroundChecked" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundCheckedPressed" ResourceKey="TcInkPrimaryBrush" />
+                                    <StaticResource x:Key="ToggleButtonForegroundPointerOver" ResourceKey="TcInkPrimaryBrush" />
+                                </ResourceDictionary>
+                            </ResourceDictionary.ThemeDictionaries>
+                        </ResourceDictionary>
                     </StackPanel.Resources>
                     <controls:MonitorTabButton x:Name="TabHome" Style="{StaticResource TcTabStyle}">
                         <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="6">
