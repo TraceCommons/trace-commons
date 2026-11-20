@@ -635,9 +635,13 @@ public sealed class SkillLearningPanel : UserControl
         Grid.SetColumn(count, 1);
         header.Children.Add(count);
         panel.Children.Add(header);
-        var box = new TextBox { Text = text, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = height };
+        // AcceptsReturn before Text: a single-line box keeps only the first
+        // line of what it is given.
+        var box = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = height };
+        box.Text = text;
         AutomationProperties.SetName(box, label);
-        box.TextChanged += (_, _) => changed(box.Text);
+        // The box breaks lines with \r; the draft is sent with \n, as the Mac's is.
+        box.TextChanged += (_, _) => changed(box.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n'));
         panel.Children.Add(box);
         return (panel, count);
     }

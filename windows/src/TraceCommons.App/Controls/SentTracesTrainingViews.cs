@@ -58,7 +58,16 @@ public static class SentTracesTrainingViews
                 PrimaryButtonStyle = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
                 SecondaryButtonStyle = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
             };
-            dialog.Opened += (_, _) => Name(dialog, actions[0].AccessibilityName, actions[1].AccessibilityName);
+            // The core's accessibility names on the two buttons, once the
+            // template has built them: on open, and again after that layout
+            // pass, since a dialog shown a second time can open before it.
+            void NameButtons() => Name(dialog, actions[0].AccessibilityName, actions[1].AccessibilityName);
+            dialog.Opened += (_, _) =>
+            {
+                NameButtons();
+                dialog.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, NameButtons);
+            };
+            dialog.LayoutUpdated += (_, _) => NameButtons();
 
             // Allow: the grant runs with the sheet up; an answer closes it, a
             // refusal keeps it up and says so, a hiding refusal closes it.
@@ -109,13 +118,12 @@ public static class SentTracesTrainingViews
     {
         foreach (Button button in Descendants<Button>(dialog))
         {
-            if (Equals(button.Content, dialog.PrimaryButtonText))
+            string? name = Equals(button.Content, dialog.PrimaryButtonText) ? notNow
+                : Equals(button.Content, dialog.SecondaryButtonText) ? allow
+                : null;
+            if (name is not null && AutomationProperties.GetName(button) != name)
             {
-                AutomationProperties.SetName(button, notNow);
-            }
-            else if (Equals(button.Content, dialog.SecondaryButtonText))
-            {
-                AutomationProperties.SetName(button, allow);
+                AutomationProperties.SetName(button, name);
             }
         }
     }

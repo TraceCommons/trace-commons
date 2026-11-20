@@ -1021,13 +1021,15 @@ public sealed class HistoryDetailInspector : UserControl
         Grid.SetColumn(counter, 1);
         header.Children.Add(counter);
         panel.Children.Add(header);
+        // AcceptsReturn before Text: a single-line box keeps only the first
+        // line of a restored multi-line value.
         var box = new TextBox
         {
-            Text = value,
             AcceptsReturn = multiline,
             TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
             MinHeight = multiline ? (limit > PublicRunEditor.OutcomeLimit ? 128 : 88) : 0,
         };
+        box.Text = value;
         AutomationProperties.SetName(box, label);
         _counters[box] = (counter, limit);
         box.TextChanged += (_, _) =>
