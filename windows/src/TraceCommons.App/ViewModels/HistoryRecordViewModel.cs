@@ -180,6 +180,9 @@ public sealed class HistoryRecordViewModel
 
     public bool HasCredit => CreditText.Length > 0;
 
+    /// <summary>The record's final credit, or null before it is scored.</summary>
+    public double? CreditFinal => _record.CreditPointsFinal;
+
     /// <summary>
     /// Whether the row offers a withdraw button. See
     /// <see cref="WithdrawCopy.OffersWithdrawal"/> for why an already-withdrawn

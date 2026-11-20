@@ -303,6 +303,34 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
 
     /// <summary>
+    /// Every fixed word on the correction-derived skill surface, as one owned
+    /// JSON object (<c>TCSkillLearning.copyJSON</c>). NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_skill_learning_copy();
+
+    /// <summary>
+    /// Validates a skill editor payload with the Rust contract: validity, a
+    /// fixed error label, character counts and limits, never the draft. Owned.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_skill_draft_validate(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? inputJson);
+
+    /// <summary>The sentence for a skill-learning daemon error label. Owned.</summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_skill_learning_error_line(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? label);
+
+    /// <summary>
+    /// The words for adding Train coding models to traces already sent, as
+    /// one owned JSON object (<c>TCConsentCopy.sentTracesTrainingCopyJSON</c>).
+    /// NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_sent_traces_training_copy_json();
+
+    /// <summary>
     /// Describes the session stores on this machine, so the roots screen can
     /// ask about something specific rather than showing an empty field.
     ///
