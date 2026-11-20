@@ -220,13 +220,16 @@ else
   fi
 
   # DIAGNOSTIC (temporary): run the test that hangs repeatedly.
-  for round in $(seq 1 30); do
-    echo "=== diagnostic round $round"
-    WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-      TEST_LIMIT_SECONDS=90 run_ignored_test "diagnostic round $round" \
-      cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
-      ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id \
-      -- --exact --ignored --test-threads=1
+  for round in $(seq 1 25); do
+    for diag_test in \
+      ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred \
+      ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id; do
+      echo "=== diagnostic round $round $diag_test"
+      WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
+        TEST_LIMIT_SECONDS=90 run_ignored_test "diagnostic round $round $diag_test" \
+        cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$diag_test" \
+        -- --exact --ignored --test-threads=1
+    done
   done
   echo "=== diagnostic FAIL=$FAIL"
   exit 1
