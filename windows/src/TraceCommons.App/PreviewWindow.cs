@@ -41,6 +41,8 @@ public sealed class PreviewWindow : Window
         _sheet.Decided += OnDecided;
         _sheet.CloseRequested += Close;
         Content = _sheet;
+        // Settings > General's appearance, as on every window (WindowAppearance).
+        WindowAppearance.Follow(this, _sheet);
         WindowClocks.Watch(this);
 
         Closed += OnClosed;

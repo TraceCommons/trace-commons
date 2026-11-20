@@ -14,9 +14,6 @@ public sealed partial class MainWindow
     private void FollowAppearance()
     {
         AppearanceChoice.Shared.ReadOnly = Program.IsSampleLaunch;
-        WindowRoot.RequestedTheme = GeneralSection.Theme(AppearanceChoice.Shared.Current);
-        void OnChanged(Appearance appearance) => WindowRoot.RequestedTheme = GeneralSection.Theme(appearance);
-        AppearanceChoice.Shared.Changed += OnChanged;
-        Closed += (_, _) => AppearanceChoice.Shared.Changed -= OnChanged;
+        WindowAppearance.Follow(this, WindowRoot);
     }
 }

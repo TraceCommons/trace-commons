@@ -29,10 +29,7 @@ public sealed partial class SettingsWindow : Window
         SettingsHost.Content = view;
 
         // Settings > General's appearance, here as on the Monitor window.
-        SettingsRoot.RequestedTheme = Controls.Settings.GeneralSection.Theme(AppearanceChoice.Shared.Current);
-        void OnAppearance(Appearance appearance) =>
-            SettingsRoot.RequestedTheme = Controls.Settings.GeneralSection.Theme(appearance);
-        AppearanceChoice.Shared.Changed += OnAppearance;
+        WindowAppearance.Follow(this, SettingsRoot);
 
         // Escape closes the window, as the Mac's onExitCommand does
         // (SettingsModal.swift:57).
@@ -43,7 +40,6 @@ public sealed partial class SettingsWindow : Window
             Close();
         };
         SettingsRoot.KeyboardAccelerators.Add(escape);
-        Closed += (_, _) => AppearanceChoice.Shared.Changed -= OnAppearance;
     }
 
     /// <summary>
