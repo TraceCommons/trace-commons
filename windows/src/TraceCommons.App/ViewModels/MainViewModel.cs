@@ -430,9 +430,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// </remarks>
     public string QueueCountText => TrayModel.DecisionCountText(_decisionsOwed);
 
-    public string QueueCountToolTip => _decisionsOwed is null
-        ? TrayModel.DecisionCountUnavailable
-        : string.Empty;
+    public string? QueueCountToolTip => TrayModel.DecisionCountToolTip(_decisionsOwed);
 
     /// <summary>
     /// The Traces tab's text equivalent for its badge: the core's
@@ -986,6 +984,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// Whether the update banner is on screen. Only ever true for a
     /// confirmed offer -- see <c>UpdateProtocol.ShouldOfferUpdate</c>.
     /// </summary>
+    /// <summary>
+    /// When this app's own update check (at launch or Settings' Check Now)
+    /// last got an answer; Settings > Updates draws its last-check line
+    /// from it.
+    /// </summary>
+    public UpdateCheckClock UpdateChecks { get; } = new();
+
     public bool IsUpdateBannerVisible
     {
         get => _isUpdateBannerVisible;
@@ -1784,7 +1789,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        // One check at a time: Check Now is off while one is out (W17 review F3).
+        if (!UpdateChecks.TryBegin())
+        {
+            return;
+        }
+
+        // CheckAsync turns every failure into an answer, so the check always ends.
         TcUpdateAvailability availability = await _updater.CheckAsync().ConfigureAwait(true);
+        UpdateChecks.Record(availability, DateTimeOffset.UtcNow);
         if (!UpdateProtocol.ShouldOfferUpdate(availability))
         {
             IsUpdateBannerVisible = false;

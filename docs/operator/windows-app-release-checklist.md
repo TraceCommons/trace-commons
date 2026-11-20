@@ -76,7 +76,10 @@ the version; the MSIX version is stamped from the tag at build time.
    `platform=windows`, `version=<next>`, `msix=false`. It signs with the real
    profile, installs the MSIX on the runner, checks write virtualization is
    off, and generates the feed, and publishes nothing. Read the
-   `windows-msix` and `windows-zip` artifacts.
+   `windows-msix` and `windows-zip` artifacts. The step `Verify the signed
+   app reaches the Windows Credential Manager` passed and printed
+   `report: reachable` and `Credential Manager unchanged` (W25-D2,
+   `scripts/windows/verify-credential-store.ps1`).
 5. Bump the contributor crate versions (the #2136 file list) in a release
    PR and merge it.
 

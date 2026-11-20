@@ -684,6 +684,53 @@ fn windows_signing_is_timestamped() {
     assert_windows_signing_is_hardened(".github/workflows/release-contributor.yml", &contributor);
 }
 
+/// W25-D2 (a): a Windows build proves the app reaches the Credential Manager
+/// before it ships, as the Mac's launch check proves the signed app reaches
+/// its keychain. The release job runs the verifier on the signed publish tree
+/// after the signatures are checked and before anything is packaged; the
+/// client CI job runs it on every Windows app change. Comments stripped, so a
+/// step that was commented out does not count.
+#[test]
+fn the_windows_app_reaches_the_credential_manager_before_it_ships() {
+    const VERIFIER: &str = "scripts/windows/verify-credential-store.ps1";
+    let apps = executable_text(&read(".github/workflows/release-apps.yml"));
+    let windows_job = &apps[apps
+        .find("\n  windows:\n")
+        .expect("release-apps.yml has a windows job")..];
+    let at = |needle: &str| {
+        windows_job
+            .find(needle)
+            .unwrap_or_else(|| panic!("release-apps.yml windows job is missing `{needle}`"))
+    };
+    let check = at(VERIFIER);
+    assert!(
+        at("- name: Verify the app signatures") < check,
+        "the credential-store check must run on the signed app"
+    );
+    assert!(
+        check < at("- name: Package the app"),
+        "the credential-store check must pass before the app is packaged"
+    );
+    assert!(
+        windows_job[check..].contains("app-publish/TraceCommons.exe"),
+        "the release check must launch the shipped publish tree's app"
+    );
+
+    let clients = executable_text(&read(".github/workflows/clients.yml"));
+    assert!(
+        clients.contains(&format!("../{VERIFIER}")),
+        "clients.yml must run the credential-store check on the Windows app"
+    );
+    assert!(
+        clients.contains("'credential_store_self_check::' --ignored"),
+        "clients.yml must run the FFI self-check against the real Credential Manager"
+    );
+
+    let verifier = read(VERIFIER);
+    assert!(verifier.contains("TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT"));
+    assert!(verifier.contains("StartsWith('reachable')"));
+}
+
 fn assert_windows_signing_is_hardened(label: &str, text: &str) {
     // Microsoft's dlib driven by signtool, NOT the marketplace action -- so the
     // client can be verified by content before it runs in a job that holds

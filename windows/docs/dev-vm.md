@@ -262,6 +262,53 @@ colours are what gets photographed. `win-capture.ps1` starts both of its
 tasks through `wscript.exe`, which has no window, asks for the foreground,
 and logs whether it got it.
 
+## Keyboard and accessibility audit
+
+`windows/scripts/a11y/` holds the W25 audit (spec W25-D1 (a): the UI
+Automation client from PowerShell, no new dependency). It runs on a Debug
+build, on recorded samples only, in the console session, and captures only
+the app's own windows by handle.
+
+- `win-a11y-run.ps1` (session 0, from SSH) sets the app theme, starts
+  `win-a11y-drive.ps1` in the console session through a hidden `/IT` task,
+  waits, reports whether the app's state on the machine changed, and puts
+  the theme back. `-Appearance` is `light`, `dark`, `hc` (High Contrast over
+  the dark app theme) or `hclight` (over the light one). High Contrast is
+  switched on and off by `SystemParametersInfo` inside the session; the
+  driver turns it off again in its `finally` whatever a step did.
+- `win-a11y-drive.ps1` follows a plan from `plans/` (the step list is at the
+  top of the script). `audit <window> <label>` writes four files per surface:
+  `<tag>-<label>.uia.txt`, a UI Automation dump; `.tab.txt`, a Tab walk
+  keyed by runtime id, with each stop's name, rectangle, whether it is off
+  screen and how many pixels the press changed; `.png`, the window by
+  `PrintWindow`; and `.contrast.txt`, every on-screen text and every named
+  control label measured from those drawn pixels (the ground is the
+  rectangle's commonest colour, the ink its 0.2%-rank most contrasting
+  pixel). Text inside a disabled control, and text something else is drawn
+  over (hit-tested at its centre), is listed as skipped, not measured.
+  `scroll` measures each scrolling region a viewport at a time. `expect`
+  writes `EXPECT PASS` or `EXPECT FAIL` to `<tag>.drive.log`.
+- `a11y_report.py <dir> <tag>` (standard library only, run where the files
+  were copied) fails on a stop with no name, a press that changed nothing on
+  screen or landed off screen, a window that opens with its bare input site
+  focused, a trap, "Ctrl+", "Trace Commons" or "Near.ai" in a name, an
+  unnamed focusable element, text measured under 4.5:1 (a control label with
+  no text element under 3:1, since it may be a glyph), and every
+  `EXPECT FAIL`.
+
+```bash
+windows/scripts/win-exec-az.sh 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\src\trace-commons\windows\scripts\a11y\win-a11y-run.ps1 -Exe "C:\src\trace-commons\windows\src\TraceCommons.App\bin\x64\Debug\net8.0-windows10.0.19041.0\win-x64\TraceCommons.exe" -Set normalDay -Appearance light -Tag main-light -Plan C:\src\trace-commons\windows\scripts\a11y\plans\main.txt'
+```
+
+What it cannot see: a Tab walk presses keys but never Enter or Space, so it
+does not show what a stop does; an unchanged screen after a press is the
+signal for an undrawn focus, but an animation elsewhere in the window hides
+it, so the box runs with the system's animations off; the contrast measure
+reads the extreme of anti-aliased ink, which overstates very thin text. A
+Debug sample has no NEAR AI sign-in, no approvals and no
+mission catalogue, so the undo card, Missions and the Private AI states
+after sign-in are not reached.
+
 ## Azure: a Windows Server 2025 box
 
 `provision-azure-vm.sh` builds a second test box, on Azure, for the same work.

@@ -85,8 +85,11 @@ public class ShellWordingTests
             // ContributorSettingsViewModel is the file the settings-screen
             // guard already watches for the witness row specifically; the rest
             // of its wording is unmoved. Four of its sentences moved into
-            // WatchCopy.cs, which is why this entry ratcheted down.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 14 },
+            // WatchCopy.cs, which is why this entry ratcheted down. Lowered
+            // from 10 (2026-11-19): the Watching timing card's notification
+            // owner line and range notice went with the card. 6 (2026-11-19):
+            // the queue-expiry sentence no control drew any more (W17 review F7).
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 6 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
             // The approval failure sentence is shared with the tested decision factory.
@@ -110,10 +113,10 @@ public class ShellWordingTests
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            { "TraceCommons.App/Controls/SettingsView.xaml", 12 },
-            // The startup switch's header, moved out of the XAML so it names
-            // the app with tc_app_name (W10); the same sentence as before.
-            { "TraceCommons.App/Controls/SettingsView.xaml.cs", 1 },
+            // Lowered from main's 12 at the 2026-11-19 merge: the sectioned
+            // Settings layout carries none of the old screen's eyebrows, and
+            // the Watching timing card's sentences are gone, as on the Mac.
+            { "TraceCommons.App/Controls/SettingsView.xaml", 5 },
             // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
             // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
             // button's hand-written accessible name, which also spelled the

@@ -27,6 +27,7 @@ using Windows.Graphics;
 using VirtualKey = Windows.System.VirtualKey;
 using VirtualKeyModifiers = Windows.System.VirtualKeyModifiers;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -94,6 +95,7 @@ public sealed partial class MainWindow
     private readonly List<(MonitorTab Tab, ToggleButton Button, Rectangle Rule)> _tabs = new();
 
     private SettingsWindow? _settingsWindow;
+    private SettingsView? _settingsView;
 
     private readonly UISettings _uiSettings = new();
 
@@ -105,6 +107,11 @@ public sealed partial class MainWindow
     private void InitializeShell()
     {
         Title = MonitorWords.AppName;
+
+        // The wake message is heard from the start, not from the first
+        // showing: a window that starts in the tray at login may never be
+        // shown, and would otherwise never ask for its flags after a wake.
+        WindowMinimumSize.Watch(WinRT.Interop.WindowNative.GetWindowHandle(this));
 
         // The toolbar row is the title bar: the window owns the bar, the
         // caption buttons stay the system's (snap layouts, window menu, their
@@ -238,6 +245,39 @@ public sealed partial class MainWindow
         privateAI.Invoked += OnTogglePrivateInferenceAccelerator;
         WindowRoot.KeyboardAccelerators.Add(privateAI);
 
+        // Escape goes back as the breadcrumb does, on the pages where the Mac
+        // binds it (MonitorNavigation.EscapeBack). Anywhere else it is left
+        // unhandled, so an open list or dialog still closes on it.
+        var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            if (MonitorNavigation.EscapeBack(_at, ViewModel.MissionsShown) is Crumb crumb)
+            {
+                args.Handled = true;
+                GoBack(crumb);
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(escape);
+
+        // Return undoes the last approval while its card offers the undo:
+        // the Mac's one Return binding (MonitorKeys.ReturnUndoes). A focused
+        // button, split button, field, list or the Traces tree keeps its own
+        // Return (a SplitButton is a ContentControl, not a ButtonBase).
+        var undo = new KeyboardAccelerator { Key = VirtualKey.Enter };
+        undo.Invoked += async (_, args) =>
+        {
+            bool undoOffered = ViewModel.HasUndo && UndoCard.Visibility == Visibility.Visible;
+            object? focused = WindowRoot.XamlRoot is XamlRoot root ? FocusManager.GetFocusedElement(root) : null;
+            bool focusTakesReturn = focused is ButtonBase or SplitButton or TextBox or PasswordBox or AutoSuggestBox or RichEditBox
+                or Selector or SelectorItem or ToggleSwitch or TracesTreeView;
+            if (MonitorKeys.ReturnUndoes(undoOffered, focusTakesReturn))
+            {
+                args.Handled = true;
+                await ViewModel.UndoAsync();
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(undo);
+
         // The accelerators belong to the window, not to any control: no
         // tooltip announces them, and no control's name is derived from one.
         WindowRoot.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
@@ -346,7 +386,7 @@ public sealed partial class MainWindow
                     Glyph = "",
                     FontSize = 10,
                     VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+                    Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
                     IsTabStop = false,
                 });
             }
@@ -700,11 +740,11 @@ public sealed partial class MainWindow
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
-        LayoutRect frame = MonitorPaneLayout.WindowFrame(
-            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, new LayoutRect(work.X, work.Y, work.Width, work.Height));
+        LayoutRect frame = MonitorPaneLayout.FirstFrame(
+            outer, MonitorPaneLayout.ToPhysical(width, scale) + frameExtra, height, new LayoutRect(work.X, work.Y, work.Width, work.Height));
         if (!IsMaximized)
         {
-            MoveAndResize(frame with { Height = Math.Min(height, work.Height) });
+            MoveAndResize(frame);
         }
 
         _presented = new PaneVisibility(_wantsMap, inspector);
@@ -879,7 +919,7 @@ public sealed partial class MainWindow
     {
         if (_settingsWindow is null)
         {
-            var settings = new SettingsView(_host, ViewModel.LegacyOffer);
+            var settings = new SettingsView(_host, ViewModel.LegacyOffer, ViewModel.UpdateChecks);
             // Settings no longer holds the model-calls switch; it holds a
             // pointer at the destination that does, and this is what turns
             // that pointer into navigation.
@@ -895,18 +935,90 @@ public sealed partial class MainWindow
                 OpenOnboarding(OnboardingState.Default()).Activate();
                 await ViewModel.RefreshAsync();
             };
+            // Updates' Check Now asks the deployment service through the
+            // window's updater, which raises the update banner here.
+            settings.CheckForUpdatesRequested += async (_, _) => await ViewModel.CheckForUpdateAsync();
+            _settingsView = settings;
             settings.AboutRequested += (_, _) => ShowAboutWindow();
             AttachSpendOrganizations(settings);
             settings.Settings.ConsentScopesConfirmed += (before, confirmed) =>
                 OnConsentScopesConfirmed(before, confirmed, _settingsWindow?.Content?.XamlRoot);
             _settingsWindow = new SettingsWindow(settings);
-            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+            _settingsWindow.Closed += async (_, _) =>
+            {
+                _settingsWindow = null;
+                _settingsView = null;
+                // A kind turned on in Settings ends its offer.
+                await RefreshNotifyOffersAsync();
+            };
         }
 
+        // Updates' last-check line reads against the clock now, not when
+        // the kept window was first built.
+        _settingsView?.RefreshUpdates();
         _settingsWindow.ShowNearOwner(AppWindow);
     }
 
     // ---- Notices -----------------------------------------------------------
+
+    /// <summary>
+    /// The one-time notification offers (W17-D2; MonitorNotices.swift
+    /// offerItems), read from the daemon's settings.
+    /// </summary>
+    private NotificationKindsStore? _notifyOffers;
+
+    private NotificationKindsStore NotifyOffers =>
+        _notifyOffers ??= new NotificationKindsStore((method, json) => _host.CallAsync(method, json));
+
+    /// <summary>Reads the offers again and redraws the notices.</summary>
+    private async System.Threading.Tasks.Task RefreshNotifyOffersAsync()
+    {
+        await NotifyOffers.ReadAsync();
+        RefreshNotices();
+    }
+
+    /// <summary>
+    /// Fills an offer's card for <paramref name="place"/> in the core's
+    /// words and answers the offer, or null when none is pending.
+    /// </summary>
+    private NotifyOffer? DrawNotifyOffer(OfferPlace place, Border card, TextBlock text, Button accept, Button decline, TextBlock refusal)
+    {
+        if (NotifyOffers.Offers(place) is not { Count: > 0 } offers)
+        {
+            return null;
+        }
+
+        NotifyOffer offer = offers[0];
+        text.Text = offer.Text;
+        accept.Content = offer.Accept;
+        decline.Content = offer.Decline;
+        accept.IsEnabled = decline.IsEnabled = !NotifyOffers.Busy;
+        bool refused = NotifyOffers.RefusedOfferKind == offer.Kind && NotifyOffers.Refusal is not null;
+        refusal.Text = refused ? NotifyOffers.Refusal! : string.Empty;
+        refusal.Visibility = refused ? Visibility.Visible : Visibility.Collapsed;
+        return offer;
+    }
+
+    /// <summary>Enable: the kind on, which ends the offer.</summary>
+    private async void OnAcceptNotifyOffer(object sender, RoutedEventArgs e) => await AnswerNotifyOfferAsync(sender, accept: true);
+
+    /// <summary>No thanks: the offer's marker cleared, nothing else.</summary>
+    private async void OnDeclineNotifyOffer(object sender, RoutedEventArgs e) => await AnswerNotifyOfferAsync(sender, accept: false);
+
+    private async System.Threading.Tasks.Task AnswerNotifyOfferAsync(object sender, bool accept)
+    {
+        string? kind = (sender as FrameworkElement)?.Tag as string;
+        NotifyOffer? offer = NotifyOffers
+            .Offers(kind == "verdicts_landed" ? OfferPlace.History : OfferPlace.Traces)
+            .FirstOrDefault(o => o.Kind == kind);
+        if (offer is null)
+        {
+            return;
+        }
+
+        await NotifyOffers.AnswerAsync(offer, accept);
+        RefreshNotices();
+    }
 
     /// <summary>The cards present now, each with its element.</summary>
     private IEnumerable<(NoticeKind Kind, FrameworkElement Card)> PresentNotices()
@@ -916,6 +1028,10 @@ public sealed partial class MainWindow
         if (ViewModel.LegacyOffer.ShowsCard) yield return (NoticeCatalog.LegacyOffer, LegacyOfferCard);
         if (ViewModel.ShowFirstContribution) yield return (NoticeCatalog.FirstContribution, FirstContributionCard);
         if (ViewModel.HasArmingOffer) yield return (NoticeCatalog.ArmingOffer(ViewModel.ArmingOfferProjectId), ArmingOfferCard);
+        if (DrawNotifyOffer(OfferPlace.Traces, IdleOfferCard, IdleOfferText, IdleOfferAccept, IdleOfferDecline, IdleOfferRefusal) is { } idle)
+            yield return (NoticeCatalog.NotifyOffer(idle.Kind), IdleOfferCard);
+        if (DrawNotifyOffer(OfferPlace.History, VerdictsOfferCard, VerdictsOfferText, VerdictsOfferAccept, VerdictsOfferDecline, VerdictsOfferRefusal) is { } verdicts)
+            yield return (NoticeCatalog.NotifyOffer(verdicts.Kind), VerdictsOfferCard);
         if (ViewModel.GrantVoidCards.Count > 0) yield return (NoticeCatalog.GrantVoids, VoidCards);
         if (ViewModel.ArmingRewordingCards.Count > 0) yield return (NoticeCatalog.ArmingRewordings, RewordingCards);
         if (ViewModel.HasGateHeldBanner) yield return (NoticeCatalog.GateHeld, GateHeldCard);
@@ -930,6 +1046,7 @@ public sealed partial class MainWindow
     private static IEnumerable<FrameworkElement> AllCards(MainWindow w) => new FrameworkElement[]
     {
         w.UpdateCard, w.LegacyNoticeCard, w.LegacyOfferCard, w.FirstContributionCard, w.ArmingOfferCard,
+        w.IdleOfferCard, w.VerdictsOfferCard,
         w.RewordingCards, w.VoidCards, w.GateHeldCard, w.WitnessCard, w.HealthCard, w.UndoCard,
         w.PrivateAIOfferCard, w.ActionNoticeCard, w._transferNotice,
     };
@@ -1141,16 +1258,12 @@ public sealed partial class MainWindow
     /// <summary>Stops a card's motion and puts it at rest: opaque, in its place.</summary>
     private static void ResetMotion(FrameworkElement card)
     {
-        // A card that never slid has no Translation property until it is
-        // enabled, and stopping an animation on a missing property throws
-        // (box, 2026-11-19: every launch died here in RefreshNotices).
+        // A card that never slid has no Translation property, and stopping
+        // an animation on a property that does not exist throws ("The
+        // specified property was not found"; box, 2026-11-19: every launch
+        // died here in RefreshNotices). Give it the property first, at rest.
         ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         Visual visual = ElementCompositionPreview.GetElementVisual(card);
-        // A card that never arrived has no Translation property, and stopping
-        // an animation on a property that does not exist throws ("The
-        // specified property was not found", the app's first notice at
-        // launch). Give it the property first, at rest.
-        ElementCompositionPreview.SetIsTranslationEnabled(card, true);
         visual.Properties.InsertVector3("Translation", System.Numerics.Vector3.Zero);
         visual.StopAnimation("Opacity");
         visual.StopAnimation("Translation.Y");
@@ -1309,6 +1422,12 @@ internal static class WindowMinimumSize
     public static void Set(IntPtr hwnd, int width, int height)
     {
         Minimums[hwnd] = (width, height);
+        Watch(hwnd);
+    }
+
+    /// <summary>Hears <see cref="Resumed"/> on <paramref name="hwnd"/>, with no minimum size yet.</summary>
+    public static void Watch(IntPtr hwnd)
+    {
         if (Installed.Add(hwnd))
         {
             SetWindowSubclass(hwnd, Proc, (UIntPtr)1, UIntPtr.Zero);

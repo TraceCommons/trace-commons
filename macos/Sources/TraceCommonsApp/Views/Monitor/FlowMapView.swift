@@ -457,11 +457,14 @@ struct FlowMapView: View {
         let slab = Path(roundedRect: CGRect(x: centre.x - half, y: centre.y - 5 * s, width: half * 2, height: 10 * s),
                         cornerRadius: 4 * s)
         context.fill(slab, with: .linearGradient(
-            Gradient(colors: [GlassTokens.Color.statusOff.color.opacity(0.75), GlassTokens.Color.statusOff.color]),
+            Gradient(colors: [GlassTokens.Color.mapPadSlab.color.opacity(0.75), GlassTokens.Color.mapPadSlab.color]),
             startPoint: CGPoint(x: centre.x, y: centre.y - 5 * s), endPoint: CGPoint(x: centre.x, y: centre.y + 5 * s)))
         context.fill(Path(roundedRect: CGRect(x: centre.x - 24 * s, y: centre.y + 5 * s, width: 48 * s, height: 6 * s),
                           cornerRadius: 3 * s), with: .color(GlassTokens.Color.mapNodeOff.color))
-        let steel = GlassTokens.Color.statusOff.color.opacity(0.7)
+        // The slab and the tower each take their own token, darker than
+        // statusOff in Light, so each clears 3:1 where it is drawn lightest
+        // (owner, 2026-11-20: "Raise to pass, both apps").
+        let steel = GlassTokens.Color.mapPadTower.color.opacity(0.7)
         context.fill(Path(roundedRect: CGRect(x: centre.x + 28 * s, y: centre.y - 55 * s, width: 4 * s, height: 50 * s),
                           cornerRadius: 2 * s), with: .color(steel))
         context.fill(Path(roundedRect: CGRect(x: centre.x + 14 * s, y: centre.y - 43 * s, width: 16 * s, height: 3 * s),

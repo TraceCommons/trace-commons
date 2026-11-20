@@ -7,8 +7,9 @@
 //! notifications, the opt-in offers and the Settings rows. Shells render
 //! these and never compose a sentence of their own.
 //!
-//! **Every string in this module is DRAFT, NEEDS APPROVAL.** None of it is
-//! approved core copy. It reaches shells two ways: composed into sentences
+//! **A string here is DRAFT, NEEDS APPROVAL unless its own doc line says
+//! the owner approved it** (several have been, with the date). The table
+//! reaches shells two ways: composed into sentences
 //! by [`crate::nudge_render`] (on `status.nudge.text`, `mark_text`,
 //! `reengage_due` and `digest_due`), and as the whole table through the C
 //! ABI's `tc_nudge_copy_json`. The pins in the shells' copy-surface tests
@@ -278,7 +279,7 @@ pub const DIGEST_ACTION_NOT_NOW: &str = "Not now";
 pub const OFFER_NOTIFY_VERDICTS: &str = "Tell me when traces are judged";
 /// The one-time offer to existing installs (owner decision 3). "At most
 /// twice a week" restates the N2 per-kind cap of owner decision 4 and
-/// changes with it. DRAFT, NEEDS APPROVAL.
+/// changes with it. Approved by the owner 2026-11-19.
 pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Traces you send are now judged in the background. \
      Want a notification when that happens? At most twice a week.";
 /// The one-time offer to existing installs on the Traces card (owner
@@ -306,13 +307,13 @@ pub const SETTING_SUGGESTIONS_HELP: &str = "The counts behind them aren't sent."
 pub const SETTING_MARK: &str = "Mark the menu bar icon when something is new";
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P245).
 pub const SETTING_MARK_HELP: &str = "The number shows instead while traces wait for you.";
-/// DRAFT, NEEDS APPROVAL.
+/// Approved by the owner 2026-11-19.
 pub const SETTING_NOTIFY_MASTER: &str = concat!("Notifications from ", crate::app_name!());
 /// [`SETTING_NOTIFY_MASTER`]'s help text: the minimum gap of owner
 /// decision 4, which [`SETTING_NOTIFY_BUDGET_HELP`] no longer states.
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P237).
 pub const SETTING_NOTIFY_MASTER_TOOLTIP: &str = "They never arrive close together.";
-/// DRAFT, NEEDS APPROVAL.
+/// Approved by the owner 2026-11-19.
 pub const SETTING_DIGEST: &str = "Waiting and contributed traces";
 /// Under the Interval schedule, with the `{hours}` placeholder. It
 /// replaced the Settings line `SettingsWords.at_most_one_notification`,
@@ -326,7 +327,7 @@ pub const SETTING_DIGEST_HELP_INTERVAL_ONE: &str =
 /// Under the Evening schedule. Approved by the owner 2026-11-04 (Settings copy pass 2, P253).
 pub const SETTING_DIGEST_HELP_EVENING: &str =
     "At most one each evening, only when traces are waiting.";
-/// DRAFT, NEEDS APPROVAL.
+/// Approved by the owner 2026-11-19.
 pub const SETTING_NOTIFY_VERDICTS: &str = "When traces you sent are judged";
 /// Approved by the owner 2026-11-04 (Settings copy pass 2, P247), with "a
 /// few days" kept: idle strings state the threshold (owner rule, tested by

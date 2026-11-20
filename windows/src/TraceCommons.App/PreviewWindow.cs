@@ -1,5 +1,8 @@
 using System;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using TraceCommons.Interop.Shell;
+using Windows.Graphics;
 using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 
@@ -41,9 +44,51 @@ public sealed class PreviewWindow : Window
         _sheet.Decided += OnDecided;
         _sheet.CloseRequested += Close;
         Content = _sheet;
+        // Settings > General's appearance, as on every window (WindowAppearance).
+        WindowAppearance.Follow(this, _sheet);
         WindowClocks.Watch(this);
+        FitToSheet(null);
 
         Closed += OnClosed;
+    }
+
+    /// <summary>The Mac's sheet measure, 760 by 620 (PreviewSheet.swift:729-731).</summary>
+    private const double SheetWidth = 760, SheetHeight = 620;
+
+    /// <summary>
+    /// Opens at the Mac's sheet measure, inside the work area and centred in
+    /// it. The system's default size (754 by 512 on a 1024 by 768 screen)
+    /// was under the sheet's own floor, so its action row sat below the
+    /// window and Tab reached Not this one and Close where nothing could be
+    /// seen (box tab walk, 2026-11-19).
+    /// </summary>
+    /// <summary>Places the window on the monitor of <paramref name="owner"/>, as About is.</summary>
+    public void PlaceNear(AppWindow owner) => FitToSheet(owner);
+
+    private void FitToSheet(AppWindow? owner)
+    {
+        DisplayArea display = DisplayArea.GetFromWindowId((owner ?? AppWindow).Id, DisplayAreaFallback.Nearest);
+        RectInt32 work = display.WorkArea;
+        double scale = MonitorScale.For(AppWindow);
+        AppWindow.ResizeClient(new SizeInt32(
+            Math.Min(work.Width, MonitorPaneLayout.ToPhysical(SheetWidth, scale)),
+            Math.Min(work.Height, MonitorPaneLayout.ToPhysical(SheetHeight, scale))));
+
+        // The frame adds to the client: take what overhangs the work area
+        // off the client again.
+        SizeInt32 outer = AppWindow.Size;
+        if (outer.Height > work.Height || outer.Width > work.Width)
+        {
+            SizeInt32 client = AppWindow.ClientSize;
+            AppWindow.ResizeClient(new SizeInt32(
+                Math.Max(1, client.Width - Math.Max(0, outer.Width - work.Width)),
+                Math.Max(1, client.Height - Math.Max(0, outer.Height - work.Height))));
+            outer = AppWindow.Size;
+        }
+
+        AppWindow.Move(new PointInt32(
+            work.X + Math.Max(0, (work.Width - outer.Width) / 2),
+            work.Y + Math.Max(0, (work.Height - outer.Height) / 2)));
     }
 
     /// <summary>

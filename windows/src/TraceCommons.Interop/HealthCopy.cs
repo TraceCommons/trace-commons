@@ -66,6 +66,34 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
     /// A null or empty label is health, not an unknown condition: the daemon
     /// expresses "fine" as the absence of a label.
     /// </remarks>
+    /// <summary>
+    /// The core's title for a background service that is not running
+    /// (<c>health_copy::core_down_copy</c>, <c>tc_health_copy_json</c> with
+    /// reachable 0), which the Mac draws over a refused start
+    /// (<c>StartupRefusedBanner</c>); empty when the library could not be read.
+    /// </summary>
+    public static string CoreDownTitle()
+    {
+        try
+        {
+            string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_health_copy_json(0, null, 0));
+            if (json is null)
+            {
+                return string.Empty;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("title", out JsonElement title)
+                && title.ValueKind == JsonValueKind.String
+                ? title.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (Exception)
+        {
+            return string.Empty;
+        }
+    }
+
     public static HealthCopy? ForLabel(string? label)
     {
         if (string.IsNullOrEmpty(label))

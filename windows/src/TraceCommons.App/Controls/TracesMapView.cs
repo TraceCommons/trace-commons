@@ -25,6 +25,7 @@ using TraceCommons.Interop.Shell;
 using Windows.Foundation;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -255,6 +256,8 @@ public sealed partial class TracesMapView : UserControl
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         ActualThemeChanged += (_, _) => { DropResources(); Redraw(); };
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { DropResources(); Redraw(); });
         ApplyWords();
     }
 
@@ -942,7 +945,7 @@ public sealed partial class TracesMapView : UserControl
 
     // ---- Colours ------------------------------------------------------
 
-    private bool Dark => ActualTheme == ElementTheme.Dark;
+    private bool Dark => ThemeBrushes.Dark;
 
     private bool HighContrast => _accessibility.HighContrast;
 
@@ -1395,7 +1398,10 @@ public sealed partial class TracesMapView : UserControl
     private void DrawPad(CanvasDrawingSession ds, ICanvasResourceCreator device, MapPoint c, double s, double dim)
     {
         float half = (float)(FlowMapScene.PadHalfWidth * s);
-        Color off = Ink("statusOff", dim);
+        // The slab and the tower take their own tokens, darker than
+        // statusOff in light, so each clears 3:1 where it is drawn lightest
+        // (owner, 2026-11-20: "Raise to pass, both apps").
+        Color off = Ink("mapPadSlab", dim);
         using (var slab = new CanvasLinearGradientBrush(device, With(off, 0.75), off)
         {
             StartPoint = new Vector2((float)c.X, (float)(c.Y - 5 * s)),
@@ -1406,7 +1412,7 @@ public sealed partial class TracesMapView : UserControl
         }
 
         ds.FillRoundedRectangle(new Rect(c.X - 24 * s, c.Y + 5 * s, 48 * s, 6 * s), (float)(3 * s), (float)(3 * s), Ink("mapNodeOff", dim));
-        Color steel = Ink("statusOff", 0.7 * dim);
+        Color steel = Ink("mapPadTower", 0.7 * dim);
         ds.FillRoundedRectangle(new Rect(c.X + 28 * s, c.Y - 55 * s, 4 * s, 50 * s), (float)(2 * s), (float)(2 * s), steel);
         ds.FillRoundedRectangle(new Rect(c.X + 14 * s, c.Y - 43 * s, 16 * s, 3 * s), (float)(1.5 * s), (float)(1.5 * s), steel);
         ds.FillRoundedRectangle(new Rect(c.X + 18 * s, c.Y - 27 * s, 12 * s, 3 * s), (float)(1.5 * s), (float)(1.5 * s), steel);

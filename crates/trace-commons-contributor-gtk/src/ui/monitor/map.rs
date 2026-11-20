@@ -1830,6 +1830,11 @@ pub struct MapColours {
     pub status_ask: gtk::gdk::RGBA,
     pub status_outside: gtk::gdk::RGBA,
     pub node_off: gtk::gdk::RGBA,
+    /// The launch pad's slab and service tower (`mapPadSlab`,
+    /// `mapPadTower`): statusOff in Dark, darker in Light so each clears
+    /// 3:1 where it is drawn lightest (owner, 2026-11-20).
+    pub pad_slab: gtk::gdk::RGBA,
+    pub pad_tower: gtk::gdk::RGBA,
     /// The folder rules' fills: share automatically, ask, never, unset.
     pub rule_fills: [gtk::gdk::RGBA; 4],
     pub credential_on: gtk::gdk::RGBA,
@@ -1885,6 +1890,8 @@ impl MapColours {
             status_ask: pick(l::STATUS_ASK, d::STATUS_ASK),
             status_outside: pick(l::STATUS_OUTSIDE, d::STATUS_OUTSIDE),
             node_off: pick(l::MAP_NODE_OFF, d::MAP_NODE_OFF),
+            pad_slab: pick(l::MAP_PAD_SLAB, d::MAP_PAD_SLAB),
+            pad_tower: pick(l::MAP_PAD_TOWER, d::MAP_PAD_TOWER),
             rule_fills: [
                 pick(l::MAP_RULE_AUTO_FILL, d::MAP_RULE_AUTO_FILL),
                 pick(l::MAP_RULE_ASK_FILL, d::MAP_RULE_ASK_FILL),
@@ -1997,6 +2004,8 @@ impl MapColours {
             status_ask: c(p.status_ask),
             status_outside: c(p.status_outside),
             node_off: c(p.line),
+            pad_slab: c(p.tertiary),
+            pad_tower: c(p.tertiary),
             rule_fills: [
                 c(p.bg.mix(p.status_on, 0.2)),
                 c(p.bg.mix(p.status_ask, 0.2)),
@@ -2679,7 +2688,7 @@ fn draw_destination(
 /// beside it; the line out lands on its left edge (`FlowMapView.drawPad`).
 fn draw_pad(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, dim: f64) {
     let half = map_scene::PAD_HALF_WIDTH * s;
-    let steel = palette.map.status_off;
+    let steel = palette.map.pad_slab;
     rounded(
         cr,
         centre.x - half,
@@ -2719,7 +2728,7 @@ fn draw_pad(cr: &gtk::cairo::Context, centre: Point, s: f64, palette: &Palette, 
         (18.0, -27.0, 12.0, 3.0, 1.5),
     ] {
         rounded(cr, centre.x + x * s, centre.y + y * s, w * s, h * s, r * s);
-        source(cr, &steel, 0.7 * dim);
+        source(cr, &palette.map.pad_tower, 0.7 * dim);
         let _ = cr.fill();
     }
 }
@@ -3774,9 +3783,9 @@ mod tests {
     /// Every word the map draws (`Word::ALL`, the only colours its text
     /// calls take) is opaque and clears 4.5:1 on every ground it is drawn
     /// on, in the standard look light and dark and in every Omarchy
-    /// palette. The Mac's statusOff sublabel (#8a8a90) measured 3.43:1 on
-    /// white and 3.09:1 on the light pane, and its dark tertiary text is
-    /// translucent (0.84).
+    /// palette. The Mac's statusOff sublabel (#78787f since 2026-11-20, was
+    /// #8a8a90) measures 4.38:1 on white and 3.95:1 on the light pane, and
+    /// its dark tertiary text is translucent (0.84).
     #[test]
     fn the_map_secondary_labels_clear_the_text_floor() {
         let mut failures = Vec::new();
@@ -3817,6 +3826,8 @@ mod tests {
             for (fill, mac_fill) in [
                 (drawn.status_on, mac.status_on),
                 (drawn.status_ask, mac.status_ask),
+                (drawn.pad_slab, mac.pad_slab),
+                (drawn.pad_tower, mac.pad_tower),
                 (drawn.status_outside, mac.status_outside),
                 (drawn.orb_shared, mac.orb_shared),
                 (drawn.orb_kept, mac.orb_kept),
@@ -3831,7 +3842,7 @@ mod tests {
         let light = MapColours::resolve(false, &Inks::standard(false));
         assert_ne!(
             light.sublabel,
-            parse("#8a8a90"),
+            MapColours::scheme(false).status_off,
             "the sublabel was not raised"
         );
         let (_, _, _, grounds) = every_look().remove(0);
@@ -4414,7 +4425,7 @@ mod tests {
 
     /// A node's words are in the Mac's text colours, not the theme's ink
     /// (`FlowMapView.drawNode`): its name in the primary text colour, its
-    /// sublabel in statusOff's text twin (#8a8a90 raised to the 4.5:1
+    /// sublabel in statusOff's text twin (#78787f raised to the 4.5:1
     /// floor, `the_standard_map_is_the_macs_raised_only_to_the_floor`),
     /// both faded with the node; a "+N" in the tertiary text colour.
     #[test]
@@ -4435,7 +4446,7 @@ mod tests {
         let (label, sublabel) = node_word_colours(&node, &palette);
         assert_eq!(label, parse("#1d1d1f").with_alpha(0.5));
         assert_eq!(sublabel, palette.map.sublabel.with_alpha(0.5));
-        assert_ne!(palette.map.sublabel, parse("#8a8a90"));
+        assert_ne!(palette.map.sublabel, parse("#78787f"));
         assert_eq!(overflow_colour(&palette), parse("#3d3d43"));
         let dark = Palette {
             map: MapColours::resolve(true, &crate::ui::style::Inks::standard(true)),

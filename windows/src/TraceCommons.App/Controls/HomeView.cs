@@ -17,6 +17,7 @@ using TraceCommons.Interop.Generated;
 using TraceCommons.Interop.Shell;
 using Windows.UI;
 using Windows.UI.ViewManagement;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -41,6 +42,7 @@ public sealed class HomeView : UserControl
     private readonly List<HeroGlyphView> _glyphs = new();
     private readonly Stopwatch _burstClock = new();
     private HomeOverviewModel? _model;
+    private string? _drawnTheme;
     private TextBlock? _balanceValue;
     private FrameworkElement? _balanceTile;
     private IReadOnlyList<long> _countSteps = Array.Empty<long>();
@@ -93,15 +95,18 @@ public sealed class HomeView : UserControl
             _loaded = true;
             WindowClocks.Changed -= OnWindowClocks;
             WindowClocks.Changed += OnWindowClocks;
-            SystemSettingWatch.Changed -= UpdateClocks;
-            SystemSettingWatch.Changed += UpdateClocks;
-            UpdateClocks();
+            SystemSettingWatch.Changed -= OnSystemSettings;
+            SystemSettingWatch.Changed += OnSystemSettings;
+            ThemeBrushes.Changed -= OnSystemSettings;
+            ThemeBrushes.Changed += OnSystemSettings;
+            OnSystemSettings();
         };
         Unloaded += (_, _) =>
         {
             _loaded = false;
             WindowClocks.Changed -= OnWindowClocks;
-            SystemSettingWatch.Changed -= UpdateClocks;
+            SystemSettingWatch.Changed -= OnSystemSettings;
+            ThemeBrushes.Changed -= OnSystemSettings;
             UpdateClocks();
             EndBurst();
         };
@@ -109,6 +114,21 @@ public sealed class HomeView : UserControl
     }
 
     private void OnWindowClocks(bool running) => DispatcherQueue.TryEnqueue(UpdateClocks);
+
+    /// <summary>
+    /// The clocks follow the motion setting; the cards, whose colours are
+    /// picked in code, are drawn again when the theme or a high contrast
+    /// theme changes (ThemeBrushes).
+    /// </summary>
+    private void OnSystemSettings()
+    {
+        UpdateClocks();
+        if (_model is HomeOverviewModel model && _drawnTheme != ThemeBrushes.Key)
+        {
+            _model = null;
+            Show(model);
+        }
+    }
 
     /// <summary>Where a tile or a hero leads; the window opens it.</summary>
     public event Action<HomeLink>? LinkRequested;
@@ -158,12 +178,13 @@ public sealed class HomeView : UserControl
     /// <summary>Draws <paramref name="model"/>. Only what changed is rebuilt; the glyphs keep their clock.</summary>
     public void Show(HomeOverviewModel model)
     {
-        if (model.Same(_model))
+        if (model.Same(_model) && _drawnTheme == ThemeBrushes.Key)
         {
             return;
         }
 
         _model = model;
+        _drawnTheme = ThemeBrushes.Key;
         _column.Children.Clear();
         _glyphs.Clear();
         _balanceValue = null;
@@ -263,14 +284,14 @@ public sealed class HomeView : UserControl
         {
             Text = signIn.NoData,
             Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
-            Foreground = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         });
         var dash = new TextBlock
         {
             Text = "\u2013",
             Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
-            Foreground = (Brush)Application.Current.Resources["TcInkTertiaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkTertiaryBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         };
         AutomationProperties.SetAccessibilityView(dash, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
@@ -318,7 +339,7 @@ public sealed class HomeView : UserControl
                 HorizontalContentAlignment = HorizontalAlignment.Left,
                 Padding = new Thickness(12, 10, 12, 10),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+                Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
             };
             AutomationProperties.SetName(button, section.Heading);
             AutomationProperties.SetHelpText(button, string.Join(", ", figures.Select(f => f.Value + " " + f.Label)));
@@ -332,7 +353,7 @@ public sealed class HomeView : UserControl
                 ColumnSpacing = HomeTrayInks.Measures.S4,
                 Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 10, HomeTrayInks.Measures.CardPaddingHorizontal, 10),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-                Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+                Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
             };
             card.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             card.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -375,7 +396,7 @@ public sealed class HomeView : UserControl
             ColumnSpacing = HomeTrayInks.Measures.S3,
             Padding = new Thickness(HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3, HomeTrayInks.Measures.S5, HomeTrayInks.Measures.S3),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.ControlRadius),
-            Background = new SolidColorBrush(Faded((Brush)Application.Current.Resources["TcStatusAskBrush"], 0.12)),
+            Background = new SolidColorBrush(Faded(ThemeBrushes.Get("TcStatusAskBrush"), 0.12)),
         };
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -384,7 +405,7 @@ public sealed class HomeView : UserControl
         {
             Glyph = "\uEB90",
             FontSize = 14,
-            Foreground = (Brush)Application.Current.Resources["TcStatusAskBrush"],
+            Foreground = ThemeBrushes.Get("TcStatusAskBrush"),
             VerticalAlignment = VerticalAlignment.Center,
         };
         AutomationProperties.SetAccessibilityView(mark, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
@@ -445,7 +466,7 @@ public sealed class HomeView : UserControl
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Padding = new Thickness(HomeTrayInks.Measures.CardPaddingHorizontal, 12, HomeTrayInks.Measures.CardPaddingHorizontal, 12),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
         };
         AutomationProperties.SetName(button, card.Title);
         if (card.Subtitle is string help)
@@ -497,7 +518,7 @@ public sealed class HomeView : UserControl
             VerticalAlignment = VerticalAlignment.Stretch,
             Padding = new Thickness(12, 10, 12, 10),
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
         };
 
         // Named by its visible label, its figure the help text (checklist E1).
@@ -515,23 +536,35 @@ public sealed class HomeView : UserControl
     /// </summary>
     private FrameworkElement BuildHero(HomeHero hero, HomeOverviewModel model)
     {
-        var ink = new SolidColorBrush(Argb(HomeTrayInks.HeroInk));
+        bool highContrast = SystemSettingWatch.HighContrast;
+        HeroGround ground = hero.Ground switch
+        {
+            HomeGround.Campaign => HeroGround.Campaign,
+            HomeGround.Missions => HeroGround.Missions,
+            _ => HeroGround.Insights,
+        };
+        Color inkColor = HeroColor(HeroPart.Ink, ground, highContrast);
+        var ink = new SolidColorBrush(inkColor);
         var card = new Grid
         {
             MinHeight = HeroCard.MinHeight,
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = new SolidColorBrush(Argb(HeroCard.Ground(hero.Ground switch
-            {
-                HomeGround.Campaign => HeroGround.Campaign,
-                HomeGround.Missions => HeroGround.Missions,
-                _ => HeroGround.Insights,
-            }))),
+            Background = new SolidColorBrush(HeroColor(HeroPart.Ground, ground, highContrast)),
+
+            // Under high contrast the card is outlined in the ink, as the
+            // tiles above it are.
+            BorderBrush = highContrast ? ink : null,
+            BorderThickness = new Thickness(highContrast ? 1 : 0),
         };
 
         // The graphic, behind the words, past the card's edges.
         var art = new Canvas { IsHitTestVisible = false };
         card.Children.Add(art);
-        if (hero.Symbol is string symbol && HeroGlyph.HeroMask(symbol) is HeroGlyph.Mask mask)
+        if (!HeroCard.DrawsArt(highContrast))
+        {
+            // No art under high contrast: decoration in fixed blues.
+        }
+        else if (hero.Symbol is string symbol && HeroGlyph.HeroMask(symbol) is HeroGlyph.Mask mask)
         {
             var glyph = new HeroGlyphView(mask, art);
             _glyphs.Add(glyph);
@@ -539,7 +572,7 @@ public sealed class HomeView : UserControl
         }
         else if (hero.Ground == HomeGround.Insights && model.InsightsBars.Count > 0)
         {
-            var bars = BuildInsightsBars(model.InsightsBars);
+            var bars = BuildInsightsBars(model.InsightsBars, inkColor);
             art.Children.Add(bars);
             card.SizeChanged += (_, e) =>
             {
@@ -601,7 +634,9 @@ public sealed class HomeView : UserControl
         {
             words.Children.Add(new Border
             {
-                Background = new SolidColorBrush(Argb(HomeTrayInks.HeroButtonFill)),
+                Background = new SolidColorBrush(HeroColor(HeroPart.PillFill, ground, highContrast)),
+                BorderBrush = highContrast ? ink : null,
+                BorderThickness = new Thickness(highContrast ? 1 : 0),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.PillRadius),
                 Padding = new Thickness(HeroCard.PillPaddingX, HeroCard.PillPaddingY, HeroCard.PillPaddingX, HeroCard.PillPaddingY),
                 Margin = new Thickness(0, HomeTrayInks.Measures.S1, 0, 0),
@@ -611,7 +646,7 @@ public sealed class HomeView : UserControl
                     Text = action,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = HomeTrayInks.Measures.LabelSize,
-                    Foreground = new SolidColorBrush(Argb(HomeTrayInks.HeroButtonInk)),
+                    Foreground = new SolidColorBrush(HeroColor(HeroPart.PillInk, ground, highContrast)),
                 },
             });
         }
@@ -649,7 +684,7 @@ public sealed class HomeView : UserControl
         // at 0.75, whole under the pointer (HeroCard.swift:197-224).
         var outer = new Grid();
         outer.Children.Add(button);
-        var glyphInk = new SolidColorBrush(Argb(HomeTrayInks.HeroInk)) { Opacity = HeroCard.CloseInk };
+        var glyphInk = new SolidColorBrush(inkColor) { Opacity = HeroCard.CloseInk };
         var close = new Button
         {
             Content = new FontIcon { Glyph = "", FontSize = HeroCard.CloseGlyph, Foreground = glyphInk },
@@ -674,11 +709,10 @@ public sealed class HomeView : UserControl
     /// from 0.95 to 0.45, cut off by the card's bottom edge
     /// (HomeInsightsVisual.swift:61-85).
     /// </summary>
-    private static FrameworkElement BuildInsightsBars(IReadOnlyList<GlanceBar> bars)
+    private static FrameworkElement BuildInsightsBars(IReadOnlyList<GlanceBar> bars, Color ink)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom };
         ulong most = bars[0].Tokens;
-        Color ink = Argb(HomeTrayInks.HeroInk);
         foreach (GlanceBar bar in bars)
         {
             var fill = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(0, 1) };
@@ -696,6 +730,22 @@ public sealed class HomeView : UserControl
         }
 
         return row;
+    }
+
+    /// <summary>
+    /// A hero part's colour (<see cref="HeroCard.Ink"/>): the Mac's literal,
+    /// or under high contrast the theme brush the Home tiles take, read now.
+    /// </summary>
+    private static Color HeroColor(HeroPart part, HeroGround ground, bool highContrast)
+    {
+        HeroInk ink = HeroCard.Ink(part, ground, highContrast);
+        if (ink.ThemeKey is string key && ThemeBrushes.Get(key) is SolidColorBrush themed)
+        {
+            return themed.Color;
+        }
+
+        // A key that did not resolve keeps the Mac's colour, never a blank.
+        return Argb(ink.ThemeKey is null ? ink.Argb : HeroCard.Ink(part, ground, highContrast: false).Argb);
     }
 
     /// <summary>A fade over the fast token (0.15 s) on the token curve (0.2, 0.8, 0.2, 1).</summary>

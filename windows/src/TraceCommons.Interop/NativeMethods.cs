@@ -37,7 +37,7 @@ namespace TraceCommons.Interop;
 ///    and is absolute: owned means returned <c>char*</c>, borrowed means
 ///    <c>const char*</c> and lives until its owning handle is freed.
 /// </summary>
-internal static class NativeMethods
+internal static partial class NativeMethods
 {
     // Windows activation argument parsing; these are OS imports, not C ABI exports.
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -158,7 +158,8 @@ internal static class NativeMethods
     /// tc_subscribe, declaring the opt-in events this subscriber can draw
     /// (<c>subscribe</c>'s <c>accepts</c>) as a borrowed JSON array of names;
     /// the window declares <c>feature_flags_changed</c>, as the Mac does
-    /// (AppModel.swift:1859). Lifetime rules are tc_subscribe's.
+    /// (AppModel.swift:1859), and <c>reengage_due</c> while it can show one.
+    /// Null declares none and is exactly tc_subscribe. Lifetime rules are tc_subscribe's.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern ulong tc_subscribe_with_accepts(
@@ -174,6 +175,15 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_feature_profile_json();
+
+    /// <summary>
+    /// Can this process reach the Cloud credential store (on Windows, the
+    /// Credential Manager)? 0 reachable, 1 unentitled (macOS only), 2
+    /// otherwise. Reads a reference that was never stored and writes nothing.
+    /// See <see cref="CredentialStoreCheck"/>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_credential_store_self_check();
 
     /// <summary>
     /// The ABI's only real barrier: blocks until the callback is guaranteed
@@ -1448,20 +1458,31 @@ internal static class NativeMethods
     internal static extern IntPtr tc_shell_words_copy_json();
 
     /// <summary>
+    /// The core's nudge table (<c>nudge_copy</c>): every fixed nudge word,
+    /// key to text, as a JSON object, the Traces order control's words among
+    /// them (NudgeCopy.swift). Free with tc_string_free. NULL only on a
+    /// caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_nudge_copy_json();
+
+    /// <summary>
+    /// The digest switch's help for the schedule in
+    /// <paramref name="settingsJson"/> (<c>digest_interval_secs</c>,
+    /// <c>digest_schedule</c>), as <c>{"digest_help": ...}</c>. Free with
+    /// tc_string_free.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_nudge_digest_help_json(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? settingsJson);
+
+    /// <summary>
     /// The glass monitor's Traces words (<c>preview_copy::monitor_traces_copy</c>)
     /// as an owned JSON object; the window reads its <c>dismiss_action</c>,
     /// the Mac's <c>coreDismissWord</c>. NULL only on a caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_monitor_traces_copy_json();
-
-    /// <summary>
-    /// The nudge words (<c>nudge_copy</c>), keyed by constant name: the
-    /// Traces order control's words among them (NudgeCopy.swift). NULL only
-    /// on a caught panic.
-    /// </summary>
-    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr tc_nudge_copy_json();
 
     /// <summary>
     /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)
