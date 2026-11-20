@@ -815,12 +815,15 @@ public sealed class HomeView : UserControl
 
     private void DrawGlyphs()
     {
+        long begun = LookFrames.Begin();
         double time = PixelField.Time(DateTimeOffset.UtcNow, still: !AnimationsOn);
         bool dark = ActualTheme != ElementTheme.Light;
         foreach (HeroGlyphView glyph in _glyphs)
         {
             glyph.Draw(time, dark);
         }
+
+        LookFrames.End("home-glyphs", begun);
     }
 
     /// <summary>

@@ -56,6 +56,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $log = Join-Path $OutDir "$Tag.drive.log"
 $tsv = Join-Path $OutDir "$Tag.perf.tsv"
+# The app's look log (TRACE_COMMONS_LOOK_LOG): clock lines and, once a
+# second, each drawn surface's frame line (LookFrames), read per window.
+$lookLog = Join-Path $OutDir "$Tag.look.log"
+Remove-Item -Force -EA SilentlyContinue $lookLog
 function Log([string] $s) {
     $line = "[{0}] {1}`r`n" -f (Get-Date).ToString('HH:mm:ss.fff'), $s
     for ($i = 0; $i -lt 40; $i++) {
@@ -115,6 +119,7 @@ function Snapshot() {
         Machine = [PerfProbe]::MachineBusyMs()
         Self = [PerfProbe]::ProcessMs($self)
         Frames = [PerfProbe]::DwmFrames()
+        Utc = [DateTime]::UtcNow
     }
 }
 function Row([string] $label, [int] $win, [double] $since, $a, $b, [string] $ping) {
@@ -131,11 +136,27 @@ function Row([string] $label, [int] $win, [double] $since, $a, $b, [string] $pin
     if (-not $byModule) { $byModule = '-' }
     $secs = ($b.T - $a.T) / [Diagnostics.Stopwatch]::Frequency
     $dwm = if ($a.Dwm -ge 0 -and $b.Dwm -ge 0) { [int]($b.Dwm - $a.Dwm) } else { -1 }
-    $frames = if ($a.Frames -ge 0 -and $b.Frames -ge 0) { $b.Frames - $a.Frames } else { -1 }
+    $dwmFrames = if ($a.Frames -ge 0 -and $b.Frames -ge 0) { $b.Frames - $a.Frames } else { -1 }
     $mem = [PerfProbe]::Memory($appPid)
-    $line = "{0}`t{1}`t{2:0.0}`t{3:0}`t{4:0}`t{5:0}`t{6}`t{7:0}`t{8:0}`t{9}`t{10}`t{11}`t{12}`t{13:0.0}`t{14}" -f $Tag, $label, $win, ($b.App - $a.App), $uiMs, $other, $dwm, ($b.Machine - $a.Machine), ($b.Self - $a.Self), $frames, ($ping -replace ' ', "`t"), ($mem -replace ' ', "`t"), $since, $secs, $byModule
+    # Each surface's frames in the window, from the app's look log (LookFrames).
+    $fr = @{}
+    if (Test-Path $lookLog) {
+        foreach ($l in [IO.File]::ReadAllLines($lookLog)) {
+            if ($l -notmatch '^(\S+) frames (\S+) n=(\d+) over=([\d.]+)s fps=[\d.]+ draw_mean=([\d.]+)ms draw_max=([\d.]+)ms gap_max=([\d.]+)ms') { continue }
+            $t = [DateTime]::Parse($matches[1]).ToUniversalTime()
+            if ($t -le $a.Utc -or $t -gt $b.Utc) { continue }
+            $k = $matches[2]
+            if (-not $fr.ContainsKey($k)) { $fr[$k] = @{ N = 0; Over = 0.0; Draw = 0.0; Gap = 0.0 } }
+            $e = $fr[$k]; $n = [int]$matches[3]
+            $e.N += $n; $e.Over += [double]$matches[4]; $e.Draw += $n * [double]$matches[5]
+            $e.Gap = [Math]::Max($e.Gap, [double]$matches[7])
+        }
+    }
+    $frames = ($fr.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}:fps={1:0.0},draw={2:0.0}ms,gap={3:0}ms' -f $_.Name, ($_.Value.N / [Math]::Max(0.001, $_.Value.Over)), ($_.Value.Draw / [Math]::Max(1, $_.Value.N)), $_.Value.Gap }) -join ' '
+    if (-not $frames) { $frames = '-' }
+    $line = "{0}`t{1}`t{2:0.0}`t{3:0}`t{4:0}`t{5:0}`t{6}`t{7:0}`t{8:0}`t{9}`t{10}`t{11}`t{12}`t{13:0.0}`t{14}`t{15}" -f $Tag, $label, $win, ($b.App - $a.App), $uiMs, $other, $dwm, ($b.Machine - $a.Machine), ($b.Self - $a.Self), $dwmFrames, ($ping -replace ' ', "`t"), ($mem -replace ' ', "`t"), $since, $secs, $byModule, $frames
     [IO.File]::AppendAllText($tsv, $line + "`r`n")
-    Log ("  {0} w{1} app={2:0} ui={3:0} other={4:0}(tid {5}) dwm={6} machine={7:0} self={8:0} frames={9} ping[n p50 p95 max >50]={10} mem[ws priv]={11} threads={12}" -f $label, $win, ($b.App - $a.App), $uiMs, $other, $otherId, $dwm, ($b.Machine - $a.Machine), ($b.Self - $a.Self), $frames, $ping, $mem, $byModule)
+    Log ("  {0} w{1} app={2:0} ui={3:0} other={4:0}(tid {5}) dwm={6} machine={7:0} self={8:0} ping[n p50 p95 max >50]={10} mem[ws priv]={11} threads={12} frames={13}" -f $label, $win, ($b.App - $a.App), $uiMs, $other, $otherId, $dwm, ($b.Machine - $a.Machine), ($b.Self - $a.Self), $dwmFrames, $ping, $mem, $byModule, $frames)
 }
 
 # Runs $n windows of $secs, calling $activity (if any) in a loop meanwhile.
@@ -160,7 +181,7 @@ function MeasureWindows([string] $label, [int] $n, [double] $secs, [scriptblock]
 $animBefore = [W]::Anim()
 Log "dwm timing: $([PerfProbe]::DwmDebug())"
 Log "== $Tag exe=$Exe display=$([W]::GetSystemMetrics(0))x$([W]::GetSystemMetrics(1)) cores=$([Environment]::ProcessorCount) animations=$animBefore session=$((Get-Process -Id $PID).SessionId)"
-"tag`tlabel`twindow`tapp_ms`tui_ms`tother_ms`tdwm_ms`tmachine_ms`tharness_ms`tdwm_frames`tping_n`tping_p50`tping_p95`tping_max`tping_over50`tws_mb`tprivate_mb`tsince_s`tsecs`tother_threads_by_start_module" | Set-Content -Path $tsv -Encoding ascii
+"tag`tlabel`twindow`tapp_ms`tui_ms`tother_ms`tdwm_ms`tmachine_ms`tharness_ms`tdwm_frames`tping_n`tping_p50`tping_p95`tping_max`tping_over50`tws_mb`tprivate_mb`tsince_s`tsecs`tother_threads_by_start_module`tframes_by_surface" | Set-Content -Path $tsv -Encoding ascii
 try {
     foreach ($raw in Get-Content $Plan) {
         $line = ($raw -replace '#.*$', '').Trim().Replace('{throttle}', $Throttle)
@@ -174,7 +195,8 @@ try {
                     $t = $Throttles[$a[2]]
                     if (-not $t) { throw "unknown throttle $($a[2])" }
                     $env:TRACE_COMMONS_SAMPLE = $a[1]
-                    $set = @('TRACE_COMMONS_SAMPLE')
+                    $env:TRACE_COMMONS_LOOK_LOG = $lookLog
+                    $set = @('TRACE_COMMONS_SAMPLE', 'TRACE_COMMONS_LOOK_LOG')
                     foreach ($opt in $a[3..($a.Count)]) {
                         if ($opt -like 'step=*') { $env:TRACE_COMMONS_FIRST_RUN_STEP = $opt.Substring(5); $set += 'TRACE_COMMONS_FIRST_RUN_STEP' }
                         if ($opt -like 'extra=*') { $env:TRACE_COMMONS_SAMPLE_EXTRA = $opt.Substring(6); $set += 'TRACE_COMMONS_SAMPLE_EXTRA' }

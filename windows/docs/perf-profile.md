@@ -70,7 +70,16 @@ no GPU spends more in DWM than the box shows.
 | `dwm_frames` | DWM's composed-frame count; on the box's Hyper-V display it does not advance, so it reads 1 or 0 |
 | `ping_*` | WM_NULL round trips to the window every 50 ms from another thread: a message waits until the UI thread pumps, so this is how long a click or a key waits to be seen. `over50` counts trips over 50 ms |
 | `ws_mb`, `private_mb` | working set and private bytes at the end of the window |
+| `frames_by_surface` | each drawn surface's frames per second, mean draw-handler time and longest gap between frames, from the app's look log (see below) |
 | `other_threads_by_start_module` | the other threads' CPU grouped by the module they started in: `ntdll` is the thread pool (WARP's rasteriser works there), `dwmcorei` WinUI's compositor, `coreclr` the GC and JIT |
+
+Every launch sets `TRACE_COMMONS_LOOK_LOG` to `<OutDir>\<Tag>.look.log`. The
+app's `LookFrames` writes one line a second for each surface it draws there
+(`stage` for the first-run stage, `map` and `map-still` for the Traces
+map's two layers, `home-glyphs` for Home's hero glyphs). The handler's time
+leaves out the rasterising Direct2D does after the handler returns, so the
+frame rate, not the handler time, shows a frame that is too slow. Nothing
+is timed unless the variable is set.
 
 `respond <label> <Name>` clicks a control and times until the window's
 pixels change, read with `PrintWindow`; each read takes tens of

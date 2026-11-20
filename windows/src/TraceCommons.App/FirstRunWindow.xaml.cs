@@ -26,6 +26,8 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text;
 using Windows.UI.ViewManagement;
 
+using TraceCommons.App.Look;
+
 namespace TraceCommons.App;
 
 /// <summary>
@@ -509,11 +511,13 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        long begun = LookFrames.Begin();
         double now = Now;
         _painter.Draw(args.DrawingSession, sender, _model, _reduceMotion ? now + 1e6 : now, sender.ActualWidth, sender.ActualHeight,
             tracesCountText: TracesCount(now), tracesCaption: _copy?.Traces.OnThisComputer,
             privateAIPill: _privateCopy?.StatInferenceAccess is { Length: > 0 } pill ? pill : null,
             usesCaptions: _copy is null ? null : new[] { Copy.Uses.ThisComputer, UsesGateLabel(), Copy.Uses.TheCommons });
+        LookFrames.End("stage", begun);
     }
 
     private string TracesCount(double now)

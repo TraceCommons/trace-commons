@@ -108,7 +108,7 @@ public class MovingLayerBoundsTests
     public void TheMovingCanvasIsSizedToTheBoxAndDrawnThroughItsOffset()
     {
         string source = Source();
-        string draw = Method(source, "private void OnDraw(");
+        string draw = Method(source, "private void DrawMoving(");
         Assert.Contains("sender.ActualOffset", draw, StringComparison.Ordinal);
         Assert.Contains("ds.Transform = Matrix3x2.CreateTranslation(-offset.X, -offset.Y)", draw, StringComparison.Ordinal);
 

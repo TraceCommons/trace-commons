@@ -1068,6 +1068,19 @@ public sealed partial class TracesMapView : UserControl
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        long begun = LookFrames.Begin();
+        try
+        {
+            DrawMoving(sender, args);
+        }
+        finally
+        {
+            LookFrames.End("map", begun);
+        }
+    }
+
+    private void DrawMoving(CanvasControl sender, CanvasDrawEventArgs args)
+    {
         CanvasDrawingSession ds = args.DrawingSession;
         double now = Now;
         bool motion = Motion && WindowClocks.Running;
@@ -1128,6 +1141,19 @@ public sealed partial class TracesMapView : UserControl
 
     /// <summary>The field, the nodes and the overflow counts: redrawn on a change, a pointer move or a shimmer pass.</summary>
     private void OnDrawStill(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        long begun = LookFrames.Begin();
+        try
+        {
+            DrawStill(sender, args);
+        }
+        finally
+        {
+            LookFrames.End("map-still", begun);
+        }
+    }
+
+    private void DrawStill(CanvasControl sender, CanvasDrawEventArgs args)
     {
         CanvasDrawingSession ds = args.DrawingSession;
         var size = new Size(sender.ActualWidth, sender.ActualHeight);
