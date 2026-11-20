@@ -1513,11 +1513,12 @@ public sealed partial class MainWindow : Window
     /// it calls into; this handler only routes the click to the entry it
     /// came from, the same pattern <see cref="OnNotThisOne"/> follows.
     /// </remarks>
-    private async void OnSubmitEntry(object sender, RoutedEventArgs e)
+    /// <summary>An inspector trace card's Submit: the tree's, asked again at the press.</summary>
+    private void OnSubmitEntry(object sender, RoutedEventArgs e)
     {
         if (EntryOf(sender) is QueueEntryViewModel entry)
         {
-            await ViewModel.SubmitEntryAsync(entry);
+            ((ITracesTreeHost)this).SubmitTrace(entry);
         }
     }
 

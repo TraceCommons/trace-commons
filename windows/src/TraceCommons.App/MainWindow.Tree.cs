@@ -51,6 +51,7 @@ public sealed partial class MainWindow : ITracesTreeHost
         map.SnapshotRead += snapshot =>
         {
             _tree.Read(snapshot, MapFeed.CoreScansWhenUnset);
+            RefreshMaySubmit();
             QueueEmptyState.Visibility = snapshot.Ready && snapshot.Tree(MapFeed.CoreScansWhenUnset, showsIgnored: true).Folders.Count == 0
                 ? Visibility.Visible
                 : Visibility.Collapsed;
@@ -60,7 +61,25 @@ public sealed partial class MainWindow : ITracesTreeHost
         // The queue's own rows carry what the tree draws beside the map's
         // read: sizes, holds, and what Submit may send.
         ViewModel.Groups.CollectionChanged += (_, _) => _tree.Refresh();
-        ViewModel.Pending.CollectionChanged += (_, _) => _tree.Refresh();
+        ViewModel.Pending.CollectionChanged += (_, _) =>
+        {
+            _tree.Refresh();
+            RefreshMaySubmit();
+        };
+    }
+
+    /// <summary>
+    /// Each waiting trace's <see cref="QueueEntryViewModel.MaySubmit"/> from
+    /// the tree's read, so the inspector's trace cards offer Submit exactly
+    /// where the tree's rows do (TracesStore.swift:801-806).
+    /// </summary>
+    private void RefreshMaySubmit()
+    {
+        TracesTreeState? state = _tree?.State;
+        foreach (QueueEntryViewModel entry in ViewModel.Pending)
+        {
+            entry.MaySubmit = state is not null && state.MaySubmit(entry.EntryId, entry.CanContribute, entry.StateCode, entry.ReasonCode);
+        }
     }
 
     QueueGroupViewModel? ITracesTreeHost.Group(string projectId) =>
@@ -120,8 +139,7 @@ public sealed partial class MainWindow : ITracesTreeHost
     {
         QueueEntryViewModel live = ViewModel.Pending.FirstOrDefault(e => e.EntryId == entry.EntryId) ?? entry;
         TracesTreeState? state = _tree?.State;
-        bool ignored = state?.Tree.Folders.FirstOrDefault(f => f.Sessions.Any(s => s.EntryId == entry.EntryId))?.Mode == MapModes.Ignore;
-        if (state is null || !TracesTreeRows.MaySubmitTrace(live.CanContribute, state.LoggedIn, state.Ready, ignored, live.StateCode, live.ReasonCode))
+        if (state is null || !state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode))
         {
             return;
         }

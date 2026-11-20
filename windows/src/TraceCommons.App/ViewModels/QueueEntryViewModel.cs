@@ -160,6 +160,28 @@ public sealed class QueueEntryViewModel : INotifyPropertyChanged
     /// </remarks>
     public bool CanContribute => Eligibility.OffersContribute;
 
+    private bool _maySubmit;
+
+    /// <summary>
+    /// Whether this trace's Submit may send, as the Traces tree asks it
+    /// (<c>TracesTreeState.MaySubmit</c>, the Mac's <c>maySubmitSession</c>):
+    /// <see cref="CanContribute"/> and also a signed-in core that answered,
+    /// a folder not ignored and a trace not held for review. The window sets
+    /// it from each read; it is asked again at the press.
+    /// </summary>
+    public bool MaySubmit
+    {
+        get => _maySubmit;
+        set
+        {
+            if (_maySubmit != value)
+            {
+                _maySubmit = value;
+                Raise(nameof(MaySubmit));
+            }
+        }
+    }
+
     /// <summary>
     /// Whether this row carries a sentence about its eligibility. False for
     /// every row of an invited contributor's queue: absent is not a state,

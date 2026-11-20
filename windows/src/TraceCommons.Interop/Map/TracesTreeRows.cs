@@ -484,6 +484,16 @@ public static class TracesTreeRows
     public static bool MaySubmitTrace(bool offersContribute, bool? loggedIn, bool ready, bool folderIgnored, string? state, string? reasonLabel) =>
         ready && loggedIn == true && !folderIgnored && !HeldForReview(state, reasonLabel) && offersContribute;
 
+    /// <summary>
+    /// <see cref="MaySubmitTrace"/> for the trace <paramref name="entryId"/>
+    /// of <paramref name="tree"/>, its folder's mode read from the tree.
+    /// </summary>
+    public static bool MaySubmitIn(TracesTree tree, bool? loggedIn, bool ready, string entryId, bool offersContribute, string? state, string? reasonLabel)
+    {
+        bool ignored = tree.Folders.FirstOrDefault(f => f.Sessions.Any(s => s.EntryId == entryId))?.Mode == MapModes.Ignore;
+        return MaySubmitTrace(offersContribute, loggedIn, ready, ignored, state, reasonLabel);
+    }
+
     /// <summary>A trace's flag (:1016-1024): amber held or ineligible or a refused mark, green for a clear one.</summary>
     public static TreeFlag? Flag(bool held, bool ineligible, TreeAttestationTone? attestation)
     {
@@ -584,6 +594,14 @@ public sealed class TracesTreeState
 
     /// <summary><c>status.logged_in</c> from the same read; null when unread.</summary>
     public bool? LoggedIn => _read?.Status?.LoggedIn;
+
+    /// <summary>
+    /// Whether a trace's Submit may send, wherever it is drawn: the tree's
+    /// row, the inspector's trace card, and the press of either
+    /// (<see cref="TracesTreeRows.MaySubmitIn"/> over this read).
+    /// </summary>
+    public bool MaySubmit(string entryId, bool offersContribute, string? stateCode, string? reasonCode) =>
+        TracesTreeRows.MaySubmitIn(_tree, LoggedIn, Ready, entryId, offersContribute, stateCode, reasonCode);
 
     public TreeSelection? Selection { get; private set; }
 
