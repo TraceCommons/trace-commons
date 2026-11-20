@@ -50,12 +50,8 @@ fn skills_is_live_default_off_and_remotely_supported_in_nonproduction() {
     }
 }
 #[test]
-fn production_blocks_skills_red_team_and_desktop_overrides() {
-    let flags = [
-        "insights_skills",
-        "red_team_sessions",
-        "claude_desktop_private_ai",
-    ];
+fn production_blocks_skills_and_desktop_overrides() {
+    let flags = ["insights_skills", "claude_desktop_private_ai"];
     let registry = registry().unwrap();
     let profile =
         super::test_signing::pin(profile_for_environment(Environment::Production).unwrap());

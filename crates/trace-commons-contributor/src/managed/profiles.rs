@@ -1133,8 +1133,8 @@ pub fn tools() -> serde_json::Value {
     tools_with_red_team(false, false)
 }
 
-/// Like [`tools`], optionally appending the `red_team` row when the flag is on
-/// and supported on this OS.
+/// Like [`tools`], optionally appending the `red_team` row when it is supported on
+/// this OS.
 pub fn tools_with_red_team(include_red_team: bool, red_team_installed: bool) -> serde_json::Value {
     use crate::install_guides::install_guide;
     let mut rows = vec![

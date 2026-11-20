@@ -1,6 +1,6 @@
 # Red Team Managed Sessions (CLI)
 
-Red Team sessions run OpenCode inside an isolated `rts` microVM on Apple Silicon macOS behind the `red_team_sessions` feature flag. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
+Red Team sessions run OpenCode inside an isolated `rts` microVM on Apple Silicon macOS. It is available in every macOS build with no feature flag; other platforms report it unavailable. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
 
 ## Launching a Red Team session
 

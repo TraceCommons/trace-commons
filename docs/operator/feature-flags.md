@@ -41,7 +41,7 @@ disabled. The dated example manifests keep it false; these files have not been
 published.
 
 The production profile omits the capabilities and remote-enable entries for
-Skills Insights, Red Team Sandbox (`red_team_sessions`), and Claude Desktop.
+Skills Insights and Claude Desktop.
 A signed manifest, a local choice, and a process override cannot enable these
 features in that build.
 

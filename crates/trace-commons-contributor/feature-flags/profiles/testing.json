@@ -1,18 +1,16 @@
 {
   "schema_version": 1,
-  "registry_version": 5,
+  "registry_version": 6,
   "environment": "testing",
   "capabilities": [
     "claude_desktop_private_ai_v1",
     "insights_skills_v1",
-    "red_team_sessions_v1",
     "skills_catalog_suggestions_v1",
     "skills_server_catalog_v1"
   ],
   "remote_enable": [
     "claude_desktop_private_ai",
     "insights_skills",
-    "red_team_sessions",
     "skills_catalog_suggestions",
     "skills_server_catalog"
   ],

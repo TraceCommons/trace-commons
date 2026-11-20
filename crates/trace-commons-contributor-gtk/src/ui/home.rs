@@ -736,8 +736,11 @@ impl HomeView {
         self.burst.set_visible(true);
         self.burst.queue_draw();
         if !still {
-            let tick = self.burst.add_tick_callback(|area, _| {
-                area.queue_draw();
+            let pace = super::glass_motion::Pace::default();
+            let tick = self.burst.add_tick_callback(move |area, clock| {
+                if pace.due(area, clock.frame_time(), 0.0) {
+                    area.queue_draw();
+                }
                 glib::ControlFlow::Continue
             });
             *flourish.tick.borrow_mut() = Some(tick);
@@ -777,6 +780,11 @@ impl HomeView {
         let flourish = Rc::downgrade(&self.flourish);
         let latest = Rc::downgrade(&self.latest);
         let mut next = 0;
+        // The window's focus rule: 15 steps drawn a second at most while
+        // another app has the focus; the count still ends on time, at its
+        // figure.
+        let pace = super::glass_motion::Pace::default();
+        let shown = self.overlay.downgrade();
         let id = glib::timeout_add_local(
             std::time::Duration::from_millis(arrival::FRAME_MS),
             move || {
@@ -796,6 +804,13 @@ impl HomeView {
                     return glib::ControlFlow::Break;
                 };
                 next += 1;
+                let drawn = next == steps.len()
+                    || shown
+                        .upgrade()
+                        .is_none_or(|shown| pace.due(&shown, glib::monotonic_time(), 0.0));
+                if !drawn {
+                    return glib::ControlFlow::Continue;
+                }
                 let reading = model::NearAiBalance {
                     remaining_nanos: Some(*step),
                     ..template.clone()

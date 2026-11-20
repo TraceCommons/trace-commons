@@ -22,12 +22,6 @@
       "capability_blocked": false,
       "timing": "live"
     },
-    "red_team_sessions": {
-      "enabled": false,
-      "pending": false,
-      "capability_blocked": false,
-      "timing": "live"
-    },
     "skills_catalog_suggestions": {
       "enabled": false,
       "pending": false,
@@ -45,7 +39,6 @@
   "local_override_allowed": {
     "claude_desktop_private_ai": true,
     "insights_skills": true,
-    "red_team_sessions": true,
     "skills_catalog_suggestions": false,
     "skills_server_catalog": true
   },
