@@ -21,7 +21,9 @@ namespace TraceCommons.RenderTests;
 /// station's glow and the orb's are the caller's shadows and are not in
 /// either render. Text is not drawn. Thresholds sit just outside what the
 /// box measured on 2026-11-19 (station iou 0.9892 mean 0.0016, orb 0.9933 /
-/// 0.0045, logos iou 0.9838 to 1.0, mean at most 0.0013).
+/// 0.0045, logos iou 0.9838 to 1.0, mean at most 0.0013). Since each face is
+/// filled once through its seam-widened outline (StationSeam, checklist O3)
+/// the station measures iou 0.9849 mean 0.0024 (tc-win-az11, 2026-11-20).
 /// </summary>
 public static partial class RenderChecks
 {
