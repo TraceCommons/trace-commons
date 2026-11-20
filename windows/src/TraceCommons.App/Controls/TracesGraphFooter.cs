@@ -113,7 +113,8 @@ internal sealed class TracesGraphFooter : UserControl
         _range.Style = (Style)Application.Current.Resources["TcCaptionTextStyle"];
         _range.FontSize = 12;
         _range.FontWeight = FontWeights.Medium;
-        _range.Foreground = Brush("TcInkPrimaryBrush");
+        // Built once: set again on a live theme switch (ThemeBrushes).
+        ThemeBrushes.Bind(_range, TextBlock.ForegroundProperty, "TcInkPrimaryBrush");
         var rangePill = new Grid
         {
             Height = 26,
