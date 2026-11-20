@@ -777,6 +777,73 @@ pub async fn run_supervisor(shared: Arc<ipc::DaemonShared>, dry_run: bool) -> Re
     supervise(shared, dry_run, pass_supervisor::never()).await
 }
 
+/// Run `f` -- a synchronous call into a library that blocks on a runtime of
+/// its own -- on a scoped thread that is not driving this one.
+///
+/// zbus's blocking API, which the Linux Secret Service keychain store uses,
+/// answers every call through `Runtime::block_on` on a static multi-thread
+/// runtime (`zbus::utils::block_on`). From a runtime worker, or from inside
+/// any `block_on`, that panics with "Cannot start a runtime from within a
+/// runtime"; the `insights_week` handler did exactly that on Linux, once per
+/// request. [`run_blocking`] is no answer here: on a current-thread runtime
+/// (`ipc::block_on_ipc`) it runs `f` in place.
+///
+/// The scoped thread enters the caller's runtime handle (entering is not
+/// running it), so a zbus object dropped there can still spawn its cleanup,
+/// as `trace-commons-contributor-gtk`'s `dbus::with_runtime` arranges for
+/// the shell. Outside any runtime `f` runs in place. A panic in `f` is
+/// resumed on the caller.
+pub(crate) fn outside_runtime<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return f();
+    };
+    std::thread::scope(|scope| {
+        let call = scope.spawn(move || {
+            let _entered = handle.enter();
+            f()
+        });
+        match call.join() {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
+/// An OS secret backend whose every call goes through [`outside_runtime`].
+/// The Linux keychain store answers through zbus's blocking API, and the
+/// account, device and Cloud credentials are read from IPC handlers and
+/// upload passes running on the daemon's workers. A test-credential-store
+/// build reaches no OS store, so it has no use for this.
+#[cfg(any(test, not(feature = "test-credential-store")))]
+pub(crate) struct OutsideRuntimeSecrets<B>(pub(crate) B);
+
+#[cfg(any(test, not(feature = "test-credential-store")))]
+impl<B: credential_store::SecretBackend> credential_store::SecretBackend
+    for OutsideRuntimeSecrets<B>
+{
+    fn read(
+        &self,
+        reference: &credential_store::CredentialReference,
+    ) -> std::result::Result<Vec<u8>, credential_store::CredentialError> {
+        outside_runtime(|| self.0.read(reference))
+    }
+
+    fn write(
+        &self,
+        reference: &credential_store::CredentialReference,
+        bytes: &[u8],
+    ) -> std::result::Result<(), credential_store::CredentialError> {
+        outside_runtime(|| self.0.write(reference, bytes))
+    }
+
+    fn delete(
+        &self,
+        reference: &credential_store::CredentialReference,
+    ) -> std::result::Result<(), credential_store::CredentialError> {
+        outside_runtime(|| self.0.delete(reference))
+    }
+}
+
 /// Run `f` -- blocking, non-yielding work with no `.await` of its own
 /// (filesystem scanning, hashing, reading a receipts file) -- off whichever
 /// worker is currently executing this task, via `tokio::task::
@@ -3715,6 +3782,91 @@ fn signal_stream() -> pass_supervisor::StopSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret backend shaped like the Linux Secret Service store: every
+    /// call is a `Runtime::block_on` on a multi-thread runtime of its own,
+    /// as `zbus::utils::block_on` does.
+    struct OwnRuntimeSecrets(std::sync::Mutex<Option<Vec<u8>>>);
+
+    fn own_runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        })
+    }
+
+    impl credential_store::SecretBackend for OwnRuntimeSecrets {
+        fn read(
+            &self,
+            _: &credential_store::CredentialReference,
+        ) -> std::result::Result<Vec<u8>, credential_store::CredentialError> {
+            own_runtime().block_on(async {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or(credential_store::CredentialError::NoEntry)
+            })
+        }
+
+        fn write(
+            &self,
+            _: &credential_store::CredentialReference,
+            bytes: &[u8],
+        ) -> std::result::Result<(), credential_store::CredentialError> {
+            own_runtime().block_on(async {
+                *self.0.lock().unwrap() = Some(bytes.to_vec());
+                Ok(())
+            })
+        }
+
+        fn delete(
+            &self,
+            _: &credential_store::CredentialReference,
+        ) -> std::result::Result<(), credential_store::CredentialError> {
+            own_runtime().block_on(async {
+                *self.0.lock().unwrap() = None;
+                Ok(())
+            })
+        }
+    }
+
+    fn secrets_answer_from_inside_a_runtime() {
+        use credential_store::SecretBackend;
+        let secrets = OutsideRuntimeSecrets(OwnRuntimeSecrets(std::sync::Mutex::new(None)));
+        let reference = credential_store::CredentialReference::allocate();
+        assert!(matches!(
+            secrets.read(&reference),
+            Err(credential_store::CredentialError::NoEntry)
+        ));
+        secrets.write(&reference, b"{}").unwrap();
+        assert_eq!(secrets.read(&reference).unwrap(), b"{}");
+        secrets.delete(&reference).unwrap();
+    }
+
+    /// The IPC server and the upload passes run on these workers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_keychain_with_its_own_runtime_answers_on_a_daemon_worker() {
+        secrets_answer_from_inside_a_runtime();
+    }
+
+    /// `ipc::block_on_ipc` serves synchronous callers on one of these.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_keychain_with_its_own_runtime_answers_on_a_current_thread_runtime() {
+        secrets_answer_from_inside_a_runtime();
+    }
+
+    /// Outside any runtime the call runs in place, on the caller's thread.
+    #[test]
+    fn outside_any_runtime_the_call_runs_in_place() {
+        let caller = std::thread::current().id();
+        assert_eq!(outside_runtime(|| std::thread::current().id()), caller);
+        secrets_answer_from_inside_a_runtime();
+    }
 
     /// A failing history status read is logged once, then not again until
     /// `HISTORY_POLL_WARN_EVERY` has passed, per state directory.

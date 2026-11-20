@@ -105,9 +105,11 @@ impl SecretStore {
     pub fn put(&self, id: AccountId, key: &ApiKey) -> Result<(), ManagedError> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            self.entry(id)?
-                .set_password(key.expose())
-                .map_err(|_| ManagedError::StorageUnavailable)
+            crate::daemon::outside_runtime(|| {
+                self.entry(id)?
+                    .set_password(key.expose())
+                    .map_err(|_| ManagedError::StorageUnavailable)
+            })
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -119,11 +121,13 @@ impl SecretStore {
     pub fn get(&self, id: AccountId) -> Result<ApiKey, ManagedError> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            ApiKey::new(
-                self.entry(id)?
-                    .get_password()
-                    .map_err(|_| ManagedError::StorageUnavailable)?,
-            )
+            crate::daemon::outside_runtime(|| {
+                ApiKey::new(
+                    self.entry(id)?
+                        .get_password()
+                        .map_err(|_| ManagedError::StorageUnavailable)?,
+                )
+            })
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
@@ -135,10 +139,10 @@ impl SecretStore {
     pub fn delete(&self, id: AccountId) -> Result<(), ManagedError> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            match self.entry(id)?.delete_credential() {
+            crate::daemon::outside_runtime(|| match self.entry(id)?.delete_credential() {
                 Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
                 Err(_) => Err(ManagedError::StorageUnavailable),
-            }
+            })
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
