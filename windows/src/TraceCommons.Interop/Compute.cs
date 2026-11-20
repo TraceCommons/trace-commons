@@ -477,6 +477,32 @@ public sealed class ComputeModel
         Changed?.Invoke();
     }
 
+    /// <summary>
+    /// At quit: stops the controller within <paramref name="timeoutMilliseconds"/>
+    /// and frees the handle once its worker is proved stopped, as the Mac's
+    /// quit does (AppDelegate.swift:105-108), so no worker outlives the app.
+    /// False when the worker could not be proved stopped; the handle is then
+    /// kept. A model never opened has nothing to stop.
+    /// </summary>
+    public async Task<bool> ShutdownAsync(ulong timeoutMilliseconds)
+    {
+        if (_handle is { } handle)
+        {
+            try
+            {
+                Publish(await Task.Run(() => handle.ShutdownJson(timeoutMilliseconds)).ConfigureAwait(true));
+            }
+            catch (ComputeRefusedException e)
+            {
+                Fail(e.Label);
+                Changed?.Invoke();
+                return false;
+            }
+        }
+
+        return Close();
+    }
+
     /// <summary>Frees the handle when its worker is proved stopped; false keeps it for a retry.</summary>
     public bool Close()
     {

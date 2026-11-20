@@ -23,6 +23,12 @@ public sealed partial class SettingsView
     private static readonly ComputeModel AppCompute = new();
 
     /// <summary>
+    /// At quit: stops the app's compute controller and frees its handle, as
+    /// the Mac's quit does (AppDelegate.swift:105-108; #2219 review, defect 3).
+    /// </summary>
+    internal static System.Threading.Tasks.Task<bool> ShutdownComputeAsync() => AppCompute.ShutdownAsync(15_000);
+
+    /// <summary>
     /// Sections whose bodies this window draws. The rest of the Mac's
     /// nineteen have no Windows body yet; their rows and rules are left out
     /// rather than drawn over nothing.

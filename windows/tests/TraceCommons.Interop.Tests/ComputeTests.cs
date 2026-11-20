@@ -143,4 +143,40 @@ public sealed class ComputeTests : IDisposable
         Assert.Equal("compute-open-refused", model.FailureLabel);
         Assert.False(model.Busy);
     }
+
+    /// <summary>
+    /// Quitting stops the controller and frees the handle, as the Mac's
+    /// quit does (<c>compute.shutdown(timeoutMilliseconds: 15_000)</c>,
+    /// AppDelegate.swift:105-108), so no worker outlives the app (#2219
+    /// review, defect 3). A model never opened has nothing to stop.
+    /// </summary>
+    [Fact]
+    public async Task QuittingStopsTheControllerAndFreesTheHandle()
+    {
+        int opened = 0;
+        var model = new ComputeModel(dir =>
+        {
+            opened++;
+            return new TcCompute(dir);
+        });
+        await model.StartAsync(_dir);
+        Assert.NotNull(model.Snapshot);
+        Assert.True(await model.ShutdownAsync(15_000));
+        Assert.Null(model.Snapshot);
+        await model.StartAsync(_dir);
+        Assert.Equal(1, opened);
+
+        Assert.True(await new ComputeModel().ShutdownAsync(15_000));
+    }
+
+    [Fact]
+    public void TheAppStopsComputeWhenItQuits()
+    {
+        string main = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt"));
+        Assert.Contains("await Controls.SettingsView.ShutdownComputeAsync();", main);
+        string sections = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "SettingsView.Sections.cs.txt"));
+        Assert.Contains("AppCompute.ShutdownAsync(15_000)", sections);
+    }
 }

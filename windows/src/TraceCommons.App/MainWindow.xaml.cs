@@ -1931,6 +1931,8 @@ public sealed partial class MainWindow : Window
         // that is no longer running.
         _tray.Dispose();
 
+        // No compute worker outlives the app (#2219 review, defect 3).
+        await Controls.SettingsView.ShutdownComputeAsync();
         await _host.DisposeAsync();
     }
 }
