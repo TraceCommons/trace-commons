@@ -258,6 +258,25 @@ fn persist_scope_choice(
 mod tests {
     use super::*;
 
+    /// The Windows skill-learning sample answers `consent_options` from a
+    /// file, so its Settings draws the consent rows a turn-on is made from;
+    /// the file is this reply, not one written by hand.
+    #[test]
+    fn the_windows_skill_learning_sample_consent_options_is_this_reply() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../windows/src/TraceCommons.Interop/SampleExtras/skillLearning/consent_options.json");
+        let recorded: Option<serde_json::Value> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        assert_eq!(
+            recorded,
+            Some(consent_options()),
+            "update {} to:\n{}",
+            path.display(),
+            serde_json::to_string_pretty(&consent_options()).unwrap()
+        );
+    }
+
     #[test]
     fn consent_options_lists_every_valid_scope_with_a_description() {
         let v = consent_options();

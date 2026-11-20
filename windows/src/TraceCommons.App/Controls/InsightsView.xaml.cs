@@ -36,6 +36,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
         _pages[InsightsViewModel.SessionsTab] = Page3;
         _pages[InsightsViewModel.AnalyzeTab] = Page4;
         ShowPage(InsightsViewModel.OverviewTab);
+        WireWeekExtras();
     }
     public async Task ActivateAsync()
     {

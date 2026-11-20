@@ -83,9 +83,11 @@ fn abandoning_a_pending_start_retires_the_late_daemon() {
     .unwrap();
     let (entered, entering) = mpsc::channel();
     let (release, released) = mpsc::channel();
+    let (hosted, hosting) = mpsc::channel();
     let mut start = Box::pin(Worker::start_with(dir.clone(), move |dir| {
         let backend = Backend::open(dir)?;
         assert!(backend.hosts_the_loop());
+        hosted.send(backend.hosted_shared().unwrap()).unwrap();
         entered.send(()).unwrap();
         released.recv_timeout(DEADLINE).unwrap();
         Ok(backend)
@@ -113,6 +115,14 @@ fn abandoning_a_pending_start_retires_the_late_daemon() {
     }
     lock.unlock().unwrap();
     drop(lock);
+    // Stopped, not just dropped: dropping the runtime under a live
+    // supervisor let a worker poll its interval after the timer driver had
+    // shut down, tokio's "runtime is shutting down" panic in `time/entry.rs`.
+    let shared = hosting.recv_timeout(DEADLINE).unwrap();
+    assert!(
+        shared.shutdown.load(std::sync::atomic::Ordering::SeqCst),
+        "the abandoned daemon was dropped without being stopped"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
