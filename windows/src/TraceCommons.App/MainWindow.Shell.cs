@@ -1100,6 +1100,7 @@ public sealed partial class MainWindow
                 NoticeStackHost.Visibility = Visibility.Collapsed;
             }
 
+            UpdateNoticeCover();
             return;
         }
 
@@ -1144,6 +1145,7 @@ public sealed partial class MainWindow
         ToolTipService.SetToolTip(NoticeClose, closeName);
 
         LayoutPlates(ids);
+        UpdateNoticeCover();
     }
 
     private NoticePlace NoticeMonitorPlace() => MonitorNavigation.Place(_at);
@@ -1154,6 +1156,7 @@ public sealed partial class MainWindow
     {
         var present = PresentNotices().Select(p => p.Kind);
         LayoutPlates(NoticeCatalog.Shown(NoticeMonitorPlace(), present, _closedNotices).Select(card => card.Id).ToArray());
+        UpdateNoticeCover();
     }
 
     /// <summary>The plates behind the front card, its size, peeking below it.</summary>
