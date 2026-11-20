@@ -29,12 +29,14 @@ internal static class SystemSettingWatch
     private static readonly UISettings Ui = new();
     private static readonly CachedReading<bool> Animations = new(() => Ui.AnimationsEnabled);
     private static readonly CachedReading<bool> Taskbar = new(TrayIcon.ReadTaskbarLight);
-    // Kept alive for its HighContrastChanged: the setting message can arrive
-    // before the reading turns, which left the rail's card in high contrast
-    // colours after it went off (box live switch, 2026-11-19).
-    private static readonly AccessibilitySettings Accessibility = new();
-    private static readonly CachedReading<bool> Contrast = new(() => Accessibility.HighContrast);
-    private static Microsoft.UI.Dispatching.DispatcherQueue? _ui;
+    private static readonly CachedReading<bool> Contrast = new(() => new AccessibilitySettings().HighContrast);
+
+    // The setting message can arrive before the high contrast reading turns,
+    // which left the rail's card in high contrast colours after it went off
+    // (box live switch, 2026-11-19). One more read a moment after each
+    // message, never a poll. (AccessibilitySettings.HighContrastChanged
+    // crashed the app at start in a desktop process: 0xc000027b.)
+    private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _settle;
     private static readonly SubclassProc Proc = WndProc;
     private static readonly HashSet<IntPtr> Installed = new();
 
@@ -65,12 +67,6 @@ internal static class SystemSettingWatch
     /// <summary>Watches <paramref name="hwnd"/>'s setting changes; once per window.</summary>
     public static void Install(IntPtr hwnd)
     {
-        if (_ui is null && Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread() is { } queue)
-        {
-            _ui = queue;
-            Accessibility.HighContrastChanged += (_, _) => queue.TryEnqueue(Refresh);
-        }
-
         if (hwnd != IntPtr.Zero && Installed.Add(hwnd))
         {
             // Id 3: WindowMinimumSize holds id 1, the W5 look track's watch id 2.
@@ -95,9 +91,18 @@ internal static class SystemSettingWatch
         if (msg is WM_SETTINGCHANGE or WM_THEMECHANGED)
         {
             // Any setting: the wParam a sender passes is not always the SPI
-            // it changed, and reading two values again is cheap next to a
+            // it changed, and reading the values again is cheap next to a
             // message the system sends only on a change.
             Refresh();
+            if (_settle is null && Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread() is { } queue)
+            {
+                _settle = queue.CreateTimer();
+                _settle.Interval = TimeSpan.FromMilliseconds(750);
+                _settle.IsRepeating = false;
+                _settle.Tick += (_, _) => Refresh();
+            }
+
+            _settle?.Start();
         }
 
         return DefSubclassProc(hwnd, msg, wParam, lParam);
