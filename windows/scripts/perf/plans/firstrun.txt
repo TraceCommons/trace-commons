@@ -1,12 +1,19 @@
-# The first-run window: each step's stage while it plays, then at rest.
+# The first-run window: each step's stage while it plays, minimised, and a
+# launch with animations off.
 animations on
 launch empty {throttle} step=Traces
 snap firstrun-traces
 measure firstrun-traces 2
+minimize
+measure firstrun-minimised 1
 quit
 launch empty {throttle} step=Uses
 measure firstrun-uses 1
 quit
 launch empty {throttle} step=Join
 measure firstrun-join 1
+quit
+animations off
+launch empty {throttle} step=Traces
+measure firstrun-animations-off 1
 quit
