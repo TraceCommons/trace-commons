@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.App.Look;
+using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 
 namespace TraceCommons.App.Controls;
