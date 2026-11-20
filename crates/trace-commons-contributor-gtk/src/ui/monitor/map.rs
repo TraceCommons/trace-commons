@@ -31,10 +31,10 @@
 //! `PanePrefs`): on the rocket map, the default, this computer is a launch
 //! pad and the library the NEAR AI space station (`station`); on the
 //! standard map they are the laptop and the turning orb (`orb`). The
-//! library is drawn between the two halves of the still layer on the map's
-//! resting timeline (20 frames a second, 30 with moving dashes, never the
-//! run's 60), kept between frames (`LibraryArt`), and drawn once at rest
-//! with animations off. Under everything is the Mac's field (`field`).
+//! library is drawn between the two halves of the still layer at its own
+//! 15 frames a second (never the dashes' 30 or the run's 60), kept between
+//! frames (`LibraryArt`), its glow drawn once per size, and drawn once at
+//! rest with animations off. Under everything is the Mac's field (`field`).
 //! The coins carry each tool's logo, or its initials, in its tint
 //! (`tool_art`). Colours are resolved from the inks (`MapColours::resolve`):
 //! in the standard look the Mac's own map tokens in the flat theme, the
@@ -694,21 +694,16 @@ mod imp {
             if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
                 snapshot.append_node(under);
             }
-            // The library's station or orb turns on the map's resting
-            // timeline, over the nodes and under the rocket and the pile,
-            // as the Mac draws it: during a run too, it moves at the
-            // resting rate, not the run's.
+            // The library's station or orb turns at its own rate, over the
+            // nodes and under the rocket and the pile, as the Mac draws it:
+            // it moves at that rate while the dashes move at theirs and a
+            // run at its own, and is built once a turn's frame, however
+            // often the map draws.
             let style = self.style.get();
             if let Some(frame) = library_frame(&scene, &fit, style) {
-                let interval = transfers::resting_motion(
-                    reduce,
-                    scene.flows(),
-                    healthy,
-                    library_turns(&scene),
-                )
-                .interval;
-                let seconds = library_seconds(self.now(), interval);
-                snapshot.append_node(self.library.node(style, &frame, seconds, reduce));
+                let seconds = library_seconds(self.now());
+                let scale = f64::from(obj.scale_factor());
+                snapshot.append_node(self.library.node(style, &frame, seconds, reduce, scale));
             }
             if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
                 snapshot.append_node(over);
@@ -2194,14 +2189,13 @@ pub fn library_frame(scene: &Scene, fit: &MapGeometry, style: MapStyle) -> Optio
     })
 }
 
-/// The map's seconds held to the resting timeline's last tick, so the
-/// library moves at the resting rate even while a run draws at 60.
-pub fn library_seconds(now: f64, interval: f64) -> f64 {
-    if interval > 0.0 {
-        (now / interval).floor() * interval
-    } else {
-        now
-    }
+/// The map's seconds held to the library's own last frame
+/// (`transfers::LIBRARY_INTERVAL`), so the library moves at its own rate
+/// whatever the map draws at: the dashes' 30 a second, or a run's 60
+/// (`GlassLibraryStation.frameInterval`, on its own timeline on the Mac).
+pub fn library_seconds(now: f64) -> f64 {
+    let interval = transfers::LIBRARY_INTERVAL;
+    (now / interval).floor() * interval
 }
 
 /// What the library was last drawn from.
@@ -2210,25 +2204,43 @@ struct LibraryKey {
     style: MapStyle,
     frame: LibraryFrame,
     angle: f64,
+    scale: f64,
+}
+
+/// What the station's glow was drawn for: its frame's size, the display's
+/// scale and its strength. Not where the frame is, nor the angle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GlowKey {
+    width: f64,
+    height: f64,
+    scale: f64,
+    lit: bool,
 }
 
 /// The library's drawing, kept until its angle, light, frame or style
-/// changes: built at most once a resting frame.
+/// changes: built at most once a turn's frame. The station's glow is kept
+/// apart, until its size, scale or light changes: drawn once, not once a
+/// frame. One of each is kept; a window resized by hand passes through
+/// many sizes.
 #[derive(Default)]
 pub struct LibraryArt {
     kept: RefCell<Option<(LibraryKey, gtk::gsk::RenderNode)>>,
     builds: Cell<usize>,
+    glow: RefCell<Option<(GlowKey, Option<gtk::gdk::Texture>)>>,
+    glow_builds: Cell<usize>,
 }
 
 impl LibraryArt {
     /// The library at `seconds` on the map's clock (`library_seconds`),
-    /// at rest under reduced motion.
+    /// at rest under reduced motion, for a display of `scale` device
+    /// pixels a point.
     pub fn node(
         &self,
         style: MapStyle,
         frame: &LibraryFrame,
         seconds: f64,
         reduce_motion: bool,
+        scale: f64,
     ) -> gtk::gsk::RenderNode {
         let angle = match style {
             MapStyle::Launch => station::angle(seconds, reduce_motion),
@@ -2238,6 +2250,7 @@ impl LibraryArt {
             style,
             frame: *frame,
             angle,
+            scale,
         };
         if let Some((kept, node)) = self.kept.borrow().as_ref()
             && *kept == key
@@ -2251,7 +2264,15 @@ impl LibraryArt {
             lit,
         } = *frame;
         let node = match style {
-            MapStyle::Launch => station::node(origin, width, height, angle, lit),
+            MapStyle::Launch => {
+                let glow = self.station_glow(GlowKey {
+                    width,
+                    height,
+                    scale,
+                    lit,
+                });
+                station::node(origin, width, height, angle, glow.as_ref())
+            }
             MapStyle::Standard => orb::node(origin, width, height, angle, lit),
         };
         self.builds.set(self.builds.get() + 1);
@@ -2259,9 +2280,28 @@ impl LibraryArt {
         node
     }
 
+    /// The station's glow for `key`, drawn only when it differs from the
+    /// last one's.
+    fn station_glow(&self, key: GlowKey) -> Option<gtk::gdk::Texture> {
+        if let Some((kept, texture)) = self.glow.borrow().as_ref()
+            && *kept == key
+        {
+            return texture.clone();
+        }
+        let texture = station::glow_texture(key.width, key.height, key.scale, key.lit);
+        self.glow_builds.set(self.glow_builds.get() + 1);
+        self.glow.replace(Some((key, texture.clone())));
+        texture
+    }
+
     /// How many times the drawing has been built.
     pub fn builds(&self) -> usize {
         self.builds.get()
+    }
+
+    /// How many times the station's glow has been drawn.
+    pub fn glow_builds(&self) -> usize {
+        self.glow_builds.get()
     }
 }
 
@@ -4057,12 +4097,12 @@ mod tests {
         assert!(at(MapStyle::Standard) > 200, "no laptop screen");
     }
 
-    /// The library turns on the map's resting timeline, as on the Mac,
-    /// where it is drawn on that timeline (20 frames a second, 30 while
-    /// arcs carry dashes) and never on the run's 60: its drawing is built
-    /// once a resting frame and kept between, however often the map draws.
+    /// The library turns at its own 15 frames a second, as on the Mac,
+    /// where it has its own timeline, never the dashes' 30 or a run's 60:
+    /// its drawing is built once a frame of its own and kept between,
+    /// however often the map draws. Its glow is drawn once.
     #[test]
-    fn the_library_is_built_once_a_resting_frame_while_a_run_draws_at_sixty() {
+    fn the_library_is_built_at_its_own_rate_whatever_the_map_draws_at() {
         let art = LibraryArt::default();
         let frame = LibraryFrame {
             origin: (10.0, 20.0),
@@ -4073,30 +4113,59 @@ mod tests {
         // One second of a run, drawn at 60 frames a second.
         for i in 0..60 {
             let now = 100.01 + f64::from(i) / 60.0;
-            art.node(
-                MapStyle::Launch,
-                &frame,
-                library_seconds(now, 1.0 / 20.0),
-                false,
-            );
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
         }
-        assert_eq!(art.builds(), 20, "20 station frames in a second");
-        // With moving dashes the resting timeline is 30 a second.
-        for i in 0..60 {
-            let now = 200.01 + f64::from(i) / 60.0;
-            art.node(
-                MapStyle::Launch,
-                &frame,
-                library_seconds(now, 1.0 / 30.0),
-                false,
-            );
+        assert_eq!(art.builds(), 15, "15 station frames in a second");
+        // One second of moving dashes, drawn at 30 frames a second.
+        for i in 0..30 {
+            let now = 200.01 + f64::from(i) / 30.0;
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
         }
-        assert_eq!(art.builds(), 50);
+        assert_eq!(art.builds(), 30, "15 more, not 30");
+        // A whole turn: the glow was drawn once, for its size, scale and
+        // light, not once a frame.
+        for i in 0..(26 * 15) {
+            let now = 300.01 + f64::from(i) / 15.0;
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
+        }
+        assert_eq!(art.glow_builds(), 1, "the glow is drawn once");
+        // Moved on the map, it is the same glow.
+        let moved = LibraryFrame {
+            origin: (40.0, 60.0),
+            ..frame
+        };
+        art.node(MapStyle::Launch, &moved, 0.0, false, 2.0);
+        assert_eq!(art.glow_builds(), 1, "a moved station keeps its glow");
+        // A new light, size or scale draws it again.
+        art.node(
+            MapStyle::Launch,
+            &LibraryFrame {
+                lit: false,
+                ..moved
+            },
+            0.0,
+            false,
+            2.0,
+        );
+        assert_eq!(art.glow_builds(), 2);
+        art.node(
+            MapStyle::Launch,
+            &LibraryFrame {
+                width: 120.0,
+                ..moved
+            },
+            0.0,
+            false,
+            2.0,
+        );
+        assert_eq!(art.glow_builds(), 3);
+        art.node(MapStyle::Launch, &moved, 0.0, false, 1.0);
+        assert_eq!(art.glow_builds(), 4);
         // Under reduced motion it rests: built once, whatever the clock.
         let still = LibraryArt::default();
         for i in 0..60 {
             let now = 300.0 + f64::from(i) / 7.0;
-            still.node(MapStyle::Launch, &frame, now, true);
+            still.node(MapStyle::Launch, &frame, now, true, 2.0);
         }
         assert_eq!(still.builds(), 1);
         // A change of light, frame or style builds it again.
@@ -4108,6 +4177,7 @@ mod tests {
             },
             0.0,
             true,
+            2.0,
         );
         still.node(
             MapStyle::Standard,
@@ -4117,8 +4187,10 @@ mod tests {
             },
             0.0,
             true,
+            2.0,
         );
         assert_eq!(still.builds(), 3);
+        assert_eq!(still.glow_builds(), 2, "the orb has no cached glow");
     }
 
     /// A coin is drawn as `MapToolPile` draws it: its edge and rim in the
@@ -4834,7 +4906,7 @@ mod tests {
                     }
                     if let Some(frame) = library_frame(&scene, &fit, style) {
                         LibraryArt::default()
-                            .node(style, &frame, 0.0, true)
+                            .node(style, &frame, 0.0, true, 2.0)
                             .draw(&cr);
                     }
                     map_transfers::resting_rocket(&cr, &scene, &fit, &palette, style);
