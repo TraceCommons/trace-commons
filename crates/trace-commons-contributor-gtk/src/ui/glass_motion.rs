@@ -311,6 +311,20 @@ impl Driver {
     pub fn is_running(&self) -> bool {
         self.running.borrow().is_some()
     }
+
+    /// The running movement's frame `t` seconds in, drawn now: a fake
+    /// frame clock for tests, which would otherwise depend on a frame
+    /// landing part-way (a software-rendered runner can skip from the
+    /// first frame to the last). Returns whether a movement was running.
+    #[cfg(test)]
+    pub fn step_at(&self, t: f64) -> bool {
+        let step = self
+            .running
+            .borrow()
+            .as_ref()
+            .map(|(_, _, step)| Rc::clone(step));
+        step.map(|step| step(t)).is_some()
+    }
 }
 
 /// One value moving on a widget's frame clock toward a target that can

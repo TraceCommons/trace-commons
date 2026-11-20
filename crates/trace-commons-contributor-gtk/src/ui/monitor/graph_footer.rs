@@ -1591,21 +1591,29 @@ mod tests {
         assert_eq!(footer.root.fraction(), 0.0, "closed at once");
         settings.set_gtk_enable_animations(true);
         footer.root.set_reveal_child(true);
-        // Part-way open on the token curve, then open; then turned off
-        // part-way through closing, it is closed at once.
-        let seen = Rc::new(Cell::new(false));
+        // It moves, over Motion.slide on the token curve. Halfway is read
+        // through a fake frame (Driver::step_at), not by waiting for a real
+        // one to land part-way: on a software-rendered runner the first
+        // frame can come after the whole 0.25 s, and the drawer went from
+        // closed to open with nothing between (weston, f8e252df5).
+        assert!(footer.root.is_moving(), "it moves with animations on");
+        let half = map_motion::footer().length() / 2.0;
+        assert!(footer.root.imp().driver.step_at(half), "a movement to step");
+        let part = footer.root.fraction();
+        assert!(
+            part > 0.05 && part < 0.95,
+            "part-way open at half time: {part}"
+        );
+        assert_eq!(
+            part,
+            map_motion::drawer_at(0.0, 1.0, half),
+            "on the footer's curve"
+        );
+        // Then open, on the real clock.
         {
-            let seen = seen.clone();
             let root = footer.root.clone();
-            pump_until(move || {
-                let f = root.fraction();
-                if f > 0.05 && f < 0.95 {
-                    seen.set(true);
-                }
-                f >= 1.0
-            });
+            pump_until(move || root.fraction() >= 1.0);
         }
-        assert!(seen.get(), "never part-way open");
         assert_eq!(footer.root.fraction(), 1.0);
         pump_until(|| footer.root.height() == HEIGHT);
         assert_eq!(footer.root.height(), HEIGHT, "its 206 points");
