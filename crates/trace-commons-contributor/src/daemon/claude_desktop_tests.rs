@@ -1421,3 +1421,40 @@ fn the_status_copy_carries_the_setup_steps() {
         );
     }
 }
+
+/// The setup sheet offers only models the route will accept: each one
+/// alone passes `context_budget` (a pair of such models always does, as the
+/// pair's window is the smaller one and each leaves room for its output).
+#[test]
+fn desktop_models_are_those_the_route_accepts() {
+    use crate::managed::models::ChatModel;
+    let model = |id: &str, context: Option<u64>, output: Option<u64>| -> ChatModel {
+        serde_json::from_value(json!({
+            "id": id, "context_length": context, "max_output_length": output
+        }))
+        .unwrap()
+    };
+    let models = vec![
+        model("big/model", Some(262_144), Some(8_192)),
+        model("huge/model", Some(1_000_000), Some(128_000)),
+        model("small/model", Some(32_768), Some(8_192)),
+        model("unknown/context", None, Some(8_192)),
+        model("unknown/output", Some(262_144), None),
+    ];
+    assert_eq!(desktop_models(&models), ["big/model", "huge/model"]);
+    for a in desktop_models(&models) {
+        for b in desktop_models(&models) {
+            assert!(context_budget(&a, &b, &models).is_some(), "{a} + {b}");
+        }
+    }
+}
+
+/// The setup sheet's button that opens Claude Desktop's Code tab.
+#[test]
+fn the_status_copy_carries_the_open_desktop_label() {
+    assert!(
+        copy()["open_desktop"]
+            .as_str()
+            .is_some_and(|w| !w.trim().is_empty())
+    );
+}
