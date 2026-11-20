@@ -21,6 +21,9 @@ struct InferenceTabView: View {
     var onOpenSettings: () -> Void = {}
     @EnvironmentObject private var model: AppModel
 
+    /// Claude Desktop's status for the tab's card, read by the ledger stack.
+    @State private var claudeDesktop: ClaudeDesktopSetupModel?
+
     /// The core's analytics words (`tc_insights_copy_json`), for each
     /// call's ledger counters.
     private static let insightsCopy = TCInsights.copy() ?? [:]
@@ -81,7 +84,7 @@ struct InferenceTabView: View {
                 // Claude Desktop: an offer while it is installed and not set
                 // up, and, while it is set up, its status with Disconnect
                 // (owner requests, 2026-11-19); otherwise draws nothing.
-                ClaudeDesktopSetupPrompt(onOpenSettings: onOpenSettings)
+                ClaudeDesktopSetupPrompt(setup: claudeDesktop, onOpenSettings: onOpenSettings)
                 // Only while Red Team's runtime is not installed and the card
                 // was not dismissed (owner, 2026-11-19); otherwise nothing.
                 RedTeamSetupPrompt(onOpenSettings: onOpenSettings)
@@ -90,6 +93,9 @@ struct InferenceTabView: View {
                 InferenceBalanceSection()
                 InferenceAccountSection(store: store, onOpenSettings: onOpenSettings)
             }
+            // On the stack, which always draws: the Claude Desktop card is
+            // empty until this read lands.
+            .claudeDesktopPolling($claudeDesktop, every: .seconds(15))
         }
         .scrollIndicators(.never)
     }

@@ -4,10 +4,13 @@ import TCShellCore
 
 /// An ordinary tool row inside Settings' existing Private AI tools panel.
 /// Older/unavailable daemons provide no copy and therefore draw no row.
+/// Draws the status its card reads (`claudeDesktopPolling` on the card's
+/// stack): a `.task` here would hang on a view that is empty until that
+/// read lands, and in the card's list an empty view has nothing to run on.
 struct ClaudeDesktopSettingsRow: View {
+    let setup: ClaudeDesktopSetupModel?
     let closeLabel: String
     @EnvironmentObject private var model: AppModel
-    @State private var setup: ClaudeDesktopSetupModel?
     private var isEnabled: Bool { model.featureIsEnabled(ClaudeDesktopSetupModel.featureID) }
 
     var body: some View {
@@ -16,23 +19,6 @@ struct ClaudeDesktopSettingsRow: View {
                 ClaudeDesktopToolRow(setup: setup, status: status)
             }
         }
-        .task(id: isEnabled) {
-            guard isEnabled else { setup?.close(); setup = nil; return }
-            var namedModel: String?
-            while !Task.isCancelled {
-                if setup == nil { setup = model.makeClaudeDesktopSetup() }
-                if let setup {
-                    await setup.refresh()
-                    if let id = setup.status?.model, id != namedModel {
-                        namedModel = id
-                        model.managedModelCatalogue(tool: "claude", cacheOnly: true) { setup.readCachedCatalogue($0) }
-                    }
-                }
-                do { try await Task.sleep(for: .seconds(5)) }
-                catch { break }
-            }
-        }
-        .onDisappear { setup?.close(); setup = nil }
         .glassModal(isPresented: Binding(
             get: { isEnabled && setup?.isPresented == true },
             set: { if !$0 { setup?.close() } })) {
@@ -41,7 +27,48 @@ struct ClaudeDesktopSettingsRow: View {
                 }
             }
     }
+}
 
+/// Reads Claude Desktop's status for the row or card drawn inside the view
+/// it modifies, while the flag is on. Hang it on a container that always
+/// draws (the tab's stack, the tools card's stack), never on the row or card
+/// themselves: those are empty until the first read lands, and an empty view
+/// in a stack contributes nothing for a `.task` to run on (staging 0.24.65,
+/// where neither ever read the status).
+struct ClaudeDesktopPolling: ViewModifier {
+    @Binding var setup: ClaudeDesktopSetupModel?
+    let every: Duration
+    /// Settings' row names the model; it reads the cached catalogue for it.
+    var readsModelNames = false
+    @EnvironmentObject private var model: AppModel
+
+    func body(content: Content) -> some View {
+        let on = model.featureIsEnabled(ClaudeDesktopSetupModel.featureID)
+        return content
+            .task(id: on) {
+                guard on else { setup?.close(); setup = nil; return }
+                var namedModel: String?
+                while !Task.isCancelled {
+                    if setup == nil { setup = model.makeClaudeDesktopSetup() }
+                    if let setup {
+                        await setup.refresh()
+                        if readsModelNames, let id = setup.status?.model, id != namedModel {
+                            namedModel = id
+                            model.managedModelCatalogue(tool: "claude", cacheOnly: true) { setup.readCachedCatalogue($0) }
+                        }
+                    }
+                    do { try await Task.sleep(for: every) } catch { break }
+                }
+            }
+            .onDisappear { setup?.close(); setup = nil }
+    }
+}
+
+extension View {
+    func claudeDesktopPolling(_ setup: Binding<ClaudeDesktopSetupModel?>, every: Duration,
+                              readsModelNames: Bool = false) -> some View {
+        modifier(ClaudeDesktopPolling(setup: setup, every: every, readsModelNames: readsModelNames))
+    }
 }
 
 /// The same flat row, separated from its polling lifecycle for render QA.
