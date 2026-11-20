@@ -48,8 +48,11 @@
     <ProjectReference Include="../../src/TraceCommons.Interop/TraceCommons.Interop.csproj" />
   </ItemGroup>
 
-  <!-- The first-run stage painter (W8), drawn offscreen without XAML. -->
+  <!-- The map's own Win2D drawing (slice W6) and the first-run stage
+       painter (W8), compiled here too, so a render test draws with the code
+       the window draws with. -->
   <ItemGroup>
+    <Compile Include="../../src/TraceCommons.App/Controls/MapPainter.cs" Link="MapPainter.cs" />
     <Compile Include="../../src/TraceCommons.App/FirstRun/FirstRunStagePainter.cs" Link="FirstRunStagePainter.cs" />
   </ItemGroup>
 

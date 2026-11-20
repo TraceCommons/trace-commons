@@ -1,0 +1,347 @@
+{
+ "_source": "Printed by a throwaway swiftc probe (not committed): a verbatim copy of FlowMapView.drawArcs (macos/Sources/TraceCommonsApp/Views/Monitor/FlowMapView.swift:263-297, blob 0747bd91e) run against a recording GraphicsContext stand-in at scale 1, dim 1, phase 1, for every arc style, healthy or not, standard or increased contrast.",
+ "strokes": [
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.2,
+     "dash": [],
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "quiet"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.5,
+     "dash": [],
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "quiet"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.2,
+     "dash": [],
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "quiet"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.5,
+     "dash": [],
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "quiet"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "dashed"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.45,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "dashed"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "dashed"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.45,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "dashed"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    },
+    {
+     "alpha": 1,
+     "dash": [
+      4,
+      8
+     ],
+     "dashPhase": -1,
+     "ink": "statusOn",
+     "round": true,
+     "width": 1.8199999999999998
+    }
+   ],
+   "strong": false,
+   "style": "flowing"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    },
+    {
+     "alpha": 1,
+     "dash": [
+      4,
+      8
+     ],
+     "dashPhase": -1,
+     "ink": "statusOn",
+     "round": true,
+     "width": 1.8199999999999998
+    }
+   ],
+   "strong": true,
+   "style": "flowing"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.25,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "flowing"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.45,
+     "dash": [
+      5,
+      5
+     ],
+     "dashPhase": 0,
+     "ink": "ink",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "flowing"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "shared"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "shared"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "shared"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.35,
+     "dash": [],
+     "ink": "statusOn",
+     "round": false,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "shared"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      0.5,
+      4
+     ],
+     "dashPhase": 0,
+     "ink": "white",
+     "round": true,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "unknown"
+  },
+  {
+   "healthy": true,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      0.5,
+      4
+     ],
+     "dashPhase": 0,
+     "ink": "white",
+     "round": true,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "unknown"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      0.5,
+      4
+     ],
+     "dashPhase": 0,
+     "ink": "white",
+     "round": true,
+     "width": 1.4
+    }
+   ],
+   "strong": false,
+   "style": "unknown"
+  },
+  {
+   "healthy": false,
+   "strokes": [
+    {
+     "alpha": 0.18,
+     "dash": [
+      0.5,
+      4
+     ],
+     "dashPhase": 0,
+     "ink": "white",
+     "round": true,
+     "width": 1.4
+    }
+   ],
+   "strong": true,
+   "style": "unknown"
+  }
+ ]
+}

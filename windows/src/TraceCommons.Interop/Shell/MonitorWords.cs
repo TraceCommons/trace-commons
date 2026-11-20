@@ -77,6 +77,9 @@ public static class MonitorWords
     /// <summary>A notice's X (<c>close</c>, MonitorNotices.swift:168).</summary>
     public static string Close => MonitorShellCopy.Top("close");
 
+    /// <summary>A notice's Details disclosure (<c>MonitorWords.noticeDetails</c>).</summary>
+    public static string NoticeDetails => MonitorShellCopy.Shell("notice_details");
+
     /// <summary>
     /// The undo card's X while approved traces will still send
     /// (<c>QueueLegacyWords.closeNoticeStillSends</c>, MonitorNotices.swift:661):
