@@ -6,7 +6,9 @@ using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -22,10 +24,14 @@ public sealed class ManagedSessionsView : UserControl
     private bool _busy;
     private bool _reading;
     private bool _unsupportedVersion;
+    /// <summary>The launch button a closed dialog hands focus back to: the
+    /// dialog's own return can land after the rebuild, or nowhere.</summary>
+    private (string Name, int Index)? _returnFocus;
     private string? _unsupportedTool;
-    /// <summary>Begins the NEAR AI sign-in as the Private AI page does; null
-    /// where this view is hosted without one.</summary>
-    private readonly Func<Task>? _signIn;
+    /// <summary>The last refusal, said on the card for a launch begun there.</summary>
+    private readonly ManagedFailure _failure = new();
+    /// <summary>Whether the action now running was begun from the card.</summary>
+    private bool _fromCard;
 
     /// <summary>A managed action the daemon refused, with its label.</summary>
     private sealed class Refused(string code) : Exception
@@ -33,10 +39,9 @@ public sealed class ManagedSessionsView : UserControl
         public string Code { get; } = code;
     }
 
-    public ManagedSessionsView(DaemonHost host, Func<Task>? signIn = null)
+    public ManagedSessionsView(DaemonHost host)
     {
         _host = host;
-        _signIn = signIn;
         Content = _root;
         // The 10 s poll stops while the window is hidden to the tray or
         // minimised (WindowClocks), and resumes with a read when it is back.
@@ -109,11 +114,14 @@ public sealed class ManagedSessionsView : UserControl
         return button;
     }
 
-    /// <summary>Install for one tool, named with the tool for Narrator.</summary>
-    private Button InstallButton(ManagedTool tool)
+    /// <summary>Install for one tool, named with the tool for Narrator;
+    /// <paramref name="withName"/> shows the name too, as the Mac's card does.</summary>
+    private Button InstallButton(ManagedTool tool, bool withName = false)
     {
         var install = Button("install", async () => { await Windows.System.Launcher.LaunchUriAsync(new Uri(tool.InstallUrl)); });
-        AutomationProperties.SetName(install, $"{T("install")} {T(tool.Tool)}");
+        string named = $"{T("install")} {T(tool.Tool)}";
+        if (withName) install.Content = named;
+        AutomationProperties.SetName(install, named);
         return install;
     }
 
@@ -132,6 +140,7 @@ public sealed class ManagedSessionsView : UserControl
         if (_busy) return;
         _busy = true;
         _error.Text = string.Empty;
+        _failure.Begin();
         _unsupportedVersion = false;
         _unsupportedTool = null;
         try { await action(); }
@@ -139,17 +148,75 @@ public sealed class ManagedSessionsView : UserControl
         {
             // `{terminal}` is where the session opens: herdr while grouped
             // there. This shell runs no tool setup, so every refusal here is
-            // a launch's.
-            _error.Text = ManagedSignIn.FillTerminal(
-                T(_unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code)),
-                _snapshot?.Capabilities.SessionDestination,
-                T("terminal"));
+            // a launch's. A launch begun on the card is said under its
+            // buttons (ManagedSessionsView.swift:131-136, :160-163); an
+            // unsupported version keeps its recovery row below.
+            string key = _unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code);
+            if (_fromCard && !_unsupportedVersion) _failure.Refuse(key, fromCard: true);
+            else _error.Text = ManagedSignIn.FillTerminal(T(key), _snapshot?.Capabilities.SessionDestination, T("terminal"));
         }
-        catch { _error.Text = T("action_failed"); }
-        finally { _busy = false; await RefreshAsync(); }
+        catch
+        {
+            if (_fromCard) _failure.Refuse("action_failed", fromCard: true);
+            else _error.Text = T("action_failed");
+        }
+        finally { _busy = false; _fromCard = false; await RefreshAsync(); }
     }
 
+    /// <summary>
+    /// Rebuilds the view, keeping keyboard focus on the same button: every
+    /// read rebuilds it, so without this the 10 s poll, or closing the launch
+    /// dialog, dropped focus to the window's first control (box, 2026-11-19).
+    /// </summary>
     private void Render()
+    {
+        if (_snapshot is null) return;
+        // While a dialog is open (busy) a poll's rebuild keeps the return.
+        var (target, keep) = ManagedFocus.Rebuild(FocusedButtonKey(), _busy, _returnFocus);
+        _returnFocus = keep;
+        RenderContent();
+        if (target is { } key) RestoreFocus(key);
+    }
+
+    private static string ButtonName(Button button) =>
+        AutomationProperties.GetName(button) is { Length: > 0 } name ? name : button.Content as string ?? string.Empty;
+
+    private static IEnumerable<Button> Buttons(Panel panel)
+    {
+        foreach (var child in panel.Children)
+        {
+            if (child is Button button) yield return button;
+            else if (child is Panel inner) foreach (var nested in Buttons(inner)) yield return nested;
+        }
+    }
+
+    /// <summary>The focused button's name and its place among buttons of that name, or null.</summary>
+    private (string Name, int Index)? FocusedButtonKey()
+    {
+        if (XamlRoot is null || FocusManager.GetFocusedElement(XamlRoot) is not Button focused) return null;
+        var buttons = Buttons(_root).ToList();
+        return ManagedFocus.KeyOf(buttons.Select(ButtonName).ToList(), buttons.IndexOf(focused));
+    }
+
+    private void RestoreFocus((string Name, int Index) key)
+    {
+        var buttons = Buttons(_root).ToList();
+        int at = ManagedFocus.Find(buttons.Select(ButtonName).ToList(), key);
+        if (at < 0) return;
+        Button match = buttons[at];
+        // Its section is brought into view too: on the box (2026-11-19) the
+        // page was left scrolled to the view's foot after the launch dialog
+        // closed, with the focused Start button and its card out of sight.
+        UIElement section = match;
+        while (Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(section) is UIElement parent && parent != _root) section = parent;
+        DispatcherQueue?.TryEnqueue(() =>
+        {
+            match.Focus(FocusState.Programmatic);
+            section.StartBringIntoView();
+        });
+    }
+
+    private void RenderContent()
     {
         if (_snapshot is null) return;
         _root.Children.Clear();
@@ -161,7 +228,10 @@ public sealed class ManagedSessionsView : UserControl
         // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
         if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
         _root.Children.Add(actions);
-        if (_snapshot.InstallTools.Length > 0)
+        // Signed in, the card above holds the Install links (box,
+        // 2026-11-19: both drew them); signed out, this block stands in for
+        // the Mac's setup row (ManagedSessionsView.swift:34-36).
+        if (_snapshot.InstallTools.Length > 0 && !_snapshot.NearAiSignedIn)
         {
             // One bare refresh glyph beside the heading; no per-tool copies.
             var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -240,59 +310,176 @@ public sealed class ManagedSessionsView : UserControl
     }
 
     /// <summary>
-    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), as on
-    /// macOS: with a sign-in, Start Claude Code and Start Codex, each a folder
-    /// choice and a launch, with no saved account; without one, the line that
-    /// asks for it and the button that begins it. Nothing here is saved.
+    /// Sessions on the NEAR AI sign-in, first (owner, 2026-10-12), drawn only
+    /// while signed in, as on macOS (ManagedSessionsView.swift:30-33, :80-98):
+    /// the sign-in title, the line naming where sessions open, and at its
+    /// foot the Start button for each tool, its logo and name, or in their
+    /// place the no-terminal notice or the install line; the Install link of
+    /// each missing tool beside them; then a launch begun here that failed.
+    /// Signed out the Mac draws no card, and nor does this: the page's
+    /// account section holds the sign-in. Nothing here is saved.
     /// </summary>
     private void RenderSignIn()
     {
-        if (_snapshot is null) return;
+        if (_snapshot is null || !_snapshot.NearAiSignedIn) return;
         var section = new StackPanel { Spacing = 6 };
-        section.Children.Add(new TextBlock { Text = T("near_ai"), FontSize = 20 });
-        bool signedIn = _snapshot.NearAiSignedIn;
-        string line = signedIn
-            ? ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.SessionDestination, T("terminal"))
-            : T("sign_in_needed");
-        section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-        if (signedIn)
+        section.Children.Add(new TextBlock { Text = T("sign_in_title"), FontSize = 20 });
+        section.Children.Add(new TextBlock
         {
-            // Left out while there is no terminal to start in; the line
-            // under the accounts' actions says so.
-            if (_snapshot.Capabilities.TerminalLaunch)
+            Text = ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.SessionDestination, T("terminal")),
+            TextWrapping = TextWrapping.Wrap,
+        });
+        switch (_snapshot.ToolArea)
+        {
+            case ManagedToolArea.NoTerminal:
+                section.Children.Add(new TextBlock { Text = T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
+                break;
+            case ManagedToolArea.Install:
+                section.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
+                break;
+        }
+
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        if (_snapshot.ToolArea == ManagedToolArea.Buttons)
+        {
+            foreach (string tool in _snapshot.SignInStartTools)
             {
-                foreach (string tool in ManagedSignIn.Tools)
-                {
-                    if (_snapshot.SignInEntry(tool) is null || ManagedSignIn.StartKey(tool) is not string key) continue;
-                    actions.Children.Add(Button(key, () => StartAsync(tool)));
-                }
+                if (ManagedSignIn.StartKey(tool) is not string key) continue;
+                actions.Children.Add(ToolButton(tool, key));
             }
         }
-        else if (_signIn is not null)
-        {
-            var signIn = Button("sign_in_near_ai", _signIn);
-            AutomationProperties.SetName(signIn, T("sign_in_near_ai_accessibility"));
-            actions.Children.Add(signIn);
-        }
+
+        // ManagedInstallLink(includeToolName: true): "Install {tool}".
+        foreach (var tool in _snapshot.MissingInstallTools) actions.Children.Add(InstallButton(tool, withName: true));
         if (actions.Children.Count > 0) section.Children.Add(actions);
+        if (_failure.OnCard(cardShown: true))
+        {
+            foreach (string line in _failure.CardLines(T, _snapshot.Capabilities.SessionDestination))
+            {
+                section.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+            }
+        }
+
         _root.Children.Add(section);
     }
 
-    /// <summary>The folder picker the launch dialog uses, then the launch.</summary>
+    /// <summary>
+    /// A tool's launch button (ManagedFolderExplainer.swift:142-171): its
+    /// logo in its tint (or its initials) and its name, named for assistive
+    /// tech by the core's Start label, as the Mac's
+    /// <c>.accessibilityLabel(startKey)</c>.
+    /// </summary>
+    private Button ToolButton(string tool, string startKey)
+    {
+        var face = new StackPanel { Orientation = Orientation.Horizontal, Spacing = LaunchHandoff.ButtonSpacing };
+        face.Children.Add(StepGeometry.Mark(tool, LaunchHandoff.ButtonLogoSide, 10));
+        face.Children.Add(new TextBlock { Text = T(tool), MaxLines = 1, VerticalAlignment = VerticalAlignment.Center });
+        var button = new Button { Content = face, IsEnabled = !_busy };
+        AutomationProperties.SetName(button, T(startKey));
+        button.Click += async (_, _) =>
+        {
+            _returnFocus = (T(startKey), 0);
+            _fromCard = true;
+            await RunAsync(() => StartAsync(tool));
+        };
+        return button;
+    }
+
+    /// <summary>
+    /// A tool's launch dialog (owner, 2026-10-19; ManagedFolderExplainer.swift:11-140):
+    /// the Start label as its title, the folder sliding into a terminal, the
+    /// folder row (the home folder until one is picked, Pick a folder as
+    /// context, and Use home once one is), the terminal row while launches
+    /// ask, then Cancel and Open {tool}. The folder is optional (owner,
+    /// 2026-10-29): with none, the daemon opens the tool in the home folder.
+    /// </summary>
     private async Task StartAsync(string tool)
     {
-        if (await PickFolderAsync() is not string path) return;
-        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
-        // Asked on every launch while more than one terminal is installed (#1891).
-        if (_snapshot.AsksForTerminal)
+        if (_snapshot is null || ManagedSignIn.StartKey(tool) is not string startKey) return;
+        string? path = null;
+        var form = new StackPanel { Spacing = 12, MinWidth = 320 };
+        var art = new LaunchArtView(tool) { HorizontalAlignment = HorizontalAlignment.Center };
+        form.Children.Add(art);
+        var folderRow = new Grid { ColumnSpacing = 8 };
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var tile = new Border
         {
-            var terminal = TerminalPicker();
-            var ask = Dialog("launch_title", terminal, "launch_short");
-            if (await ask.ShowAsync() != ContentDialogResult.Primary) return;
-            await SaveTerminalAsync(terminal.SelectedIndex);
+            Width = 22, Height = 22, CornerRadius = new CornerRadius(6),
+            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcTileFolderBrush"],
+            Child = new FontIcon { Glyph = LaunchHandoff.FolderGlyph, FontSize = 11 },
+        };
+        AutomationProperties.SetAccessibilityView(tile, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        var shown = new TextBlock { VerticalAlignment = VerticalAlignment.Center, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis, IsTextSelectionEnabled = true };
+        var clear = new Button { Content = T("clear_folder") };
+        var pick = new Button { Content = T("pick_folder") };
+        void ShowFolder()
+        {
+            shown.Text = path ?? T("home_folder");
+            ToolTipService.SetToolTip(shown, path);
+            clear.Visibility = path is null ? Visibility.Collapsed : Visibility.Visible;
         }
+        clear.Click += (_, _) => { path = null; ShowFolder(); };
+        pick.Click += async (_, _) =>
+        {
+            if (await PickFolderAsync() is string chosen && ManagedLaunchFolder.IsAcceptable(chosen)) { path = chosen; ShowFolder(); }
+        };
+        ShowFolder();
+        Grid.SetColumn(tile, 0); Grid.SetColumn(shown, 1); Grid.SetColumn(clear, 2); Grid.SetColumn(pick, 3);
+        folderRow.Children.Add(tile); folderRow.Children.Add(shown); folderRow.Children.Add(clear); folderRow.Children.Add(pick);
+        form.Children.Add(folderRow);
+        // Asked on every launch while more than one terminal is installed (#1891).
+        var terminal = _snapshot.AsksForTerminal ? TerminalPicker() : null;
+        if (terminal is not null) form.Children.Add(terminal);
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot, Title = T(startKey), Content = form,
+            PrimaryButtonText = ManagedSignIn.OpenLabel(T("open_tool"), T(tool)),
+            CloseButtonText = T("cancel"), DefaultButton = ContentDialogButton.Primary,
+        };
+        // Open is the default action (ManagedFolderExplainer.swift:62,
+        // isDefault): focus starts on it, so Enter opens the tool rather than
+        // the folder picker.
+        // Until the person first presses a key or the pointer, focus that
+        // lands anywhere else goes back to Open: on the box (2026-11-19) a
+        // second opening in a row had the dialog move focus to the first
+        // button of its content after Opened.
+        bool settling = true;
+        dialog.PreviewKeyDown += (_, _) => settling = false;
+        dialog.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => settling = false), true);
+        dialog.GotFocus += (_, e) =>
+        {
+            if (settling && e.OriginalSource is not Button { Name: "PrimaryButton" }) FocusPrimary(dialog);
+        };
+        dialog.Opened += (_, _) => FocusPrimary(dialog);
+        ContentDialogResult result = await dialog.ShowAsync();
+        art.Release();
+        if (result != ContentDialogResult.Primary) return;
+        // Decided from the folder and the snapshot at send time (L4).
+        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
+        if (terminal is not null) await SaveTerminalAsync(terminal.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
+    }
+
+    /// <summary>Focuses a dialog's primary button: the template part WinUI
+    /// names <c>PrimaryButton</c>.</summary>
+    private static void FocusPrimary(ContentDialog dialog)
+    {
+        if (FindButton(dialog, "PrimaryButton") is Button primary) primary.Focus(FocusState.Programmatic);
+    }
+
+    private static Button? FindButton(DependencyObject parent, string name)
+    {
+        int count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (int i = 0; i < count; i++)
+        {
+            DependencyObject child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i);
+            if (child is Button button && button.Name == name) return button;
+            if (FindButton(child, name) is Button found) return found;
+        }
+        return null;
     }
 
     /// <summary>The "Open sessions in" row of a launch that asks: the core's
@@ -408,12 +595,14 @@ public sealed class ManagedSessionsView : UserControl
         if (terminalPicker is not null) form.Children.Add(terminalPicker);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
         var launchDialog = Dialog("launch_title", form, "launch_short");
-        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && !string.IsNullOrWhiteSpace(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
+        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && ManagedLaunchFolder.IsAcceptable(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
         account.SelectionChanged += (_, _) => ValidateLaunch();
         model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
-        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
+        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
+        // Decided from the typed folder at send time (L4).
+        if (_snapshot.AccountLaunchParams(selected, project.Text, model.Text, collect.IsChecked == true, Guid.NewGuid().ToString()) is not { } request) return;
         if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
-        await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false, model = selected.Tool == "opencode" ? model.Text.Trim() : null, collect_traces = selected.Tool == "opencode" && collect.IsChecked == true }));
+        await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }
 }

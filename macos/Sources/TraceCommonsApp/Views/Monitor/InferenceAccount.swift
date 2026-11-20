@@ -63,6 +63,8 @@ struct InferenceBalanceSection: View {
 struct PrivateAISettingsPanels: View {
     let store: InferenceStore
     @EnvironmentObject private var model: AppModel
+    /// Claude Desktop's status for its row, read by the tools card's stack.
+    @State private var claudeDesktop: ClaudeDesktopSetupModel?
 
     var body: some View {
         if let copy = model.privateInferenceCopy {
@@ -82,9 +84,12 @@ struct PrivateAISettingsPanels: View {
                             onRefresh: { refreshTools() })
                         .helpIfAny(copy.harnessesPrecedenceTooltip)
                         HarnessListSection(copy: copy, titled: false)
-                        ClaudeDesktopSettingsRow(closeLabel: MonitorWords.close)
+                        ClaudeDesktopSettingsRow(setup: claudeDesktop, closeLabel: MonitorWords.close)
                         RedTeamSettingsRow()
                     }
+                    // On the stack, which always draws: the row is empty
+                    // until this read lands.
+                    .claudeDesktopPolling($claudeDesktop, every: .seconds(5), readsModelNames: true)
                 }
                 PrivateAISwitchCard(
                     copy: copy,

@@ -48,7 +48,9 @@ public static class SymbolGlyphs
         ["dollarsign.circle"] = new(0xE8C7, Nearest: true),
         ["exclamationmark.circle.fill"] = new(0xE783),
         ["exclamationmark.triangle.fill"] = new(0xE7BA),
-        ["folder.fill"] = new(0xE8B7),
+        // FolderFill, filled as the symbol; the outline Folder (E8B7) was
+        // the launch art's largest pixel difference from the Mac (#2207).
+        ["folder.fill"] = new(0xE8D5),
         ["gearshape"] = new(0xE713),
         ["hand.thumbsup"] = new(0xE8E1),
         ["hand.thumbsup.fill"] = new(0xE8E1),

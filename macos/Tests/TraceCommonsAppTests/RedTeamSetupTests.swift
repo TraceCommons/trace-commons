@@ -54,7 +54,7 @@ final class RedTeamSetupTests: XCTestCase {
         let tab = try GlassSurfaceRulesTests.text("Views/Monitor/InferenceViews.swift")
         XCTAssertTrue(tab.contains("RedTeamSetupPrompt(onOpenSettings: onOpenSettings)"))
         let settings = try GlassSurfaceRulesTests.text("Views/Monitor/InferenceAccount.swift")
-        XCTAssertTrue(settings.contains("ClaudeDesktopSettingsRow(closeLabel: MonitorWords.close)\n                        RedTeamSettingsRow()"))
+        XCTAssertTrue(settings.contains("ClaudeDesktopSettingsRow(setup: claudeDesktop, closeLabel: MonitorWords.close)\n                        RedTeamSettingsRow()"))
     }
 
     func testInstallingRedTeamSendsOnlyTheInstallAction() async throws {
