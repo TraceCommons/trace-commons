@@ -643,6 +643,8 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         trace_commons_protocol::admission::SIGNATURE_HEADER,
         HeaderValue::from_static("invalid-replay-signature"),
     );
+    // Each send below follows one for the same submission.
+    admission_lock_released(&client, &tenant, admitted.submission_id).await;
     assert_eq!(
         post(
             state.clone(),
@@ -655,6 +657,7 @@ async fn actual_postgres_challenge_witness_ingest_and_terminal_retry() {
         StatusCode::FORBIDDEN,
         "an offered changed replay signature cannot replace stored authority"
     );
+    admission_lock_released(&client, &tenant, admitted.submission_id).await;
     let resumed = require_ok(
         post(
             state.clone(),
