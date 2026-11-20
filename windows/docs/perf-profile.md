@@ -9,10 +9,14 @@ It runs on a Debug build (only a Debug build reads `TRACE_COMMONS_SAMPLE`;
 a Release build would start a real daemon), on recorded samples, in the
 console session, and captures only the app's own windows by handle. It
 never signs in, enrolls, accepts terms or shares. See [dev-vm.md](dev-vm.md)
-for the box itself. For numbers that match a release, build Debug with the
+for the box itself. For numbers closer to a release, build Debug with the
 compiler's optimisations on (`-p:Configuration=Debug -p:Optimize=true`):
-the JIT then compiles the app's code as a Release build would, and the
-sample switch still works.
+the app's own assemblies are then optimised as Release's are, and the
+sample switch still works. It is not a Release build: the `#if DEBUG`
+paths (the samples among them) stay, and no Release build has been
+profiled. Neither configuration uses ReadyToRun, so in both the runtime
+starts methods in its quick tier and recompiles the busy ones, and a
+trace of the first seconds shows JIT time.
 
 ## The pieces
 
