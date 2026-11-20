@@ -837,10 +837,15 @@ public sealed partial class TracesMapView : UserControl
         Kick();
     }
 
-    private double? WantedInterval()
+    /// <summary>When the main layer was last asked to draw by the clock.</summary>
+    private double _mainDrawnAt = double.NegativeInfinity;
+
+    private double? WantedInterval() => WantedInputs() is { } inputs ? MapMotion.ClockInterval(inputs) : null;
+
+    private MapClockInputs? WantedInputs()
     {
         double now = Now;
-        return MapMotion.ClockInterval(new MapClockInputs(
+        return new MapClockInputs(
             AnimationsEnabled: Motion,
             Loaded: _loaded,
             WindowVisible: WindowClocks.Running,
@@ -852,7 +857,7 @@ public sealed partial class TracesMapView : UserControl
             PileMoving: _pile.Moving(now),
             LightFading: _pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration,
             SecondsShown: now - _shownAt,
-            NextDeadlineIn: _player.NextDeadline is { } deadline ? deadline - now : null));
+            NextDeadlineIn: _player.NextDeadline is { } deadline ? deadline - now : null);
     }
 
     private void Kick()
@@ -882,7 +887,12 @@ public sealed partial class TracesMapView : UserControl
         {
             double now = Now;
             _player.Tick(now);
-            _canvas.Invalidate();
+            if (WantedInputs() is not { } inputs || MapMotion.MainLayerDue(inputs, now - _mainDrawnAt))
+            {
+                _mainDrawnAt = now;
+                _canvas.Invalidate();
+            }
+
             bool fieldMoves = MapField.Sweep(now - _shownAt, false) > 0 || MapField.UntilNextPass(now - _shownAt) == 0
                 || (_pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration + MapMotion.TransferFrameInterval);
             // The pile moves between the layers as it starts and stops.

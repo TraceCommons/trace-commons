@@ -48,6 +48,38 @@ public class MapFieldLayerTests
         Assert.Contains("DropFieldLayers();", Method(source, "private void DropResources("), StringComparison.Ordinal);
     }
 
+    private static MapClockInputs Inputs(bool transfer = false, bool pile = false, bool light = false, bool flows = true, bool library = true) => new(
+        AnimationsEnabled: true, Loaded: true, WindowVisible: true, PaneShown: true, HasLibrary: library, Flows: flows, Healthy: true,
+        TransferPlaying: transfer, PileMoving: pile, LightFading: light, SecondsShown: 41.5, NextDeadlineIn: null);
+
+    [Fact]
+    public void APassDoesNotDrawTheArcsAndStationAtSixty()
+    {
+        // During a pass the clock ticks at 60 for the field; the arcs keep
+        // their 30 a second and the station its 20.
+        Assert.Equal(MapMotion.TransferFrameInterval, MapMotion.ClockInterval(Inputs()));
+        Assert.False(MapMotion.MainLayerDue(Inputs(), sinceLastDraw: 1.0 / 60));
+        Assert.True(MapMotion.MainLayerDue(Inputs(), sinceLastDraw: 2.0 / 60));
+        Assert.False(MapMotion.MainLayerDue(Inputs(flows: false), sinceLastDraw: 2.0 / 60));
+        Assert.True(MapMotion.MainLayerDue(Inputs(flows: false), sinceLastDraw: 3.0 / 60));
+
+        // What moves at 60 in the main layer still draws every tick.
+        Assert.True(MapMotion.MainLayerDue(Inputs(transfer: true), sinceLastDraw: 1.0 / 60));
+        Assert.True(MapMotion.MainLayerDue(Inputs(pile: true), sinceLastDraw: 1.0 / 60));
+        Assert.True(MapMotion.MainLayerDue(Inputs(light: true), sinceLastDraw: 1.0 / 60));
+
+        // A clock that only waits (nothing turns or flows) draws when it fires, as before.
+        Assert.True(MapMotion.MainLayerDue(Inputs(flows: false, library: false), sinceLastDraw: 1.0 / 60));
+    }
+
+    [Fact]
+    public void TheTickAsksBeforeDrawingTheMainLayer()
+    {
+        string tick = Method(Source(), "private DispatcherQueueTimer CreateTimer(");
+        Assert.Contains("MapMotion.MainLayerDue(", tick, StringComparison.Ordinal);
+        Assert.DoesNotContain("            _canvas.Invalidate();\n            bool fieldMoves", tick, StringComparison.Ordinal);
+    }
+
     private static string Source()
     {
         string path = System.IO.Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/TracesMapView.cs.txt");
