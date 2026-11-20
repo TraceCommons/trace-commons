@@ -17,7 +17,7 @@ public class MapClockTests
     private static MapClockInputs Idle => new(
         AnimationsEnabled: true, Loaded: true, WindowVisible: true, PaneShown: true,
         HasLibrary: false, Flows: false, Healthy: true, TransferPlaying: false, PileMoving: false,
-        LightFading: false, SecondsShown: 5, NextDeadlineIn: null);
+        LightFading: false, SecondsShown: 5, NextDeadlineIn: null, LibraryOnMovingLayer: false);
 
     [Fact]
     public void NothingTicksHiddenMinimisedUnloadedWithItsPaneClosedOrUnderReduceMotion()
@@ -34,15 +34,44 @@ public class MapClockTests
     public void EachPartRunsAtTheMacsOwnRate()
     {
         // Transfers and the pile at 60 (FlowMapView.swift:107, :140); the
-        // dashes at 30 (:283); the station and orb alone at 20
-        // (LibraryStation.swift:39).
+        // dashes at 30 (:283).
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, TransferPlaying = true }));
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { PileMoving = true }));
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { LightFading = true }));
         Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
-        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(Idle with { HasLibrary = true }));
-        // Paused or stale dashes do not move (FlowMapView.swift:278-285).
-        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
+    }
+
+    /// <summary>
+    /// #2268: the station turns on its own clock at 15 a second, not on the
+    /// dashes' 30. The moving layer's clock leaves it alone, unless the
+    /// station is drawn on that layer (a run or an open pile takes the
+    /// whole pane), when that clock turns it as before and its own stops.
+    /// </summary>
+    [Fact]
+    public void TheStationTurnsOnItsOwnClockApartFromTheDashes()
+    {
+        // At rest the moving layer's clock runs for the dashes only.
+        Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true })!.Value, 9);
+        Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false })!.Value, 9);
+        Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
+
+        // The station's own clock: 15 a second, with or without dashes.
+        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true }));
+        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true }));
+        Assert.Null(MapMotion.LibraryInterval(Idle));
+
+        // On the moving layer, the moving clock turns it and its own stops.
+        MapClockInputs onMoving = Idle with { HasLibrary = true, LibraryOnMovingLayer = true };
+        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(onMoving));
+        Assert.Equal(1.0 / 30, MapMotion.ClockInterval(onMoving with { Flows = true }));
+        Assert.Null(MapMotion.LibraryInterval(onMoving));
+
+        // It stops where every map clock stops.
+        MapClockInputs turning = Idle with { HasLibrary = true };
+        Assert.Null(MapMotion.LibraryInterval(turning with { WindowVisible = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { Loaded = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { PaneShown = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { AnimationsEnabled = false }));
     }
 
     [Fact]

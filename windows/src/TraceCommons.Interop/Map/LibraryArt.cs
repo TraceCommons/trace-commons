@@ -52,6 +52,9 @@ public static class LibraryStation
     /// </summary>
     public const double FrameInterval = 1.0 / 15;
 
+    /// <summary>The ring's radius and its tube's, in mesh units (#2268).</summary>
+    public const double RingRadius = 36.0, RingTube = 3.6;
+
     /// <summary>The station's frame on the rocket map, in design units (FlowMapView.swift:290).</summary>
     public const double FrameWidth = 150, FrameHeight = 130;
 
@@ -186,13 +189,12 @@ public static class LibraryStation
                 Rgb(0, 98, 176), Mark: true));
         }
 
-        const double RingRadius = 36.0, Tube = 3.6;
         const int Around = 40, Across = 8;
         Vec3 Torus(int u, int v)
         {
             double a = (double)u / Around * 2 * Math.PI, b = (double)v / Across * 2 * Math.PI;
-            double r = RingRadius + Tube * Math.Cos(b);
-            return new Vec3(r * Math.Cos(a), Tube * Math.Sin(b), r * Math.Sin(a));
+            double r = RingRadius + RingTube * Math.Cos(b);
+            return new Vec3(r * Math.Cos(a), RingTube * Math.Sin(b), r * Math.Sin(a));
         }
 
         for (int u = 0; u < Around; u++)
@@ -236,34 +238,95 @@ public static class LibraryStation
         return new Vec3(x * Cz - y2 * Sz, x * Sz + y2 * Cz, z2);
     }
 
+    /// <summary>A turned point of the mesh on a <paramref name="width"/> by <paramref name="height"/> frame, in perspective.</summary>
+    public static MapPoint Project(Vec3 q, double width, double height)
+    {
+        double scale = Math.Min(width / 140, height / 120);
+        double s = scale * CameraDistance / (CameraDistance - q.Z);
+        return new MapPoint(width / 2 + q.X * s, height / 2 - q.Y * s);
+    }
+
+    /// <summary>
+    /// The ring's outline on a <paramref name="width"/> by
+    /// <paramref name="height"/> frame (#2268, <c>ringOutline</c>): its outer
+    /// and inner edges, each closed, to fill even-odd. The ring lies in the
+    /// plane the station turns in, so its outline is the same at every angle
+    /// of the turn, and the glow drawn from it can be drawn once.
+    /// </summary>
+    public static IReadOnlyList<MapPoint[]> RingOutline(double width, double height)
+    {
+        const int Steps = 96;
+        var loops = new List<MapPoint[]>(2);
+        foreach (double radius in new[] { RingRadius + RingTube, RingRadius - RingTube })
+        {
+            var loop = new MapPoint[Steps + 1];
+            for (int step = 0; step <= Steps; step++)
+            {
+                double a = (double)step / Steps * 2 * Math.PI;
+                loop[step] = Project(Turned(new Vec3(radius * Math.Cos(a), 0, radius * Math.Sin(a)), 0), width, height);
+            }
+
+            loops.Add(loop);
+        }
+
+        return loops;
+    }
+
     /// <summary>
     /// One frame in a <paramref name="width"/> by <paramref name="height"/>
     /// frame: every face turned, projected, shaded and sorted far to near
     /// (:253-304). The caller fills each and strokes it 0.6 wide in its own
-    /// colour, round joins, to close the seams.
+    /// colour, round joins, to close the seams. The painter draws from
+    /// <see cref="FrameInto"/>; this list is for tests.
     /// </summary>
     public static IReadOnlyList<DrawnFace> Frame(double width, double height, double angle)
     {
-        // Each distinct corner is turned and projected once (#2268): a ring
-        // corner is shared by four faces. Faces are ordered by index, far to
-        // near, with the mesh's order breaking ties as the stable sort did.
+        var frame = new StationFrame();
+        FrameInto(frame, width, height, angle);
         IndexedMesh mesh = Indexed;
-        double scale = Math.Min(width / 140, height / 120);
+        var faces = new DrawnFace[frame.Count];
+        for (int i = 0; i < faces.Length; i++)
+        {
+            int f = frame.Order[i], first = mesh.Starts[f], corners = mesh.Starts[f + 1] - first;
+            var points = new MapPoint[corners];
+            for (int c = 0; c < corners; c++)
+            {
+                points[c] = frame.Projected[mesh.Corners[first + c]];
+            }
+
+            faces[i] = new DrawnFace(points, frame.R[f], frame.G[f], frame.B[f]);
+        }
+
+        return faces;
+    }
+
+    /// <summary>
+    /// One frame into <paramref name="into"/>, whose buffers are kept from
+    /// frame to frame (#2268): each distinct corner turned and projected
+    /// once (a ring corner is shared by four faces), and the faces put in
+    /// order by index, far to near, the mesh's order breaking ties as the
+    /// stable sort did. Face <c>Order[i]</c>'s corners are
+    /// <c>Projected[Indexed.Corners[Starts[f]..Starts[f + 1]]]</c>, its
+    /// colour <c>(R[f], G[f], B[f])</c>. Nothing is allocated per face.
+    /// </summary>
+    public static void FrameInto(StationFrame into, double width, double height, double angle)
+    {
+        IndexedMesh mesh = Indexed;
+        int count = Mesh.Count;
+        into.Size(mesh.Vertices.Length, count);
+        Vec3[] turned = into.Turned;
+        MapPoint[] projected = into.Projected;
+        double[] depth = into.Depth;
+        int[] order = into.Order;
         double cy = Math.Cos(angle), sy = Math.Sin(angle);
-        var turned = new Vec3[mesh.Vertices.Length];
-        var projected = new MapPoint[mesh.Vertices.Length];
         for (int v = 0; v < turned.Length; v++)
         {
             Vec3 q = Turned(mesh.Vertices[v], cy, sy);
             turned[v] = q;
-            double s = scale * CameraDistance / (CameraDistance - q.Z);
-            projected[v] = new MapPoint(width / 2 + q.X * s, height / 2 - q.Y * s);
+            projected[v] = Project(q, width, height);
         }
 
-        int count = Mesh.Count;
-        var depth = new double[count];
-        var colour = new Vec3[count];
-        var order = new List<int>(count);
+        int drawn = 0;
         double markNear = double.NegativeInfinity, markFar = double.PositiveInfinity;
         for (int f = 0; f < count; f++)
         {
@@ -298,35 +361,25 @@ public static class LibraryStation
             }
 
             depth[f] = sum / corners;
-            colour[f] = face.Color * (0.3 + 0.7 * lambert) + new Vec3(spec, spec, spec);
-            order.Add(f);
+            Vec3 shaded = face.Color * (0.3 + 0.7 * lambert) + new Vec3(spec, spec, spec);
+            into.R[f] = Math.Min(1, shaded.X);
+            into.G[f] = Math.Min(1, shaded.Y);
+            into.B[f] = Math.Min(1, shaded.Z);
+            order[drawn++] = f;
         }
 
         double markMiddle = (markNear + markFar) / 2;
-        foreach (int f in order)
+        for (int i = 0; i < drawn; i++)
         {
+            int f = order[i];
             if (Mesh[f].MarkCap)
             {
                 depth[f] = depth[f] > markMiddle ? markNear + 0.01 : markFar - 0.01;
             }
         }
 
-        order.Sort((a, b) => depth[a] != depth[b] ? depth[a].CompareTo(depth[b]) : a.CompareTo(b));
-        var faces = new DrawnFace[order.Count];
-        for (int i = 0; i < faces.Length; i++)
-        {
-            int f = order[i], first = mesh.Starts[f], corners = mesh.Starts[f + 1] - first;
-            var points = new MapPoint[corners];
-            for (int c = 0; c < corners; c++)
-            {
-                points[c] = projected[mesh.Corners[first + c]];
-            }
-
-            Vec3 c3 = colour[f];
-            faces[i] = new DrawnFace(points, Math.Min(1, c3.X), Math.Min(1, c3.Y), Math.Min(1, c3.Z));
-        }
-
-        return faces;
+        Array.Sort(order, 0, drawn, into.FarToNear);
+        into.Count = drawn;
     }
 
     /// <summary>
@@ -555,5 +608,72 @@ public static class MapField
 
         double since = (secondsShown - ShimmerFirst) % ShimmerEvery;
         return since < ShimmerDuration ? 0 : ShimmerEvery - since;
+    }
+}
+
+/// <summary>
+/// A station frame's buffers (<see cref="LibraryStation.FrameInto"/>),
+/// kept by the painter from frame to frame so a frame allocates nothing
+/// per face.
+/// </summary>
+public sealed class StationFrame
+{
+    /// <summary>Each distinct corner, turned.</summary>
+    internal Vec3[] Turned { get; private set; } = Array.Empty<Vec3>();
+
+    /// <summary>Each distinct corner, projected onto the frame.</summary>
+    public MapPoint[] Projected { get; private set; } = Array.Empty<MapPoint>();
+
+    /// <summary>The faces drawn, far to near, as indices into the mesh; the first <see cref="Count"/> are this frame's.</summary>
+    public int[] Order { get; private set; } = Array.Empty<int>();
+
+    /// <summary>How many faces this frame draws.</summary>
+    public int Count { get; internal set; }
+
+    /// <summary>Each face's shaded colour, by mesh index.</summary>
+    public double[] R { get; private set; } = Array.Empty<double>();
+
+    /// <inheritdoc cref="R"/>
+    public double[] G { get; private set; } = Array.Empty<double>();
+
+    /// <inheritdoc cref="R"/>
+    public double[] B { get; private set; } = Array.Empty<double>();
+
+    internal double[] Depth { get; private set; } = Array.Empty<double>();
+
+    /// <summary>Far to near by depth, the mesh's order breaking ties.</summary>
+    internal IComparer<int> FarToNear { get; }
+
+    public StationFrame() => FarToNear = new ByDepth(this);
+
+    internal void Size(int vertices, int faces)
+    {
+        if (Projected.Length != vertices)
+        {
+            Turned = new Vec3[vertices];
+            Projected = new MapPoint[vertices];
+        }
+
+        if (Order.Length != faces)
+        {
+            Order = new int[faces];
+            Depth = new double[faces];
+            R = new double[faces];
+            G = new double[faces];
+            B = new double[faces];
+        }
+    }
+
+    private sealed class ByDepth : IComparer<int>
+    {
+        private readonly StationFrame _frame;
+
+        public ByDepth(StationFrame frame) => _frame = frame;
+
+        public int Compare(int a, int b)
+        {
+            double[] depth = _frame.Depth;
+            return depth[a] != depth[b] ? depth[a].CompareTo(depth[b]) : a.CompareTo(b);
+        }
     }
 }

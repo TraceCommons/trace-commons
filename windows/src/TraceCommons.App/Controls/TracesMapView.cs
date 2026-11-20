@@ -48,10 +48,11 @@ public enum MapView
 /// <remarks>
 /// <para>
 /// Motion follows the Mac row by row (spec "Animation coverage"): the arcs'
-/// dashes at 30 frames a second, the station and orb at 20, transfers and
+/// dashes at 30 frames a second, the station and orb at 15, transfers and
 /// the pile at 60, the shimmer and the pointer light on their own curves.
-/// One <see cref="DispatcherQueueTimer"/> drives them at the fastest rate
-/// anything needs; it runs only while the control is loaded, the window can
+/// One <see cref="DispatcherQueueTimer"/> drives the moving layer at the
+/// fastest rate it needs, and the library turns on a second one on its own
+/// layer (#2268); each runs only while the control is loaded, the window can
 /// be seen (<see cref="WindowClocks"/>) and the system lets things move
 /// (<see cref="UISettings.AnimationsEnabled"/>, read on every tick and on
 /// every activation, so a change applies at once). With motion off the map
@@ -69,6 +70,14 @@ public sealed partial class TracesMapView : UserControl
 
     /// <summary>The still layer under the moving one: the field and the nodes, drawn on change (FlowMapView.swift:91-96).</summary>
     private readonly CanvasControl _still = new();
+
+    /// <summary>
+    /// The library's own layer over the moving one, on its own clock (#2268):
+    /// the station turns at 15 a second, not at the dashes' 30. While a run
+    /// plays or the pile is on the moving layer, the library is drawn there
+    /// instead, under the run and the pile as before.
+    /// </summary>
+    private readonly CanvasControl _libraryCanvas = new();
     private readonly Canvas _targets = new();
     private readonly Border _card = new();
     private readonly TextBlock _cardTitle = new();
@@ -182,6 +191,10 @@ public sealed partial class TracesMapView : UserControl
         _canvas.CreateResources += (_, _) => DropResources();
         _canvas.IsHitTestVisible = false;
         AutomationProperties.SetAccessibilityView(_canvas, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        _libraryCanvas.Draw += OnDrawLibrary;
+        _libraryCanvas.CreateResources += (_, _) => DropResources();
+        _libraryCanvas.IsHitTestVisible = false;
+        AutomationProperties.SetAccessibilityView(_libraryCanvas, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
         _still.Draw += OnDrawStill;
         _still.CreateResources += (_, _) => DropResources();
         _still.IsHitTestVisible = false;
@@ -234,6 +247,7 @@ public sealed partial class TracesMapView : UserControl
 
         _root.Children.Add(_still);
         _root.Children.Add(_canvas);
+        _root.Children.Add(_libraryCanvas);
         _root.Children.Add(_targets);
         _root.Children.Add(_card);
         _root.Children.Add(_foot);
@@ -840,10 +854,15 @@ public sealed partial class TracesMapView : UserControl
         Kick();
     }
 
-    private double? WantedInterval()
+    private double? WantedInterval() => MapMotion.ClockInterval(ClockInputs());
+
+    /// <summary>What the library's own clock needs (#2268), or null.</summary>
+    private double? LibraryInterval() => MapMotion.LibraryInterval(ClockInputs());
+
+    private MapClockInputs ClockInputs()
     {
         double now = Now;
-        return MapMotion.ClockInterval(new MapClockInputs(
+        return new MapClockInputs(
             AnimationsEnabled: Motion,
             Loaded: _loaded,
             WindowVisible: WindowClocks.Running,
@@ -855,16 +874,19 @@ public sealed partial class TracesMapView : UserControl
             PileMoving: _pile.Moving(now),
             LightFading: _pointerChangedAt >= 0 && now - _pointerChangedAt < MapMotion.PointerLightFade.Duration,
             SecondsShown: now - _shownAt,
-            NextDeadlineIn: _player.NextDeadline is { } deadline ? deadline - now : null));
+            NextDeadlineIn: _player.NextDeadline is { } deadline ? deadline - now : null,
+            LibraryOnMovingLayer: LibraryOnMovingLayer(now));
     }
 
     private void Kick()
     {
+        KickLibrary();
+
         // The window's rule on top of the map's own: at most 15 a second
         // while the window is not focused (FocusFrameRule).
         if (WantedInterval() is not { } own || WindowClocks.Windows.Interval(XamlRoot, own) is not { } interval)
         {
-            StopTimer();
+            _timer?.Stop();
             return;
         }
 
@@ -902,13 +924,47 @@ public sealed partial class TracesMapView : UserControl
         return timer;
     }
 
-    private void StopTimer() => _timer?.Stop();
+    /// <summary>The library's own clock (#2268), under the same window rule.</summary>
+    private void KickLibrary()
+    {
+        if (LibraryInterval() is not { } library || WindowClocks.Windows.Interval(XamlRoot, library) is not { } interval)
+        {
+            _libraryTimer?.Stop();
+            return;
+        }
+
+        _libraryTimer ??= CreateLibraryTimer();
+        TimeSpan wanted = TimeSpan.FromSeconds(interval);
+        if (MapMotion.ClockRestarts(_libraryTimer.IsRunning, _libraryTimer.Interval.TotalSeconds, wanted.TotalSeconds))
+        {
+            _libraryTimer.Stop();
+            _libraryTimer.Interval = wanted;
+            _libraryTimer.Start();
+        }
+    }
+
+    private DispatcherQueueTimer? _libraryTimer;
+
+    private DispatcherQueueTimer CreateLibraryTimer()
+    {
+        DispatcherQueueTimer timer = DispatcherQueue.CreateTimer();
+        timer.IsRepeating = true;
+        timer.Tick += (_, _) => _libraryCanvas.Invalidate();
+        return timer;
+    }
+
+    private void StopTimer()
+    {
+        _timer?.Stop();
+        _libraryTimer?.Stop();
+    }
 
     private void Redraw()
     {
         _still.Invalidate();
         PlaceMovingCanvas();
         _canvas.Invalidate();
+        _libraryCanvas.Invalidate();
     }
 
     /// <summary>The moving layer's box (MovingLayerBounds), or null while it takes the whole pane.</summary>
@@ -923,30 +979,73 @@ public sealed partial class TracesMapView : UserControl
     /// </summary>
     private void PlaceMovingCanvas()
     {
-        LayoutRect? box = MovingBox(Now);
+        double now = Now;
+        PlaceLibraryCanvas(now);
+        LayoutRect? box = MovingBox(now);
         if (box == _movingBox)
         {
             return;
         }
 
         _movingBox = box;
+        Place(_canvas, box);
+    }
+
+    private static void Place(CanvasControl canvas, LayoutRect? box)
+    {
         if (box is { } b)
         {
-            _canvas.HorizontalAlignment = HorizontalAlignment.Left;
-            _canvas.VerticalAlignment = VerticalAlignment.Top;
-            _canvas.Margin = new Thickness(b.X, b.Y, 0, 0);
-            _canvas.Width = b.Width;
-            _canvas.Height = b.Height;
+            canvas.HorizontalAlignment = HorizontalAlignment.Left;
+            canvas.VerticalAlignment = VerticalAlignment.Top;
+            canvas.Margin = new Thickness(b.X, b.Y, 0, 0);
+            canvas.Width = b.Width;
+            canvas.Height = b.Height;
         }
         else
         {
-            _canvas.HorizontalAlignment = HorizontalAlignment.Stretch;
-            _canvas.VerticalAlignment = VerticalAlignment.Stretch;
-            _canvas.Margin = default;
-            _canvas.Width = double.NaN;
-            _canvas.Height = double.NaN;
+            canvas.HorizontalAlignment = HorizontalAlignment.Stretch;
+            canvas.VerticalAlignment = VerticalAlignment.Stretch;
+            canvas.Margin = default;
+            canvas.Width = double.NaN;
+            canvas.Height = double.NaN;
         }
     }
+
+    /// <summary>The library layer's box (<see cref="LibraryBox"/>) and whether the library is on the moving layer, as last placed.</summary>
+    private LayoutRect? _libraryBox;
+    private bool? _libraryOnMoving;
+
+    /// <summary>
+    /// Sizes the library's layer to the library's frame and glow, and hides
+    /// it while the library is drawn on the moving layer; the layer that
+    /// takes the library over is drawn again at once.
+    /// </summary>
+    private void PlaceLibraryCanvas(double now)
+    {
+        bool onMoving = LibraryOnMovingLayer(now);
+        if (onMoving != _libraryOnMoving)
+        {
+            _libraryOnMoving = onMoving;
+            _libraryCanvas.Visibility = onMoving ? Visibility.Collapsed : Visibility.Visible;
+            _libraryCanvas.Invalidate();
+            _canvas.Invalidate();
+        }
+
+        LayoutRect? box = LibraryBox();
+        if (box != _libraryBox)
+        {
+            _libraryBox = box;
+            Place(_libraryCanvas, box);
+        }
+    }
+
+    /// <summary>
+    /// Whether the library is drawn on the moving layer: while that layer
+    /// takes the whole pane, for a run or a pile on it, so the run and the
+    /// pile still draw over the library. Otherwise it has its own layer.
+    /// </summary>
+    private bool LibraryOnMovingLayer(double now) =>
+        (Motion && WindowClocks.Running && _player.Run is not null) || PileMoves(now);
 
     /// <summary>
     /// Every part <see cref="OnDraw"/> draws while the layer rests, in pane
@@ -961,7 +1060,7 @@ public sealed partial class TracesMapView : UserControl
             return null;
         }
 
-        bool whole = (Motion && WindowClocks.Running && _player.Run is not null) || PileMoves(now);
+        bool whole = LibraryOnMovingLayer(now);
         MapGeometry fit = Fit;
         var parts = new List<LayoutRect>();
         double half = MapGeometry.ArcWidth * MapGeometry.FlowingWidthFactor * fit.Scale / 2;
@@ -973,14 +1072,6 @@ public sealed partial class TracesMapView : UserControl
         if (_scene.Stack is not null)
         {
             bool launch = _style == TracesMapStyle.Launch;
-            if (_scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
-            {
-                double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
-                double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
-                double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
-                parts.Add(MovingLayerBounds.Around(fit.Point(library.At), w + 2 * pad, h + 2 * pad));
-            }
-
             if (launch && _scene.Nodes.FirstOrDefault(n => n.Id == "hub") is { } hub)
             {
                 double reach = 2 * TransferDrawing.RocketLength * fit.Scale;
@@ -989,6 +1080,23 @@ public sealed partial class TracesMapView : UserControl
         }
 
         return MovingLayerBounds.Resting(PaneSize, XamlRoot?.RasterizationScale ?? 1, whole, parts);
+    }
+
+    /// <summary>The library's frame with its glow, in pane DIPs, on whole device pixels; null (the whole pane) with no library.</summary>
+    private LayoutRect? LibraryBox()
+    {
+        if (!_scene.DrawsMap || _scene.Stack is null || _scene.Nodes.FirstOrDefault(n => n.Id == "library") is not { } library)
+        {
+            return null;
+        }
+
+        MapGeometry fit = Fit;
+        bool launch = _style == TracesMapStyle.Launch;
+        double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
+        double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
+        double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
+        return MovingLayerBounds.Resting(PaneSize, XamlRoot?.RasterizationScale ?? 1, false,
+            new[] { MovingLayerBounds.Around(fit.Point(library.At), w + 2 * pad, h + 2 * pad) });
     }
 
     // ---- The pointer --------------------------------------------------
@@ -1066,6 +1174,7 @@ public sealed partial class TracesMapView : UserControl
         DropFieldLayers();
         _logos.Clear();
         _libraryFrames.Clear();
+        _stationGlow.Clear();
     }
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
@@ -1105,9 +1214,9 @@ public sealed partial class TracesMapView : UserControl
         DrawArcs(ds, sender, fit, motion ? now : 0, motion);
         if (_scene.Stack is { } stack)
         {
-            if (_scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
+            if (LibraryOnMovingLayer(now) && _scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
             {
-                DrawLibrary(ds, sender, library, fit, motion ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200 : 0, !motion);
+                DrawLibrary(ds, sender, library, fit, LibrarySeconds(motion), !motion);
             }
 
             MapTransferRun? run = motion && _player.Run is { } r ? r : null;
@@ -1140,6 +1249,40 @@ public sealed partial class TracesMapView : UserControl
     private bool PileMoves(double now) =>
         (Motion && WindowClocks.Running && ((_player.Run is { } run && run.Moving(now - run.Start)) || _pile.Moving(now)))
         || _pile.Stages(now, !(Motion && WindowClocks.Running)).Tall > 0;
+
+    /// <summary>The seconds the library's turn reads: the Mac's reference-date clock.</summary>
+    private static double LibrarySeconds(bool motion) =>
+        motion ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0 - 978307200 : 0;
+
+    private void OnDrawLibrary(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        long begun = LookFrames.Begin();
+        try
+        {
+            DrawLibraryLayer(sender, args);
+        }
+        finally
+        {
+            LookFrames.End("map-library", begun);
+        }
+    }
+
+    /// <summary>The library on its own layer (#2268), unless the moving layer has it.</summary>
+    private void DrawLibraryLayer(CanvasControl sender, CanvasDrawEventArgs args)
+    {
+        double now = Now;
+        if (sender.ActualWidth > 0 && sender.ActualHeight > 0 && _scene.DrawsMap && _scene.Stack is not null
+            && !LibraryOnMovingLayer(now)
+            && _scene.Nodes.FirstOrDefault(n => n.Id == "library") is { } library)
+        {
+            // Sized to the library's box (PlaceLibraryCanvas): draw through its offset.
+            CanvasDrawingSession ds = args.DrawingSession;
+            Vector3 offset = sender.ActualOffset;
+            ds.Transform = Matrix3x2.CreateTranslation(-offset.X, -offset.Y);
+            bool motion = Motion && WindowClocks.Running;
+            DrawLibrary(ds, sender, library, Fit, LibrarySeconds(motion), !motion);
+        }
+    }
 
     /// <summary>The field, the nodes and the overflow counts: redrawn on a change, a pointer move or a shimmer pass.</summary>
     private void OnDrawStill(CanvasControl sender, CanvasDrawEventArgs args)
@@ -1643,11 +1786,13 @@ public sealed partial class TracesMapView : UserControl
 
     /// <summary>
     /// The station or the orb at the library's place (FlowMapView.swift:236-249),
-    /// with its glow. Each of its 20-a-second frames is drawn once per size,
+    /// with its glow. Each of its 15-a-second frames is drawn once per size,
     /// style, theme and lit state and then reused: the turn repeats, and the
-    /// mesh and the glow's blur are the costliest things the map draws. The
-    /// art is rasterised once per frame, into a bitmap the glow and the frame
-    /// both read (checklist O3: a command list was rasterised twice).
+    /// mesh is the costliest thing the map draws. The station's glow is drawn
+    /// once from its ring (<see cref="StationGlow"/>, #2268), under every
+    /// frame; the orb's is still drawn into each frame from its art, which is
+    /// rasterised once per frame into a bitmap the glow and the frame both
+    /// read (checklist O3: a command list was rasterised twice).
     /// </summary>
     private void DrawLibrary(CanvasDrawingSession ds, ICanvasResourceCreator device, MapNode library, MapGeometry fit, double seconds, bool still)
     {
@@ -1661,15 +1806,21 @@ public sealed partial class TracesMapView : UserControl
         double w = (launch ? LibraryStation.FrameWidth : TransferDrawing.OrbFrame) * fit.Scale;
         double h = (launch ? LibraryStation.FrameHeight : TransferDrawing.OrbFrame) * fit.Scale;
         double pad = (launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius) * 2;
+        float side = (float)(w + 2 * pad), tall = (float)(h + 2 * pad);
+        Color brand = Ink("heroCampaignBright");
+        float x = (float)(at.X - w / 2 - pad), y = (float)(at.Y - h / 2 - pad);
+        if (launch)
+        {
+            ds.DrawImage(StationGlow(device, side, tall, _canvas.Dpi, pad, w, h, library.Active, brand), x, y);
+        }
+
         CanvasRenderTarget? frame = _libraryFrames.Get(index);
         if (frame is null)
         {
             double angle = launch
                 ? (still ? LibraryStation.RestAngle : LibraryStation.RestAngle + (index + 0.0) / frames * 2 * Math.PI)
                 : (still ? LibraryOrb.RestAngle : LibraryOrb.RestAngle + (index + 0.0) / frames * 2 * Math.PI);
-            float side = (float)(w + 2 * pad), tall = (float)(h + 2 * pad);
             frame = new CanvasRenderTarget(device, side, tall, _canvas.Dpi);
-            Color brand = Ink("heroCampaignBright");
             using (var art = new CanvasRenderTarget(device, side, tall, _canvas.Dpi))
             {
                 using (CanvasDrawingSession layer = art.CreateDrawingSession())
@@ -1687,8 +1838,11 @@ public sealed partial class TracesMapView : UserControl
 
                 using CanvasDrawingSession f = frame.CreateDrawingSession();
                 f.Clear(Color.FromArgb(0, 0, 0, 0));
-                DrawGlow(f, art, With(brand, launch ? LibraryStation.Glow(library.Active) : LibraryOrb.Glow(library.Active)),
-                    launch ? LibraryStation.GlowRadius : LibraryOrb.GlowRadius);
+                if (!launch)
+                {
+                    DrawGlow(f, art, With(brand, LibraryOrb.Glow(library.Active)), LibraryOrb.GlowRadius);
+                }
+
                 using (f.CreateLayer(launch ? 1 : (float)LibraryOrb.Opacity(library.Active)))
                 {
                     f.DrawImage(art);
@@ -1703,13 +1857,64 @@ public sealed partial class TracesMapView : UserControl
             }
             else
             {
-                ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
+                ds.DrawImage(frame, x, y);
                 frame.Dispose();
                 return;
             }
         }
 
-        ds.DrawImage(frame, (float)(at.X - w / 2 - pad), (float)(at.Y - h / 2 - pad));
+        ds.DrawImage(frame, x, y);
+    }
+
+    /// <summary>The station's glow, kept for one size, scale, lit state and colour.</summary>
+    private readonly LibraryFrameCache<CanvasRenderTarget> _stationGlow = new();
+
+    /// <summary>
+    /// The station's glow on a <paramref name="side"/> by <paramref name="tall"/>
+    /// image whose frame starts <paramref name="pad"/> in (#2268,
+    /// <c>GlassLibraryStationGlow</c>): the ring's outline, which is the same
+    /// at every angle of the turn, filled even-odd and blurred as the glow
+    /// round the whole mesh was, in the same colour, strength and radius,
+    /// once per size, scale, lit state and colour rather than on every frame.
+    /// </summary>
+    private CanvasRenderTarget StationGlow(ICanvasResourceCreator device, float side, float tall, float dpi, double pad, double w, double h, bool lit, Color brand)
+    {
+        _stationGlow.Look($"{side}|{tall}|{dpi}|{lit}|{brand}");
+        if (_stationGlow.Get(0) is { } kept)
+        {
+            return kept;
+        }
+
+        var glow = new CanvasRenderTarget(device, side, tall, dpi);
+        using (var ring = new CanvasRenderTarget(device, side, tall, dpi))
+        {
+            using (CanvasDrawingSession r = ring.CreateDrawingSession())
+            {
+                r.Clear(Color.FromArgb(0, 0, 0, 0));
+                using var path = new CanvasPathBuilder(device);
+                path.SetFilledRegionDetermination(CanvasFilledRegionDetermination.Alternate);
+                foreach (MapPoint[] loop in LibraryStation.RingOutline(w, h))
+                {
+                    path.BeginFigure((float)(pad + loop[0].X), (float)(pad + loop[0].Y));
+                    for (int i = 1; i < loop.Length; i++)
+                    {
+                        path.AddLine((float)(pad + loop[i].X), (float)(pad + loop[i].Y));
+                    }
+
+                    path.EndFigure(CanvasFigureLoop.Closed);
+                }
+
+                using CanvasGeometry outline = CanvasGeometry.CreatePath(path);
+                r.FillGeometry(outline, Color.FromArgb(255, 0, 0, 0));
+            }
+
+            using CanvasDrawingSession g = glow.CreateDrawingSession();
+            g.Clear(Color.FromArgb(0, 0, 0, 0));
+            DrawGlow(g, ring, With(brand, LibraryStation.Glow(lit)), LibraryStation.GlowRadius);
+        }
+
+        _stationGlow.Put(0, glow);
+        return glow;
     }
 
     /// <summary>A shadow-style glow of <paramref name="radius"/> round an image (SwiftUI's <c>.shadow</c>).</summary>

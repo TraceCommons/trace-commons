@@ -241,18 +241,23 @@ public class MapArtTests
     }
 
     [Fact]
-    public void TheRestingClockRunsAtThirtyForDashesFifteenForTheLibraryAndNotAtAllOtherwise()
+    public void AtRestTheDashesAndTheLibraryMoveApart()
     {
-        var cases = new[] { (false, true, true, true), (false, false, true, true), (true, true, true, true), (false, false, true, false), (false, true, false, false) };
-        JsonElement mac = MapProbe.Get("resting");
-        for (int i = 0; i < cases.Length; i++)
+        // #2268's restingMotion (FlowMapView.swift): the dashes move while
+        // flows are live and healthy, the library while there is one, and
+        // nothing under Reduce Motion. Each runs on its own clock.
+        var cases = new (bool Reduce, bool Flows, bool Healthy, bool Library, bool Dashes, bool Turns)[]
         {
-            (double interval, bool paused) = MapMotion.Resting(cases[i].Item1, cases[i].Item2, cases[i].Item3, cases[i].Item4);
-            // The probe was recorded with the Mac's library at 20 a second;
-            // #2268 lowers it to 15, and Windows follows.
-            double expected = Math.Abs(mac[i][0].GetDouble() - 1.0 / 20) < 1e-9 ? LibraryStation.FrameInterval : mac[i][0].GetDouble();
-            Near(expected, interval, $"case {i}");
-            Assert.Equal(mac[i][1].GetDouble() == 1, paused);
+            (false, true, true, true, true, true),
+            (false, false, true, true, false, true),
+            (true, true, true, true, false, false),
+            (false, false, true, false, false, false),
+            (false, true, false, false, false, false),
+            (false, true, true, false, true, false),
+        };
+        foreach (var c in cases)
+        {
+            Assert.Equal((c.Dashes, c.Turns), MapMotion.Resting(c.Reduce, c.Flows, c.Healthy, c.Library));
         }
 
         Assert.False(MapMotion.ClockRuns(true, true, windowVisible: false));

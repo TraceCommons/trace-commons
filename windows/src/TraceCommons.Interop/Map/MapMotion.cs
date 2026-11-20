@@ -102,21 +102,31 @@ public static class MapMotion
     public static double DashOffsetInWidths(double phase, double strokeWidth) => phase / strokeWidth;
 
     /// <summary>
-    /// How the map's resting clock runs (:280-285): 30 a second while dashes
-    /// move, the library's 20 while only it turns, paused otherwise.
+    /// What moves on the map at rest (#2268, FlowMapView.swift
+    /// <c>restingMotion</c>): the arcs' dashes while flows are live and
+    /// healthy, the library while there is one, nothing under reduce
+    /// motion. Each runs on its own clock: the dashes at 30 a second, the
+    /// library at its own 15 (<see cref="LibraryInterval"/>).
     /// </summary>
-    public static (double Interval, bool Paused) Resting(bool reduceMotion, bool flows, bool healthy, bool library)
-    {
-        bool dashes = !reduceMotion && flows && healthy;
-        bool turns = !reduceMotion && library;
-        return (dashes ? ArcFrameInterval : LibraryStation.FrameInterval, !(dashes || turns));
-    }
+    public static (bool Dashes, bool Turns) Resting(bool reduceMotion, bool flows, bool healthy, bool library) =>
+        (!reduceMotion && flows && healthy, !reduceMotion && library);
+
+    /// <summary>
+    /// The library's own clock (#2268): its frame interval while it turns on
+    /// its own layer, or null when it must not tick (as for
+    /// <see cref="ClockInterval"/>), when there is no library, or while it
+    /// is drawn on the moving layer, whose clock then turns it.
+    /// </summary>
+    public static double? LibraryInterval(MapClockInputs i) =>
+        ClockRuns(i.AnimationsEnabled, i.Loaded, i.WindowVisible) && i.PaneShown && i.HasLibrary && !i.LibraryOnMovingLayer
+            ? LibraryStation.FrameInterval
+            : null;
 
     /// <summary>The transfer layer and the pile tick at 60 a second while a run moves (:107, :140).</summary>
     public const double TransferFrameInterval = 1.0 / 60;
 
     /// <summary>
-    /// The map's one clock: the interval its fastest moving part needs now,
+    /// The moving layer's clock: the interval its fastest moving part needs now,
     /// or null when it must not tick at all (hidden, minimised, unloaded,
     /// its pane closed, or motion off), in which case only a model change
     /// redraws it. With nothing moving, it waits for the next shimmer pass
@@ -135,10 +145,17 @@ public static class MapMotion
             return TransferFrameInterval;
         }
 
-        (double interval, bool paused) = Resting(false, i.Flows, i.Healthy, i.HasLibrary);
-        if (!paused)
+        // The library has its own clock (LibraryInterval), except while it
+        // is drawn on this layer.
+        (bool dashes, bool turns) = Resting(false, i.Flows, i.Healthy, i.HasLibrary);
+        if (dashes)
         {
-            return interval;
+            return ArcFrameInterval;
+        }
+
+        if (turns && i.LibraryOnMovingLayer)
+        {
+            return LibraryStation.FrameInterval;
         }
 
         double wait = MapField.UntilNextPass(i.SecondsShown);
@@ -254,7 +271,8 @@ public readonly record struct MapClockInputs(
     bool PileMoving,
     bool LightFading,
     double SecondsShown,
-    double? NextDeadlineIn);
+    double? NextDeadlineIn,
+    bool LibraryOnMovingLayer);
 
 /// <summary>
 /// The map's still layer (field, nodes, a resting pile) and when it must be

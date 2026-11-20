@@ -112,16 +112,26 @@ public class MovingLayerBoundsTests
         Assert.Contains("sender.ActualOffset", draw, StringComparison.Ordinal);
         Assert.Contains("ds.Transform = Matrix3x2.CreateTranslation(-offset.X, -offset.Y)", draw, StringComparison.Ordinal);
 
-        // Every part the resting layer draws is in the box: the arcs, the
-        // library's frame and the rocket at rest; a run or a moving pile
-        // takes the whole pane.
+        // Every part the resting layer draws is in the box: the arcs and
+        // the rocket at rest; a run or a moving pile takes the whole pane.
+        // The library is on its own layer at rest (#2268), in its own box,
+        // and comes back to this one only while the whole pane is taken.
         string parts = Method(source, "private LayoutRect? MovingBox(");
         Assert.Contains("_scene.Arcs", parts, StringComparison.Ordinal);
         Assert.Contains("MovingLayerBounds.Curve(", parts, StringComparison.Ordinal);
-        Assert.Contains("LibraryStation.FrameWidth", parts, StringComparison.Ordinal);
+        Assert.DoesNotContain("LibraryStation.FrameWidth", parts, StringComparison.Ordinal);
+        Assert.Contains("LibraryStation.FrameWidth", Method(source, "private LayoutRect? LibraryBox("), StringComparison.Ordinal);
+        Assert.Contains("if (LibraryOnMovingLayer(now)", draw, StringComparison.Ordinal);
+        string library = Method(source, "private void DrawLibraryLayer(");
+        Assert.Contains("sender.ActualOffset", library, StringComparison.Ordinal);
+        Assert.Contains("ds.Transform = Matrix3x2.CreateTranslation(-offset.X, -offset.Y)", library, StringComparison.Ordinal);
+        Assert.Contains("!LibraryOnMovingLayer(now)", library, StringComparison.Ordinal);
         Assert.Contains("TransferDrawing.RocketRest(", parts, StringComparison.Ordinal);
-        Assert.Contains("_player.Run", parts, StringComparison.Ordinal);
-        Assert.Contains("PileMoves(", parts, StringComparison.Ordinal);
+        Assert.Contains("bool whole = LibraryOnMovingLayer(now);", parts, StringComparison.Ordinal);
+        Assert.Contains(
+            "private bool LibraryOnMovingLayer(double now) =>\n        (Motion && WindowClocks.Running && _player.Run is not null) || PileMoves(now);",
+            source, StringComparison.Ordinal);
+        Assert.Contains("PlaceLibraryCanvas(now);", Method(source, "private void PlaceMovingCanvas("), StringComparison.Ordinal);
 
         // The box is checked on every tick and on every redraw.
         Assert.Contains("PlaceMovingCanvas();", Method(source, "private DispatcherQueueTimer CreateTimer("), StringComparison.Ordinal);
