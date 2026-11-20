@@ -68,7 +68,7 @@ internal static class SystemSettingWatch
         if (_ui is null && Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread() is { } queue)
         {
             _ui = queue;
-            Accessibility.HighContrastChanged += (_, _) => _ui.TryEnqueue(Refresh);
+            Accessibility.HighContrastChanged += (_, _) => queue.TryEnqueue(Refresh);
         }
 
         if (hwnd != IntPtr.Zero && Installed.Add(hwnd))
