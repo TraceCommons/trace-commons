@@ -1482,6 +1482,16 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
             }
             else
             {
+                // The scopes the daemon confirmed, against those it last
+                // reported: Train coding models turning on offers it on the
+                // traces already sent (AppModel.swift:3007-3017).
+                if (SentTracesTrainingState.ConfirmedScopes(response) is { } confirmed)
+                {
+                    IReadOnlyList<string> before = _reportedScopes;
+                    _reportedScopes = confirmed;
+                    ConsentScopesConfirmed?.Invoke(before, confirmed);
+                }
+
                 await LoadAuditAsync().ConfigureAwait(true);
             }
         }
@@ -1667,8 +1677,18 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         Raise(nameof(NotificationOwnerText));
     }
 
+    /// <summary>The consent scopes the daemon last reported to this screen.</summary>
+    private IReadOnlyList<string> _reportedScopes = Array.Empty<string>();
+
+    /// <summary>
+    /// A consent write the daemon confirmed: the scopes it last reported, then
+    /// the ones it now holds.
+    /// </summary>
+    public event Action<IReadOnlyList<string>, IReadOnlyList<string>>? ConsentScopesConfirmed;
+
     private void FillConsent(ConsentOptionsPayload? options, IReadOnlyCollection<string> granted)
     {
+        _reportedScopes = granted.ToList();
         AlwaysIncluded.Clear();
         OptionalScopes.Clear();
         _preservedNonDataScopes.Clear();

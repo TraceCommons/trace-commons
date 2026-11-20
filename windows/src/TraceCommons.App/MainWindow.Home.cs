@@ -238,6 +238,7 @@ public sealed partial class MainWindow
             }
 
             ShowHome();
+            _ = RefreshSentTrainingLineAsync();
         }
         finally
         {

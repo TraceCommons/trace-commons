@@ -1,0 +1,25 @@
+{
+  "owner_scope_sha256": "sha256:owner-a",
+  "task": "Repair the generated client without editing its checked-in output.",
+  "task_success": "partial",
+  "user_feedback": "correction",
+  "human_correction": "Use the bounded retry path.",
+  "evidence": [
+    {
+      "event_id": "11111111-1111-4111-8111-111111111111",
+      "kind": "tool_result",
+      "excerpt": "The bounded retry completed on the second attempt."
+    }
+  ],
+  "contribution_status": "accepted",
+  "permitted_uses": [
+    "debugging",
+    "evaluation"
+  ],
+  "contributed_version": "trace-contribution/1",
+  "consent_policy_version": "consent/1",
+  "redaction_pipeline_version": "redaction/3",
+  "publication": null,
+  "publication_version": 0,
+  "retained_source_slug": "source-workflow"
+}
