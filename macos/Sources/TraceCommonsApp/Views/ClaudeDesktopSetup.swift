@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -185,6 +186,15 @@ struct ClaudeDesktopSetupSheet: View {
                     .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                // Once there are variables to paste: open Claude Desktop on a
+                // new Code session, where the saved environment is made.
+                if ClaudeDesktopSetupPrompt.desktopInstalled, !status.text("open_desktop").isEmpty {
+                    Button(status.text("open_desktop")) {
+                        NSWorkspace.shared.open(ClaudeDesktopPrompt.newCodeSessionURL)
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .fixedSize()
+                }
             }
             if setup.failed {
                 Text(status.text("error"))

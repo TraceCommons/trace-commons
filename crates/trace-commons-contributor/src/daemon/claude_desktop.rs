@@ -164,6 +164,19 @@ pub(crate) fn context_budget(
     (compact >= 100_000).then_some((compact, output))
 }
 
+/// The models the Desktop route accepts as either the main or the
+/// background model: each passes `context_budget` on its own, so any pair of
+/// them does too (the pair's window is the smaller one, and each leaves room
+/// for its own output). The setup sheet offers only these, so a Save never
+/// fails on a model NEAR AI lists without a usable context window.
+pub(crate) fn desktop_models(models: &[ChatModel]) -> Vec<String> {
+    models
+        .iter()
+        .filter(|m| context_budget(&m.id, &m.id, models).is_some())
+        .map(|m| m.id.clone())
+        .collect()
+}
+
 fn copy() -> Value {
     json!({
         "title":"Claude Desktop", "setup":"Set up", "save":"Save", "copy":"Copy", "disconnect":"Disconnect",
@@ -184,7 +197,10 @@ fn copy() -> Value {
         "sheet_step_models":"Choose a main model, and a background model if you want one.",
         "sheet_step_copy":"Save, then Copy the variables.",
         "sheet_step_environment":"In Claude Desktop’s Code tab, create a Local saved environment and choose a folder.",
-        "sheet_step_session":"Paste the variables into that environment and start a new session with it. Only sessions using it go through Private AI. Do not set ANTHROPIC_AUTH_TOKEN."
+        "sheet_step_session":"Paste the variables into that environment and start a new session with it. Only sessions using it go through Private AI. Do not set ANTHROPIC_AUTH_TOKEN.",
+        // The sheet's button that opens Claude Desktop's Code tab once the
+        // variables are copied. DRAFT, NEEDS APPROVAL.
+        "open_desktop":"Open Claude Desktop"
     })
 }
 fn environment(binding: &Binding) -> String {
