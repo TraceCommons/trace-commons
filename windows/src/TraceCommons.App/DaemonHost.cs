@@ -85,6 +85,9 @@ public sealed class DaemonHost : IAsyncDisposable
     /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
     public event Action? Started;
 
+    /// <summary>Raised when a start is refused (<see cref="StartRefused"/>).</summary>
+    public event Action? Refused;
+
     /// <summary>
     /// A model call was recorded (<c>inference_call_added</c>). The Private AI
     /// tab re-reads its ledger on it, as the Mac's InferenceStore does.
@@ -215,6 +218,14 @@ public sealed class DaemonHost : IAsyncDisposable
     public bool IsRunning => _daemon is not null;
 #endif
 
+    /// <summary>
+    /// The last start was refused for a cause other than undeclared session
+    /// folders (most often another instance holding the state directory);
+    /// cleared once a start succeeds. Settings draws the core's down title
+    /// for it rather than the onboarding notice (<c>MonitorGate.down</c>).
+    /// </summary>
+    public bool StartRefused { get; private set; }
+
     /// <summary>Changes whenever the running daemon connection is replaced or stopped.</summary>
     public long ConnectionGeneration { get; private set; }
 
@@ -276,10 +287,21 @@ public sealed class DaemonHost : IAsyncDisposable
         // back to the real ~/.claude and ~/.codex. That fallback is what this
         // client used to get, and it meant a contributor's whole session
         // history was scanned on the strength of never having been asked.
-        TcDaemon daemon = await Task
-            .Run(() => new TcDaemon(_configDir, settingsJson), cancellationToken)
-            .ConfigureAwait(true);
+        TcDaemon daemon;
+        try
+        {
+            daemon = await Task
+                .Run(() => new TcDaemon(_configDir, settingsJson), cancellationToken)
+                .ConfigureAwait(true);
+        }
+        catch (TcException exception) when (!exception.IsRootsNotDeclared)
+        {
+            StartRefused = true;
+            Refused?.Invoke();
+            throw;
+        }
 
+        StartRefused = false;
         _daemon = daemon;
         ConnectionGeneration++;
         // feature_flags_changed always, as the Mac does; reengage_due only

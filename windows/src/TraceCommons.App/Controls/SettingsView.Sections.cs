@@ -111,7 +111,12 @@ public sealed partial class SettingsView
 
         _sectionsHost = host;
         Loaded += OnSectionsLoaded;
-        Unloaded += (_, _) => host.StatusChanged -= OnGateStatusChanged;
+        Unloaded += (_, _) =>
+        {
+            host.StatusChanged -= OnGateStatusChanged;
+            host.Started -= OnGateStatusChanged;
+            host.Refused -= OnGateStatusChanged;
+        };
 
         DevicesHost.Content = new AccountDevicesSection(host);
         _payouts = new PayoutLinkSection(host);
@@ -209,8 +214,14 @@ public sealed partial class SettingsView
 
         // Read again whenever the daemon's status changes while Settings is
         // up, so a Set up again that unenrolls closes the gated sections.
+        // A start that lands or is refused while Settings is up changes the
+        // gate too (MonitorGate.down).
         host.StatusChanged -= OnGateStatusChanged;
         host.StatusChanged += OnGateStatusChanged;
+        host.Started -= OnGateStatusChanged;
+        host.Started += OnGateStatusChanged;
+        host.Refused -= OnGateStatusChanged;
+        host.Refused += OnGateStatusChanged;
         await ReadGateAsync(host);
     }
 
@@ -241,9 +252,13 @@ public sealed partial class SettingsView
             return !OnboardingState.Default().IsSetupComplete(answered);
         });
 
-        if (await _gateReader.ReadAsync())
+        await _gateReader.ReadAsync();
+
+        // A refused start is down whatever the reads said (MonitorGate.of).
+        SettingsGate gate = SettingsGates.Window(host.StartRefused, _gateReader.Gate);
+        if (gate != _gate)
         {
-            _gate = _gateReader.Gate;
+            _gate = gate;
             DrawList();
         }
     }
@@ -271,6 +286,17 @@ public sealed partial class SettingsView
         if (gate == SettingsGate.Awaiting)
         {
             notice.Content = new ProgressRing { IsActive = true, Width = 16, Height = 16, HorizontalAlignment = HorizontalAlignment.Left };
+            return;
+        }
+
+        if (gate == SettingsGate.Down)
+        {
+            // The Mac's StartupRefusedBanner: the core's down title. The
+            // Mac's sentence under it is its own refusal's; this shell has
+            // no core sentence for a refused start, so it draws the title
+            // alone rather than a shell-written one, and no button: nothing
+            // here restarts the service.
+            notice.Content = SettingsCards.Card(string.Empty, SettingsCards.Text(HealthCopy.CoreDownTitle()));
             return;
         }
 

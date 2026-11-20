@@ -3,8 +3,9 @@ namespace TraceCommons.Interop.Shell;
 /// <summary>
 /// What a Settings section draws in place of its content (<c>MonitorGate</c>,
 /// MonitorNavigation.swift:287-312): nothing yet while the core has not said
-/// whether onboarding is required, the onboarding notice while it is, and
-/// the content otherwise. A section available before onboarding (R-43) is
+/// whether onboarding is required, the core's down title when the daemon
+/// refused to start, the onboarding notice while it is required, and the
+/// content otherwise. A section available before onboarding (R-43) is
 /// never gated; Payouts draws nothing at all unless open.
 /// </summary>
 public enum SettingsGate
@@ -13,6 +14,8 @@ public enum SettingsGate
     Awaiting,
     /// <summary>Onboarding is required: the notice whose button opens first run.</summary>
     SignedOut,
+    /// <summary>The daemon refused to start: the core's down title, for anyone, onboarded or not.</summary>
+    Down,
     /// <summary>Nothing in the way.</summary>
     Open,
 }
@@ -22,6 +25,15 @@ public static class SettingsGates
     /// <summary>The window's gate (<c>MonitorGate.of</c>, less the refused daemon, which the Monitor says).</summary>
     public static SettingsGate Of(bool onboardingKnown, bool requiresOnboarding) =>
         !onboardingKnown ? SettingsGate.Awaiting : requiresOnboarding ? SettingsGate.SignedOut : SettingsGate.Open;
+
+    /// <summary>
+    /// The window's gate over the status reads' (<c>MonitorGate.of</c>): a
+    /// daemon that refused to start is down whatever the reads said, for
+    /// anyone, onboarded or not. A failed read over a running daemon is not
+    /// a refusal and stays signed out (fail closed), as on the Mac.
+    /// </summary>
+    public static SettingsGate Window(bool startRefused, SettingsGate read) =>
+        startRefused ? SettingsGate.Down : read;
 
     /// <summary>One section's gate (<c>forSettings</c>).</summary>
     public static SettingsGate For(SettingsSection section, SettingsGate window) =>
