@@ -74,7 +74,7 @@ public struct GlassSpinner: View {
 public struct GlassSkeleton: View {
     private let width: CGFloat?
     private let height: CGFloat
-    @State private var dim = false
+    @State private var shownAt = Date()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// `width` nil fills the width offered.
@@ -83,26 +83,43 @@ public struct GlassSkeleton: View {
         self.height = height
     }
 
-    /// The pulse: half a `motion.pulse` each way, on the token curve,
-    /// repeating; none under Reduce Motion.
-    static func pulse(_ reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.pulse / 2).repeatForever(autoreverses: true)
-    }
+    /// The skeleton's frame rate: a slow fade over 0.8 s each way.
+    static let frameInterval: Double = 1 / 30
 
     /// The bar's opacity at either end of the pulse.
     static func opacity(dim: Bool) -> Double {
         dim ? GlassTokens.Opacity.skeletonDim : 1
     }
 
+    /// The bar's opacity `time` seconds after it appeared: down to
+    /// `skeletonDim` over half a `motion.pulse` on the token curve, and
+    /// back the same way, repeating. Full under Reduce Motion. Drawn from
+    /// the time, through the shared clock, so it follows the window's
+    /// focus and stops while it cannot be seen; a repeating SwiftUI
+    /// animation would run at the display's rate in any window.
+    static func opacity(at time: TimeInterval, reduceMotion: Bool) -> Double {
+        guard !reduceMotion else { return 1 }
+        let half = GlassTokens.Motion.pulse / 2
+        let phase = max(0, time).truncatingRemainder(dividingBy: 2 * half) / half
+        let progress = curve.value(at: phase <= 1 ? phase : 2 - phase)
+        return 1 + (opacity(dim: true) - 1) * progress
+    }
+
+    /// `GlassMotion.curve`'s control points, as a curve to read.
+    private static let curve = UnitCurve.bezier(
+        startControlPoint: UnitPoint(x: GlassTokens.Motion.easeX1, y: GlassTokens.Motion.easeY1),
+        endControlPoint: UnitPoint(x: GlassTokens.Motion.easeX2, y: GlassTokens.Motion.easeY2))
+
     public var body: some View {
-        RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
-            .fill(GlassColor.ink(0.08))
-            .frame(width: width, height: height)
-            .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
-            .opacity(Self.opacity(dim: dim && !reduceMotion))
-            .animation(Self.pulse(reduceMotion), value: dim)
-            .onAppear { dim = true }
-            .accessibilityHidden(true)
+        GlassAnimationTimeline(minimumInterval: Self.frameInterval, paused: reduceMotion) { date in
+            RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
+                .fill(GlassColor.ink(0.08))
+                .opacity(Self.opacity(at: date.timeIntervalSince(shownAt), reduceMotion: reduceMotion))
+        }
+        .frame(width: width, height: height)
+        .frame(maxWidth: width == nil ? .infinity : nil, alignment: .leading)
+        .onAppear { shownAt = Date() }
+        .accessibilityHidden(true)
     }
 }
 
