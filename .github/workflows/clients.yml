@@ -325,6 +325,12 @@ jobs:
       # same dev profile. Debug, not --release: see windows-contributor-app.
       - name: Build the contributor FFI cdylib for the app job
         run: cargo build -p trace-commons-contributor-ffi
+      # W25-D2: the FFI self-check reaches the real Credential Manager. Its
+      # own command, after the cdylib build above, because the combined test
+      # step unifies in the test credential-store feature, under which the
+      # store is refused and the check reports 2.
+      - name: Verify the FFI credential-store self-check reaches Credential Manager
+        run: cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::' --ignored
       - name: Upload the FFI cdylib
         uses: actions/upload-artifact@v4
         with:
@@ -784,6 +790,23 @@ jobs:
           msbuild src/TraceCommons.App/TraceCommons.App.csproj -restore -p:Configuration=Debug -p:Platform=x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Debug --filter "FullyQualifiedName~SampleDaemonTests|FullyQualifiedName~NativeBindingTests" --logger "console;verbosity=normal"
+
+      # W25-D2 (a), the Windows counterpart of the Mac's signed-app launch
+      # check: the unpackaged app built above answers
+      # TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT before it opens a window and
+      # must report the Credential Manager reachable. The release workflow
+      # runs the same script against the signed publish tree.
+      - name: Verify the app reaches the Windows Credential Manager
+        working-directory: windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $found = @(Get-ChildItem -Path src/TraceCommons.App/bin/x64/Debug -Recurse -Filter TraceCommons.exe)
+          if ($found.Count -ne 1) {
+            throw "expected exactly 1 Debug TraceCommons.exe, found $($found.Count): $($found.FullName -join ', ')"
+          }
+          & ../scripts/windows/verify-credential-store.ps1 -App $found[0].FullName
+          exit $LASTEXITCODE
 
       # The Win2D render tests (spec W1-D2 (a)). Win2D cannot create a device
       # in session 0, so the harness prints the runner's session id and

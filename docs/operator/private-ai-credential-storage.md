@@ -66,6 +66,8 @@ Neither profile can stand in for the other. Both grant `KXSWJN7WY8.*`, so the ac
 
 `tauri.release.conf.json` passes the entitlements file to the Tauri bundler (`bundle.macOS.entitlements`) and copies the profile into the bundle as `Contents/embedded.provisionprofile` (`bundle.macOS.files`). `tauri-desktop/scripts/package-macos-release.sh` refuses to start without the profile, and runs the verifier against the signed app before notarizing. That includes the verifier's launch check: the Tauri app answers `TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT` from `main` before it opens a window, writing `reachable` or `unreachable code=N` as the native shell does, and exits.
 
+The Windows app answers the same variable (spec W25-D2 (a)): `Program.Main` runs `CredentialStoreCheck` first, before any window, daemon or single-instance key, and writes the same lines from `tc_credential_store_self_check`, which on Windows reads the Credential Manager and writes nothing to it. `scripts/windows/verify-credential-store.ps1 -App <TraceCommons.exe>` launches the app hidden, needs no console session, and fails unless the report is `reachable` and the Credential Manager's target list is unchanged. The `windows contributor app` CI job runs it on the Debug build, and the release workflow's `windows` job runs it on the signed publish tree before packaging.
+
 A Tauri build signed without these inputs -- `pnpm tauri dev`, or any build that does not pass `tauri.release.conf.json` -- is unentitled, and shows `storage_unentitled` for Private AI, as an ad-hoc native build does.
 
 ### Creating the Tauri profile
