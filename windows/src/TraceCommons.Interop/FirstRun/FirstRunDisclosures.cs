@@ -25,6 +25,19 @@ public sealed record AutomaticGrantCopy
     [JsonPropertyName("summary")] public string Summary { get; init; } = "";
     [JsonPropertyName("no_review")] public string NoReview { get; init; } = "";
 
+    /// <summary>
+    /// Each Sharing answer split into the line shown and the rest, behind
+    /// the info button (AutomaticGrantCopy.swift:34-40). Null when absent;
+    /// Ask's title is present and empty since the owner cut it (2026-11-04).
+    /// </summary>
+    [JsonPropertyName("path_automatic_title")] public string? PathAutomaticTitle { get; init; }
+
+    [JsonPropertyName("path_automatic_detail")] public string? PathAutomaticDetail { get; init; }
+
+    [JsonPropertyName("path_ask_first_title")] public string? PathAskFirstTitle { get; init; }
+
+    [JsonPropertyName("path_ask_first_detail")] public string? PathAskFirstDetail { get; init; }
+
     /// <summary>The scrub the core chose (AutomaticGrantCopy.swift:52-58).</summary>
     public Scrub? Chosen => Disclosure switch
     {

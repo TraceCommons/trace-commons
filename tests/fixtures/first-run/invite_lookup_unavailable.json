@@ -1,0 +1,7 @@
+{
+  "id": 1,
+  "error": {
+    "code": "unavailable",
+    "message": "invite-lookup-unavailable"
+  }
+}

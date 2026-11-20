@@ -6100,6 +6100,26 @@ fn the_withdrawal_confirmation_prompt_crosses_the_abi() {
 }
 
 #[test]
+fn the_windows_words_cross_the_abi() {
+    use trace_commons_contributor::preview_copy::windows_words_copy;
+    use trace_commons_contributor_ffi::tc_windows_words_copy_json;
+    let value = json_owned(tc_windows_words_copy_json());
+    assert_eq!(value, serde_json::to_value(windows_words_copy()).unwrap());
+    assert_eq!(
+        value
+            .pointer("/credit_icon_animation_toggle")
+            .and_then(|v| v.as_str()),
+        Some("Animate taskbar and tray icons")
+    );
+    // The Mac's switch keeps its own words.
+    let mac = trace_commons_contributor::preview_copy::monitor_screens_copy().home_history;
+    assert_eq!(
+        mac.credit_icon_animation_toggle,
+        "Animate Dock and menu bar icons"
+    );
+}
+
+#[test]
 fn the_monitor_screens_copy_crosses_the_abi() {
     use trace_commons_contributor::preview_copy::monitor_screens_copy;
     use trace_commons_contributor_ffi::tc_monitor_screens_copy_json;
