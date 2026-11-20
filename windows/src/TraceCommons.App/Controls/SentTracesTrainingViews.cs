@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -173,8 +174,8 @@ public static class SentTracesTrainingViews
         grid.Children.Add(button);
         return new Border
         {
-            Background = (Brush)Application.Current.Resources["TcSurfaceInsetBrush"],
-            BorderBrush = (Brush)Application.Current.Resources["TcHairlineBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceInsetBrush"),
+            BorderBrush = ThemeBrushes.Get("TcHairlineBrush"),
             BorderThickness = new Thickness(1),
             CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"],
             Padding = new Thickness(14, 10, 14, 10),
@@ -201,7 +202,7 @@ public static class SentTracesTrainingViews
         {
             panel.Children.Add(new Border
             {
-                BorderBrush = (Brush)Application.Current.Resources["TcInkSecondaryBrush"],
+                BorderBrush = ThemeBrushes.Get("TcInkSecondaryBrush"),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(10),
                 Padding = new Thickness(8, 2, 8, 2),
@@ -244,7 +245,7 @@ public static class SentTracesTrainingViews
     {
         Text = text,
         Style = (Style)Application.Current.Resources[style],
-        Foreground = (Brush)Application.Current.Resources[brush],
+        Foreground = ThemeBrushes.Get(brush),
         TextWrapping = TextWrapping.Wrap,
     };
 }

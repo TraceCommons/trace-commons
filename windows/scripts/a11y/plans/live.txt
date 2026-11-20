@@ -1,0 +1,31 @@
+# Live switches while the app runs: high contrast on and off, then dark
+# to light, with Home, the rail and the flyout audited after each.
+key main BC ctrl
+newwin settings
+toggle settings Show the edge rail
+sleep 1500
+newwin rail
+front main
+tab TabHome
+hc on
+front main
+tab TabHome
+audit main live-hc-home 40
+rail-open
+audit rail live-hc-rail 12
+key rail 1B
+hc off
+theme light
+front main
+tab TabHome
+audit main live-light-home 40
+tab TabTraces
+audit main live-light-traces 40
+rail-open
+audit rail live-light-rail 12
+key rail 1B
+flyout
+audit flyout live-light-flyout 12
+key flyout 1B
+theme dark
+toggle settings Show the edge rail

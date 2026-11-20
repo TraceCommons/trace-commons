@@ -13,6 +13,21 @@ public enum HeroGround
     Insights,
 }
 
+/// <summary>The parts of a hero card that take a colour of their own.</summary>
+public enum HeroPart
+{
+    Ground,
+    Ink,
+    PillFill,
+    PillInk,
+}
+
+/// <summary>
+/// A colour a hero part takes: the Mac's literal (0xAARRGGBB), or, when
+/// <see cref="ThemeKey"/> is set, the app's theme brush of that name.
+/// </summary>
+public readonly record struct HeroInk(uint Argb, string? ThemeKey);
+
 /// <summary>
 /// The rules the pixel grid moves by (<c>GlassPixelField</c>,
 /// macos/Sources/TCDesign/Components/PixelField.swift). The hero glyph takes
@@ -425,6 +440,36 @@ public static class HeroCard
         HeroGround.Missions => HomeTrayInks.HeroMissions,
         _ => HomeTrayInks.HeroInsights,
     };
+
+    /// <summary>The theme brush a card's ground takes (the Home tiles' own).</summary>
+    public const string HighContrastGroundKey = "TcSurfaceCardBrush";
+
+    /// <summary>The theme brush a card's words take (the Home tiles' own).</summary>
+    public const string HighContrastInkKey = "TcInkPrimaryBrush";
+
+    /// <summary>
+    /// A part's colour: the Mac's literal (GlassTokens.swift:405-409,
+    /// HeroCard.swift:186-200), the same in both appearances. Under a high
+    /// contrast theme the ground and the pill take the card ground and the
+    /// words the ink, as every other Home card does, so the system's colours
+    /// reach the hero too (checklist D2).
+    /// </summary>
+    public static HeroInk Ink(HeroPart part, HeroGround ground, bool highContrast) => (part, highContrast) switch
+    {
+        (HeroPart.Ground or HeroPart.PillFill, true) => new HeroInk(0, HighContrastGroundKey),
+        (_, true) => new HeroInk(0, HighContrastInkKey),
+        (HeroPart.Ground, false) => new HeroInk(Ground(ground), null),
+        (HeroPart.PillInk, false) => new HeroInk(HomeTrayInks.HeroButtonInk, null),
+        (HeroPart.PillFill, false) => new HeroInk(HomeTrayInks.HeroButtonFill, null),
+        _ => new HeroInk(HomeTrayInks.HeroInk, null),
+    };
+
+    /// <summary>
+    /// Whether the glyph or bars are drawn behind the words: not under a
+    /// high contrast theme, where they would be decoration in fixed blues
+    /// over the system's ground.
+    /// </summary>
+    public static bool DrawsArt(bool highContrast) => !highContrast;
 
     /// <summary>The Missions hero's symbol (HomeViews.swift:291).</summary>
     public const string MissionsSymbol = "scope";

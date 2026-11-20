@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -144,7 +145,8 @@ public sealed class MissionsView : UserControl
         return card;
     }
 
-    private static T Res<T>(string key) => (T)Application.Current.Resources[key];
+    // A brush in the theme shown now (ThemeBrushes), anything else as stored.
+    private static T Res<T>(string key) => typeof(T) == typeof(Brush) ? (T)(object)ThemeBrushes.Get(key) : (T)Application.Current.Resources[key];
 
     private static TextBlock Text(string text, string style, string? brush = null)
     {

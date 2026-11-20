@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -156,26 +157,26 @@ public sealed partial class PrivateInferenceView
     private async void OnSpendPromptDismiss(object sender, RoutedEventArgs e) => await SpendPrompt.DismissAsync();
 
     /// <summary>A proof tag's ink by its tone (<c>GlassTag.Tone</c>), from the theme's status inks.</summary>
-    public static Brush ToneBrush(LedgerTone tone) => (Brush)Application.Current.Resources[tone switch
+    public static Brush ToneBrush(LedgerTone tone) => ThemeBrushes.Get(tone switch
     {
         LedgerTone.On => "TcStatusOnTextBrush",
         LedgerTone.Ask => "TcStatusAskTextBrush",
         LedgerTone.Failed => "TcCoralTextBrush",
         LedgerTone.Outside => "TcStatusOutsideTextBrush",
         _ => "TcInkSecondaryBrush",
-    }];
+    });
 
     /// <summary>The heading chip's one dot for <paramref name="status"/>.</summary>
     public static Visibility DotShown(DotStatus dot, DotStatus status) => Shown(dot == status);
 
     /// <summary>The chip's word in its status ink (<c>GlassChip</c>: <c>status.textColor</c>, else secondary).</summary>
-    public static Brush DotInk(DotStatus dot) => (Brush)Application.Current.Resources[dot switch
+    public static Brush DotInk(DotStatus dot) => ThemeBrushes.Get(dot switch
     {
         DotStatus.On => "TcStatusOnTextBrush",
         DotStatus.Ask => "TcStatusAskTextBrush",
         DotStatus.Outside => "TcStatusOutsideTextBrush",
         _ => "TcInkSecondaryBrush",
-    }];
+    });
 
     public static Visibility Shown(bool value) => value ? Visibility.Visible : Visibility.Collapsed;
 }

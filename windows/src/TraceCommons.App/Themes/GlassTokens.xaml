@@ -171,8 +171,8 @@
             <StaticResource x:Key="TcGlassWellInactiveBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcGlassControlBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcGlassControlInactiveBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcGlassControlSelectedBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
-            <StaticResource x:Key="TcGlassControlSelectedInactiveBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
+            <StaticResource x:Key="TcGlassControlSelectedBrush" ResourceKey="TextFillColorPrimaryBrush" />
+            <StaticResource x:Key="TcGlassControlSelectedInactiveBrush" ResourceKey="TextFillColorPrimaryBrush" />
             <StaticResource x:Key="TcGlassPopoverBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcGlassPopoverInactiveBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />
             <StaticResource x:Key="TcGlassMenuBrush" ResourceKey="ApplicationPageBackgroundThemeBrush" />

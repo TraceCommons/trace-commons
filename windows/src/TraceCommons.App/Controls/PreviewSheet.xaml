@@ -38,11 +38,18 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    MinWidth="720"
-    MinHeight="560">
+    MinWidth="720">
 
-    <Grid Background="{ThemeResource TcWindowBackgroundBrush}"
-          RowDefinitions="Auto,Auto,*,Auto">
+    <Grid Background="{ThemeResource TcWindowBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <!-- Auto, or a star share when the footer needs more than half
+                 the room (PreviewSheet.FitFooter). -->
+            <RowDefinition x:Name="FooterRow" Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
         <!--
             Header: the same identity line and the same labelled figures as
@@ -50,7 +57,8 @@
             clicked is one of the quieter things that makes a preview
             trustworthy.
         -->
-        <StackPanel Grid.Row="0"
+        <StackPanel x:Name="SheetHeader"
+                    Grid.Row="0"
                     Spacing="8"
                     Padding="20,14"
                     Background="{ThemeResource TcSurfaceCardBrush}"
@@ -113,7 +121,8 @@
             the four carry a count, so a contributor can see there is
             something to look at before clicking the tab.
         -->
-        <StackPanel Grid.Row="1"
+        <StackPanel x:Name="SheetTabs"
+                    Grid.Row="1"
                     Orientation="Horizontal"
                     Spacing="4"
                     Padding="20,10,20,0"
@@ -143,12 +152,19 @@
             </Button>
         </StackPanel>
 
-        <Grid Grid.Row="2" Padding="20,14">
+        <!--
+            The loading and failure notices take a row of their own above
+            the tab on screen: centred over it, as they were, a failed
+            preview drew "This one can't be shown." through the search tab's
+            own lines, and neither could be read (box capture, 2026-11-19).
+        -->
+        <Grid Grid.Row="2" Padding="20,14" RowDefinitions="Auto,*">
 
             <!-- While the redaction pass runs. It reads the session and
                  redacts it locally, which on a large trace takes a moment. -->
-            <StackPanel Spacing="6"
-                        VerticalAlignment="Center"
+            <StackPanel Grid.Row="0" Spacing="6"
+                        Margin="0,0,0,10"
+                        VerticalAlignment="Top"
                         HorizontalAlignment="Center"
                         Visibility="{x:Bind ViewModel.IsLoading, Mode=OneWay}">
                 <TextBlock Text="{x:Bind ViewModel.LoadingTitle, Mode=OneWay}"
@@ -162,9 +178,10 @@
             <!-- A preview that could not be opened or could not be read. The
                  second sentence is the one that matters: the failure costs
                  the contributor nothing. -->
-            <StackPanel Spacing="6"
+            <StackPanel Grid.Row="0" Spacing="6"
                         MaxWidth="420"
-                        VerticalAlignment="Center"
+                        Margin="0,0,0,10"
+                        VerticalAlignment="Top"
                         HorizontalAlignment="Center"
                         Visibility="{x:Bind ViewModel.HasFailed, Mode=OneWay}">
                 <TextBlock Text="This one can't be shown."
@@ -184,7 +201,7 @@
                 client name, get 0 matches or jump to context, without reading
                 148 turns.
             -->
-            <Grid RowDefinitions="Auto,Auto,Auto,Auto,*"
+            <Grid Grid.Row="1" RowDefinitions="Auto,Auto,Auto,Auto,*"
                   Visibility="{x:Bind ViewModel.IsSearchTab, Mode=OneWay}">
                 <TextBlock Grid.Row="0"
                            Text="Search this trace for anything you need to be sure isn't in it."
@@ -295,7 +312,7 @@
             </Grid>
 
             <!-- 2. What's in it. -->
-            <ScrollViewer Visibility="{x:Bind ViewModel.IsWhatsInItTab, Mode=OneWay}">
+            <ScrollViewer Grid.Row="1" Visibility="{x:Bind ViewModel.IsWhatsInItTab, Mode=OneWay}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="{x:Bind ViewModel.TurnsText, Mode=OneWay}"
                                Style="{StaticResource TcMetricValueTextStyle}" />
@@ -516,7 +533,7 @@
                 and OnTranscriptRealized is the only thing that arms the first
                 half of the gate.
             -->
-            <ScrollViewer x:Name="TranscriptPanel"
+            <ScrollViewer Grid.Row="1" x:Name="TranscriptPanel"
                           x:Load="{x:Bind ViewModel.IsTranscriptTab, Mode=OneWay}"
                           Loaded="OnTranscriptRealized"
                           ViewChanged="OnTranscriptScrolled"
@@ -627,7 +644,7 @@
 
             <!-- 4. Permissions, restated at the moment of consent rather than
                  only at onboarding. -->
-            <ScrollViewer Visibility="{x:Bind ViewModel.IsPermissionsTab, Mode=OneWay}">
+            <ScrollViewer Grid.Row="1" Visibility="{x:Bind ViewModel.IsPermissionsTab, Mode=OneWay}">
                 <StackPanel Spacing="8">
                     <TextBlock Text="What this upload asks for"
                                Style="{StaticResource TcTitleCardTextStyle}" />
@@ -652,8 +669,18 @@
             The footer: the caveat, the read gate, and the only approve control
             in the product.
         -->
-        <StackPanel Grid.Row="3"
-                    Spacing="10"
+        <!--
+            When the footer needs more than half the room under the header
+            rows, its row shares that room with the page and the footer
+            scrolls inside its share: on a short window it used to run off
+            the bottom, and Tab reached Not this one and Close where nothing
+            could be seen (box tab walk, 2026-11-19, a 754 by 512 window).
+        -->
+        <ScrollViewer x:Name="FooterScroller"
+                      Grid.Row="3"
+                      HorizontalScrollMode="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="10"
                     Padding="20,12"
                     Background="{ThemeResource TcSurfaceCardBrush}"
                     BorderBrush="{ThemeResource TcHairlineDividerBrush}"
@@ -831,34 +858,48 @@
                 <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.AdmissionNeutralMessage, Mode=OneWay}" TextWrapping="Wrap" />
             </Grid>
 
-            <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8">
-                <!-- Outlined like Close, never filled: it must not read as a
-                     second way to approve. -->
-                <Button Grid.Column="0"
-                        Style="{StaticResource TcSecondaryButtonStyle}"
-                        Content="Not this one"
-                        IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
-                        ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
-                        Click="OnNotThisOne" />
-                <Button Grid.Column="2"
-                        Style="{StaticResource TcSecondaryButtonStyle}"
-                        Content="Close"
-                        Click="OnClose" />
-                <!--
-                    The ONLY approve control in the product. It is behind the
-                    preview by design, behind the read gate by design, and it
-                    carries NO keyboard accelerator and is not the default
-                    button: an irreversible send one Return away from a hand
-                    resting on the keyboard is exactly the misclick this sheet
-                    exists to prevent.
-                -->
-                <Button Grid.Column="3"
-                        Style="{StaticResource TcPrimaryButtonStyle}"
-                        Content="Contribute"
-                        IsEnabled="{x:Bind ViewModel.CanContribute, Mode=OneWay}"
-                        ToolTipService.ToolTip="{x:Bind ViewModel.ContributeHelp, Mode=OneWay}"
-                        Click="OnContribute" />
-            </Grid>
         </StackPanel>
+        </ScrollViewer>
+
+        <!--
+            The action row, pinned under the footer as the Mac's sheet pins
+            its action bar (PreviewSheet.swift:538-551): on a short window
+            the explanatory footer scrolls, and Not this one, Close and
+            Contribute stay on screen, so Tab never reaches them where they
+            cannot be seen (box tab walk, 2026-11-19).
+        -->
+        <Grid x:Name="ActionRow"
+              Grid.Row="4"
+              Padding="20,8,20,12"
+              Background="{ThemeResource TcSurfaceCardBrush}"
+              ColumnDefinitions="Auto,*,Auto,Auto"
+              ColumnSpacing="8">
+            <!-- Outlined like Close, never filled: it must not read as a
+                 second way to approve. -->
+            <Button Grid.Column="0"
+                    Style="{StaticResource TcSecondaryButtonStyle}"
+                    Content="Not this one"
+                    IsEnabled="{x:Bind ViewModel.CanDecide, Mode=OneWay}"
+                    ToolTipService.ToolTip="Skips this trace for good, even if you keep working in it. This project will keep being offered."
+                    Click="OnNotThisOne" />
+            <Button Grid.Column="2"
+                    Style="{StaticResource TcSecondaryButtonStyle}"
+                    Content="Close"
+                    Click="OnClose" />
+            <!--
+                The ONLY approve control in the product. It is behind the
+                preview by design, behind the read gate by design, and it
+                carries NO keyboard accelerator and is not the default
+                button: an irreversible send one Return away from a hand
+                resting on the keyboard is exactly the misclick this sheet
+                exists to prevent.
+            -->
+            <Button Grid.Column="3"
+                    Style="{StaticResource TcPrimaryButtonStyle}"
+                    Content="Contribute"
+                    IsEnabled="{x:Bind ViewModel.CanContribute, Mode=OneWay}"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.ContributeHelp, Mode=OneWay}"
+                    Click="OnContribute" />
+        </Grid>
     </Grid>
 </UserControl>

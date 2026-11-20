@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop.Map;
 using TraceCommons.Interop.Shell;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App;
 
@@ -148,8 +149,8 @@ public sealed partial class MainWindow
             }
 
             NoticePlate p = plates[i];
-            plate.Background = (Brush)Application.Current.Resources["TcSurfaceCardBrush"];
-            plate.BorderBrush = (Brush)Application.Current.Resources["TcHairlineBrush"];
+            plate.Background = ThemeBrushes.Get("TcSurfaceCardBrush");
+            plate.BorderBrush = ThemeBrushes.Get("TcHairlineBrush");
             plate.Height = height;
             plate.Opacity = p.Opacity;
             plate.RenderTransform = new CompositeTransform { ScaleX = p.ScaleX, CenterX = width / 2, TranslateY = p.OffsetY };

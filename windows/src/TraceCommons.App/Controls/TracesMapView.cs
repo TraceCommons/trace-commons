@@ -25,6 +25,7 @@ using TraceCommons.Interop.Shell;
 using Windows.Foundation;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -255,6 +256,8 @@ public sealed partial class TracesMapView : UserControl
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         ActualThemeChanged += (_, _) => { DropResources(); Redraw(); };
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { DropResources(); Redraw(); });
         ApplyWords();
     }
 
@@ -942,7 +945,7 @@ public sealed partial class TracesMapView : UserControl
 
     // ---- Colours ------------------------------------------------------
 
-    private bool Dark => ActualTheme == ElementTheme.Dark;
+    private bool Dark => ThemeBrushes.Dark;
 
     private bool HighContrast => _accessibility.HighContrast;
 

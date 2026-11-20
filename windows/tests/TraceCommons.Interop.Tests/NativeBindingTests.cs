@@ -48,9 +48,11 @@ public class NativeBindingTests
     /// already binds, declared once. 151 after the merge of #2253: its
     /// tc_skill_learning_copy, tc_skill_draft_validate,
     /// tc_skill_learning_error_line and tc_sent_traces_training_copy_json
-    /// (137 in NativeMethods.cs, 14 in NativeMethods.Settings.cs).
+    /// (137 in NativeMethods.cs, 14 in NativeMethods.Settings.cs). 152
+    /// after the merge of #2256: its one credential-store binding (138 in
+    /// NativeMethods.cs, 14 in NativeMethods.Settings.cs, no entry point twice).
     /// </summary>
-    private const int BoundFunctions = 151;
+    private const int BoundFunctions = 152;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
     private const int HeaderFunctions = 188;

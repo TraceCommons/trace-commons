@@ -4,6 +4,7 @@ using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -156,8 +157,8 @@ public static class WithdrawDialog
             Child = block,
             Padding = new Thickness(12),
             CornerRadius = new CornerRadius(8),
-            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcSurfaceInsetBrush"],
-            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcGoldAttentionBorderBrush"],
+            Background = ThemeBrushes.Get("TcSurfaceInsetBrush"),
+            BorderBrush = ThemeBrushes.Get("TcGoldAttentionBorderBrush"),
             BorderThickness = new Thickness(1),
         };
     }

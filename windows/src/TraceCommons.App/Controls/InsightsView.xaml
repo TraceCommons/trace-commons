@@ -11,18 +11,11 @@
         rectangles, never a ring. There is no Spend tab: a tab that can't
         be used is hidden, not drawn disabled.
     -->
-    <Pivot x:Name="Tabs" SelectionChanged="OnTabChanged">
-        <!--
-            The Mac's tab bar labels (GlassSegmentedTabs, Navigation.swift:
-            TypeScale.label, 12, and 8 either side), so all five headers fit
-            the 440 pane rather than scrolling Overview off to the left
-            (review round 2, low 6). The keys are the Pivot template's own.
-        -->
-        <Pivot.Resources>
-            <x:Double x:Key="PivotHeaderItemFontSize">12</x:Double>
-            <Thickness x:Key="PivotHeaderItemMargin">8,0,8,0</Thickness>
-        </Pivot.Resources>
-        <PivotItem Header="{Binding [analytics_tab_overview]}">
+    <Grid RowDefinitions="Auto,*">
+        <!-- The tabs as the Mac draws them, each a keyboard stop (InsightsTabBar). -->
+        <local:InsightsTabBar x:Name="TabBar" Grid.Row="0" />
+        <Grid x:Name="Pages" Grid.Row="1">
+        <Grid x:Name="Page0">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="16">
@@ -165,8 +158,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_patterns]}">
+        </Grid>
+        <Grid x:Name="Page1" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <StackPanel Orientation="Horizontal" Spacing="16">
@@ -255,7 +248,7 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
+        </Grid>
         <!--
             Benchmarks (spec W20, InsightsBenchmarksTab.swift:245-421): the
             intro over the person's own traces, the population and period
@@ -264,7 +257,7 @@
             the person's own figures and one observation. Every word is the
             core's; a sample window draws the Mac's sample (InsightsSample).
         -->
-        <PivotItem Header="{Binding [analytics_tab_benchmarks]}">
+        <Grid x:Name="Page2" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="10" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
@@ -387,8 +380,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_sessions]}">
+        </Grid>
+        <Grid x:Name="Page3" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <ComboBox x:Name="SessionChoice" ItemsSource="{Binding Sessions.Choices}" DisplayMemberPath="Label"
@@ -448,8 +441,8 @@
                     </ItemsControl>
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-        <PivotItem Header="{Binding [analytics_tab_analyze]}">
+        </Grid>
+        <Grid x:Name="Page4" Visibility="Collapsed">
             <ScrollViewer>
                 <StackPanel Padding="28" Spacing="12" MaxWidth="1000" HorizontalAlignment="Stretch">
                     <TextBlock Text="{Binding Title}" FontSize="28" />
@@ -658,6 +651,7 @@
                     <Button Content="{Binding [contributions]}" Click="OnContributions" />
                 </StackPanel>
             </ScrollViewer>
-        </PivotItem>
-    </Pivot>
+        </Grid>
+        </Grid>
+    </Grid>
 </UserControl>
