@@ -84,10 +84,10 @@ jobs:
   # `environment: release` is load-bearing and not just symmetry with the
   # signing jobs: values scoped to `release` (the AZURE_SIGNING_* variables
   # are) read as empty in a job without the environment, so this pre-flight
-  # would refuse every release that checks one. A tag push no longer checks
-  # the Azure values, but the declaration stays so that putting Windows back
-  # on tags needs no change here. The environment carries no protection
-  # rules, so declaring it adds no approval step.
+  # would refuse every release that checks one. The declaration stays
+  # whether or not a tag push checks the Azure values, so moving the Windows
+  # MSIX on or off tags needs no change here. The environment carries no
+  # protection rules, so declaring it adds no approval step.
   release-config:
     name: verify release configuration
     runs-on: ubuntu-latest

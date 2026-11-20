@@ -130,11 +130,12 @@ the version; the MSIX version is stamped from the tag at build time.
 
 - **"Update and restart" does not restart.** The in-app update installs the
   new version and ends the app, and nothing starts it again (see the trial
-  below). `RegisterApplicationRestart` was tried, with flags 11 and 0, and
-  with `AddPackageByAppInstallerFileAsync` in place of the `Request...`
-  call: it registered (S_OK) and the app still stayed closed. The
-  deployment ends the app through `TerminateApplications`, not Restart
-  Manager. Tried only as the box's built-in Administrator. Whether to change
+  below). `RegisterApplicationRestart` was tried twice: with flags 11, and
+  with flags 0 together with `AddPackageByAppInstallerFileAsync` in place
+  of the `Request...` call (that run logged S_OK from the registration).
+  The app stayed closed both times. For the flags-11 run the deployment log
+  shows `TerminateApplications` and the Restart Manager log is empty. Tried
+  only as the box's built-in Administrator. Whether to change
   the button's words or find another relaunch is the owner's call.
 - The `windows` job publishes the app without `-p:Version`, so the portable
   app's assembly version is the SDK default until #2216 (which reads the
@@ -196,14 +197,14 @@ directory were removed afterwards, and the box was deallocated.
 | Launch from `shell:AppsFolder` | ran from `C:\Program Files\WindowsApps\Iqlusion.TraceCommons_1.0.12.0_x64__...`; main window up |
 | Feed moved to 1.0.13; Settings opened (starts the daemon, then the update check) | the app fetched the feed; the "Update available" banner offered "Update and restart" on Insights (on Traces it sits behind the first-contribution card, by the notice order) |
 | "Update and restart" | the daemon shut down cleanly (`daemon.lock` removed, as on a clean close); `AddFromAppInstallerOperation` with `ForceTargetApplicationShutdownOption`; 1.0.13.0 registered about 7 s later |
-| Relaunch | **none**: no process for the two minutes watched, at 1.0.13 and again at 1.0.15 and 1.0.17 with the restart registration tried (see "Still open") |
+| Relaunch | **none**: no process in the 120 s watched at 1.0.13, nor in 90 s at 1.0.15 and 60 s at 1.0.17 with the restart registration tried (see "Still open") |
 | State across the update | `daemon-settings.json`, `daemon-state.json` and a sentinel file byte-identical before and after; launched by hand, 1.0.17 started its daemon on the same state |
 
-Box notes: `Add-AppxPackage` and `Invoke-CommandInDesktopPackage` over SSH
-fail ("Failed to initialize PLM", 0x80070005); run them in the console
-session (an `/IT` task). The daemon needs a `daemon-settings.json` it wrote
-itself (it carries `schema_version`); a hand-written one reads as
-`settings-unreadable`. Under the hosts redirect the daemon's
+Box notes: `Add-AppxPackage -AppInstallerFile` over SSH fails ("Failed to
+initialize PLM", 0x80070005); run it, and `Invoke-CommandInDesktopPackage`,
+in the console session (an `/IT` task). A hand-written two-key
+`daemon-settings.json` read as `settings-unreadable`; one the daemon wrote
+itself from the same declarations (passed as start settings) worked. Under the hosts redirect the daemon's
 `feature-flags/production.json` fetch got a 404, so these runs had no
 remote flags.
 
