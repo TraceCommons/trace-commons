@@ -184,6 +184,7 @@ final class AnimationFocusTests: XCTestCase {
     /// (#2268), each through the shared clock, so focus applies to each:
     /// focused, dashes at 30 and the library at 15 frames a second; seen
     /// but not focused, both at 15; hidden, both stopped.
+    @MainActor
     func test_mapDashAndLibraryTimelinesFollowFocus() throws {
         let sources = Dictionary(try allSources(), uniquingKeysWith: { first, _ in first })
         let map = try XCTUnwrap(sources["TraceCommonsApp/Views/Monitor/FlowMapView.swift"])
