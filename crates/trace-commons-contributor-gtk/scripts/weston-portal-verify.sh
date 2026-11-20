@@ -77,7 +77,7 @@ done
 
 # --- start the real daemon the shell attaches to --------------------------
 
-RUST_BACKTRACE=1 "$DAEMON_BIN" daemon run &
+"$DAEMON_BIN" daemon run &
 DAEMON_PID=$!
 
 cleanup() {
