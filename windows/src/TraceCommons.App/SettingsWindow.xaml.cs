@@ -69,6 +69,10 @@ public sealed partial class SettingsWindow : Window
 
         AppWindow.Show();
         Activate();
+
+        // Focus the first control, not the bare input site: a nameless
+        // first stop that Escape never reached (W25 audit, box az9).
+        ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => AppWindow.IsVisible);
     }
 }
 

@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Windows.Graphics;
 
 namespace TraceCommons.App;
@@ -241,6 +244,25 @@ internal static class ToolWindows
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+    /// <summary>
+    /// Focuses the first control under <paramref name="root"/> once it is
+    /// laid out and its window active, while <paramref name="stillOpen"/>
+    /// holds. Without it a window opened by a click has its bare input site
+    /// focused: a nameless stop a screen reader announces as a pane, and one
+    /// Escape never reaches (box tab walk, 2026-11-19: the flyout opened on
+    /// it; the rail's fix for the same fault, tc-win-az5, now lives here).
+    /// </summary>
+    public static void FocusFirst(FrameworkElement root, FocusState state, Func<bool> stillOpen)
+    {
+        root.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            if (stillOpen() && FocusManager.FindFirstFocusableElement(root) is Control first)
+            {
+                first.Focus(state);
+            }
+        });
+    }
 
     /// <summary>Takes the keyboard after a click inside: the window may now be activated.</summary>
     public static void TakeKeyboard(IntPtr hwnd)
