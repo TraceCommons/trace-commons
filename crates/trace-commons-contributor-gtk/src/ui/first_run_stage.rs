@@ -618,15 +618,22 @@ impl Lighten {
 
     /// The rate a stage that wants a frame every `interval` seconds (0:
     /// every frame the display draws) can be asked to keep on a display of
-    /// `refresh_hz` (60 when unknown): the lower of the two.
+    /// `refresh_hz` (60 when unknown): the lower of the two, and never
+    /// more than `MOST_ASKED`, the most any step asks for by name, so a
+    /// fast display does not make a stage drawing 90 frames a second
+    /// slow.
     pub fn asked_fps(interval: f64, refresh_hz: Option<f64>) -> f64 {
         let display = refresh_hz.filter(|hz| *hz > 0.0).unwrap_or(60.0);
-        if interval > 0.0 {
-            (1.0 / interval).min(display)
+        let wanted = if interval > 0.0 {
+            1.0 / interval
         } else {
             display
-        }
+        };
+        wanted.min(display).min(Self::MOST_ASKED)
     }
+
+    /// The most frames a second any step asks for by name (Traces, Uses).
+    pub const MOST_ASKED: f64 = 60.0;
 
     /// A frame the stage drew at `at` (seconds) while it asked for
     /// `asked` frames a second (`asked_fps`), or `None` when this frame's
@@ -1621,7 +1628,16 @@ mod tests {
 
         assert_eq!(Lighten::asked_fps(1.0 / 60.0, Some(30.0)), 30.0);
         assert_eq!(Lighten::asked_fps(0.0, None), 60.0);
-        assert_eq!(Lighten::asked_fps(0.0, Some(144.0)), 144.0);
+        assert_eq!(Lighten::asked_fps(0.0, Some(144.0)), 60.0);
+        assert_eq!(Lighten::asked_fps(1.0 / 60.0, Some(144.0)), 60.0);
+        // A stage drawing 90 a second on a 144 Hz display is not slow.
+        let mut fast_display = Lighten::default();
+        let asked = Some(Lighten::asked_fps(0.0, Some(144.0)));
+        assert_eq!(
+            run(&mut fast_display, 0.0, 30.0, 90.0, asked),
+            None,
+            "a 144 Hz display"
+        );
         assert_eq!(Lighten::asked_fps(1.0 / 30.0, Some(144.0)), 30.0);
         let mut thirty_hz = Lighten::default();
         let asked = Some(Lighten::asked_fps(1.0 / 60.0, Some(30.0)));
