@@ -1456,6 +1456,14 @@ internal static class NativeMethods
     internal static extern IntPtr tc_monitor_traces_copy_json();
 
     /// <summary>
+    /// The nudge words (<c>nudge_copy</c>), keyed by constant name: the
+    /// Traces order control's words among them (NudgeCopy.swift). NULL only
+    /// on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_nudge_copy_json();
+
+    /// <summary>
     /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)
     /// as an owned string; a negative count is an unknown one. Empty for
     /// zero. NULL only on a caught panic.

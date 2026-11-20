@@ -150,6 +150,7 @@ public sealed partial class MainWindow
         ViewModel.ArmingRewordingCards.CollectionChanged += (_, _) => RefreshNotices();
         Activated += OnShellFirstActivated;
 
+        InitializeMap();
         RefreshLocation();
     }
 
@@ -318,6 +319,8 @@ public sealed partial class MainWindow
 
         RenderBreadcrumb();
         RefreshNotices();
+        FollowTabOnMap(_at.Tab);
+        RefreshMapTransfers();
         ApplyPaneAvailability();
     }
 
@@ -436,9 +439,9 @@ public sealed partial class MainWindow
     /// </summary>
     private void ApplyDemand()
     {
-        var keys = new SortedSet<string>(InspectorDemand.Keys(ViewModel.Demand), StringComparer.Ordinal);
         string? arming = ViewModel.HasArmingOffer ? ViewModel.ArmingOfferProjectId : null;
-        keys.UnionWith(InspectorDemand.OfferKeys(_at.Tab, ViewModel.HasPrivateInferenceOffer, arming));
+        IReadOnlySet<string> keys = InspectorDemand.WindowKeys(
+            ViewModel.Demand with { Review = _treeReview }, _at, ViewModel.HasPrivateInferenceOffer, arming);
         if (_demand.Update(keys) && !_wantsInspector)
         {
             _wantsInspector = true;
@@ -463,7 +466,7 @@ public sealed partial class MainWindow
 
     private void OnInspectorToggleClick(object sender, RoutedEventArgs e)
     {
-        _wantsInspector = !_presented.Inspector;
+        _wantsInspector = PaneToggles.Wanted(PaneToggle.Inspector, _presented, _transition?.To);
         ApplyPaneAvailability();
     }
 
@@ -471,13 +474,16 @@ public sealed partial class MainWindow
 
     /// <summary>
     /// What the panes should be on this tab: the person's choice where the
-    /// inspector is available (MonitorWindowView.swift:303). No map until W3.
+    /// inspector is available, and the map on every tab while it is wanted
+    /// (MonitorWindowView.swift:182, :303).
     /// </summary>
     private void ApplyPaneAvailability()
     {
         bool available = MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
         InspectorToggle.IsEnabled = available;
-        var wanted = new PaneVisibility(false, _wantsInspector && available);
+        var wanted = new PaneVisibility(_wantsMap, _wantsInspector && available);
+        ApplyMapToggle(wanted.Map);
+        ApplyGraph();
         InspectorToggle.IsChecked = wanted.Inspector;
         string toggleName = MonitorWords.Toggle(PaneToggle.Inspector, wanted.Inspector);
         AutomationProperties.SetName(InspectorToggle, toggleName);
@@ -651,7 +657,11 @@ public sealed partial class MainWindow
         MapColumn.Width = new GridLength(layout.Map ?? 0);
         InspectorGapColumn.Width = new GridLength(layout.Inspector is null ? 0 : MonitorPaneLayout.PaneGap);
         InspectorColumn.Width = new GridLength(layout.Inspector ?? 0);
-        MapPane.Visibility = Visibility.Collapsed;
+        MapPane.Visibility = layout.Map is null ? Visibility.Collapsed : Visibility.Visible;
+        if (_map is not null)
+        {
+            _map.PaneShown = layout.Map is not null;
+        }
         InspectorPane.Visibility = layout.Inspector is null ? Visibility.Collapsed : Visibility.Visible;
         if (_moveRun is null)
         {
@@ -682,10 +692,11 @@ public sealed partial class MainWindow
         RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         double scale = Scale;
         PaneVisibility seed = MonitorPaneLayout.FirstLaunch(work.Width / scale);
+        _wantsMap = seed.Map;
         _wantsInspector = seed.Inspector || InspectorDemand.OpensOnAppear(InspectorDemand.Keys(ViewModel.Demand));
 
         bool inspector = _wantsInspector && MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
-        double width = MonitorPaneLayout.WindowWidth(showsMap: false, showsInspector: inspector);
+        double width = MonitorPaneLayout.WindowWidth(showsMap: _wantsMap, showsInspector: inspector);
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
@@ -696,7 +707,7 @@ public sealed partial class MainWindow
             MoveAndResize(frame with { Height = Math.Min(height, work.Height) });
         }
 
-        _presented = new PaneVisibility(false, inspector);
+        _presented = new PaneVisibility(_wantsMap, inspector);
         ApplyMinimumSize();
         LayoutPanes();
         ApplyDemand();
@@ -913,13 +924,14 @@ public sealed partial class MainWindow
         if (ViewModel.HasUndo) yield return (NoticeCatalog.Undo(ViewModel.UndoEntryIds), UndoCard);
         if (ViewModel.HasPrivateInferenceOffer) yield return (NoticeCatalog.PrivateAIOffer, PrivateAIOfferCard);
         if (ViewModel.HasNotice) yield return (NoticeCatalog.ActionNotice, ActionNoticeCard);
+        foreach ((NoticeKind Kind, FrameworkElement Card) transfer in TransferNotices()) yield return transfer;
     }
 
     private static IEnumerable<FrameworkElement> AllCards(MainWindow w) => new FrameworkElement[]
     {
         w.UpdateCard, w.LegacyNoticeCard, w.LegacyOfferCard, w.FirstContributionCard, w.ArmingOfferCard,
         w.RewordingCards, w.VoidCards, w.GateHeldCard, w.WitnessCard, w.HealthCard, w.UndoCard,
-        w.PrivateAIOfferCard, w.ActionNoticeCard,
+        w.PrivateAIOfferCard, w.ActionNoticeCard, w._transferNotice,
     };
 
     /// <summary>
@@ -975,6 +987,7 @@ public sealed partial class MainWindow
         }
 
         EndArmingStackExit();
+        ShowTransferNotice(front);
         frontCard.Visibility = Visibility.Visible;
         Canvas.SetZIndex(frontCard, 1);
         if (frontChanged)
@@ -1198,6 +1211,9 @@ public sealed partial class MainWindow
                 break;
             case "private-ai-offer":
                 OnDeclinePrivateInference(sender, e);
+                break;
+            case string id when NoticeCatalog.IsTransfer(id):
+                _map?.CloseTransfer(NoticeCatalog.TransferId(id));
                 break;
             default:
                 _closedNotices.Add(front.Id);

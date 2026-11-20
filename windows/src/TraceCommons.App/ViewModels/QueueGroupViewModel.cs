@@ -82,6 +82,9 @@ public sealed class QueueGroupViewModel
     /// </summary>
     public bool ShowSubmitAll => _group.ShowSubmitAll;
 
+    /// <summary>How many traces Submit all sends: the daemon's contributable count.</summary>
+    public int OfferedCount => _group.OfferedCount;
+
     /// <summary>"Submit all (3)" -- the header action's label, when shown.</summary>
     public string SubmitAllText =>
         string.Format(CultureInfo.CurrentCulture, "Submit all ({0})", _group.OfferedCount);

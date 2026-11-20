@@ -1,0 +1,6601 @@
+{
+  "_source" : "Throwaway swiftc probe (not committed): verbatim copies of TracesGraphModel (MonitorShell.swift:76-186), GlassBarGraph gaps\/labelAlignment\/dotAlphas\/drawMatrix arithmetic (Indicators.swift:396-506), GlassBarSlide.init (:515-517) and MonitorTracesGraphCopy.range\/bar (MonitorGraphMapCopy.swift:41-58) at 9cabd97dc, the Mac's en_US locale, words from tc_monitor_screens_copy_json of the same tree.",
+  "barWords" : "Monday, November 2: 3 shared, 0 kept",
+  "buckets" : {
+    "America\/Los_Angeles|0|-1" : [
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "5:00",
+        "shared" : 1,
+        "start" : "2026-10-31T12:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T14:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T16:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "11:00",
+        "shared" : 0,
+        "start" : "2026-10-31T18:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T20:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T22:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "17:00",
+        "shared" : 0,
+        "start" : "2026-11-01T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T02:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T04:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "23:00",
+        "shared" : 0,
+        "start" : "2026-11-01T06:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T08:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T10:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|0|-2" : [
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "5:00",
+        "shared" : 0,
+        "start" : "2026-10-30T12:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T14:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T16:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "11:00",
+        "shared" : 0,
+        "start" : "2026-10-30T18:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T20:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T22:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "17:00",
+        "shared" : 0,
+        "start" : "2026-10-31T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T02:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T04:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "23:00",
+        "shared" : 1,
+        "start" : "2026-10-31T06:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T08:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T10:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|0|-5" : [
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "5:00",
+        "shared" : 0,
+        "start" : "2026-10-27T12:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T14:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T16:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 1,
+        "label" : "11:00",
+        "shared" : 0,
+        "start" : "2026-10-27T18:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T20:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T22:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "17:00",
+        "shared" : 0,
+        "start" : "2026-10-28T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-28T02:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T04:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "23:00",
+        "shared" : 1,
+        "start" : "2026-10-28T06:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T08:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T10:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|0|0" : [
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "4:00",
+        "shared" : 0,
+        "start" : "2026-11-01T12:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T14:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T16:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "10:00",
+        "shared" : 1,
+        "start" : "2026-11-01T18:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T20:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T22:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "16:00",
+        "shared" : 1,
+        "start" : "2026-11-02T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T02:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T04:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "22:00",
+        "shared" : 0,
+        "start" : "2026-11-02T06:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T08:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T10:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|1|-1" : [
+      {
+        "day" : "Monday, October 12",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-12T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-13T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 4,
+        "start" : "2026-10-14T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-15T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-16T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-17T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-18T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 4,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-19T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-20T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 4,
+        "start" : "2026-10-21T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-22T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|1|-2" : [
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-01T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-02T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-03T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 4,
+        "label" : "Sun",
+        "shared" : 4,
+        "start" : "2026-10-04T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-05T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-06T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-07T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-08T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 4,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-09T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-10T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 4,
+        "start" : "2026-10-11T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|1|-5" : [
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-29T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-30T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-31T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-09-01T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-09-02T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-03T07:00:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-04T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-09-05T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-09-06T07:00:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-09-07T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-09-08T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|1|0" : [
+      {
+        "day" : "Friday, October 23",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-23T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 4,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-24T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-25T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-26T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 4,
+        "start" : "2026-10-27T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-28T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 4,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-29T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-30T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-31T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-11-01T07:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "Mon",
+        "shared" : 1,
+        "start" : "2026-11-02T08:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|2|-1" : [
+      {
+        "day" : "Tuesday, August 11",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-08-11T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-12T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-13T07:00:00Z"
+      },
+      {
+        "day" : "Friday, August 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-14T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-15T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-16T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 17",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-17T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-18T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-19T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-20T07:00:00Z"
+      },
+      {
+        "day" : "Friday, August 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-21T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-22T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 23",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-23T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-24T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-25T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-26T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-27T07:00:00Z"
+      },
+      {
+        "day" : "Friday, August 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-28T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-29T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-30T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-31T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-01T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-02T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-03T07:00:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-04T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-05T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-06T07:00:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-07T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-08T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-09T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 10",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-10T07:00:00Z"
+      },
+      {
+        "day" : "Friday, September 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-11T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-12T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 13",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-13T07:00:00Z"
+      },
+      {
+        "day" : "Monday, September 14",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-14T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-15T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 16",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-09-16T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 17",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-17T07:00:00Z"
+      },
+      {
+        "day" : "Friday, September 18",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-18T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 19",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-19T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-20T07:00:00Z"
+      },
+      {
+        "day" : "Monday, September 21",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-21T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|2|-2" : [
+      {
+        "day" : "Tuesday, June 30",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-06-30T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-01T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-02T07:00:00Z"
+      },
+      {
+        "day" : "Friday, July 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-03T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-04T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-05T07:00:00Z"
+      },
+      {
+        "day" : "Monday, July 6",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-07-06T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-07T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-08T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-09T07:00:00Z"
+      },
+      {
+        "day" : "Friday, July 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-10T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-11T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 12",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-07-12T07:00:00Z"
+      },
+      {
+        "day" : "Monday, July 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-13T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-14T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-15T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-16T07:00:00Z"
+      },
+      {
+        "day" : "Friday, July 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-17T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 18",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-07-18T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-19T07:00:00Z"
+      },
+      {
+        "day" : "Monday, July 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-20T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-21T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-22T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-23T07:00:00Z"
+      },
+      {
+        "day" : "Friday, July 24",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-07-24T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-25T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-26T07:00:00Z"
+      },
+      {
+        "day" : "Monday, July 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-27T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-28T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-29T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 30",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-07-30T07:00:00Z"
+      },
+      {
+        "day" : "Friday, July 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-31T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-01T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-02T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-03T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-04T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 5",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-08-05T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-06T07:00:00Z"
+      },
+      {
+        "day" : "Friday, August 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-07T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-08T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-09T07:00:00Z"
+      },
+      {
+        "day" : "Monday, August 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-10T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|2|-5" : [
+      {
+        "day" : "Tuesday, February 24",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-02-24T08:00:00Z"
+      },
+      {
+        "day" : "Wednesday, February 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-25T08:00:00Z"
+      },
+      {
+        "day" : "Thursday, February 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-26T08:00:00Z"
+      },
+      {
+        "day" : "Friday, February 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-27T08:00:00Z"
+      },
+      {
+        "day" : "Saturday, February 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-28T08:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-01T08:00:00Z"
+      },
+      {
+        "day" : "Monday, March 2",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-03-02T08:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-03T08:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-04T08:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-05T08:00:00Z"
+      },
+      {
+        "day" : "Friday, March 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-06T08:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-07T08:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 8",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-03-08T08:00:00Z"
+      },
+      {
+        "day" : "Monday, March 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-09T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-10T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-11T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-12T07:00:00Z"
+      },
+      {
+        "day" : "Friday, March 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-13T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 14",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-03-14T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-15T07:00:00Z"
+      },
+      {
+        "day" : "Monday, March 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-16T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-17T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-18T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-19T07:00:00Z"
+      },
+      {
+        "day" : "Friday, March 20",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-03-20T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-21T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-22T07:00:00Z"
+      },
+      {
+        "day" : "Monday, March 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-23T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-24T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-25T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 26",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-03-26T07:00:00Z"
+      },
+      {
+        "day" : "Friday, March 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-27T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-28T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-29T07:00:00Z"
+      },
+      {
+        "day" : "Monday, March 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-30T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-31T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, April 1",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-04-01T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, April 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-02T07:00:00Z"
+      },
+      {
+        "day" : "Friday, April 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-03T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, April 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-04T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, April 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-05T07:00:00Z"
+      },
+      {
+        "day" : "Monday, April 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-06T07:00:00Z"
+      }
+    ],
+    "America\/Los_Angeles|2|0" : [
+      {
+        "day" : "Tuesday, September 22",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-09-22T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 23",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-23T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 24",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-24T07:00:00Z"
+      },
+      {
+        "day" : "Friday, September 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-25T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-26T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 27",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-27T07:00:00Z"
+      },
+      {
+        "day" : "Monday, September 28",
+        "kept" : 4,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-09-28T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 29",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-29T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-30T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-01T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-02T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-03T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 4,
+        "label" : "Sun",
+        "shared" : 4,
+        "start" : "2026-10-04T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-05T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-06T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-07T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-08T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-09T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-10T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-11T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 12",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-12T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-13T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-14T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-15T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-16T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-17T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-18T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-19T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-20T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-21T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-22T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 23",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-23T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-24T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-25T07:00:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-26T07:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-27T07:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-28T07:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-29T07:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-30T07:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-31T07:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-11-01T07:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T08:00:00Z"
+      }
+    ],
+    "Asia\/Kolkata|0|-1" : [
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "18:00",
+        "shared" : 1,
+        "start" : "2026-10-31T12:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T14:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T16:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-10-31T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T20:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T22:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 0,
+        "start" : "2026-11-01T00:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T02:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T04:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 0,
+        "start" : "2026-11-01T06:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T08:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T10:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|0|-2" : [
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "18:00",
+        "shared" : 0,
+        "start" : "2026-10-30T12:30:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T14:30:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T16:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-10-30T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T20:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T22:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 1,
+        "start" : "2026-10-31T00:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T02:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T04:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 1,
+        "start" : "2026-10-31T06:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T08:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T10:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|0|-5" : [
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "18:00",
+        "shared" : 0,
+        "start" : "2026-10-27T12:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T14:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T16:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-10-27T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T20:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T22:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "6:00",
+        "shared" : 0,
+        "start" : "2026-10-28T00:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-28T02:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T04:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 1,
+        "start" : "2026-10-28T06:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T08:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T10:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|0|0" : [
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "18:00",
+        "shared" : 1,
+        "start" : "2026-11-01T12:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T14:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T16:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "0:00",
+        "shared" : 1,
+        "start" : "2026-11-01T18:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T20:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T22:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 0,
+        "start" : "2026-11-02T00:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T02:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T04:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 0,
+        "start" : "2026-11-02T06:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T08:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T10:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|1|-1" : [
+      {
+        "day" : "Monday, October 12",
+        "kept" : 4,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-11T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 4,
+        "start" : "2026-10-12T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-13T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-14T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-15T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 4,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-16T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-17T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-10-18T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-19T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-20T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-21T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|1|-2" : [
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-09-30T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 4,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-01T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-02T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-03T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-04T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 4,
+        "start" : "2026-10-05T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-06T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-07T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-08T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-09T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-10T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|1|-5" : [
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-28T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-29T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-30T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-08-31T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-09-01T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-02T18:30:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-03T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-09-04T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-09-05T18:30:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-09-06T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-09-07T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|1|0" : [
+      {
+        "day" : "Friday, October 23",
+        "kept" : 4,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-22T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-23T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-24T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-10-25T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-26T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-27T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-28T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-29T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-30T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 4,
+        "start" : "2026-10-31T18:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-11-01T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|2|-1" : [
+      {
+        "day" : "Tuesday, August 11",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-08-10T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, August 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-11T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, August 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-12T18:30:00Z"
+      },
+      {
+        "day" : "Friday, August 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-13T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, August 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-14T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-15T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 17",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-16T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, August 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-17T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, August 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-18T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, August 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-19T18:30:00Z"
+      },
+      {
+        "day" : "Friday, August 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-20T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, August 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-21T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 23",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-22T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-23T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, August 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-24T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, August 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-25T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, August 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-26T18:30:00Z"
+      },
+      {
+        "day" : "Friday, August 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-27T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-28T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-29T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-30T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-31T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-01T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-02T18:30:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-03T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-04T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-05T18:30:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-06T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-07T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-08T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, September 10",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-09T18:30:00Z"
+      },
+      {
+        "day" : "Friday, September 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-10T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, September 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 2,
+        "start" : "2026-09-11T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, September 13",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-12T18:30:00Z"
+      },
+      {
+        "day" : "Monday, September 14",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-13T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-14T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 16",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-09-15T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, September 17",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-16T18:30:00Z"
+      },
+      {
+        "day" : "Friday, September 18",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-17T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, September 19",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-18T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, September 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-19T18:30:00Z"
+      },
+      {
+        "day" : "Monday, September 21",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-20T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|2|-2" : [
+      {
+        "day" : "Tuesday, June 30",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-06-29T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, July 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-06-30T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, July 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-01T18:30:00Z"
+      },
+      {
+        "day" : "Friday, July 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-02T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, July 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-03T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, July 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-04T18:30:00Z"
+      },
+      {
+        "day" : "Monday, July 6",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-07-05T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, July 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-06T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, July 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-07T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, July 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-08T18:30:00Z"
+      },
+      {
+        "day" : "Friday, July 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-09T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, July 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-10T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, July 12",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-07-11T18:30:00Z"
+      },
+      {
+        "day" : "Monday, July 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-12T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, July 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-13T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, July 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-14T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, July 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-15T18:30:00Z"
+      },
+      {
+        "day" : "Friday, July 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-16T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, July 18",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-07-17T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, July 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-18T18:30:00Z"
+      },
+      {
+        "day" : "Monday, July 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-19T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, July 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-20T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, July 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-21T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, July 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-22T18:30:00Z"
+      },
+      {
+        "day" : "Friday, July 24",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-07-23T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, July 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-24T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, July 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-25T18:30:00Z"
+      },
+      {
+        "day" : "Monday, July 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-26T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, July 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-27T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, July 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-28T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, July 30",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-07-29T18:30:00Z"
+      },
+      {
+        "day" : "Friday, July 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-30T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, August 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-31T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-01T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-02T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, August 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-03T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, August 5",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-08-04T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, August 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-05T18:30:00Z"
+      },
+      {
+        "day" : "Friday, August 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-06T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, August 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-07T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, August 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-08T18:30:00Z"
+      },
+      {
+        "day" : "Monday, August 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-09T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|2|-5" : [
+      {
+        "day" : "Tuesday, February 24",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-02-23T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, February 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-24T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, February 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-25T18:30:00Z"
+      },
+      {
+        "day" : "Friday, February 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-26T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, February 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-27T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, March 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-28T18:30:00Z"
+      },
+      {
+        "day" : "Monday, March 2",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-03-01T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, March 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-02T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, March 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-03T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, March 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-04T18:30:00Z"
+      },
+      {
+        "day" : "Friday, March 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-05T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, March 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-06T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, March 8",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-03-07T18:30:00Z"
+      },
+      {
+        "day" : "Monday, March 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-08T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, March 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-09T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, March 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-10T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, March 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-11T18:30:00Z"
+      },
+      {
+        "day" : "Friday, March 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-12T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, March 14",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-03-13T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, March 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-14T18:30:00Z"
+      },
+      {
+        "day" : "Monday, March 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-15T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, March 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-16T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, March 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-17T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, March 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-18T18:30:00Z"
+      },
+      {
+        "day" : "Friday, March 20",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-03-19T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, March 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-20T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, March 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-21T18:30:00Z"
+      },
+      {
+        "day" : "Monday, March 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-22T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, March 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-23T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, March 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-24T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, March 26",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-03-25T18:30:00Z"
+      },
+      {
+        "day" : "Friday, March 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-26T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, March 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-27T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, March 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-28T18:30:00Z"
+      },
+      {
+        "day" : "Monday, March 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-29T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, March 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-30T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, April 1",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-03-31T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, April 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-01T18:30:00Z"
+      },
+      {
+        "day" : "Friday, April 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-02T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, April 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-03T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, April 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-04T18:30:00Z"
+      },
+      {
+        "day" : "Monday, April 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-05T18:30:00Z"
+      }
+    ],
+    "Asia\/Kolkata|2|0" : [
+      {
+        "day" : "Tuesday, September 22",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-09-21T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 23",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-22T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, September 24",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-23T18:30:00Z"
+      },
+      {
+        "day" : "Friday, September 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-24T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, September 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-25T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, September 27",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-26T18:30:00Z"
+      },
+      {
+        "day" : "Monday, September 28",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-09-27T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, September 29",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-28T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, September 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-29T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-30T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-01T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-02T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-03T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-04T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-05T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-06T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-07T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-08T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-09T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-10T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 12",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-11T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-12T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-13T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-14T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-15T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-16T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-17T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-18T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-19T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-20T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-21T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 23",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-22T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-23T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-24T18:30:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-25T18:30:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-26T18:30:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-27T18:30:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-28T18:30:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-29T18:30:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-30T18:30:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-31T18:30:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-11-01T18:30:00Z"
+      }
+    ],
+    "UTC|0|-1" : [
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "12:00",
+        "shared" : 1,
+        "start" : "2026-10-31T12:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T14:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T16:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "18:00",
+        "shared" : 0,
+        "start" : "2026-10-31T18:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T20:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T22:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-11-01T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T02:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T04:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 0,
+        "start" : "2026-11-01T06:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T08:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T10:00:00Z"
+      }
+    ],
+    "UTC|0|-2" : [
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 0,
+        "start" : "2026-10-30T12:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T14:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T16:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "18:00",
+        "shared" : 0,
+        "start" : "2026-10-30T18:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-30T20:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-30T22:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-10-31T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-31T02:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T04:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 1,
+        "start" : "2026-10-31T06:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T08:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-31T10:00:00Z"
+      }
+    ],
+    "UTC|0|-5" : [
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 0,
+        "start" : "2026-10-27T12:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T14:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T16:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 1,
+        "label" : "18:00",
+        "shared" : 0,
+        "start" : "2026-10-27T18:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-27T20:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-27T22:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 0,
+        "start" : "2026-10-28T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-10-28T02:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T04:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 1,
+        "start" : "2026-10-28T06:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T08:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-10-28T10:00:00Z"
+      }
+    ],
+    "UTC|0|0" : [
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "12:00",
+        "shared" : 0,
+        "start" : "2026-11-01T12:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-01T14:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T16:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 1,
+        "label" : "18:00",
+        "shared" : 1,
+        "start" : "2026-11-01T18:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T20:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-01T22:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "0:00",
+        "shared" : 1,
+        "start" : "2026-11-02T00:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T02:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T04:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "6:00",
+        "shared" : 0,
+        "start" : "2026-11-02T06:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-11-02T08:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 1,
+        "label" : "",
+        "shared" : 1,
+        "start" : "2026-11-02T10:00:00Z"
+      }
+    ],
+    "UTC|1|-1" : [
+      {
+        "day" : "Monday, October 12",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-12T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 4,
+        "start" : "2026-10-13T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 4,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-14T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-15T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-16T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-17T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-18T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 4,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-10-19T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-20T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-21T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-22T00:00:00Z"
+      }
+    ],
+    "UTC|1|-2" : [
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-01T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-02T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 4,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-03T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-04T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-10-05T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 4,
+        "start" : "2026-10-06T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-07T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 4,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-08T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-09T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-10T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-11T00:00:00Z"
+      }
+    ],
+    "UTC|1|-5" : [
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-29T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-30T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-31T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-09-01T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-09-02T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-03T00:00:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-04T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-09-05T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-09-06T00:00:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-09-07T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-09-08T00:00:00Z"
+      }
+    ],
+    "UTC|1|0" : [
+      {
+        "day" : "Friday, October 23",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-23T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 4,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-24T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-25T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "Mon",
+        "shared" : 4,
+        "start" : "2026-10-26T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-10-27T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-28T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 4,
+        "label" : "Thu",
+        "shared" : 4,
+        "start" : "2026-10-29T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 5,
+        "start" : "2026-10-30T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 5,
+        "start" : "2026-10-31T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 4,
+        "start" : "2026-11-01T00:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 2,
+        "label" : "Mon",
+        "shared" : 3,
+        "start" : "2026-11-02T00:00:00Z"
+      }
+    ],
+    "UTC|2|-1" : [
+      {
+        "day" : "Tuesday, August 11",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-08-11T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-12T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-13T00:00:00Z"
+      },
+      {
+        "day" : "Friday, August 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-14T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-15T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-16T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 17",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-08-17T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-18T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-19T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-20T00:00:00Z"
+      },
+      {
+        "day" : "Friday, August 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-21T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-22T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 23",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-08-23T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-24T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-25T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-26T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-27T00:00:00Z"
+      },
+      {
+        "day" : "Friday, August 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-28T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 29",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-08-29T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-30T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-31T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-01T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-02T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-03T00:00:00Z"
+      },
+      {
+        "day" : "Friday, September 4",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-09-04T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-05T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-06T00:00:00Z"
+      },
+      {
+        "day" : "Monday, September 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-07T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-08T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-09T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 10",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-09-10T00:00:00Z"
+      },
+      {
+        "day" : "Friday, September 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-09-11T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 3,
+        "start" : "2026-09-12T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 13",
+        "kept" : 2,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-13T00:00:00Z"
+      },
+      {
+        "day" : "Monday, September 14",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-14T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-15T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 16",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-09-16T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 17",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-17T00:00:00Z"
+      },
+      {
+        "day" : "Friday, September 18",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-18T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 19",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-19T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-20T00:00:00Z"
+      },
+      {
+        "day" : "Monday, September 21",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-21T00:00:00Z"
+      }
+    ],
+    "UTC|2|-2" : [
+      {
+        "day" : "Tuesday, June 30",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-06-30T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-01T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-02T00:00:00Z"
+      },
+      {
+        "day" : "Friday, July 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-03T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-04T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-05T00:00:00Z"
+      },
+      {
+        "day" : "Monday, July 6",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-07-06T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-07T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-08T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-09T00:00:00Z"
+      },
+      {
+        "day" : "Friday, July 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-10T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-11T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 12",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-07-12T00:00:00Z"
+      },
+      {
+        "day" : "Monday, July 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-13T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 14",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-14T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-15T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-16T00:00:00Z"
+      },
+      {
+        "day" : "Friday, July 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-17T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 18",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-07-18T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-19T00:00:00Z"
+      },
+      {
+        "day" : "Monday, July 20",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-20T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-21T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-22T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-23T00:00:00Z"
+      },
+      {
+        "day" : "Friday, July 24",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-07-24T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, July 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-25T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, July 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-26T00:00:00Z"
+      },
+      {
+        "day" : "Monday, July 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-27T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, July 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-28T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, July 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-29T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, July 30",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-07-30T00:00:00Z"
+      },
+      {
+        "day" : "Friday, July 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-07-31T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-01T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-02T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-03T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, August 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-04T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, August 5",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-08-05T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, August 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-06T00:00:00Z"
+      },
+      {
+        "day" : "Friday, August 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-07T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, August 8",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-08T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, August 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-09T00:00:00Z"
+      },
+      {
+        "day" : "Monday, August 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-08-10T00:00:00Z"
+      }
+    ],
+    "UTC|2|-5" : [
+      {
+        "day" : "Tuesday, February 24",
+        "kept" : 0,
+        "label" : "Tue",
+        "shared" : 0,
+        "start" : "2026-02-24T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, February 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-25T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, February 26",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-26T00:00:00Z"
+      },
+      {
+        "day" : "Friday, February 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-27T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, February 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-02-28T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 1",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-01T00:00:00Z"
+      },
+      {
+        "day" : "Monday, March 2",
+        "kept" : 0,
+        "label" : "Mon",
+        "shared" : 0,
+        "start" : "2026-03-02T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-03T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-04T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-05T00:00:00Z"
+      },
+      {
+        "day" : "Friday, March 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-06T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 7",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-07T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 8",
+        "kept" : 0,
+        "label" : "Sun",
+        "shared" : 0,
+        "start" : "2026-03-08T00:00:00Z"
+      },
+      {
+        "day" : "Monday, March 9",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-09T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 10",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-10T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 11",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-11T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 12",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-12T00:00:00Z"
+      },
+      {
+        "day" : "Friday, March 13",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-13T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 14",
+        "kept" : 0,
+        "label" : "Sat",
+        "shared" : 0,
+        "start" : "2026-03-14T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 15",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-15T00:00:00Z"
+      },
+      {
+        "day" : "Monday, March 16",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-16T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 17",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-17T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 18",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-18T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 19",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-19T00:00:00Z"
+      },
+      {
+        "day" : "Friday, March 20",
+        "kept" : 0,
+        "label" : "Fri",
+        "shared" : 0,
+        "start" : "2026-03-20T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 21",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-21T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 22",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-22T00:00:00Z"
+      },
+      {
+        "day" : "Monday, March 23",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-23T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 24",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-24T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, March 25",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-25T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, March 26",
+        "kept" : 0,
+        "label" : "Thu",
+        "shared" : 0,
+        "start" : "2026-03-26T00:00:00Z"
+      },
+      {
+        "day" : "Friday, March 27",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-27T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, March 28",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-28T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, March 29",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-29T00:00:00Z"
+      },
+      {
+        "day" : "Monday, March 30",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-30T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, March 31",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-03-31T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, April 1",
+        "kept" : 0,
+        "label" : "Wed",
+        "shared" : 0,
+        "start" : "2026-04-01T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, April 2",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-02T00:00:00Z"
+      },
+      {
+        "day" : "Friday, April 3",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-03T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, April 4",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-04T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, April 5",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-05T00:00:00Z"
+      },
+      {
+        "day" : "Monday, April 6",
+        "kept" : 0,
+        "label" : "",
+        "shared" : 0,
+        "start" : "2026-04-06T00:00:00Z"
+      }
+    ],
+    "UTC|2|0" : [
+      {
+        "day" : "Tuesday, September 22",
+        "kept" : 3,
+        "label" : "Tue",
+        "shared" : 5,
+        "start" : "2026-09-22T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 23",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-23T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, September 24",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-24T00:00:00Z"
+      },
+      {
+        "day" : "Friday, September 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-25T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, September 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-26T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, September 27",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-27T00:00:00Z"
+      },
+      {
+        "day" : "Monday, September 28",
+        "kept" : 4,
+        "label" : "Mon",
+        "shared" : 5,
+        "start" : "2026-09-28T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, September 29",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-09-29T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, September 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-09-30T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-01T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 2",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-02T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 3",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-03T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 4",
+        "kept" : 3,
+        "label" : "Sun",
+        "shared" : 5,
+        "start" : "2026-10-04T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 5",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-05T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 6",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-06T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 7",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-07T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 8",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-08T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 9",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-09T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 10",
+        "kept" : 3,
+        "label" : "Sat",
+        "shared" : 4,
+        "start" : "2026-10-10T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 11",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-11T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 12",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-12T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 13",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-13T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 14",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-14T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 15",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-15T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 16",
+        "kept" : 3,
+        "label" : "Fri",
+        "shared" : 4,
+        "start" : "2026-10-16T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 17",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-17T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 18",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-18T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 19",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-19T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 20",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-20T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 21",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-21T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 22",
+        "kept" : 3,
+        "label" : "Thu",
+        "shared" : 5,
+        "start" : "2026-10-22T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 23",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-23T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 24",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-24T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, October 25",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-25T00:00:00Z"
+      },
+      {
+        "day" : "Monday, October 26",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-26T00:00:00Z"
+      },
+      {
+        "day" : "Tuesday, October 27",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-27T00:00:00Z"
+      },
+      {
+        "day" : "Wednesday, October 28",
+        "kept" : 3,
+        "label" : "Wed",
+        "shared" : 5,
+        "start" : "2026-10-28T00:00:00Z"
+      },
+      {
+        "day" : "Thursday, October 29",
+        "kept" : 4,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-10-29T00:00:00Z"
+      },
+      {
+        "day" : "Friday, October 30",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-30T00:00:00Z"
+      },
+      {
+        "day" : "Saturday, October 31",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 5,
+        "start" : "2026-10-31T00:00:00Z"
+      },
+      {
+        "day" : "Sunday, November 1",
+        "kept" : 3,
+        "label" : "",
+        "shared" : 4,
+        "start" : "2026-11-01T00:00:00Z"
+      },
+      {
+        "day" : "Monday, November 2",
+        "kept" : 2,
+        "label" : "",
+        "shared" : 3,
+        "start" : "2026-11-02T00:00:00Z"
+      }
+    ]
+  },
+  "dotAlphas" : {
+    "0.0\/5.0" : [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "0.2\/1.0" : [
+      0.67500000000000004,
+      0.40000000000000013,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "1.0\/5.0" : [
+      0.67500000000000004,
+      0.40000000000000013,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "1.0\/100.0" : [
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "2.0\/5.0" : [
+      0.56666666666666665,
+      0.78333333333333333,
+      0.80000000000000027,
+      0,
+      0,
+      0,
+      0
+    ],
+    "3.0\/0.0" : [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "3.0\/5.0" : [
+      0.47999999999999998,
+      0.60999999999999999,
+      0.73999999999999999,
+      0.87,
+      0.34999999999999998,
+      0,
+      0
+    ],
+    "4.0\/7.0" : [
+      0.51249999999999996,
+      0.67500000000000004,
+      0.83750000000000002,
+      1,
+      0,
+      0,
+      0
+    ],
+    "5.0\/5.0" : [
+      0.44285714285714284,
+      0.5357142857142857,
+      0.62857142857142856,
+      0.72142857142857142,
+      0.81428571428571428,
+      0.90714285714285714,
+      1
+    ],
+    "6.5\/7.0" : [
+      0.44285714285714284,
+      0.5357142857142857,
+      0.62857142857142856,
+      0.72142857142857142,
+      0.81428571428571428,
+      0.90714285714285714,
+      0.5
+    ],
+    "9.0\/11.0" : [
+      0.45833333333333331,
+      0.56666666666666665,
+      0.67500000000000004,
+      0.78333333333333333,
+      0.89166666666666661,
+      0.72727272727272751,
+      0
+    ],
+    "11.0\/11.0" : [
+      0.44285714285714284,
+      0.5357142857142857,
+      0.62857142857142856,
+      0.72142857142857142,
+      0.81428571428571428,
+      0.90714285714285714,
+      1
+    ]
+  },
+  "gaps" : {
+    "full" : [
+      6,
+      5
+    ],
+    "thin" : [
+      2,
+      1
+    ]
+  },
+  "kept" : [
+    "2026-11-02T10:07:00Z",
+    "2026-11-02T02:36:00Z",
+    "2026-11-01T19:05:00Z",
+    "2026-11-01T11:34:00Z",
+    "2026-11-01T04:03:00Z",
+    "2026-10-31T20:32:00Z",
+    "2026-10-31T13:01:00Z",
+    "2026-10-31T05:30:00Z",
+    "2026-10-30T21:59:00Z",
+    "2026-10-30T14:28:00Z",
+    "2026-10-30T06:57:00Z",
+    "2026-10-29T23:26:00Z",
+    "2026-10-29T15:55:00Z",
+    "2026-10-29T08:24:00Z",
+    "2026-10-29T00:53:00Z",
+    "2026-10-28T17:22:00Z",
+    "2026-10-28T09:51:00Z",
+    "2026-10-28T02:20:00Z",
+    "2026-10-27T18:49:00Z",
+    "2026-10-27T11:18:00Z",
+    "2026-10-27T03:47:00Z",
+    "2026-10-26T20:16:00Z",
+    "2026-10-26T12:45:00Z",
+    "2026-10-26T05:14:00Z",
+    "2026-10-25T21:43:00Z",
+    "2026-10-25T14:12:00Z",
+    "2026-10-25T06:41:00Z",
+    "2026-10-24T23:10:00Z",
+    "2026-10-24T15:39:00Z",
+    "2026-10-24T08:08:00Z",
+    "2026-10-24T00:37:00Z",
+    "2026-10-23T17:06:00Z",
+    "2026-10-23T09:35:00Z",
+    "2026-10-23T02:04:00Z",
+    "2026-10-22T18:33:00Z",
+    "2026-10-22T11:02:00Z",
+    "2026-10-22T03:31:00Z",
+    "2026-10-21T20:00:00Z",
+    "2026-10-21T12:29:00Z",
+    "2026-10-21T04:58:00Z",
+    "2026-10-20T21:27:00Z",
+    "2026-10-20T13:56:00Z",
+    "2026-10-20T06:25:00Z",
+    "2026-10-19T22:54:00Z",
+    "2026-10-19T15:23:00Z",
+    "2026-10-19T07:52:00Z",
+    "2026-10-19T00:21:00Z",
+    "2026-10-18T16:50:00Z",
+    "2026-10-18T09:19:00Z",
+    "2026-10-18T01:48:00Z",
+    "2026-10-17T18:17:00Z",
+    "2026-10-17T10:46:00Z",
+    "2026-10-17T03:15:00Z",
+    "2026-10-16T19:44:00Z",
+    "2026-10-16T12:13:00Z",
+    "2026-10-16T04:42:00Z",
+    "2026-10-15T21:11:00Z",
+    "2026-10-15T13:40:00Z",
+    "2026-10-15T06:09:00Z",
+    "2026-10-14T22:38:00Z",
+    "2026-10-14T15:07:00Z",
+    "2026-10-14T07:36:00Z",
+    "2026-10-14T00:05:00Z",
+    "2026-10-13T16:34:00Z",
+    "2026-10-13T09:03:00Z",
+    "2026-10-13T01:32:00Z",
+    "2026-10-12T18:01:00Z",
+    "2026-10-12T10:30:00Z",
+    "2026-10-12T02:59:00Z",
+    "2026-10-11T19:28:00Z",
+    "2026-10-11T11:57:00Z",
+    "2026-10-11T04:26:00Z",
+    "2026-10-10T20:55:00Z",
+    "2026-10-10T13:24:00Z",
+    "2026-10-10T05:53:00Z",
+    "2026-10-09T22:22:00Z",
+    "2026-10-09T14:51:00Z",
+    "2026-10-09T07:20:00Z",
+    "2026-10-08T23:49:00Z",
+    "2026-10-08T16:18:00Z",
+    "2026-10-08T08:47:00Z",
+    "2026-10-08T01:16:00Z",
+    "2026-10-07T17:45:00Z",
+    "2026-10-07T10:14:00Z",
+    "2026-10-07T02:43:00Z",
+    "2026-10-06T19:12:00Z",
+    "2026-10-06T11:41:00Z",
+    "2026-10-06T04:10:00Z",
+    "2026-10-05T20:39:00Z",
+    "2026-10-05T13:08:00Z",
+    "2026-10-05T05:37:00Z",
+    "2026-10-04T22:06:00Z",
+    "2026-10-04T14:35:00Z",
+    "2026-10-04T07:04:00Z",
+    "2026-10-03T23:33:00Z",
+    "2026-10-03T16:02:00Z",
+    "2026-10-03T08:31:00Z",
+    "2026-10-03T01:00:00Z",
+    "2026-10-02T17:29:00Z",
+    "2026-10-02T09:58:00Z",
+    "2026-10-02T02:27:00Z",
+    "2026-10-01T18:56:00Z",
+    "2026-10-01T11:25:00Z",
+    "2026-10-01T03:54:00Z",
+    "2026-09-30T20:23:00Z",
+    "2026-09-30T12:52:00Z",
+    "2026-09-30T05:21:00Z",
+    "2026-09-29T21:50:00Z",
+    "2026-09-29T14:19:00Z",
+    "2026-09-29T06:48:00Z",
+    "2026-09-28T23:17:00Z",
+    "2026-09-28T15:46:00Z",
+    "2026-09-28T08:15:00Z",
+    "2026-09-28T00:44:00Z",
+    "2026-09-27T17:13:00Z",
+    "2026-09-27T09:42:00Z",
+    "2026-09-27T02:11:00Z",
+    "2026-09-26T18:40:00Z",
+    "2026-09-26T11:09:00Z",
+    "2026-09-26T03:38:00Z",
+    "2026-09-25T20:07:00Z",
+    "2026-09-25T12:36:00Z",
+    "2026-09-25T05:05:00Z",
+    "2026-09-24T21:34:00Z",
+    "2026-09-24T14:03:00Z",
+    "2026-09-24T06:32:00Z",
+    "2026-09-23T23:01:00Z",
+    "2026-09-23T15:30:00Z",
+    "2026-09-23T07:59:00Z",
+    "2026-09-23T00:28:00Z",
+    "2026-09-22T16:57:00Z",
+    "2026-09-22T09:26:00Z",
+    "2026-09-22T01:55:00Z",
+    "2026-09-21T18:24:00Z",
+    "2026-09-21T10:53:00Z",
+    "2026-09-21T03:22:00Z",
+    "2026-09-20T19:51:00Z",
+    "2026-09-20T12:20:00Z",
+    "2026-09-20T04:49:00Z",
+    "2026-09-19T21:18:00Z",
+    "2026-09-19T13:47:00Z",
+    "2026-09-19T06:16:00Z",
+    "2026-09-18T22:45:00Z",
+    "2026-09-18T15:14:00Z",
+    "2026-09-18T07:43:00Z",
+    "2026-09-18T00:12:00Z",
+    "2026-09-17T16:41:00Z",
+    "2026-09-17T09:10:00Z",
+    "2026-09-17T01:39:00Z",
+    "2026-09-16T18:08:00Z",
+    "2026-09-16T10:37:00Z",
+    "2026-09-16T03:06:00Z",
+    "2026-09-15T19:35:00Z",
+    "2026-09-15T12:04:00Z",
+    "2026-09-15T04:33:00Z",
+    "2026-09-14T21:02:00Z",
+    "2026-09-14T13:31:00Z",
+    "2026-09-14T06:00:00Z",
+    "2026-09-13T22:29:00Z",
+    "2026-09-13T14:58:00Z"
+  ],
+  "labelAlignment" : [
+    "leading",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "trailing",
+    "center"
+  ],
+  "matrix" : {
+    "full_18x96" : {
+      "across" : 2.6666666666666665,
+      "axis" : [
+        0,
+        47.5,
+        18,
+        1
+      ],
+      "down" : [
+        [
+          6.333333333333333,
+          51.428571428571431
+        ],
+        [
+          6.333333333333333,
+          57.285714285714285
+        ],
+        [
+          6.333333333333333,
+          63.142857142857139
+        ],
+        [
+          6.333333333333333,
+          69
+        ],
+        [
+          6.333333333333333,
+          74.857142857142861
+        ],
+        [
+          6.333333333333333,
+          80.714285714285722
+        ],
+        [
+          6.333333333333333,
+          86.571428571428569
+        ],
+        [
+          9,
+          51.428571428571431
+        ],
+        [
+          9,
+          57.285714285714285
+        ],
+        [
+          9,
+          63.142857142857139
+        ],
+        [
+          9,
+          69
+        ],
+        [
+          9,
+          74.857142857142861
+        ],
+        [
+          9,
+          80.714285714285722
+        ],
+        [
+          9,
+          86.571428571428569
+        ],
+        [
+          11.666666666666666,
+          51.428571428571431
+        ],
+        [
+          11.666666666666666,
+          57.285714285714285
+        ],
+        [
+          11.666666666666666,
+          63.142857142857139
+        ],
+        [
+          11.666666666666666,
+          69
+        ],
+        [
+          11.666666666666666,
+          74.857142857142861
+        ],
+        [
+          11.666666666666666,
+          80.714285714285722
+        ],
+        [
+          11.666666666666666,
+          86.571428571428569
+        ]
+      ],
+      "left" : 6.333333333333333,
+      "pitch" : 5.8571428571428568,
+      "up" : [
+        [
+          6.333333333333333,
+          44.571428571428569
+        ],
+        [
+          6.333333333333333,
+          38.714285714285715
+        ],
+        [
+          6.333333333333333,
+          32.857142857142861
+        ],
+        [
+          6.333333333333333,
+          27
+        ],
+        [
+          6.333333333333333,
+          21.142857142857146
+        ],
+        [
+          6.333333333333333,
+          15.285714285714285
+        ],
+        [
+          6.333333333333333,
+          9.4285714285714306
+        ],
+        [
+          9,
+          44.571428571428569
+        ],
+        [
+          9,
+          38.714285714285715
+        ],
+        [
+          9,
+          32.857142857142861
+        ],
+        [
+          9,
+          27
+        ],
+        [
+          9,
+          21.142857142857146
+        ],
+        [
+          9,
+          15.285714285714285
+        ],
+        [
+          9,
+          9.4285714285714306
+        ],
+        [
+          11.666666666666666,
+          44.571428571428569
+        ],
+        [
+          11.666666666666666,
+          38.714285714285715
+        ],
+        [
+          11.666666666666666,
+          32.857142857142861
+        ],
+        [
+          11.666666666666666,
+          27
+        ],
+        [
+          11.666666666666666,
+          21.142857142857146
+        ],
+        [
+          11.666666666666666,
+          15.285714285714285
+        ],
+        [
+          11.666666666666666,
+          9.4285714285714306
+        ]
+      ]
+    },
+    "full_40x96" : {
+      "across" : 5.8571428571428568,
+      "axis" : [
+        0,
+        47.5,
+        40,
+        1
+      ],
+      "down" : [
+        [
+          14.142857142857144,
+          51.428571428571431
+        ],
+        [
+          14.142857142857144,
+          57.285714285714285
+        ],
+        [
+          14.142857142857144,
+          63.142857142857139
+        ],
+        [
+          14.142857142857144,
+          69
+        ],
+        [
+          14.142857142857144,
+          74.857142857142861
+        ],
+        [
+          14.142857142857144,
+          80.714285714285722
+        ],
+        [
+          14.142857142857144,
+          86.571428571428569
+        ],
+        [
+          20,
+          51.428571428571431
+        ],
+        [
+          20,
+          57.285714285714285
+        ],
+        [
+          20,
+          63.142857142857139
+        ],
+        [
+          20,
+          69
+        ],
+        [
+          20,
+          74.857142857142861
+        ],
+        [
+          20,
+          80.714285714285722
+        ],
+        [
+          20,
+          86.571428571428569
+        ],
+        [
+          25.857142857142858,
+          51.428571428571431
+        ],
+        [
+          25.857142857142858,
+          57.285714285714285
+        ],
+        [
+          25.857142857142858,
+          63.142857142857139
+        ],
+        [
+          25.857142857142858,
+          69
+        ],
+        [
+          25.857142857142858,
+          74.857142857142861
+        ],
+        [
+          25.857142857142858,
+          80.714285714285722
+        ],
+        [
+          25.857142857142858,
+          86.571428571428569
+        ]
+      ],
+      "left" : 14.142857142857144,
+      "pitch" : 5.8571428571428568,
+      "up" : [
+        [
+          14.142857142857144,
+          44.571428571428569
+        ],
+        [
+          14.142857142857144,
+          38.714285714285715
+        ],
+        [
+          14.142857142857144,
+          32.857142857142861
+        ],
+        [
+          14.142857142857144,
+          27
+        ],
+        [
+          14.142857142857144,
+          21.142857142857146
+        ],
+        [
+          14.142857142857144,
+          15.285714285714285
+        ],
+        [
+          14.142857142857144,
+          9.4285714285714306
+        ],
+        [
+          20,
+          44.571428571428569
+        ],
+        [
+          20,
+          38.714285714285715
+        ],
+        [
+          20,
+          32.857142857142861
+        ],
+        [
+          20,
+          27
+        ],
+        [
+          20,
+          21.142857142857146
+        ],
+        [
+          20,
+          15.285714285714285
+        ],
+        [
+          20,
+          9.4285714285714306
+        ],
+        [
+          25.857142857142858,
+          44.571428571428569
+        ],
+        [
+          25.857142857142858,
+          38.714285714285715
+        ],
+        [
+          25.857142857142858,
+          32.857142857142861
+        ],
+        [
+          25.857142857142858,
+          27
+        ],
+        [
+          25.857142857142858,
+          21.142857142857146
+        ],
+        [
+          25.857142857142858,
+          15.285714285714285
+        ],
+        [
+          25.857142857142858,
+          9.4285714285714306
+        ]
+      ]
+    },
+    "thin_9x96" : {
+      "across" : 5.8571428571428568,
+      "axis" : [
+        0,
+        47.5,
+        9,
+        1
+      ],
+      "down" : [
+        [
+          4.5,
+          51.428571428571431
+        ],
+        [
+          4.5,
+          57.285714285714285
+        ],
+        [
+          4.5,
+          63.142857142857139
+        ],
+        [
+          4.5,
+          69
+        ],
+        [
+          4.5,
+          74.857142857142861
+        ],
+        [
+          4.5,
+          80.714285714285722
+        ],
+        [
+          4.5,
+          86.571428571428569
+        ]
+      ],
+      "left" : 4.5,
+      "pitch" : 5.8571428571428568,
+      "up" : [
+        [
+          4.5,
+          44.571428571428569
+        ],
+        [
+          4.5,
+          38.714285714285715
+        ],
+        [
+          4.5,
+          32.857142857142861
+        ],
+        [
+          4.5,
+          27
+        ],
+        [
+          4.5,
+          21.142857142857146
+        ],
+        [
+          4.5,
+          15.285714285714285
+        ],
+        [
+          4.5,
+          9.4285714285714306
+        ]
+      ]
+    }
+  },
+  "now" : "2026-11-02T10:37:00Z",
+  "ranges" : [
+    {
+      "count" : 12,
+      "in" : null,
+      "out" : 1,
+      "span" : 24,
+      "stepHours" : 2
+    },
+    {
+      "count" : 11,
+      "in" : 0,
+      "out" : 2,
+      "span" : 11,
+      "stepHours" : 24
+    },
+    {
+      "count" : 42,
+      "in" : 1,
+      "out" : null,
+      "span" : 42,
+      "stepHours" : 24
+    }
+  ],
+  "rangeWords" : {
+    "11|false|0" : "Last 11 days",
+    "11|false|1" : "11 days, 1 window back",
+    "11|false|2" : "11 days, 2 windows back",
+    "11|false|7" : "11 days, 7 windows back",
+    "24|true|0" : "Last 24 hours",
+    "24|true|1" : "24 hours, 1 window back",
+    "24|true|2" : "24 hours, 2 windows back",
+    "24|true|7" : "24 hours, 7 windows back",
+    "42|false|0" : "Last 42 days",
+    "42|false|1" : "42 days, 1 window back",
+    "42|false|2" : "42 days, 2 windows back",
+    "42|false|7" : "42 days, 7 windows back"
+  },
+  "shared" : [
+    "2026-11-02T10:37:00Z",
+    "2026-11-02T05:30:00Z",
+    "2026-11-02T00:23:00Z",
+    "2026-11-01T19:16:00Z",
+    "2026-11-01T14:09:00Z",
+    "2026-11-01T09:02:00Z",
+    "2026-11-01T03:55:00Z",
+    "2026-10-31T22:48:00Z",
+    "2026-10-31T17:41:00Z",
+    "2026-10-31T12:34:00Z",
+    "2026-10-31T07:27:00Z",
+    "2026-10-31T02:20:00Z",
+    "2026-10-30T21:13:00Z",
+    "2026-10-30T16:06:00Z",
+    "2026-10-30T10:59:00Z",
+    "2026-10-30T05:52:00Z",
+    "2026-10-30T00:45:00Z",
+    "2026-10-29T19:38:00Z",
+    "2026-10-29T14:31:00Z",
+    "2026-10-29T09:24:00Z",
+    "2026-10-29T04:17:00Z",
+    "2026-10-28T23:10:00Z",
+    "2026-10-28T18:03:00Z",
+    "2026-10-28T12:56:00Z",
+    "2026-10-28T07:49:00Z",
+    "2026-10-28T02:42:00Z",
+    "2026-10-27T21:35:00Z",
+    "2026-10-27T16:28:00Z",
+    "2026-10-27T11:21:00Z",
+    "2026-10-27T06:14:00Z",
+    "2026-10-27T01:07:00Z",
+    "2026-10-26T20:00:00Z",
+    "2026-10-26T14:53:00Z",
+    "2026-10-26T09:46:00Z",
+    "2026-10-26T04:39:00Z",
+    "2026-10-25T23:32:00Z",
+    "2026-10-25T18:25:00Z",
+    "2026-10-25T13:18:00Z",
+    "2026-10-25T08:11:00Z",
+    "2026-10-25T03:04:00Z",
+    "2026-10-24T21:57:00Z",
+    "2026-10-24T16:50:00Z",
+    "2026-10-24T11:43:00Z",
+    "2026-10-24T06:36:00Z",
+    "2026-10-24T01:29:00Z",
+    "2026-10-23T20:22:00Z",
+    "2026-10-23T15:15:00Z",
+    "2026-10-23T10:08:00Z",
+    "2026-10-23T05:01:00Z",
+    "2026-10-22T23:54:00Z",
+    "2026-10-22T18:47:00Z",
+    "2026-10-22T13:40:00Z",
+    "2026-10-22T08:33:00Z",
+    "2026-10-22T03:26:00Z",
+    "2026-10-21T22:19:00Z",
+    "2026-10-21T17:12:00Z",
+    "2026-10-21T12:05:00Z",
+    "2026-10-21T06:58:00Z",
+    "2026-10-21T01:51:00Z",
+    "2026-10-20T20:44:00Z",
+    "2026-10-20T15:37:00Z",
+    "2026-10-20T10:30:00Z",
+    "2026-10-20T05:23:00Z",
+    "2026-10-20T00:16:00Z",
+    "2026-10-19T19:09:00Z",
+    "2026-10-19T14:02:00Z",
+    "2026-10-19T08:55:00Z",
+    "2026-10-19T03:48:00Z",
+    "2026-10-18T22:41:00Z",
+    "2026-10-18T17:34:00Z",
+    "2026-10-18T12:27:00Z",
+    "2026-10-18T07:20:00Z",
+    "2026-10-18T02:13:00Z",
+    "2026-10-17T21:06:00Z",
+    "2026-10-17T15:59:00Z",
+    "2026-10-17T10:52:00Z",
+    "2026-10-17T05:45:00Z",
+    "2026-10-17T00:38:00Z",
+    "2026-10-16T19:31:00Z",
+    "2026-10-16T14:24:00Z",
+    "2026-10-16T09:17:00Z",
+    "2026-10-16T04:10:00Z",
+    "2026-10-15T23:03:00Z",
+    "2026-10-15T17:56:00Z",
+    "2026-10-15T12:49:00Z",
+    "2026-10-15T07:42:00Z",
+    "2026-10-15T02:35:00Z",
+    "2026-10-14T21:28:00Z",
+    "2026-10-14T16:21:00Z",
+    "2026-10-14T11:14:00Z",
+    "2026-10-14T06:07:00Z",
+    "2026-10-14T01:00:00Z",
+    "2026-10-13T19:53:00Z",
+    "2026-10-13T14:46:00Z",
+    "2026-10-13T09:39:00Z",
+    "2026-10-13T04:32:00Z",
+    "2026-10-12T23:25:00Z",
+    "2026-10-12T18:18:00Z",
+    "2026-10-12T13:11:00Z",
+    "2026-10-12T08:04:00Z",
+    "2026-10-12T02:57:00Z",
+    "2026-10-11T21:50:00Z",
+    "2026-10-11T16:43:00Z",
+    "2026-10-11T11:36:00Z",
+    "2026-10-11T06:29:00Z",
+    "2026-10-11T01:22:00Z",
+    "2026-10-10T20:15:00Z",
+    "2026-10-10T15:08:00Z",
+    "2026-10-10T10:01:00Z",
+    "2026-10-10T04:54:00Z",
+    "2026-10-09T23:47:00Z",
+    "2026-10-09T18:40:00Z",
+    "2026-10-09T13:33:00Z",
+    "2026-10-09T08:26:00Z",
+    "2026-10-09T03:19:00Z",
+    "2026-10-08T22:12:00Z",
+    "2026-10-08T17:05:00Z",
+    "2026-10-08T11:58:00Z",
+    "2026-10-08T06:51:00Z",
+    "2026-10-08T01:44:00Z",
+    "2026-10-07T20:37:00Z",
+    "2026-10-07T15:30:00Z",
+    "2026-10-07T10:23:00Z",
+    "2026-10-07T05:16:00Z",
+    "2026-10-07T00:09:00Z",
+    "2026-10-06T19:02:00Z",
+    "2026-10-06T13:55:00Z",
+    "2026-10-06T08:48:00Z",
+    "2026-10-06T03:41:00Z",
+    "2026-10-05T22:34:00Z",
+    "2026-10-05T17:27:00Z",
+    "2026-10-05T12:20:00Z",
+    "2026-10-05T07:13:00Z",
+    "2026-10-05T02:06:00Z",
+    "2026-10-04T20:59:00Z",
+    "2026-10-04T15:52:00Z",
+    "2026-10-04T10:45:00Z",
+    "2026-10-04T05:38:00Z",
+    "2026-10-04T00:31:00Z",
+    "2026-10-03T19:24:00Z",
+    "2026-10-03T14:17:00Z",
+    "2026-10-03T09:10:00Z",
+    "2026-10-03T04:03:00Z",
+    "2026-10-02T22:56:00Z",
+    "2026-10-02T17:49:00Z",
+    "2026-10-02T12:42:00Z",
+    "2026-10-02T07:35:00Z",
+    "2026-10-02T02:28:00Z",
+    "2026-10-01T21:21:00Z",
+    "2026-10-01T16:14:00Z",
+    "2026-10-01T11:07:00Z",
+    "2026-10-01T06:00:00Z",
+    "2026-10-01T00:53:00Z",
+    "2026-09-30T19:46:00Z",
+    "2026-09-30T14:39:00Z",
+    "2026-09-30T09:32:00Z",
+    "2026-09-30T04:25:00Z",
+    "2026-09-29T23:18:00Z",
+    "2026-09-29T18:11:00Z",
+    "2026-09-29T13:04:00Z",
+    "2026-09-29T07:57:00Z",
+    "2026-09-29T02:50:00Z",
+    "2026-09-28T21:43:00Z",
+    "2026-09-28T16:36:00Z",
+    "2026-09-28T11:29:00Z",
+    "2026-09-28T06:22:00Z",
+    "2026-09-28T01:15:00Z",
+    "2026-09-27T20:08:00Z",
+    "2026-09-27T15:01:00Z",
+    "2026-09-27T09:54:00Z",
+    "2026-09-27T04:47:00Z",
+    "2026-09-26T23:40:00Z",
+    "2026-09-26T18:33:00Z",
+    "2026-09-26T13:26:00Z",
+    "2026-09-26T08:19:00Z",
+    "2026-09-26T03:12:00Z",
+    "2026-09-25T22:05:00Z",
+    "2026-09-25T16:58:00Z",
+    "2026-09-25T11:51:00Z",
+    "2026-09-25T06:44:00Z",
+    "2026-09-25T01:37:00Z",
+    "2026-09-24T20:30:00Z",
+    "2026-09-24T15:23:00Z",
+    "2026-09-24T10:16:00Z",
+    "2026-09-24T05:09:00Z",
+    "2026-09-24T00:02:00Z",
+    "2026-09-23T18:55:00Z",
+    "2026-09-23T13:48:00Z",
+    "2026-09-23T08:41:00Z",
+    "2026-09-23T03:34:00Z",
+    "2026-09-22T22:27:00Z",
+    "2026-09-22T17:20:00Z",
+    "2026-09-22T12:13:00Z",
+    "2026-09-22T07:06:00Z",
+    "2026-09-22T01:59:00Z",
+    "2026-09-21T20:52:00Z",
+    "2026-09-21T15:45:00Z",
+    "2026-09-21T10:38:00Z",
+    "2026-09-21T05:31:00Z",
+    "2026-09-21T00:24:00Z",
+    "2026-09-20T19:17:00Z",
+    "2026-09-20T14:10:00Z",
+    "2026-09-20T09:03:00Z",
+    "2026-09-20T03:56:00Z",
+    "2026-09-19T22:49:00Z",
+    "2026-09-19T17:42:00Z",
+    "2026-09-19T12:35:00Z",
+    "2026-09-19T07:28:00Z",
+    "2026-09-19T02:21:00Z",
+    "2026-09-18T21:14:00Z",
+    "2026-09-18T16:07:00Z",
+    "2026-09-18T11:00:00Z",
+    "2026-09-18T05:53:00Z",
+    "2026-09-18T00:46:00Z",
+    "2026-09-17T19:39:00Z",
+    "2026-09-17T14:32:00Z",
+    "2026-09-17T09:25:00Z",
+    "2026-09-17T04:18:00Z",
+    "2026-09-16T23:11:00Z",
+    "2026-09-16T18:04:00Z",
+    "2026-09-16T12:57:00Z",
+    "2026-09-16T07:50:00Z",
+    "2026-09-16T02:43:00Z",
+    "2026-09-15T21:36:00Z",
+    "2026-09-15T16:29:00Z",
+    "2026-09-15T11:22:00Z",
+    "2026-09-15T06:15:00Z",
+    "2026-09-15T01:08:00Z",
+    "2026-09-14T20:01:00Z",
+    "2026-09-14T14:54:00Z",
+    "2026-09-14T09:47:00Z",
+    "2026-09-14T04:40:00Z",
+    "2026-09-13T23:33:00Z",
+    "2026-09-13T18:26:00Z",
+    "2026-09-13T13:19:00Z",
+    "2026-09-13T08:12:00Z",
+    "2026-09-13T03:05:00Z",
+    "2026-09-12T21:58:00Z",
+    "2026-09-12T16:51:00Z",
+    "2026-09-12T11:44:00Z"
+  ],
+  "slide" : [
+    [
+      0,
+      -1,
+      "fromLeading"
+    ],
+    [
+      -1,
+      0,
+      "fromTrailing"
+    ],
+    [
+      0,
+      0,
+      "none"
+    ]
+  ]
+}

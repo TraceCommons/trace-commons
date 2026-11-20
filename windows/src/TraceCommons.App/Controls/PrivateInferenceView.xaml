@@ -173,7 +173,7 @@
                     </StackPanel>
                 </Border>
 
-                <ContentControl x:Name="ManagedContent" />
+                <ContentControl x:Name="ManagedContent" IsTabStop="False" />
 
                 <!--
                     The ledger (spec W19, InferenceTabView.ledgerSections,
@@ -586,7 +586,7 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    Foreground="{ThemeResource TcGoldTextBrush}"
                                    TextWrapping="Wrap" />
-                        <ItemsControl ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
+                        <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">
                                     <StackPanel Spacing="12" Margin="0,12,0,0" Padding="20"

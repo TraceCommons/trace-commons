@@ -334,7 +334,7 @@ class GlassTokensTests(unittest.TestCase):
 
     def test_logos_come_from_the_swift_path_data(self):
         logos = generate.parse_logos(generate.LOGOS.read_text())
-        self.assertEqual([l["name"] for l in logos], ["claude", "codex", "antigravity", "openCode", "theia"])
+        self.assertEqual([l["name"] for l in logos], ["claude", "codex", "antigravity", "openCode", "redTeam", "theia"])
         by_name = {l["name"]: l for l in logos}
         self.assertEqual(by_name["openCode"]["view_box"], (0, 0, 24, 24))
         self.assertEqual(by_name["openCode"]["paths"], ["M16,6H8v12h8V6zm4,16H4V2h16v20z"])
