@@ -89,7 +89,9 @@ struct Inner {
     /// The scroller the steps sit in: the graphic is clipped to it.
     scroller: Option<gtk::Widget>,
     tick: Option<gtk::TickCallbackId>,
-    last_frame: i64,
+    /// The frame-rate gate: the step's own rate, 15 a second at most
+    /// while the window is not focused.
+    pace: super::glass_motion::Pace,
     /// How many times the stage has been drawn.
     draws: u64,
     /// Each found tool's beam: the opacity it fades from, to, and when.
@@ -176,7 +178,7 @@ impl Stage {
                 traces_counted: false,
                 scroller: None,
                 tick: None,
-                last_frame: 0,
+                pace: super::glass_motion::Pace::default(),
                 draws: 0,
                 beams: BTreeMap::new(),
                 ring_tight_at: None,
@@ -503,15 +505,7 @@ impl Stage {
                 drop(inner);
                 stage::motion::frame_interval(step, scanning, stage.in_flight(at))
             };
-            let due = {
-                let mut inner = stage.inner.borrow_mut();
-                let since = (frame - inner.last_frame) as f64 / 1e6;
-                let due = stage::motion::frame_due(since, interval);
-                if due {
-                    inner.last_frame = frame;
-                }
-                due
-            };
+            let due = stage.inner.borrow().pace.due(area, frame, interval);
             if due {
                 stage.advance(at, false);
                 stage.drive(at);

@@ -367,6 +367,8 @@ mod imp {
         pub tick: RefCell<Option<gtk::TickCallbackId>>,
         /// The clock's last drawn frame and its rate, in seconds.
         pub last_frame: Cell<f64>,
+        /// The frame-rate gate the clock's frames pass.
+        pub pace: crate::ui::glass_motion::Pace,
         pub interval: Cell<f64>,
         /// The still layer and what it was drawn from: what lies under the
         /// station, and, at rest, the rocket and the pile over it.
@@ -1493,7 +1495,9 @@ impl MapCanvas {
             if now - imp.dash_time.get() >= imp.dash_interval.get() * 0.9 {
                 imp.dash_time.set(now);
             }
-            if now - imp.last_frame.get() >= interval * 0.9 {
+            // The window's focus rule over the map's own rate: 15 a second
+            // at most while another app has the focus.
+            if imp.pace.due(canvas, clock.frame_time(), interval) {
                 imp.last_frame.set(now);
                 if imp.pile_moved() {
                     canvas.queue_allocate();

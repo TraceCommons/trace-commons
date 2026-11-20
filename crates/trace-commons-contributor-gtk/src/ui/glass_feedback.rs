@@ -216,7 +216,8 @@ mod turn {
         pub refreshing: Cell<bool>,
         pub since: Cell<i64>,
         pub tick: std::cell::RefCell<Option<gtk::TickCallbackId>>,
-        pub last: Cell<f64>,
+        /// The frame-rate gate: 30 a second, 15 while unfocused.
+        pub pace: glass_motion::Pace,
     }
 
     #[glib::object_subclass]
@@ -335,7 +336,7 @@ impl Turn {
             self.show(0.0);
             return;
         }
-        imp.last.set(f64::NEG_INFINITY);
+        imp.pace.reset();
         let id = self.add_tick_callback(|turn, clock| {
             let imp = turn.imp();
             let now = clock.frame_time();
@@ -353,8 +354,7 @@ impl Turn {
                 turn.show(0.0);
                 return gtk::glib::ControlFlow::Break;
             }
-            if elapsed - imp.last.get() >= REFRESH_INTERVAL {
-                imp.last.set(elapsed);
+            if imp.pace.due(turn, now, REFRESH_INTERVAL) {
                 // A full turn is where it began.
                 turn.show(refresh_turn(elapsed, refreshing, false) % 360.0);
             }
