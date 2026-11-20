@@ -259,7 +259,7 @@ public sealed partial class InsightsView
             var track = new Grid { Height = 8, VerticalAlignment = VerticalAlignment.Center };
             track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(row.Share, 0.01), GridUnitType.Star) });
             track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(1 - row.Share, 0), GridUnitType.Star) });
-            var ground = new Rectangle { Fill = ThemeBrushes.Get("TcSurfaceInsetBrush"), RadiusX = 4, RadiusY = 4 };
+            var ground = new Rectangle { Fill = ThemeBrushes.Get("TcHairlineBrush"), RadiusX = 4, RadiusY = 4 };
             Grid.SetColumnSpan(ground, 2);
             track.Children.Add(ground);
             track.Children.Add(new Rectangle { Fill = ThemeBrushes.Get("TcAccentBrush"), RadiusX = 4, RadiusY = 4, MinWidth = 4 });
@@ -307,7 +307,8 @@ public sealed partial class InsightsView
         {
             var column = new StackPanel { Spacing = 2 };
             var pair = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2, Height = 120 };
-            if (day.LastWeek is { } last) pair.Children.Add(Bar(last, top, "TcSurfaceInsetBrush"));
+            // The week before in the chart-grid colour, as the Mac draws it.
+            if (day.LastWeek is { } last) pair.Children.Add(Bar(last, top, "TcHairlineBrush"));
             pair.Children.Add(Bar(day.Week, top, "TcAccentBrush"));
             column.Children.Add(pair);
             TextBlock tick = Caption(day.Label);
@@ -323,7 +324,7 @@ public sealed partial class InsightsView
         chart.Children.Add(bars);
         var legend = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
         legend.Children.Add(Swatch(thisWeek, "TcAccentBrush"));
-        legend.Children.Add(Swatch(before, "TcSurfaceInsetBrush"));
+        legend.Children.Add(Swatch(before, "TcHairlineBrush"));
         chart.Children.Add(legend);
         body.Children.Add(chart);
 
