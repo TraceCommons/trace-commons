@@ -16,8 +16,12 @@
   documented requirement is encoding="UTF-8" with no escape characters and
   no non-ascii characters.
 
-  Namespaces: the root is the 2017/2 namespace, with the 2021 namespace
-  declared as s4 because AutomaticBackgroundTask lives there. ShowPrompt and
+  Namespace: everything here is in the 2017/2 namespace, AutomaticBackgroundTask
+  included. It was once written in the 2021 namespace, and Windows refused
+  the whole feed: Add-AppxPackage -AppInstallerFile failed with 0x8008020C,
+  "Element '{.../2021}AutomaticBackgroundTask' is unexpected ... Expecting:
+  {.../2017/2}AutomaticBackgroundTask" (tc-win-az3, 2026-11-20). Only
+  ForceUpdateFromAnyVersion lives in 2021, and it is not written. ShowPrompt and
   UpdateBlocksActivation are not written -- both are documented as no-ops for
   desktop applications packaged in a Windows app package, and the in-app
   InfoBar is the prompt instead. ForceUpdateFromAnyVersion is not written
@@ -38,7 +42,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ns2017 = 'http://schemas.microsoft.com/appx/appinstaller/2017/2'
-$ns2021 = 'http://schemas.microsoft.com/appx/appinstaller/2021'
 
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$') {
     throw "Version must be a quad (e.g. 1.2.3.0); got '$Version'."
@@ -83,7 +86,6 @@ try {
     $writer.WriteStartDocument()
 
     $writer.WriteStartElement('AppInstaller', $ns2017)
-    $writer.WriteAttributeString('xmlns', 's4', $null, $ns2021)
     $writer.WriteAttributeString('Version', $Version)
     $writer.WriteAttributeString('Uri', $selfUri)
 
@@ -107,7 +109,7 @@ try {
     # Every 8 hours whether or not the app was launched. This is the branch
     # that reaches a contributor who leaves the app closed for a week, which
     # is exactly the population running the oldest redaction code.
-    $writer.WriteStartElement('AutomaticBackgroundTask', $ns2021)
+    $writer.WriteStartElement('AutomaticBackgroundTask', $ns2017)
     $writer.WriteEndElement()
 
     $writer.WriteEndElement()  # UpdateSettings
