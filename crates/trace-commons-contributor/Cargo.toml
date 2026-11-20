@@ -150,7 +150,7 @@ windows-sys = { version = "0.61", features = [
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
 # Red Team sandboxed sessions on NEAR AI Red SandBox (macOS only). Pinned to
 # a revision that resolves the same `nearai/ironwire` revision as above.
-rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "48b3c7b12446fcbfa748404ae4acad339ee6b879" }
+rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "854a8e0dbce8dbdec97b7c8edcac74b68de21125" }
 # `security-framework` moved to trace-commons-contributor-platform with
 # `os_secret_store`, whose `storage_error` is its only user here.
 
