@@ -78,7 +78,7 @@ public sealed partial class MainWindow
             && NoticeFront.ActualHeight > 0
             && Content?.XamlRoot is not null)
         {
-            CoverRect card = Bounds(NoticeFront);
+            CoverRect card = CoverBounds(NoticeFront);
             var host = new Rect(card.X, card.Y, card.Width, card.Height);
             foreach (UIElement element in VisualTreeHelper.FindElementsInHostCoordinates(host, TabContent, includeAllElements: true))
             {
@@ -95,7 +95,7 @@ public sealed partial class MainWindow
                 if (element is Control control
                     && control.Visibility == Visibility.Visible
                     && (control.IsTabStop || _coveredByNotice.ContainsKey(control))
-                    && NoticeCover.Covers(card, Bounds(control)))
+                    && NoticeCover.Covers(card, CoverBounds(control)))
                 {
                     covered.Add(control);
                 }
@@ -120,7 +120,7 @@ public sealed partial class MainWindow
     }
 
     /// <summary>An element's rectangle in window coordinates.</summary>
-    private static CoverRect Bounds(FrameworkElement element)
+    private static CoverRect CoverBounds(FrameworkElement element)
     {
         Rect r = element.TransformToVisual(null).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
         return new CoverRect(r.X, r.Y, r.Width, r.Height);
