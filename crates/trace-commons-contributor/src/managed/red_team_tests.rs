@@ -330,6 +330,63 @@ fn inputs_are_copied_not_linked() {
     assert_eq!(std::fs::read(&original).unwrap(), b"original-content");
 }
 
+/// A project folder with node_modules has symlinks inside it (.bin/*).
+/// Staging skips them without following, copies the rest, and lists what
+/// it skipped beside (not inside) the staged folder (staging 0.24.68).
+#[cfg(unix)]
+#[test]
+fn symlinks_inside_an_input_folder_are_skipped_not_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let outside = dir.path().join("secret.txt");
+    std::fs::write(&outside, b"outside-the-folder").unwrap();
+    let project = dir.path().join("site");
+    let bin = project.join("node_modules").join(".bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(project.join("index.js"), b"code").unwrap();
+    std::fs::write(project.join("node_modules").join("tool.js"), b"tool").unwrap();
+    std::os::unix::fs::symlink("../tool.js", bin.join("tool")).unwrap();
+    std::os::unix::fs::symlink(&outside, project.join("leak")).unwrap();
+
+    let session_id = Uuid::new_v4();
+    let staged = stage_inputs(&store, session_id, std::slice::from_ref(&project))
+        .unwrap()
+        .expect("staged in dir");
+    let site = staged.join("site");
+    assert_eq!(std::fs::read(site.join("index.js")).unwrap(), b"code");
+    assert_eq!(
+        std::fs::read(site.join("node_modules").join("tool.js")).unwrap(),
+        b"tool"
+    );
+    assert!(std::fs::symlink_metadata(site.join("leak")).is_err());
+    assert!(std::fs::symlink_metadata(site.join("node_modules/.bin/tool")).is_err());
+    assert!(site.join("node_modules/.bin").is_dir());
+
+    let note =
+        std::fs::read_to_string(staged.parent().unwrap().join(SKIPPED_SYMLINKS_FILE)).unwrap();
+    assert!(
+        note.contains(&project.join("leak").display().to_string()),
+        "{note}"
+    );
+    assert!(
+        note.contains(&bin.join("tool").display().to_string()),
+        "{note}"
+    );
+    assert!(!note.contains("outside-the-folder"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_selected_input_that_is_itself_a_symlink_is_still_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(stage_inputs(&store, Uuid::new_v4(), std::slice::from_ref(&link)).is_err());
+}
+
 #[test]
 fn route_config_is_unchanged_for_other_sessions() {
     let url = "https://cloud-api.near.ai/v1";
