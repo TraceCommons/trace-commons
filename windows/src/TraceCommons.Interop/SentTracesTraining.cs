@@ -189,6 +189,23 @@ public sealed class SentTracesTrainingState
     public static bool TurnsOn(IEnumerable<string> before, IEnumerable<string> after) =>
         !before.Contains(Scope, StringComparer.Ordinal) && after.Contains(Scope, StringComparer.Ordinal);
 
+    /// <summary>
+    /// The scopes a <c>set_consent_scopes</c> reply confirms (its
+    /// <c>consent_scopes</c>, DaemonClient.swift:838-845), or null for a
+    /// refusal or a reply without them: nothing is offered on a guess.
+    /// </summary>
+    public static IReadOnlyList<string>? ConfirmedScopes(DaemonResponse response)
+    {
+        if (response.IsError || response.Result is not JsonElement result || result.ValueKind != JsonValueKind.Object
+            || !result.TryGetProperty("consent_scopes", out JsonElement scopes) || scopes.ValueKind != JsonValueKind.Array
+            || scopes.EnumerateArray().Any(s => s.ValueKind != JsonValueKind.String))
+        {
+            return null;
+        }
+
+        return scopes.EnumerateArray().Select(s => s.GetString()!).ToList();
+    }
+
     /// <summary>The count the line and the sheet say, or null when nothing is drawn (:249-252).</summary>
     public ulong? Count => Eligibility == SentTracesTrainingEligibility.Eligible && _count > 0 ? _count : null;
 

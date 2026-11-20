@@ -1,0 +1,64 @@
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.UI.Xaml;
+using TraceCommons.App.Controls;
+using TraceCommons.Interop;
+
+namespace TraceCommons.App;
+
+/// <summary>
+/// Train coding models on traces already sent (W20-D3, taken (a)): the one
+/// model the app owns (<c>AppModel.sentTracesTraining</c>,
+/// AppModel.swift:362-367), so the Settings sheet, Home's line and the
+/// inspector's section agree. Raised where the Mac raises it: once after a
+/// confirmed turn-on in Settings (AppModel.swift:3007-3017), and by Home's
+/// Review. Nothing is preselected and no grant is sent without Allow.
+/// </summary>
+public sealed partial class MainWindow
+{
+    private SentTracesTrainingModel? _sentTraining;
+
+    /// <summary>The model, made on first use over this window's daemon.</summary>
+    private SentTracesTrainingModel SentTraining =>
+        _sentTraining ??= new SentTracesTrainingModel((method, parameters) => _host.CallAsync(method, parameters), SentTracesTrainingCopy.Current);
+
+    /// <summary>Re-reads the count with Home's reads and redraws the line (SentTracesTrainingViews.swift:119-126).</summary>
+    private async Task RefreshSentTrainingLineAsync()
+    {
+        await SentTraining.RefreshAsync();
+        _home.SetTrainingLine(SentTracesTrainingViews.Line(SentTraining, ReviewSentTraining));
+    }
+
+    /// <summary>Home's Review: the same sheet, in this window.</summary>
+    private void ReviewSentTraining()
+    {
+        SentTraining.Review();
+        if (Content?.XamlRoot is XamlRoot root)
+        {
+            _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
+        }
+    }
+
+    private async Task ShowSentTrainingSheetAsync(XamlRoot root, SentTracesTrainingSite site)
+    {
+        await SentTracesTrainingViews.ShowSheetAsync(root, SentTraining, site);
+        _home.SetTrainingLine(SentTracesTrainingViews.Line(SentTraining, ReviewSentTraining));
+        _historyDetail?.RefreshTraining();
+    }
+
+    /// <summary>
+    /// A Settings consent write the daemon confirmed: when it turned Train
+    /// coding models on, read the eligible traces and raise the sheet once,
+    /// in the Settings window (<c>offerSentTracesTraining</c>, AppModel.swift:3007-3017).
+    /// </summary>
+    private async void OnConsentScopesConfirmed(IReadOnlyList<string> before, IReadOnlyList<string> confirmed, XamlRoot? root)
+    {
+        if (!SentTracesTrainingState.TurnsOn(before, confirmed) || root is null)
+        {
+            return;
+        }
+
+        await SentTraining.OfferAfterTurnOnAsync(SentTracesTrainingSite.Settings);
+        await ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Settings);
+    }
+}

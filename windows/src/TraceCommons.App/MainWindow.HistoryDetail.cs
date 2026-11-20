@@ -57,7 +57,7 @@ public sealed partial class MainWindow
         if (_openedSubmission != record.SubmissionId || _historyDetail is null)
         {
             _openedSubmission = record.SubmissionId;
-            _historyDetail = new HistoryDetailInspector(_host, record);
+            _historyDetail = new HistoryDetailInspector(_host, record, SentTraining);
             _historyInspectorHost!.Content = _historyDetail;
         }
 

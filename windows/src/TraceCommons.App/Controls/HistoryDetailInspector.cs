@@ -69,9 +69,12 @@ public sealed class HistoryDetailInspector : UserControl
     private readonly Dictionary<TextBox, (TextBlock Counter, int Limit)> _counters = new();
     private readonly List<CheckBox> _evidenceBoxes = new();
 
-    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record)
+    private readonly SentTracesTrainingModel? _training;
+
+    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record, SentTracesTrainingModel? training = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        _training = training;
         Record = record ?? throw new ArgumentNullException(nameof(record));
         Content = new ScrollViewer
         {
@@ -95,7 +98,26 @@ public sealed class HistoryDetailInspector : UserControl
     {
         Loaded -= OnLoaded;
         Render();
+        // The eligible traces, read once if nothing has asked yet
+        // (SentTraceTrainingSection's task, SentTracesTrainingViews.swift:159-163).
+        if (_training is { } training && training.State.Eligibility == SentTracesTrainingEligibility.Unknown)
+        {
+            await training.RefreshAsync();
+            RefreshTraining();
+        }
+
         await LoadAsync();
+    }
+
+    private ContentControl? _trainingSlot;
+
+    /// <summary>Redraws the sent-traces training section in place.</summary>
+    public void RefreshTraining()
+    {
+        if (_trainingSlot is { } slot && _training is { } training)
+        {
+            slot.Content = SentTracesTrainingViews.TraceSection(training, Record.SubmissionId, Record.CreditFinal, RefreshTraining);
+        }
     }
 
     /// <summary>
@@ -254,6 +276,12 @@ public sealed class HistoryDetailInspector : UserControl
 
         PublicRunCopy? copy = Copy;
         _root.Children.Add(Summary(copy));
+
+        // Train coding models on this sent trace: offered while it lacks the
+        // use, then Credit pending until its credit shows (HistoryInspector.swift:37-40).
+        _trainingSlot = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false };
+        _root.Children.Add(_trainingSlot);
+        RefreshTraining();
         foreach (string line in Explanations())
         {
             _root.Children.Add(Caption(line, "TcInkSecondaryBrush"));

@@ -451,6 +451,71 @@ public class SentTracesTrainingTests
         Assert.Equal(SentTracesTrainingEligibility.Hidden, model.State.Eligibility);
     }
 
+    [Fact]
+    public void OnlyAConfirmedWriteSaysWhichScopesAreOn()
+    {
+        Assert.Equal(new[] { "benchmark_only", "model_training" }, SentTracesTrainingState.ConfirmedScopes(
+            DaemonResponse.Parse("{\"id\":1,\"result\":{\"consent_scopes\":[\"benchmark_only\",\"model_training\"]}}")));
+        Assert.Null(SentTracesTrainingState.ConfirmedScopes(
+            DaemonResponse.Parse("{\"id\":1,\"error\":{\"code\":\"unavailable\",\"message\":\"not-logged-in\"}}")));
+        Assert.Null(SentTracesTrainingState.ConfirmedScopes(DaemonResponse.Parse("{\"id\":1,\"result\":{}}")));
+        Assert.Null(SentTracesTrainingState.ConfirmedScopes(DaemonResponse.Parse("{\"id\":1,\"result\":{\"consent_scopes\":[1]}}")));
+    }
+
+    private static string Shell(string relative) => File.ReadAllText(
+        Path.Combine(AppContext.BaseDirectory, "shell-source", relative + ".txt")).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    /// <summary>
+    /// A confirmed turn-on in Settings raises the sheet in the Settings window,
+    /// only after the daemon confirmed the write (<c>test_aConfirmedTurnOnRaisesTheSheet</c>).
+    /// </summary>
+    [Fact]
+    public void AConfirmedTurnOnRaisesTheSheetInSettings()
+    {
+        string settings = Shell("TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs");
+        int save = settings.IndexOf("public async Task SaveConsentAsync()", StringComparison.Ordinal);
+        int error = settings.IndexOf("if (response.IsError)", save, StringComparison.Ordinal);
+        int confirmed = settings.IndexOf("SentTracesTrainingState.ConfirmedScopes(response)", save, StringComparison.Ordinal);
+        int raised = settings.IndexOf("ConsentScopesConfirmed?.Invoke(before, confirmed);", save, StringComparison.Ordinal);
+        Assert.True(save > 0 && error > save && confirmed > error && raised > confirmed);
+
+        string window = Shell("TraceCommons.App/MainWindow.SentTracesTraining.cs");
+        int turnsOn = window.IndexOf("SentTracesTrainingState.TurnsOn(before, confirmed)", StringComparison.Ordinal);
+        int offer = window.IndexOf("OfferAfterTurnOnAsync(SentTracesTrainingSite.Settings)", StringComparison.Ordinal);
+        Assert.True(turnsOn > 0 && offer > turnsOn);
+        Assert.Contains("settings.Settings.ConsentScopesConfirmed += (before, confirmed) =>", Shell("TraceCommons.App/MainWindow.Shell.cs"));
+    }
+
+    /// <summary>
+    /// The line sits under Home's Insights card; the inspector offers Allow on
+    /// the opened sent trace (<c>test_theLineAndTheInspectorAreWired</c>).
+    /// </summary>
+    [Fact]
+    public void TheLineAndTheInspectorAreWired()
+    {
+        string home = Shell("TraceCommons.App/Controls/HomeView.cs");
+        int heroes = home.IndexOf("_column.Children.Add(BuildHero(hero, model));", StringComparison.Ordinal);
+        int line = home.IndexOf("_column.Children.Add(_trainingSlot);", StringComparison.Ordinal);
+        int catalogue = home.IndexOf("if (model.Catalogue is HomeCard catalogue)", StringComparison.Ordinal);
+        Assert.True(heroes > 0 && line > heroes && catalogue > line);
+        Assert.Contains("_ = RefreshSentTrainingLineAsync();", Shell("TraceCommons.App/MainWindow.Home.cs"));
+
+        string inspector = Shell("TraceCommons.App/Controls/HistoryDetailInspector.cs");
+        int summary = inspector.IndexOf("_root.Children.Add(Summary(copy));", StringComparison.Ordinal);
+        int section = inspector.IndexOf("_root.Children.Add(_trainingSlot);", StringComparison.Ordinal);
+        Assert.True(summary > 0 && section > summary);
+        Assert.Contains("new HistoryDetailInspector(_host, record, SentTraining)", Shell("TraceCommons.App/MainWindow.HistoryDetail.cs"));
+
+        string views = Shell("TraceCommons.App/Controls/SentTracesTrainingViews.cs");
+        Assert.Contains("AutomationProperties.SetName(button, copy.ReviewAccessibilityName);", views);
+        Assert.Contains("AutomationProperties.SetName(allow, copy.TraceAccessibilityName);", views);
+        Assert.Contains("await model.AllowAsync(submissionId);", views);
+        Assert.Contains("DefaultButton = ContentDialogButton.None,", views);
+        Assert.DoesNotContain("ContentDialogButton.Primary", views);
+        Assert.DoesNotContain("ContentDialogButton.Secondary", views);
+        Assert.DoesNotContain("TcPrimaryButtonStyle", views);
+    }
+
     /// <summary>
     /// Only the person's choice sends a grant: the model's two grant calls sit
     /// in its two Allow handlers, and no other file calls them
