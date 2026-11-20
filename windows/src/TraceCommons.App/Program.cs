@@ -15,6 +15,13 @@ public static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // The release pipeline's credential-store check (W25-D2). First, so it
+        // opens no window, starts no daemon, takes no single-instance key and
+        // is never handed to a running instance.
+        if (CredentialStoreCheck.RunIfRequested(Environment.GetEnvironmentVariable(CredentialStoreCheck.Variable)))
+        {
+            return 0;
+        }
         WinRT.ComWrappersSupport.InitializeComWrappers();
         // Subscribe before claiming the key: another process can redirect as
         // soon as registration succeeds, before the XAML window exists.

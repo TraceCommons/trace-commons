@@ -23,6 +23,7 @@ using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -136,7 +137,7 @@ public sealed class InsightsSkillsView : UserControl
 
     private static string N(int value) => value.ToString(CultureInfo.InvariantCulture);
 
-    private static Brush R(string key) => (Brush)Application.Current.Resources[key];
+    private static Brush R(string key) => ThemeBrushes.Get(key);
 
     private static TextBlock Line(string text, string? style = null, Brush? brush = null)
     {
@@ -895,7 +896,7 @@ public sealed class InsightsSkillsView : UserControl
         var grid = new Grid { Height = 44, Margin = new Thickness(0, 4, 0, 4), ColumnSpacing = 0 };
         // The week before in the ink at 22%, as the Mac draws it; High
         // Contrast keeps the system text colour.
-        Brush muted = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast
+        Brush muted = SystemSettingWatch.HighContrast
             ? R("TcInkTertiaryBrush")
             : new SolidColorBrush(((SolidColorBrush)R("TcGlassInkBrush")).Color) { Opacity = InsightsSkillsHome.EarlierBarInk };
         for (int i = 0; i < bars.Count; i++)

@@ -37,6 +37,9 @@ public sealed partial class MainWindow
     /// </summary>
     private void ApplyGlassMaterial()
     {
+        // Every brush code picks follows this window's theme from here on.
+        ThemeBrushes.Follow(WindowRoot);
+        ThemeBrushes.Changed += PaintGround;
         bool supported = MicaController.IsSupported();
         bool highContrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
         _material = WindowMaterialChoice.For(supported, highContrast);

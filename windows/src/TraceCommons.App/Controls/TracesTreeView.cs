@@ -18,6 +18,7 @@ using TraceCommons.Interop.Shell;
 using Windows.System;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -96,6 +97,13 @@ internal sealed class TracesTreeView : UserControl
     private readonly TextBlock _empty = new();
     private readonly Button _searchButton = new();
     private readonly Grid _eyeSlot = new();
+
+    // The column titles, drawn over a tree with folders (TracesViews.swift:193-198).
+    private Grid? _titles;
+
+    // The heading's search and order: drawn on an empty tree only when a
+    // filter emptied it (ShowListControls).
+    private readonly List<FrameworkElement> _listControls = new();
     private readonly Grid _searchField = new();
     private readonly TextBox _searchBox = new();
     private readonly TranslateTransform _searchShift = new();
@@ -141,6 +149,7 @@ internal sealed class TracesTreeView : UserControl
         {
             Grid.SetRow(titles, 1);
             _root.Children.Add(titles);
+            _titles = titles;
         }
 
         _content.Children.Add(_rows);
@@ -166,6 +175,8 @@ internal sealed class TracesTreeView : UserControl
         _rows.PointerReleased += OnRowsPointerReleased;
         _rows.PointerCaptureLost += (_, _) => EndDrag();
         ActualThemeChanged += (_, _) => Render();
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { Render(); });
         Unloaded += (_, _) => StopTicking();
     }
 
@@ -267,6 +278,7 @@ internal sealed class TracesTreeView : UserControl
         _searchField.Children.Add(clear);
         search.Children.Add(_searchField);
         heading.Children.Add(search);
+        _listControls.Add(search);
 
         // Automatic for every folder, an eye left of the order control
         // (owner, 2026-11-02; NudgeViews.swift:69-71, :147-150). Drawn by
@@ -274,6 +286,7 @@ internal sealed class TracesTreeView : UserControl
         Grid.SetColumn(_eyeSlot, 2);
         _eyeSlot.VerticalAlignment = VerticalAlignment.Center;
         heading.Children.Add(_eyeSlot);
+        _listControls.Add(_eyeSlot);
 
         if (TreeOrderWords.Label.Length > 0)
         {
@@ -289,6 +302,7 @@ internal sealed class TracesTreeView : UserControl
             order.Flyout = menu;
             Grid.SetColumn(order, 3);
             heading.Children.Add(order);
+            _listControls.Add(order);
         }
 
         return heading;
@@ -500,6 +514,7 @@ internal sealed class TracesTreeView : UserControl
     private void Render()
     {
         DrawEye();
+        ShowListControls();
         _rows.Children.Clear();
         _rowById.Clear();
         IReadOnlyList<TreeRow> rows = _state.Rows;
@@ -525,6 +540,29 @@ internal sealed class TracesTreeView : UserControl
         if (_state.ScrollTarget is { } target)
         {
             DispatcherQueue.TryEnqueue(() => ScrollTo(target));
+        }
+    }
+
+    /// <summary>
+    /// The heading's search and order on an empty tree: only when a filter
+    /// emptied it, so the way out stays (TracesViews.swift:181-187, 235-239).
+    /// Otherwise they are not drawn, and are no Tab stop sitting unseen
+    /// beside the empty state (box tab walk, empty and coreDown samples,
+    /// 2026-11-20).
+    /// </summary>
+    private void ShowListControls()
+    {
+        bool shown = _state.Tree.Folders.Count > 0
+            || _state.Search.Trim().Length > 0
+            || TracesTreeRows.KeepsControlsWhenEmpty(idleOnly: false, _state.Tree.HiddenIgnored);
+        foreach (FrameworkElement control in _listControls)
+        {
+            control.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        if (_titles is not null)
+        {
+            _titles.Visibility = _state.Tree.Folders.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
     }
 
@@ -1164,7 +1202,7 @@ internal sealed class TracesTreeView : UserControl
             return new SolidColorBrush(_ui.UIElementColor(type));
         }
 
-        IReadOnlyDictionary<string, MapRgba> inks = ActualTheme == ElementTheme.Dark ? MapArt.Dark : MapArt.Light;
+        IReadOnlyDictionary<string, MapRgba> inks = ThemeBrushes.Dark ? MapArt.Dark : MapArt.Light;
         MapRgba c = inks.TryGetValue(token, out MapRgba found) ? found : inks["textPrimary"];
         return new SolidColorBrush(Color.FromArgb((byte)Math.Round(255 * Math.Clamp(c.A, 0, 1)), c.R, c.G, c.B));
     }

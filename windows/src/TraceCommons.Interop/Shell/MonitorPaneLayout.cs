@@ -234,6 +234,29 @@ public sealed record MonitorPaneLayout(double Main, double? Map, double? Inspect
     }
 
     /// <summary>
+    /// The window's frame the first time it is shown: <see cref="WindowFrame"/>
+    /// across, and wholly on the work area down as well, as AppKit keeps a
+    /// new window on screen. Windows picks the window's first position before
+    /// the app sizes it, so on a short display (1024x768, test box
+    /// 2026-11-20) the sized window ran under the taskbar; it moves up only as
+    /// far as it must, and one taller than the work area is held to it.
+    /// </summary>
+    public static LayoutRect FirstFrame(LayoutRect frame, double width, double height, LayoutRect workArea)
+    {
+        LayoutRect across = WindowFrame(frame, width, workArea);
+        height = Math.Min(height, workArea.Height);
+        double bottom = workArea.Y + workArea.Height;
+        double y = frame.Y;
+        if (y + height > bottom)
+        {
+            y = bottom - height;
+        }
+
+        y = Math.Max(workArea.Y, y);
+        return across with { Y = y, Height = height };
+    }
+
+    /// <summary>
     /// A width in device-independent units as whole physical pixels at
     /// <paramref name="scale"/> (the monitor's DPI over 96), rounded up so a
     /// pane never loses its last pixel column to truncation.

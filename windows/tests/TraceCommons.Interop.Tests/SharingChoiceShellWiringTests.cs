@@ -36,6 +36,19 @@ public class SharingChoiceShellWiringTests
     }
 
     [Fact]
+    public void TheEyeHidesWithTheListControlsAndTheTitlesWithAnEmptyTree()
+    {
+        // TracesViews.swift:178-198: an empty tree keeps TracesListControls
+        // (the eye among them) only when a filter emptied it, and draws no
+        // column titles.
+        string tree = Source("Controls/TracesTreeView.cs");
+        Assert.Contains("_listControls.Add(_eyeSlot);", tree, StringComparison.Ordinal);
+        int at = tree.IndexOf("private void ShowListControls()", StringComparison.Ordinal);
+        string body = tree[at..tree.IndexOf("\n    }\n", at, StringComparison.Ordinal)];
+        Assert.Contains("_titles.Visibility", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TheWindowTakesTheMacsSteps()
     {
         string window = Source("MainWindow.SharingChoice.cs");

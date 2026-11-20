@@ -53,7 +53,7 @@ internal static class StepGeometry
     public static FrameworkElement Mark(string tool, double side, double initialsSize)
     {
         LaunchToolMark mark = LaunchToolMark.For(tool);
-        Brush tint = (Brush)Application.Current.Resources[mark.TintKey];
+        Brush tint = ThemeBrushes.Get(mark.TintKey);
         FrameworkElement element = mark.Logo is ToolLogoId id
             ? new Path { Data = Build(ToolLogos.Fitted(id, new LayoutRect(0, 0, side, side))), Fill = tint, Width = side, Height = side }
             : new TextBlock { Text = mark.Initials, Foreground = tint, FontSize = initialsSize, FontWeight = Microsoft.UI.Text.FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center };
@@ -92,10 +92,10 @@ public sealed class LaunchArtView : UserControl
         // three dots over a hairline, the tool's logo.
         double left = (LaunchHandoff.Width - LaunchHandoff.TerminalWidth) / 2 + LaunchHandoff.TerminalX;
         double top = (LaunchHandoff.Height - LaunchHandoff.TerminalHeight) / 2;
-        var ink = (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+        var ink = ThemeBrushes.Get("TextFillColorPrimaryBrush");
         bool highContrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
         (double groundInk, double dotInk) = LaunchHandoff.TerminalInks(highContrast);
-        var hairline = highContrast ? ink : (Brush)Application.Current.Resources["TcHairlineBrush"];
+        var hairline = highContrast ? ink : ThemeBrushes.Get("TcHairlineBrush");
         Add(canvas, new Rectangle
         {
             Width = LaunchHandoff.TerminalWidth, Height = LaunchHandoff.TerminalHeight,
@@ -129,7 +129,7 @@ public sealed class LaunchArtView : UserControl
         {
             Width = LaunchHandoff.FolderTileSide, Height = LaunchHandoff.FolderTileSide,
             CornerRadius = new CornerRadius(LaunchHandoff.ControlRadius),
-            Background = (Brush)Application.Current.Resources["TcTileFolderBrush"],
+            Background = ThemeBrushes.Get("TcTileFolderBrush"),
             Child = new FontIcon { Glyph = LaunchHandoff.FolderGlyph, FontSize = 13, Foreground = ink },
         };
         Add(canvas, _folder, (LaunchHandoff.Width - LaunchHandoff.FolderTileSide) / 2,

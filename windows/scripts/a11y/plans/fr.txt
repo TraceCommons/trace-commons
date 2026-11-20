@@ -1,0 +1,8 @@
+# A first-run step: audit whichever windows the launch made.
+newwin other
+snap main fr-main
+snap other fr-other
+audit main fr-main 40
+audit other fr-other 40
+key other 1B
+state other fr-other-after-esc

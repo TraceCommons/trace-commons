@@ -176,6 +176,15 @@ internal static class NativeMethods
     internal static extern IntPtr tc_feature_profile_json();
 
     /// <summary>
+    /// Can this process reach the Cloud credential store (on Windows, the
+    /// Credential Manager)? 0 reachable, 1 unentitled (macOS only), 2
+    /// otherwise. Reads a reference that was never stored and writes nothing.
+    /// See <see cref="CredentialStoreCheck"/>.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int tc_credential_store_self_check();
+
+    /// <summary>
     /// The ABI's only real barrier: blocks until the callback is guaranteed
     /// not to fire again. Returns void and REFUSES SILENTLY when called from a
     /// thread inside any tokio runtime context, so callers must compare

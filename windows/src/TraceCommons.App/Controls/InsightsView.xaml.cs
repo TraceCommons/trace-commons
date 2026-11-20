@@ -29,18 +29,25 @@ public sealed partial class InsightsView : UserControl, IDisposable
         _window = window;
         DataContext = ViewModel;
         Unloaded += (_, _) => { _episodeMemberDraft.Clear(); ViewModel.Cancel(); };
+        TabBar.Pressed += OnTabPressed;
+        _pages[InsightsViewModel.OverviewTab] = Page0;
+        _pages[InsightsViewModel.PatternsTab] = Page1;
+        _pages[InsightsViewModel.BenchmarksTab] = Page2;
+        _pages[InsightsViewModel.SessionsTab] = Page3;
+        _pages[InsightsViewModel.AnalyzeTab] = Page4;
+        ShowPage(InsightsViewModel.OverviewTab);
     }
     public async Task ActivateAsync()
     {
         await ViewModel.LoadAsync();
         _activated = true;
-        await ViewModel.SelectTabAsync(ViewModel.TabAt(Tabs.SelectedIndex));
+        await ViewModel.SelectTabAsync(_tab);
     }
 
     /// <summary>Skills' "review settings" action: Settings opens (InsightsView.swift <c>openSkillsSettings</c>).</summary>
     public event EventHandler? SkillsSettingsRequested;
 
-    private PivotItem? _skillsItem;
+    private InsightsSkillsView? _skills;
 
     /// <summary>
     /// The daemon's <c>insights_skills</c> flag: Skills is added after
@@ -50,33 +57,54 @@ public sealed partial class InsightsView : UserControl, IDisposable
     public void SetSkillsEnabled(bool enabled)
     {
         if (_closed) return;
-        if (enabled && _skillsItem is null)
+        if (enabled && _skills is null)
         {
-            var view = new InsightsSkillsView(ViewModel.Skills, () => SkillsSettingsRequested?.Invoke(this, EventArgs.Empty));
-            _skillsItem = new PivotItem { Header = ViewModel.Skills.Text("skills_title"), Content = view };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(_skillsItem, "insights-tab-skills");
+            _skills = new InsightsSkillsView(ViewModel.Skills, () => SkillsSettingsRequested?.Invoke(this, EventArgs.Empty)) { Visibility = Visibility.Collapsed };
             _ = ViewModel.SetSkillsEnabled(true);
-            Tabs.Items.Insert(InsightsViewModel.ShownTabs(true).ToList().IndexOf(InsightsViewModel.SkillsTab), _skillsItem);
+            TabBar.AddSkills(ViewModel.Skills.Text("skills_title"));
+            Pages.Children.Add(_skills);
+            _pages[InsightsViewModel.SkillsTab] = _skills;
+            ShowPage(_tab);
         }
-        else if (!enabled && _skillsItem is not null)
+        else if (!enabled && _skills is not null)
         {
-            bool shown = ReferenceEquals(Tabs.SelectedItem, _skillsItem);
-            PivotItem item = _skillsItem;
-            _skillsItem = null;
-            (item.Content as InsightsSkillsView)?.Close();
+            bool shown = _tab == InsightsViewModel.SkillsTab;
+            InsightsSkillsView view = _skills;
+            _skills = null;
+            view.Close();
             _ = ViewModel.SetSkillsEnabled(false);
-            if (shown) Tabs.SelectedIndex = 0;
-            Tabs.Items.Remove(item);
+            TabBar.RemoveSkills();
+            Pages.Children.Remove(view);
+            _pages.Remove(InsightsViewModel.SkillsTab);
+            if (shown)
+            {
+                ShowPage(InsightsViewModel.OverviewTab);
+                if (_activated) _ = ViewModel.SelectTabAsync(_tab);
+            }
         }
     }
-    // Set once the core's words are loaded. The Pivot selects its first tab
-    // while the control is built, before then, and that read would present
-    // with no words; ActivateAsync reads the tab on screen instead.
+    // Set once the core's words are loaded. The first tab is shown while the
+    // control is built, before then, and that read would present with no
+    // words; ActivateAsync reads the tab on screen instead.
     private bool _activated;
-    // The tabs read their figures when shown; Analyze reads nothing new.
-    private async void OnTabChanged(object sender, SelectionChangedEventArgs args)
+    private readonly System.Collections.Generic.Dictionary<int, FrameworkElement> _pages = new();
+    private int _tab = InsightsViewModel.OverviewTab;
+    // A tab shows its page; the tabs read their figures when shown, and
+    // Analyze reads nothing new.
+    private async void OnTabPressed(int tab)
     {
-        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(ViewModel.TabAt(Tabs.SelectedIndex));
+        bool changed = tab != _tab;
+        ShowPage(tab);
+        if (changed && !_closed && _activated) await ViewModel.SelectTabAsync(_tab);
+    }
+    private void ShowPage(int tab)
+    {
+        _tab = tab;
+        foreach ((int id, FrameworkElement page) in _pages)
+        {
+            page.Visibility = id == tab ? Visibility.Visible : Visibility.Collapsed;
+        }
+        TabBar.Show(tab);
     }
     // A week picker's own index follows the model; only a choice the model
     // is not already showing reads again.

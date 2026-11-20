@@ -29,6 +29,14 @@ internal static class SystemSettingWatch
     private static readonly UISettings Ui = new();
     private static readonly CachedReading<bool> Animations = new(() => Ui.AnimationsEnabled);
     private static readonly CachedReading<bool> Taskbar = new(TrayIcon.ReadTaskbarLight);
+    private static readonly CachedReading<bool> Contrast = new(() => new AccessibilitySettings().HighContrast);
+
+    // The setting message can arrive before the high contrast reading turns,
+    // which left the rail's card in high contrast colours after it went off
+    // (box live switch, 2026-11-19). One more read a moment after each
+    // message, never a poll. (AccessibilitySettings.HighContrastChanged
+    // crashed the app at start in a desktop process: 0xc000027b.)
+    private static Microsoft.UI.Dispatching.DispatcherQueueTimer? _settle;
     private static readonly SubclassProc Proc = WndProc;
     private static readonly HashSet<IntPtr> Installed = new();
 
@@ -46,7 +54,14 @@ internal static class SystemSettingWatch
     /// <summary>The taskbar draws itself light.</summary>
     public static bool TaskbarLight => Taskbar.Value;
 
-    /// <summary>Raised on the UI thread when either setting changed.</summary>
+    /// <summary>
+    /// A high contrast theme is on. Code that picks a colour itself (Home's
+    /// hero, the rail's mark) reads it at draw time and draws again on
+    /// <see cref="Changed"/>; XAML theme resources follow on their own.
+    /// </summary>
+    public static bool HighContrast => Contrast.Value;
+
+    /// <summary>Raised on the UI thread when any of the settings changed.</summary>
     public static event Action? Changed;
 
     /// <summary>Watches <paramref name="hwnd"/>'s setting changes; once per window.</summary>
@@ -59,12 +74,13 @@ internal static class SystemSettingWatch
         }
     }
 
-    /// <summary>Reads both settings again, as the window is activated; raises <see cref="Changed"/> if either moved.</summary>
+    /// <summary>Reads the settings again, as the window is activated; raises <see cref="Changed"/> if any moved.</summary>
     public static void Refresh()
     {
         bool animations = Animations.Refresh();
         bool taskbar = Taskbar.Refresh();
-        if (animations || taskbar)
+        bool contrast = Contrast.Refresh();
+        if (animations || taskbar || contrast)
         {
             Changed?.Invoke();
         }
@@ -75,9 +91,18 @@ internal static class SystemSettingWatch
         if (msg is WM_SETTINGCHANGE or WM_THEMECHANGED)
         {
             // Any setting: the wParam a sender passes is not always the SPI
-            // it changed, and reading two values again is cheap next to a
+            // it changed, and reading the values again is cheap next to a
             // message the system sends only on a change.
             Refresh();
+            if (_settle is null && Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread() is { } queue)
+            {
+                _settle = queue.CreateTimer();
+                _settle.Interval = TimeSpan.FromMilliseconds(750);
+                _settle.IsRepeating = false;
+                _settle.Tick += (_, _) => Refresh();
+            }
+
+            _settle?.Start();
         }
 
         return DefSubclassProc(hwnd, msg, wParam, lParam);
