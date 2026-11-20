@@ -368,15 +368,32 @@ public static class InsightsUsageWords
     public static IReadOnlyList<Day> Days(InsightsNearAiCredit credit, Func<string, string?> copy) =>
         (credit.ByDay ?? Array.Empty<InsightsCreditWindow>()).Select((window, index) =>
         {
-            string label = window.Date is { } date
-                && DateOnly.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly day)
-                    ? day.ToString("ddd", CultureInfo.GetCultureInfo("en-US"))[..1]
-                    : (index + 1).ToString(CultureInfo.InvariantCulture);
             long? micros = window.UsdMicros ?? (window.UsdPartial == true ? window.UsdMicrosKnown : null);
-            return new Day(window.Date ?? index.ToString(CultureInfo.InvariantCulture), label,
+            return new Day(window.Date ?? index.ToString(CultureInfo.InvariantCulture), Weekday(window.Date, index),
                 InsightsCreditWords.Spend(window.UsdMicros, window.UsdMicrosKnown, copy),
                 micros is { } m ? m / 1_000_000.0 : null);
         }).ToList();
+
+    /// <summary>
+    /// A tool's tokens on each of the last 7 days (<c>claude_code</c> or
+    /// <c>codex</c>, from <c>usage_by_day</c>; InsightsUsageCards.swift:331-344);
+    /// empty from a daemon that predates them. An unknown day draws no bar.
+    /// </summary>
+    public static IReadOnlyList<Day> TokenBars(IReadOnlyList<InsightsUsageDay>? days, string tool, Func<string, string?> copy) =>
+        (days ?? Array.Empty<InsightsUsageDay>()).Select((day, index) =>
+        {
+            long? tokens = tool == "codex" ? day.Codex : day.ClaudeCode;
+            return new Day(day.Date, Weekday(day.Date, index),
+                InsightsAnalyticsWords.Figure(copy, tokens is { } t ? (ulong)Math.Max(0, t) : null),
+                tokens is { } v ? v : null);
+        }).ToList();
+
+    /// <summary>The weekday's one-letter name, or the day's position when the date does not read.</summary>
+    private static string Weekday(string? date, int index) =>
+        date is not null
+        && DateOnly.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly day)
+            ? day.ToString("ddd", CultureInfo.GetCultureInfo("en-US"))[..1]
+            : (index + 1).ToString(CultureInfo.InvariantCulture);
 }
 
 /// <summary>
