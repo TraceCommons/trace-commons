@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using TraceCommons.Interop;
 using Xunit;
 
@@ -79,5 +81,38 @@ public class AccountGenerationTests
         owner.Observe("sha256:a");
         owner.Boundary();
         Assert.Equal(1, told);
+    }
+
+    /// <summary>
+    /// Every new generation is announced, from a status naming another
+    /// account as from a sign-out, so a Settings section showing the old
+    /// account's devices, payouts or referrals reads them again (#2219
+    /// review, defect 7). The same account read again announces nothing.
+    /// </summary>
+    [Fact]
+    public void EveryNewAccountIsAnnouncedAndTheSameOneIsNot()
+    {
+        var owner = new AccountGeneration();
+        int told = 0;
+        owner.Changed += () => told++;
+        owner.Observe("sha256:a");
+        owner.Observe("sha256:a");
+        Assert.Equal(0, told);
+        owner.Observe("sha256:b");
+        Assert.Equal(1, told);
+        owner.Boundary();
+        Assert.Equal(2, told);
+    }
+
+    /// <summary>Settings reads the account's lists again on each new generation.</summary>
+    [Fact]
+    public void SettingsReadsTheAccountsListsAgainOnANewAccount()
+    {
+        string sections = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "Controls", "SettingsView.Sections.cs.txt"));
+        Assert.Contains("host.Account.Changed += OnAccountChanged;", sections);
+        Assert.Contains("_devices?.RefreshAsync()", sections);
+        Assert.Contains("_payouts?.RefreshAsync()", sections);
+        Assert.Contains("_referrals?.RefreshAsync()", sections);
     }
 }

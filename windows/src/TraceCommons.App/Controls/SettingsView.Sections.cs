@@ -48,6 +48,8 @@ public sealed partial class SettingsView
     private readonly Dictionary<SettingsSection, StackPanel> _bodies = new();
     private readonly Dictionary<SettingsSection, ContentControl> _notices = new();
     private PayoutLinkSection? _payouts;
+    private AccountDevicesSection? _devices;
+    private ReferralsSection? _referrals;
     private UpdatesSection? _updates;
     private DaemonHost? _sectionsHost;
 
@@ -116,13 +118,16 @@ public sealed partial class SettingsView
             host.StatusChanged -= OnGateStatusChanged;
             host.Started -= OnGateStatusChanged;
             host.Refused -= OnGateStatusChanged;
+            host.Account.Changed -= OnAccountChanged;
         };
 
-        DevicesHost.Content = new AccountDevicesSection(host);
+        _devices = new AccountDevicesSection(host);
+        DevicesHost.Content = _devices;
         _payouts = new PayoutLinkSection(host);
         _payouts.VisibilityChanged += _ => DrawList();
         PayoutsHost.Content = _payouts;
-        ReferralsHost.Content = new ReferralsSection(host);
+        _referrals = new ReferralsSection(host);
+        ReferralsHost.Content = _referrals;
         GeneralHost.Content = new GeneralSection();
         InsightsHost.Content = new InsightsSection(host);
         NotificationsHost.Content = new NotificationsSection(host);
@@ -222,7 +227,27 @@ public sealed partial class SettingsView
         host.Started += OnGateStatusChanged;
         host.Refused -= OnGateStatusChanged;
         host.Refused += OnGateStatusChanged;
+        host.Account.Changed -= OnAccountChanged;
+        host.Account.Changed += OnAccountChanged;
         await ReadGateAsync(host);
+    }
+
+    /// <summary>
+    /// Another account, or none: the account's own lists are read again,
+    /// so the old account's devices, payout links and referral codes do not
+    /// stay on screen (#2219 review, defect 7).
+    /// </summary>
+    private async void OnAccountChanged()
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        await System.Threading.Tasks.Task.WhenAll(
+            _devices?.RefreshAsync() ?? System.Threading.Tasks.Task.CompletedTask,
+            _payouts?.RefreshAsync() ?? System.Threading.Tasks.Task.CompletedTask,
+            _referrals?.RefreshAsync() ?? System.Threading.Tasks.Task.CompletedTask);
     }
 
     private async void OnGateStatusChanged()

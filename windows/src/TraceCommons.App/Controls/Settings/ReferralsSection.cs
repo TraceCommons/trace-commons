@@ -61,6 +61,9 @@ public sealed class ReferralsSection : UserControl
         Loaded += async (_, _) => await _flow.RefreshAsync();
     }
 
+    /// <summary>Reads the codes again, after a change of account.</summary>
+    public System.Threading.Tasks.Task RefreshAsync() => _flow.RefreshAsync();
+
     private void ArmApply()
     {
         if (_apply is not null)
