@@ -187,6 +187,8 @@ impl Worker {
                 .send_blocking(Ok(Attachment::of(&backend)))
                 .is_err()
             {
+                // The start was abandoned: nobody will use this daemon.
+                retire(backend);
                 return;
             }
 
@@ -231,9 +233,10 @@ impl Worker {
                     }
                 };
                 if result_tx.send_blocking((id, outcome)).is_err() {
-                    return;
+                    break;
                 }
             }
+            retire(backend);
         });
 
         let attachment = ready_rx
@@ -363,6 +366,15 @@ fn spawn_pump(
         }
     }
     stop
+}
+
+/// Stop a backend nobody will call again, rather than drop it. Dropping a
+/// hosting backend drops its runtime under a live supervisor, and a worker
+/// can then poll the supervisor's interval after the timer driver has shut
+/// down: tokio's "runtime is shutting down" panic (`time/entry.rs`). An
+/// attached backend has nothing to stop.
+fn retire(backend: Backend) {
+    let _ = backend.stop();
 }
 
 /// [`Job::Reopen`] on the worker thread. Returns the backend to use from
