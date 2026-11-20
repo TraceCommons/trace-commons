@@ -61,6 +61,13 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private readonly List<(Action<double> Apply, Func<double, bool> Moving)> _motions = new();
     private readonly Dictionary<string, string> _names = new(StringComparer.Ordinal);
     private IReadOnlyList<SourceCandidate> _discovered = Array.Empty<SourceCandidate>();
+
+    /// <summary>
+    /// How many times discovery has answered. Tools is built when the window
+    /// opens, before the probe returns; counting it in the content key builds
+    /// the step again with the tools found, signed in or not.
+    /// </summary>
+    private int _discoveries;
     private List<ConsentOption> _options = new();
     private string? _termsLabel;
     private bool _ticking;
@@ -323,6 +330,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private async Task LoadAsync()
     {
         _discovered = await Task.Run(SourceDiscovery.ProbeThisMachine).ConfigureAwait(true);
+        _discoveries++;
         var rows = _discovered.Select(c => (c.Source, c.Exists)).ToList();
         _runner.State.RecordDiscovery(rows);
         _model.SetRows(rows);
@@ -651,7 +659,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         Notice(state) ?? "", _runner.IsCommitting, _runner.SignInWaiting, state.SignedIn, state.Account,
         state.Invite, state.EnrolledInvite ?? "-", _runner.Failure?.GetType().Name ?? "",
         _pendingFolder?.Path ?? "", _addRefused, _inviteRefused, state.AddedFolders.Count,
-        state.SharingChosen, state.Sharing, _controller.GrantCopyRead);
+        state.SharingChosen, state.Sharing, _controller.GrantCopyRead, _discoveries);
 
     /// <summary>
     /// The failed request's line under the step's content
@@ -891,13 +899,16 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         HorizontalAlignment = HorizontalAlignment.Center,
     };
 
-    /// <summary>FirstRunFrame (FirstRunFrame.swift:150-230): graphic, title, content, over the thread's 44.</summary>
+    /// <summary>
+    /// FirstRunFrame (FirstRunFrame.swift:150-230): graphic, title, content,
+    /// below the thread's 44, as a grid of <see cref="FirstRunFrameLayout.Rows"/>:
+    /// the free height is split three ways, or taken by a card that scrolls.
+    /// </summary>
     private UIElement Framed(FirstRunStep step, string light, string bold, UIElement content)
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 44, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-        _graphic = new Border { Height = StageActors.GraphicHeight(step), Margin = new Thickness(0, 24, 0, 24), IsHitTestVisible = false };
-        panel.Children.Add(_graphic);
-        var title = new TextBlock { FontSize = 26, TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(40, 0, 40, 20) };
+        var grid = new Grid { Margin = new Thickness(0, FirstRunFrameLayout.ThreadBottom, 0, 0) };
+        _graphic = new Border { Height = StageActors.GraphicHeight(step), IsHitTestVisible = false };
+        var title = new TextBlock { FontSize = 26, TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(40, 0, 40, FirstRunFrameLayout.TitleGap) };
         title.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = light, Foreground = Brush(FirstRunTokens.TextSecondary) });
         title.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = bold, FontWeight = FontWeights.Bold, Foreground = Brush(FirstRunTokens.TextPrimary) });
         AutomationProperties.SetAccessibilityView(title, AccessibilityView.Raw);
@@ -905,14 +916,37 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         var heading = Key(new ContentControl { Content = title, IsTabStop = false, UseSystemFocusVisuals = true, HorizontalAlignment = HorizontalAlignment.Center, HorizontalContentAlignment = HorizontalAlignment.Center }, FirstRunFocus.Heading);
         AutomationProperties.SetHeadingLevel(heading, AutomationHeadingLevel.Level1);
         AutomationProperties.SetName(heading, light + bold);
-        panel.Children.Add(heading);
-        panel.Children.Add(content);
-        if (Notice(_runner.State) is { } notice)
+        // UsesScreen.swift:647, JoinScreen.swift:494: the card scrolls in the
+        // height it takes, its top under the title.
+        UIElement card = FirstRunFrameLayout.CardScrolls(step)
+            ? new ScrollViewer { Content = content, VerticalAlignment = VerticalAlignment.Top, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
+            : content;
+        UIElement? notice = Notice(_runner.State) is { } line ? Alert(line, 560) : null;
+        IReadOnlyList<FirstRunFrameRow> rows = FirstRunFrameLayout.Rows(step);
+        for (int i = 0; i < rows.Count; i++)
         {
-            panel.Children.Add(Alert(notice, 560));
+            FirstRunFrameRow row = rows[i];
+            grid.RowDefinitions.Add(new RowDefinition
+            {
+                Height = row.Fills ? new GridLength(1, GridUnitType.Star) : row.Slot == FirstRunFrameSlot.Gap ? new GridLength(row.MinHeight) : GridLength.Auto,
+                MinHeight = row.MinHeight,
+            });
+            UIElement? cell = row.Slot switch
+            {
+                FirstRunFrameSlot.Graphic => _graphic,
+                FirstRunFrameSlot.Title => heading,
+                FirstRunFrameSlot.Card => card,
+                FirstRunFrameSlot.Notice => notice,
+                _ => null,
+            };
+            if (cell is not null)
+            {
+                Grid.SetRow((FrameworkElement)cell, i);
+                grid.Children.Add(cell);
+            }
         }
 
-        return panel;
+        return grid;
     }
 
     /// <summary>

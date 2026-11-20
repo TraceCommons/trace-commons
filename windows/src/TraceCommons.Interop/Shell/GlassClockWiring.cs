@@ -223,3 +223,49 @@ public sealed class MotionRuns<TProperty> where TProperty : notnull
     public bool IsCurrent(TProperty property, int run) =>
         _current.TryGetValue(property, out int current) && current == run;
 }
+
+/// <summary>
+/// A handler an element keeps on a long-lived event between Loaded and
+/// Unloaded, held at most once. WinUI can raise Loaded twice without an
+/// Unloaded between; a bare <c>+=</c> on each Loaded then adds the handler
+/// twice, the one Unloaded removes one copy, and a static event keeps the
+/// element alive for the life of the process.
+/// </summary>
+public sealed class HeldSubscription
+{
+    private readonly Action _add;
+    private readonly Action _remove;
+
+    public HeldSubscription(Action add, Action remove)
+    {
+        _add = add;
+        _remove = remove;
+    }
+
+    /// <summary>Whether the handler is on the event.</summary>
+    public bool Held { get; private set; }
+
+    /// <summary>Adds the handler unless it is already held.</summary>
+    public void Hold()
+    {
+        if (Held)
+        {
+            return;
+        }
+
+        _add();
+        Held = true;
+    }
+
+    /// <summary>Removes the handler if it is held.</summary>
+    public void Release()
+    {
+        if (!Held)
+        {
+            return;
+        }
+
+        _remove();
+        Held = false;
+    }
+}

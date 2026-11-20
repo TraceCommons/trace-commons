@@ -11,6 +11,7 @@ using TraceCommons.App.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Map;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App;
 
@@ -23,6 +24,46 @@ namespace TraceCommons.App;
 public sealed partial class MainWindow : ITracesTreeHost
 {
     private TracesTreeView? _tree;
+
+    private FolderAutomatic? _automatic;
+
+    /// <summary>The folder rows' Automatic writes, through the arming offer's call and refusal line.</summary>
+    FolderAutomatic ITracesTreeHost.AutomaticWrites => _automatic ??= NewFolderAutomatic();
+
+    private FolderAutomatic NewFolderAutomatic()
+    {
+        var writes = new FolderAutomatic(
+            (method, payload) => ViewModel.Host.CallAsync(method, payload),
+            async () =>
+            {
+                await ViewModel.RefreshAsync();
+                if (_map is not null)
+                {
+                    await _map.ReadAsync();
+                }
+            },
+            () => MonitorWords.ProjectModeFailed);
+        writes.Changed += () => _tree?.Refresh();
+        ViewModel.Host.Account.BoundaryCrossed += writes.AccountBoundary;
+        return writes;
+    }
+
+    /// <summary>
+    /// A folder row's Automatic switch: the write, or for the bucket of
+    /// traces with no project, nothing; the note under it already says why
+    /// (TracesViews.swift:685-691), and the switch is drawn back as it was.
+    /// </summary>
+    async void ITracesTreeHost.SetFolderAutomatic(TracesTree.FolderNode folder, bool on)
+    {
+        if (folder.IsBucket)
+        {
+            _tree?.Refresh();
+            return;
+        }
+
+        await ((ITracesTreeHost)this).AutomaticWrites.SetAsync(folder, on);
+        _tree?.Refresh();
+    }
 
     /// <summary>The person's folder order, kept beside the daemon's state as the map style is.</summary>
     private static string FolderOrderPath() =>
@@ -51,6 +92,7 @@ public sealed partial class MainWindow : ITracesTreeHost
         map.SnapshotRead += snapshot =>
         {
             _tree.Read(snapshot, MapFeed.CoreScansWhenUnset);
+            RefreshMaySubmit();
             QueueEmptyState.Visibility = snapshot.Ready && snapshot.Tree(MapFeed.CoreScansWhenUnset, showsIgnored: true).Folders.Count == 0
                 ? Visibility.Visible
                 : Visibility.Collapsed;
@@ -60,7 +102,25 @@ public sealed partial class MainWindow : ITracesTreeHost
         // The queue's own rows carry what the tree draws beside the map's
         // read: sizes, holds, and what Submit may send.
         ViewModel.Groups.CollectionChanged += (_, _) => _tree.Refresh();
-        ViewModel.Pending.CollectionChanged += (_, _) => _tree.Refresh();
+        ViewModel.Pending.CollectionChanged += (_, _) =>
+        {
+            _tree.Refresh();
+            RefreshMaySubmit();
+        };
+    }
+
+    /// <summary>
+    /// Each waiting trace's <see cref="QueueEntryViewModel.MaySubmit"/> from
+    /// the tree's read, so the inspector's trace cards offer Submit exactly
+    /// where the tree's rows do (TracesStore.swift:801-806).
+    /// </summary>
+    private void RefreshMaySubmit()
+    {
+        TracesTreeState? state = _tree?.State;
+        foreach (QueueEntryViewModel entry in ViewModel.Pending)
+        {
+            entry.MaySubmit = state is not null && state.MaySubmit(entry.EntryId, entry.CanContribute, entry.StateCode, entry.ReasonCode);
+        }
     }
 
     QueueGroupViewModel? ITracesTreeHost.Group(string projectId) =>
@@ -120,8 +180,7 @@ public sealed partial class MainWindow : ITracesTreeHost
     {
         QueueEntryViewModel live = ViewModel.Pending.FirstOrDefault(e => e.EntryId == entry.EntryId) ?? entry;
         TracesTreeState? state = _tree?.State;
-        bool ignored = state?.Tree.Folders.FirstOrDefault(f => f.Sessions.Any(s => s.EntryId == entry.EntryId))?.Mode == MapModes.Ignore;
-        if (state is null || !TracesTreeRows.MaySubmitTrace(live.CanContribute, state.LoggedIn, state.Ready, ignored, live.StateCode, live.ReasonCode))
+        if (state is null || !state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode))
         {
             return;
         }
