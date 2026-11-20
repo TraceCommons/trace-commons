@@ -1,0 +1,44 @@
+{
+  "scopes": [
+    {
+      "name": "debugging_evaluation",
+      "title": "Debugging and evaluation",
+      "description": "Researchers can read your traces to study errors and compare coding agents.",
+      "always_on": true,
+      "grants_data_use": true,
+      "tag": "always on"
+    },
+    {
+      "name": "benchmark_only",
+      "title": "Create benchmarks",
+      "description": "Turn parts of your traces into tests for coding agents.",
+      "always_on": false,
+      "grants_data_use": true,
+      "tag": "data use"
+    },
+    {
+      "name": "ranking_training",
+      "title": "Train evaluators",
+      "description": "Train models that rank or grade coding-agent answers.",
+      "always_on": false,
+      "grants_data_use": true,
+      "tag": "data use"
+    },
+    {
+      "name": "model_training",
+      "title": "Train coding models",
+      "description": "Train models that write code, including commercial models.",
+      "always_on": false,
+      "grants_data_use": true,
+      "tag": "data use"
+    },
+    {
+      "name": "public_attribution",
+      "title": "List my handle publicly as a contributor",
+      "description": "Doesn't change how any trace is used.",
+      "always_on": false,
+      "grants_data_use": false,
+      "tag": "attribution only"
+    }
+  ]
+}

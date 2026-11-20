@@ -26,6 +26,49 @@ public sealed partial class MainWindow
     private SkillLearningModel SkillLearning =>
         _skillLearning ??= SkillLearningModel.WithCore(SkillLearningCall());
 
+    private AccountOwnedContent? _accountContent;
+
+    /// <summary>
+    /// The account the window's record content belongs to
+    /// (<c>AppModel.accountOwnedContentScope</c>): every History inspector
+    /// reports its detail reads here, since each is built for one record.
+    /// Cleared by another owner, an account-ending read, or Windows' own
+    /// account boundary (a status naming another account, a sign-out, an
+    /// unenroll), so no skill work of one account survives into the next.
+    /// </summary>
+    private AccountOwnedContent AccountContent
+    {
+        get
+        {
+            if (_accountContent is null)
+            {
+                _accountContent = new AccountOwnedContent();
+                _accountContent.Cleared += ClearAccountOwnedContent;
+                _host.Account.Changed += _accountContent.AccountBoundary;
+            }
+
+            return _accountContent;
+        }
+    }
+
+    /// <summary>
+    /// Everything read under the last account goes (<c>clearAccountOwnedContent</c>,
+    /// AppModel.swift:4255-4261): the skill store, and the open record's
+    /// detail, editor and skill panel with its typed draft.
+    /// </summary>
+    private void ClearAccountOwnedContent()
+    {
+        // Raised on the UI thread today; the inspector redraws, so make sure.
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(ClearAccountOwnedContent);
+            return;
+        }
+
+        _skillLearning?.ClearAccountOwnedContent();
+        _historyDetail?.ClearAccountOwnedContent();
+    }
+
     /// <summary>
     /// The daemon the skill flow asks, or none in a sample window: the flow
     /// spends on NEAR AI and writes into a tool's folder, and a recorded
@@ -70,6 +113,70 @@ public sealed partial class MainWindow
         await SentTracesTrainingViews.ShowSheetAsync(root, SentTraining, site);
         _home.SetTrainingLine(SentTracesTrainingViews.Line(SentTraining, ReviewSentTraining));
         _historyDetail?.RefreshTraining();
+    }
+
+    /// <summary>
+    /// The first run's Start confirmed a consent write: when it turned Train
+    /// coding models on, read the eligible traces and raise the sheet once
+    /// for this window, which the first run hands off to; it is shown here
+    /// once the first run has closed, not over the Start still running
+    /// (<c>saveConsentScopes</c>, AppModel.swift:5049-5058).
+    /// </summary>
+    private void OnFirstRunConsentScopesConfirmed(IReadOnlyList<string> before, IReadOnlyList<string> confirmed) =>
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            if (!SentTracesTrainingState.TurnsOn(before, confirmed))
+            {
+                return;
+            }
+
+            await SentTraining.OfferAfterTurnOnAsync(SentTracesTrainingSite.Monitor);
+            // The first run may have closed while the eligible traces were read.
+            if (_onboarding is null)
+            {
+                ShowFirstRunTrainingOffer();
+            }
+        });
+
+    private bool _offerWaitsForWindow;
+
+    /// <summary>
+    /// The first run has handed off: an offer it raised is shown on this
+    /// window, once it is on screen. A window hidden to the tray keeps the
+    /// offer until it is next activated (the Mac's Monitor shows its sheet
+    /// when it appears); Home's Review shows the same sheet meanwhile.
+    /// </summary>
+    private void ShowFirstRunTrainingOffer()
+    {
+        if (SentTraining.Sheet is not { Site: SentTracesTrainingSite.Monitor })
+        {
+            return;
+        }
+
+        if (!AppWindow.IsVisible || Content?.XamlRoot is not XamlRoot root)
+        {
+            if (!_offerWaitsForWindow)
+            {
+                _offerWaitsForWindow = true;
+                Activated += OnActivatedWithOffer;
+            }
+
+            return;
+        }
+
+        _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
+    }
+
+    private void OnActivatedWithOffer(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState == WindowActivationState.Deactivated || !AppWindow.IsVisible)
+        {
+            return;
+        }
+
+        Activated -= OnActivatedWithOffer;
+        _offerWaitsForWindow = false;
+        DispatcherQueue.TryEnqueue(ShowFirstRunTrainingOffer);
     }
 
     /// <summary>

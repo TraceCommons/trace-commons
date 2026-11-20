@@ -1,0 +1,14 @@
+{
+  "installed": true,
+  "skill": {
+    "install_id": "77777777-7777-4777-8777-777777777777",
+    "evaluation_id": "55555555-5555-4555-8555-555555555555",
+    "source_submission_id": "644587ac-f321-57d9-9b27-2c280db3de77",
+    "tool": "Codex",
+    "name": "repair-generated-sources",
+    "target_location": "$CODEX_HOME/skills/repair-generated-sources",
+    "skill_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "marker_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "installed_at": "2026-09-11T05:00:00Z"
+  }
+}

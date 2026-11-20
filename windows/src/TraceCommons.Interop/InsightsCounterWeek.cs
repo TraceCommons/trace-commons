@@ -61,6 +61,27 @@ public sealed class InsightsCounterWeek
     public IReadOnlyList<InsightsCounterSession>? Sessions { get; }
 
     /// <summary>Enabled, readable, from the counter pass, with a rollup and the core's Overview (:2308-2310).</summary>
+    /// <summary>Spend at API list prices; null from a daemon that predates it.</summary>
+    public InsightsWork? Work { get; private init; }
+
+    /// <summary>The goals set with <c>/goal</c> this week; null from a daemon that predates them.</summary>
+    public InsightsWeekGoals? Goals { get; private init; }
+
+    /// <summary>NEAR AI's own charge; null while routing is unavailable, never zero.</summary>
+    public InsightsNearAiCredit? NearAiCredit { get; private init; }
+
+    /// <summary>Claude Code and Codex tokens on each of the last 7 local days.</summary>
+    public IReadOnlyList<InsightsUsageDay>? UsageByDay { get; private init; }
+
+    /// <summary>The kept weeks' figures, passed to the core's <c>comparisons</c> unchanged.</summary>
+    public JsonElement? History { get; private init; }
+
+    /// <summary>The daemon's <c>insights_recap_card_enabled</c>, passed to <c>comparisons</c>.</summary>
+    public bool? RecapCardEnabled { get; private init; }
+
+    /// <summary>Each source's change on last week.</summary>
+    public IReadOnlyList<InsightsWeekChange>? ChangeVsLastWeek { get; private init; }
+
     public bool ShowsCounterPass =>
         Enabled && Readable == true && Feed == "counter_pass" && Sessions is not null && Overview is not null;
 
@@ -110,8 +131,32 @@ public sealed class InsightsCounterWeek
             sessions = list;
         }
 
-        return new InsightsCounterWeek(enabled.GetBoolean(), feed, readable, Str(result, "week_start"), Str(result, "iso_week"),
-            overview, patterns, sessions);
+        // The Mac decodes the whole reply or none of it: a part that is there
+        // but malformed refuses the reply (DaemonDataModels.swift:2258-2328).
+        try
+        {
+            JsonElement? history = null;
+            if (result.TryGetProperty("history", out JsonElement kept) && kept.ValueKind != JsonValueKind.Null)
+            {
+                history = kept.ValueKind == JsonValueKind.Array ? kept.Clone() : InsightsWeekParts.Fail<JsonElement>();
+            }
+
+            return new InsightsCounterWeek(enabled.GetBoolean(), feed, readable, Str(result, "week_start"), Str(result, "iso_week"),
+                overview, patterns, sessions)
+            {
+                Work = InsightsWeekParts.Part(result, "work", InsightsWeekParts.Work),
+                Goals = InsightsWeekParts.Part(result, "goals", InsightsWeekParts.Goals),
+                NearAiCredit = InsightsWeekParts.Part(result, "near_ai_credit", InsightsWeekParts.Credit),
+                UsageByDay = InsightsWeekParts.Part(result, "usage_by_day", InsightsWeekParts.UsageDays),
+                History = history,
+                RecapCardEnabled = InsightsWeekParts.OptBool(result, "recap_card_enabled"),
+                ChangeVsLastWeek = InsightsWeekParts.Part(result, "change_vs_last_week", InsightsWeekParts.Changes),
+            };
+        }
+        catch (Exception e) when (e is InsightsWeekParts.Malformed or OverflowException)
+        {
+            return null;
+        }
     }
 
     private static InsightsCounterSession? Session(JsonElement row)
