@@ -1526,15 +1526,20 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
             // Claude Desktop's sheet lists only the models its route accepts.
             let desktop_models =
                 (p.tool == ToolId::Claude).then(|| super::claude_desktop::desktop_models(&main));
-            Ok(json!({
-                "desktop_models":desktop_models,
+            let mut reply = json!({
                 "models":main,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,
                 "background_sets":background["sets"],
                 "background":background["models"],
                 "background_models":background_models,
-            }))
+            });
+            // Only Claude's reply carries the key; another tool's reply is
+            // unchanged from before Claude Desktop's list existed.
+            if let Some(desktop_models) = desktop_models {
+                reply["desktop_models"] = json!(desktop_models);
+            }
+            Ok(reply)
         }
         _ => Err(ManagedError::ModelUnavailable.into()),
     };

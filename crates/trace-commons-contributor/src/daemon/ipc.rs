@@ -17376,6 +17376,7 @@ mod tests {
                 "tier_order":["near_ai","external","incognito"],
                 "background_sets":[],
                 "background":{},
+                "background_models":[],
             })
         );
         // Claude's answer also says, for each model as the main model, its
