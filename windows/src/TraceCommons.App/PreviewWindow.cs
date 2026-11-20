@@ -36,8 +36,7 @@ public sealed class PreviewWindow : Window
     public PreviewWindow(
         DaemonHost host,
         QueueEntryViewModel entry,
-        Func<string, QueueEntryViewModel?>? liveEntry,
-        AppWindow? owner = null)
+        Func<string, QueueEntryViewModel?>? liveEntry)
     {
         Title = "Look inside";
 
@@ -46,7 +45,7 @@ public sealed class PreviewWindow : Window
         _sheet.CloseRequested += Close;
         Content = _sheet;
         WindowClocks.Watch(this);
-        FitToSheet(owner);
+        FitToSheet(null);
 
         Closed += OnClosed;
     }
@@ -61,9 +60,11 @@ public sealed class PreviewWindow : Window
     /// window and Tab reached Not this one and Close where nothing could be
     /// seen (box tab walk, 2026-11-19).
     /// </summary>
+    /// <summary>Places the window on the monitor of <paramref name="owner"/>, as About is.</summary>
+    public void PlaceNear(AppWindow owner) => FitToSheet(owner);
+
     private void FitToSheet(AppWindow? owner)
     {
-        // On the monitor of the window it was opened from, as About is.
         DisplayArea display = DisplayArea.GetFromWindowId((owner ?? AppWindow).Id, DisplayAreaFallback.Nearest);
         RectInt32 work = display.WorkArea;
         double scale = MonitorScale.For(AppWindow);
