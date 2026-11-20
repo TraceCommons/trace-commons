@@ -97,14 +97,14 @@ public sealed class AboutWindow : Window
         };
         if (model.ShowsCopyright)
         {
-            var copyright = new TextBlock
+            var copyrightLine = new TextBlock
             {
                 Text = model.Copyright,
                 Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
                 HorizontalAlignment = HorizontalAlignment.Center,
             };
-            ThemeBrushes.Bind(copyright, TextBlock.ForegroundProperty, "TcInkSecondaryBrush");
-            column.Children.Add(copyright);
+            ThemeBrushes.Bind(copyrightLine, TextBlock.ForegroundProperty, "TcInkSecondaryBrush");
+            column.Children.Add(copyrightLine);
         }
 
         var ground = new Grid { Children = { column } };
