@@ -13,6 +13,8 @@ public enum NoticeGroup
     App,
     /// <summary>What waits on an answer about the traces (<c>tracesOffers</c>).</summary>
     TracesOffers,
+    /// <summary>History's own offers (<c>historyOffers</c>): the verdicts offer.</summary>
+    HistoryOffers,
     /// <summary>What is happening to the traces now (<c>tracesNow</c>).</summary>
     TracesNow,
     /// <summary>The Private AI tab's own (<c>privateAIItems</c>).</summary>
@@ -153,6 +155,15 @@ public static class NoticeCatalog
     /// <summary>Whether <paramref name="id"/> is an approval's undo card.</summary>
     public static bool IsUndo(string id) => id.StartsWith(UndoPrefix, StringComparison.Ordinal);
 
+    /// <summary>
+    /// A one-time offer to turn a notification kind on
+    /// (MonitorNotices.swift:695-725, W17-D2): the idle offer with the traces
+    /// offers, the verdicts offer with History's own. Not now closes it
+    /// until the window opens again; No thanks answers it.
+    /// </summary>
+    public static NoticeKind NotifyOffer(string kind) =>
+        new("notify-offer:" + kind, kind == "verdicts_landed" ? NoticeGroup.HistoryOffers : NoticeGroup.TracesOffers, NoticeClose.ForNow);
+
     /// <summary>The offer to answer model calls: the X declines it (MonitorNotices.swift:751-761).</summary>
     public static readonly NoticeKind PrivateAIOffer = new("private-ai-offer", NoticeGroup.PrivateAI, NoticeClose.Declines);
 
@@ -175,12 +186,15 @@ public static class NoticeCatalog
 
     /// <summary>
     /// The groups a place draws, back first (MonitorNotices.swift:140-161).
-    /// History's own offers and Home's terms hold have no card in this shell.
+    /// Home's terms hold has no card in this shell.
     /// </summary>
     public static IReadOnlyList<NoticeGroup> Groups(NoticePlace place) => place switch
     {
-        NoticePlace.Traces or NoticePlace.History =>
+        NoticePlace.Traces =>
             new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
+        NoticePlace.History =>
+            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.HistoryOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
+        NoticePlace.HomeHistory => new[] { NoticeGroup.App, NoticeGroup.HistoryOffers, NoticeGroup.Action },
         NoticePlace.PrivateAI => new[] { NoticeGroup.App, NoticeGroup.PrivateAI, NoticeGroup.Action },
         _ => new[] { NoticeGroup.App, NoticeGroup.Action },
     };

@@ -119,6 +119,7 @@ pub mod retired_second_scan;
 pub mod retry_jitter;
 pub mod routing;
 pub mod routing_copy;
+pub mod settings_general_copy;
 pub mod shell_words_copy;
 pub mod skill_loop;
 pub mod skills_catalog;

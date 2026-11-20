@@ -6495,6 +6495,22 @@ pub extern "C" fn tc_referral_copy_json() -> *mut c_char {
     })
 }
 
+/// The Settings window's General words the Mac spells in Swift
+/// (`settings_general_copy::settings_general_copy`): `general`,
+/// `appearance`, `light`, `dark` and `system`. The Windows app's General
+/// section reads them. Every word but `appearance` is a draft for owner
+/// review.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_settings_general_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::settings_general_copy::settings_general_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// A typed referral code as it is shown, `TC-XXXXX-XXXXX`
 /// (`trace_commons_protocol::referral::normalize_referral_code`, then
 /// `format_referral_code`): the same reading the daemon applies before it

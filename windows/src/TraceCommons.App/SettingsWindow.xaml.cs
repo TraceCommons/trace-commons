@@ -27,6 +27,19 @@ public sealed partial class SettingsWindow : Window
         WindowClocks.Watch(this);
         Title = MonitorWords.SettingsTitle;
         SettingsHost.Content = view;
+
+        // Settings > General's appearance, here as on the Monitor window.
+        WindowAppearance.Follow(this, SettingsRoot);
+
+        // Escape closes the window, as the Mac's onExitCommand does
+        // (SettingsModal.swift:57).
+        var escape = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            Close();
+        };
+        SettingsRoot.KeyboardAccelerators.Add(escape);
     }
 
     /// <summary>
@@ -56,6 +69,10 @@ public sealed partial class SettingsWindow : Window
 
         AppWindow.Show();
         Activate();
+
+        // Focus the first control, not the bare input site: a nameless
+        // first stop that Escape never reached (W25 audit, box az9).
+        ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => AppWindow.IsVisible);
     }
 }
 

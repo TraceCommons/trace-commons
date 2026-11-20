@@ -27,6 +27,12 @@ public sealed partial class SessionRootsWindow : Window
     public SessionRootsWindow(DaemonHost host, IReadOnlyList<SourceCandidate> candidates)
     {
         InitializeComponent();
+        // Settings > General's appearance, as on every window (WindowAppearance).
+        if (Content is Microsoft.UI.Xaml.FrameworkElement root)
+        {
+            WindowAppearance.Follow(this, root);
+        }
+
         // The app's name from brand.rs (tc_app_name), never a literal (W10).
         Title = TraceCommons.Interop.Shell.MonitorWords.AppName;
         WindowClocks.Watch(this);

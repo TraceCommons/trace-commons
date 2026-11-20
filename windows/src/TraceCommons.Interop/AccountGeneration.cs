@@ -23,6 +23,14 @@ public sealed class AccountGeneration
     /// </summary>
     public event Action? BoundaryCrossed;
 
+    /// <summary>Raised on every new generation.</summary>
+    /// <summary>
+    /// Raised on every new generation: a status naming another account, or
+    /// a <see cref="Boundary"/>. Settings sections that list the account's
+    /// own things (devices, payouts, referrals) read them again on it.
+    /// </summary>
+    public event Action? Changed;
+
     private bool _seen;
     private string? _scope;
 
@@ -37,13 +45,14 @@ public sealed class AccountGeneration
     public bool Observe(string? scope)
     {
         bool changed = _seen && _scope != scope;
+        _seen = true;
+        _scope = scope;
         if (changed)
         {
             Current++;
+            Changed?.Invoke();
         }
 
-        _seen = true;
-        _scope = scope;
         return changed;
     }
 
@@ -52,6 +61,7 @@ public sealed class AccountGeneration
     {
         Current++;
         BoundaryCrossed?.Invoke();
+        Changed?.Invoke();
     }
 
     /// <summary>Whether a press stamped <paramref name="pressedUnder"/> may still be applied.</summary>

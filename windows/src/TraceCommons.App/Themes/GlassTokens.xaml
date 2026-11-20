@@ -122,11 +122,11 @@
             <SolidColorBrush x:Key="TcGlassToolbarGlyphBrush" Color="#FF1D1D1F" />
             <SolidColorBrush x:Key="TcGlassStatusOnBrush" Color="#FF1A8F4C" />
             <SolidColorBrush x:Key="TcGlassStatusAskBrush" Color="#FFA8690F" />
-            <SolidColorBrush x:Key="TcGlassStatusOffBrush" Color="#FF8A8A90" />
+            <SolidColorBrush x:Key="TcGlassStatusOffBrush" Color="#FF78787F" />
             <SolidColorBrush x:Key="TcGlassCtaBrush" Color="#FF0558B6" />
             <SolidColorBrush x:Key="TcGlassCtaInkBrush" Color="#FFFFFFFF" />
             <SolidColorBrush x:Key="TcGlassToggleOnBrush" Color="#FF0558B6" />
-            <SolidColorBrush x:Key="TcGlassToggleOffBrush" Color="#FFB8B9BB" />
+            <SolidColorBrush x:Key="TcGlassToggleOffBrush" Color="#FF8A8B8C" />
             <SolidColorBrush x:Key="TcGlassToggleKnobOnBrush" Color="#FFFFFFFF" />
             <SolidColorBrush x:Key="TcGlassToggleKnobOffBrush" Color="#FFFFFFFF" />
             <SolidColorBrush x:Key="TcGlassCheckboxOnBrush" Color="#FF0558B6" />

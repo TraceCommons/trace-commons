@@ -446,6 +446,16 @@ pub struct SettingsWords {
     pub copy: &'static str,
     pub checks_daily: &'static str,
     pub checks_automatically: &'static str,
+    /// Windows only: the Updates tag on a self-updating (packaged) copy,
+    /// where App Installer checks every 8 hours, in place of
+    /// [`Self::checks_daily`]. The Mac does not draw it. Approved by the
+    /// owner 2026-11-19.
+    pub checks_every_eight_hours: &'static str,
+    /// Windows only: the Updates caption on a self-updating copy, in place
+    /// of [`Self::checks_automatically`]; the background task installs
+    /// without asking. The Mac does not draw it. Approved by the owner
+    /// 2026-11-19.
+    pub installs_when_closed: &'static str,
     pub managed_by_homebrew: &'static str,
     pub homebrew_replaces: &'static str,
     pub updates_unavailable: &'static str,
@@ -510,6 +520,10 @@ pub fn settings_words() -> SettingsWords {
         checks_daily: "Checks daily",
         // Approved by the owner 2026-11-04 (Settings copy pass 2, P259).
         checks_automatically: "Asks before installing an update.",
+        // Windows only. Approved by the owner 2026-11-19.
+        checks_every_eight_hours: "Checks every 8 hours",
+        // Windows only. Approved by the owner 2026-11-19.
+        installs_when_closed: "Installs updates when the app is closed or next opens.",
         managed_by_homebrew: "Updates managed by Homebrew",
         // Approved by the owner 2026-11-04 (Settings copy pass 2, P258).
         homebrew_replaces: "To update, run this in a terminal:",
@@ -790,6 +804,24 @@ mod tests {
         );
         assert_eq!(copy.paused_notice.resume, "Resume");
         assert_eq!(copy.paused_notice.not_now, "Not now");
+    }
+
+    /// The Windows Updates card's two lines, approved by the owner
+    /// 2026-11-19, beside the Mac's, which keep their words.
+    #[test]
+    fn the_windows_update_words_are_the_owners_and_the_macs_are_unchanged() {
+        let settings = serde_json::to_value(settings_words()).expect("settings words serialize");
+        assert_eq!(settings["checks_every_eight_hours"], "Checks every 8 hours");
+        assert_eq!(
+            settings["installs_when_closed"],
+            "Installs updates when the app is closed or next opens."
+        );
+        assert_eq!(settings["checks_daily"], "Checks daily");
+        assert_eq!(
+            settings["checks_automatically"],
+            "Asks before installing an update."
+        );
+        assert_eq!(settings["last_checked"], "Last checked {relative}.");
     }
 
     fn strings(value: &serde_json::Value, out: &mut Vec<String>) {

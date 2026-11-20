@@ -140,7 +140,7 @@ public class SampleDaemonTests
         foreach (string method in new[]
         {
             "set_settings", "enroll", "withdraw", "unenroll", "preview", "preview_body",
-            "search_original", "account_devices_list", "",
+            "search_original", "account_devices_list", "managed_cli_options_set", "managed_snapshot", "",
             // W21: no recording of these exists (the Mac's sample client has
             // none either), so a sample launch's History detail shows the
             // core's failed-read line and offers no publish.

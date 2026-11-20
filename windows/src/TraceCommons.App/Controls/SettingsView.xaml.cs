@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls;
 
@@ -24,65 +25,47 @@ public sealed partial class SettingsView : UserControl
     private bool _tokenContributionDialogOpen;
     private bool _inferenceEvidenceDialogOpen;
 
-    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer)
+    public SettingsView(DaemonHost host, LegacyMigrationOfferViewModel legacyOffer, UpdateCheckClock updateChecks)
     {
         LegacyOffer = legacyOffer ?? throw new ArgumentNullException(nameof(legacyOffer));
+        ArgumentNullException.ThrowIfNull(updateChecks);
         InitializeComponent();
-        // The app's name from brand.rs (tc_app_name), never a literal (W10).
-        StartAtLoginSwitch.Header = $"Start {TraceCommons.Interop.Shell.MonitorWords.AppName} when you sign in";
+        BuildSections(host, updateChecks);
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
         InitializeShellSwitches();
-        QuiescenceMinutes.Loaded += (_, _) => AddMapStyleSwitch();
+
+        // The Traces map's style (W6-D1), its card in General after the edge
+        // rail, as the Mac's (GeneralSection.swift:28); left out when the
+        // core gave no words for it.
+        if (MapStyleSwitch.Build() is { } mapStyle)
+        {
+            MapStyleHost.Content = mapStyle;
+        }
+        else
+        {
+            MapStyleCard.Visibility = Visibility.Collapsed;
+        }
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
+        Settings.AuditReadChanged += DrawAuditNotice;
+        DrawAuditNotice();
         Loaded += OnFirstLoaded;
     }
 
     /// <summary>
-    /// The Traces map's style switch (W6-D1), as its own card after the
-    /// behaviour card: Settings has no General section on Windows yet (W17).
+    /// The change log's read notice: a spinner until list_audit answers,
+    /// then the failure line with Retry while nothing has answered
+    /// (ChangesSection.swift:11-15); nothing once a read answered.
     /// </summary>
-    private void AddMapStyleSwitch()
+    private void DrawAuditNotice()
     {
-        if (_mapStyleAdded)
-        {
-            return;
-        }
-
-        // The behaviour card is the nearest Border round the quiet-time box,
-        // and its section the nearest panel round that card, read from the
-        // live tree once it is loaded.
-        DependencyObject? node = QuiescenceMinutes;
-        Border? behaviour = null;
-        while (node is not null && behaviour is null)
-        {
-            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
-            behaviour = node as Border;
-        }
-
-        if (behaviour is null
-            || Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(behaviour) is not Panel section
-            || MapStyleSwitch.Build() is not { } content)
-        {
-            return;
-        }
-
-        _mapStyleAdded = true;
-        var card = new Border
-        {
-            Background = behaviour.Background,
-            BorderBrush = behaviour.BorderBrush,
-            BorderThickness = behaviour.BorderThickness,
-            CornerRadius = behaviour.CornerRadius,
-            Padding = behaviour.Padding,
-            Child = content,
-        };
-        section.Children.Insert(section.Children.IndexOf(behaviour) + 1, card);
+        AuditLogRead audit = Settings.Audit;
+        AuditNoticeHost.Content = audit.ShowsReadNotice
+            ? global::TraceCommons.App.Controls.Settings.SettingsCards.ReadNotice(audit.ReadFailed, async (_, _) => await Settings.RetryAuditAsync())
+            : null;
     }
-
-    private bool _mapStyleAdded;
 
     public PublicProfileViewModel ViewModel { get; }
 
@@ -434,22 +417,6 @@ public sealed partial class SettingsView : UserControl
     private async void OnWitnessClear(object sender, RoutedEventArgs e)
     {
         await Settings.ClearWitnessAsync();
-    }
-
-    private async void OnBehaviorChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
-    {
-        if (!Settings.IsLoaded || Settings.IsBusy || double.IsNaN(args.NewValue))
-        {
-            return;
-        }
-
-        BehaviorSetting setting = sender.Name switch
-        {
-            "QuiescenceMinutes" => BehaviorSetting.QuiescenceMinutes,
-            "DigestHours" => BehaviorSetting.DigestHours,
-            _ => throw new InvalidOperationException("unknown behavior setting"),
-        };
-        await Settings.SaveBehaviorAsync(setting, args.NewValue);
     }
 
     /// <summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -87,6 +88,9 @@ public sealed class DaemonHost : IAsyncDisposable
     /// <summary>A daemon started and is subscribed; raised on the UI thread. Never in a sample window.</summary>
     public event Action? Started;
 
+    /// <summary>Raised when a start is refused (<see cref="StartRefused"/>).</summary>
+    public event Action? Refused;
+
     /// <summary>
     /// A model call was recorded (<c>inference_call_added</c>). The Private AI
     /// tab re-reads its ledger on it, as the Mac's InferenceStore does.
@@ -129,6 +133,21 @@ public sealed class DaemonHost : IAsyncDisposable
     /// deltas.
     /// </summary>
     public event Action<int>? Lagged;
+
+    /// <summary>
+    /// Raised on the UI thread for a <c>reengage_due</c> this build can post
+    /// (<see cref="ReengageNotice"/>). Delivered only while
+    /// <see cref="AcceptedEvents"/> declares it.
+    /// </summary>
+    public event Action<ReengageNotice>? ReengageDue;
+
+    /// <summary>
+    /// The opt-in events this app renders, declared when the subscription is
+    /// made (<c>tc_subscribe_with_accepts</c>). Set before the daemon starts:
+    /// <c>reengage_due</c> only while the tray can show a notification
+    /// (<see cref="ReengageNotice.AcceptedEvents"/>).
+    /// </summary>
+    public IReadOnlyList<string> AcceptedEvents { get; set; } = Array.Empty<string>();
 
     /// <summary>
     /// Raised on the UI thread when the daemon's preview scheduler finishes
@@ -202,6 +221,14 @@ public sealed class DaemonHost : IAsyncDisposable
     public bool IsRunning => _daemon is not null;
 #endif
 
+    /// <summary>
+    /// The last start was refused for a cause other than undeclared session
+    /// folders (most often another instance holding the state directory);
+    /// cleared once a start succeeds. Settings draws the core's down title
+    /// for it rather than the onboarding notice (<c>MonitorGate.down</c>).
+    /// </summary>
+    public bool StartRefused { get; private set; }
+
     /// <summary>Changes whenever the running daemon connection is replaced or stopped.</summary>
     public long ConnectionGeneration { get; private set; }
 
@@ -270,13 +297,28 @@ public sealed class DaemonHost : IAsyncDisposable
         // back to the real ~/.claude and ~/.codex. That fallback is what this
         // client used to get, and it meant a contributor's whole session
         // history was scanned on the strength of never having been asked.
-        TcDaemon daemon = await Task
-            .Run(() => new TcDaemon(_configDir, settingsJson), cancellationToken)
-            .ConfigureAwait(true);
+        TcDaemon daemon;
+        try
+        {
+            daemon = await Task
+                .Run(() => new TcDaemon(_configDir, settingsJson), cancellationToken)
+                .ConfigureAwait(true);
+        }
+        catch (TcException exception) when (!exception.IsRootsNotDeclared)
+        {
+            StartRefused = true;
+            Refused?.Invoke();
+            throw;
+        }
 
+        StartRefused = false;
         _daemon = daemon;
         ConnectionGeneration++;
-        _subscription = daemon.Subscribe(OnDaemonEvent, new[] { DaemonProtocol.Events.FeatureFlagsChanged });
+        // feature_flags_changed always, as the Mac does; reengage_due only
+        // while the tray can show it (AcceptedEvents).
+        _subscription = daemon.Subscribe(
+            OnDaemonEvent,
+            new[] { DaemonProtocol.Events.FeatureFlagsChanged }.Concat(AcceptedEvents).ToArray());
         Started?.Invoke();
     }
 
@@ -485,6 +527,14 @@ public sealed class DaemonHost : IAsyncDisposable
                         evt.ContributedProjects,
                         evt.CreditPending,
                         evt.Contribution));
+                    break;
+
+                case DaemonProtocol.Events.ReengageDue:
+                    if (ReengageNotice.From(evt) is { } notice)
+                    {
+                        ReengageDue?.Invoke(notice);
+                    }
+
                     break;
 
                 case DaemonProtocol.Events.Lagged:

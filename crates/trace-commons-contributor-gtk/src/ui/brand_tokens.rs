@@ -187,7 +187,7 @@ pub const GLASS_LIGHT_CSS: &str = r#"
 @define-color tc_glass_ink_tertiary #3d3d43;
 @define-color tc_glass_status_ask #a8690f;
 @define-color tc_glass_status_on #1a8f4c;
-@define-color tc_glass_status_off #8a8a90;
+@define-color tc_glass_status_off #78787f;
 @define-color tc_glass_tile_folder #e6e6ea;
 @define-color tc_glass_window_pane #f2f3f6;
 @define-color tc_glass_window_card #fafafb;
@@ -448,7 +448,7 @@ pub mod glass {
         /// `dataKept`, light.
         pub const KEPT_LIGHT: &str = "#2F6BC4";
         /// `statusOff`, light.
-        pub const LABEL_LIGHT: &str = "#8A8A90";
+        pub const LABEL_LIGHT: &str = "#78787F";
         /// `textPrimary`, light.
         pub const TEXT_PRIMARY_LIGHT: &str = "#1D1D1F";
         /// `dataShared`, dark.
@@ -485,7 +485,7 @@ pub mod glass {
         /// `statusAsk`, light.
         pub const ASK_LIGHT: &str = "#A8690F";
         /// `statusOff`, light.
-        pub const OFF_LIGHT: &str = "#8A8A90";
+        pub const OFF_LIGHT: &str = "#78787F";
         /// `statusOutside`, light.
         pub const OUTSIDE_LIGHT: &str = "#D0342C";
         /// `statusOn`, dark.
@@ -637,12 +637,14 @@ pub mod map {
         pub const MAP_ORB_KEPT: Rgba = ("#cf5320", 1.0);
         pub const PURPLE_SOFT: Rgba = ("#056bdc", 1.0);
         pub const BLUE: Rgba = ("#2f6bc4", 1.0);
-        pub const STATUS_OFF: Rgba = ("#8a8a90", 1.0);
+        pub const STATUS_OFF: Rgba = ("#78787f", 1.0);
         pub const STATUS_ON: Rgba = ("#1a8f4c", 1.0);
         pub const STATUS_ON_TEXT: Rgba = ("#0b4628", 1.0);
         pub const STATUS_ASK: Rgba = ("#a8690f", 1.0);
         pub const STATUS_OUTSIDE: Rgba = ("#d0342c", 1.0);
         pub const MAP_NODE_OFF: Rgba = ("#c4c9d2", 1.0);
+        pub const MAP_PAD_SLAB: Rgba = ("#69696f", 1.0);
+        pub const MAP_PAD_TOWER: Rgba = ("#5f5f65", 1.0);
         pub const MAP_CREDENTIAL_ON: Rgba = ("#27a06b", 1.0);
         pub const MAP_RULE_AUTO_FILL: Rgba = ("#d7f1e2", 1.0);
         pub const MAP_RULE_ASK_FILL: Rgba = ("#f6ead0", 1.0);
@@ -677,6 +679,8 @@ pub mod map {
         pub const STATUS_ASK: Rgba = ("#ffc75c", 1.0);
         pub const STATUS_OUTSIDE: Rgba = ("#ff6b6b", 1.0);
         pub const MAP_NODE_OFF: Rgba = ("#5d5d63", 1.0);
+        pub const MAP_PAD_SLAB: Rgba = ("#a9a9b0", 1.0);
+        pub const MAP_PAD_TOWER: Rgba = ("#a9a9b0", 1.0);
         pub const MAP_CREDENTIAL_ON: Rgba = ("#2c7a5b", 1.0);
         pub const MAP_RULE_AUTO_FILL: Rgba = ("#12321f", 1.0);
         pub const MAP_RULE_ASK_FILL: Rgba = ("#2b2412", 1.0);
@@ -733,7 +737,7 @@ pub mod first_run {
         pub const TINT_ACCENT: Rgba = ("#056bdc", 0.14);
         pub const TOGGLE_ON: Rgba = ("#0558b6", 1.0);
         pub const TEXT_ON_ACCENT: Rgba = ("#ffffff", 1.0);
-        pub const TOGGLE_OFF: Rgba = ("#000000", 0.24);
+        pub const TOGGLE_OFF: Rgba = ("#000000", 0.43);
         pub const TOGGLE_KNOB_OFF: Rgba = ("#ffffff", 1.0);
         pub const FIRST_RUN_CONTROL_HOVER: Rgba = ("#ffffff", 0.92);
     }

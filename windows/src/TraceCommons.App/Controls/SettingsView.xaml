@@ -3,9 +3,10 @@
     The complete device Settings screen, plus the public profile from section
     5.6 of the design spec.
 
-    Every value comes from the daemon or the operating system. Timing edits
-    send one set_settings key at a time, project changes use opaque project
-    ids, and the local audit log contains fixed labels only.
+    Every value comes from the daemon or the operating system. Project
+    changes use opaque project ids, and the local audit log contains fixed
+    labels only. Watching shows only the watcher card, as the Mac's
+    WatchingSection does; the timing card is gone (owner, 2026-11-19).
 
     Two surfaces, not two states of one. Off the roster this is a single
     control that grants nothing and opens a consent dialog; on it, it is a
@@ -30,24 +31,128 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
 
+    <!--
+        The Settings sections' code-built cards and the list's hairlines take
+        their brushes through these styles, so they follow the window's own
+        theme (Settings, General, Appearance) as the markup does; a brush read
+        from the application's resources would follow the app's theme instead.
+    -->
+    <UserControl.Resources>
+        <Style x:Key="SettingsCardStyle" TargetType="Border">
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceCardBrush}" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcCardCornerRadius}" />
+            <Setter Property="Padding" Value="14,12" />
+        </Style>
+        <Style x:Key="SettingsHairlineStyle" TargetType="Border">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Margin" Value="0,6" />
+            <Setter Property="Background" Value="{ThemeResource TcHairlineDividerBrush}" />
+        </Style>
+
+        <!--
+            The chips' and lines' brushes (SettingsCards.GlassChip,
+            StatusChip, the secondary and tertiary captions, the spend
+            organization card's notice): the same rule, so they follow the
+            window's theme and a live theme change. Code never reads a brush
+            key itself (SettingsThemeBrushTests).
+        -->
+        <Style x:Key="SettingsChipAccentTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcAccentTextBrush}" />
+        </Style>
+        <Style x:Key="SettingsChipSecondaryTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsChipOnTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusOnTextBrush}" />
+        </Style>
+        <Style x:Key="SettingsGlassChipStyle" TargetType="Border">
+            <Setter Property="Padding" Value="9,3,9,3" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="BorderThickness" Value="0.5" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="SettingsGlassChipMutedStyle" TargetType="Border" BasedOn="{StaticResource SettingsGlassChipStyle}">
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
+        </Style>
+        <Style x:Key="SettingsStatusChipStyle" TargetType="Border">
+            <Setter Property="Padding" Value="9,3,9,3" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="SettingsStatusDotOnStyle" TargetType="Ellipse">
+            <Setter Property="Width" Value="6" />
+            <Setter Property="Height" Value="6" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Fill" Value="{ThemeResource TcStatusOnBrush}" />
+        </Style>
+        <Style x:Key="SettingsStatusDotOffStyle" TargetType="Ellipse" BasedOn="{StaticResource SettingsStatusDotOnStyle}">
+            <Setter Property="Fill" Value="{ThemeResource TcStatusOffBrush}" />
+        </Style>
+        <Style x:Key="SettingsSecondaryCaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource TcCaptionTextStyle}">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsTertiaryCaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource TcCaptionTextStyle}">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkTertiaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeTextStyle" TargetType="TextBlock">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeWashAskStyle" TargetType="Border">
+            <Setter Property="Opacity" Value="0.14" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcCardCornerRadius}" />
+            <Setter Property="Background" Value="{ThemeResource TcStatusAskBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeWashOutsideStyle" TargetType="Border" BasedOn="{StaticResource SettingsNoticeWashAskStyle}">
+            <Setter Property="Background" Value="{ThemeResource TcStatusOutsideBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeIconAskStyle" TargetType="FontIcon">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusAskBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeIconOutsideStyle" TargetType="FontIcon">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusOutsideBrush}" />
+        </Style>
+    </UserControl.Resources>
+
     <Grid RowDefinitions="Auto,*">
 
-        <StackPanel Grid.Row="0"
-                    Spacing="2"
-                    Padding="20,9"
-                    BorderBrush="{ThemeResource TcHairlineDividerBrush}"
-                    BorderThickness="0,0,0,1">
-            <TextBlock Text="Settings" Style="{StaticResource TcTitleScreenTextStyle}" />
-            <TextBlock Text="What this machine watches, and what your traces are allowed to do."
-                       Style="{StaticResource TcCaptionTextStyle}"
-                       TextWrapping="Wrap" />
-        </StackPanel>
+        <!--
+            The header: the core's settings_title, as the Mac's SettingsModal
+            draws it (SettingsModal.swift:62-80), over a hairline.
+        -->
+        <Grid Grid.Row="0"
+              Padding="18,14,16,10"
+              BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+              BorderThickness="0,0,0,1">
+            <TextBlock x:Name="SettingsTitleText" Style="{StaticResource TcTitleScreenTextStyle}" />
+            <ContentControl x:Name="HeaderChipHost" IsTabStop="False" HorizontalAlignment="Right" VerticalAlignment="Center" />
+        </Grid>
 
-        <ScrollViewer Grid.Row="1" Padding="22,16,22,16">
-            <StackPanel Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
-
-                <TextBlock Text="CONNECTION"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
+        <!--
+            Two columns, as on the Mac (SettingsModal.swift:82-150): the
+            section list (180 wide, a hairline between groups, no group
+            headings), a hairline, and one scrolling body holding every
+            section in the Mac's order. A row scrolls the body to its section.
+            The list is filled in code from SettingsSections.
+        -->
+        <Grid Grid.Row="1" ColumnDefinitions="180,Auto,*">
+            <ScrollViewer Grid.Column="0">
+                <StackPanel x:Name="SectionList" Spacing="1" Padding="8,10,8,10" />
+            </ScrollViewer>
+            <Border Grid.Column="1" Width="1" Background="{ThemeResource TcHairlineDividerBrush}" />
+            <ScrollViewer x:Name="SectionScroller" Grid.Column="2" Padding="22,0,22,16">
+            <StackPanel x:Name="SectionBody" Spacing="12" MaxWidth="640" HorizontalAlignment="Left">
+                <!-- Account (SettingsSections.swift:14): who this app is, the account, its devices. -->
+                <TextBlock x:Name="RuleAccount" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyAccount" Spacing="12">
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
                         BorderThickness="1"
@@ -165,6 +270,23 @@
                 </StackPanel>
 
                 <!--
+                    Move a legacy invite identity to the contributor's NEAR AI
+                    account. Shown only while the daemon offers it. The same
+                    control the main window's notices card uses, here without
+                    the dismiss: the move stays available as long as it is
+                    offered. Every string is bound, from the Rust.
+                -->
+                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
+                                                   ShowsDismiss="False"
+                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
+
+                <ContentControl IsTabStop="False" x:Name="DevicesHost" HorizontalContentAlignment="Stretch" />
+                <!-- Payouts: drawn, with its row, only while something in it applies (D2). -->
+                </StackPanel>
+                <TextBlock x:Name="RulePayouts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPayouts" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="PayoutsHost" HorizontalContentAlignment="Stretch" />
+                <!--
                     F10, entry point 3: a wallet-origin account's payouts need
                     a NEAR AI login. This shell has no payouts section, so the
                     line sits here in the account section, where macOS shows
@@ -191,172 +313,20 @@
                     </StackPanel>
                 </Border>
 
-                <!--
-                    Move a legacy invite identity to the contributor's NEAR AI
-                    account. Shown only while the daemon offers it. The same
-                    control the main window's notices card uses, here without
-                    the dismiss: the move stays available as long as it is
-                    offered. Every string is bound, from the Rust.
-                -->
-                <controls:LegacyMigrationOfferView x:Name="LegacyOfferView"
-                                                   ShowsDismiss="False"
-                                                   Visibility="{x:Bind LegacyOffer.IsAvailable, Mode=OneWay}" />
-
-                <TextBlock Text="STARTUP"
-                           Style="{StaticResource TcEyebrowTextStyle}"
-                           Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}" />
-                <ToggleSwitch x:Name="StartAtLoginSwitch"
-                              IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
-                              IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                              Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
-                              Toggled="OnStartAtLoginToggled" />
-
-                <!--
-                    Credit arrivals and the edge rail (W12, W13): the Mac's
-                    General section cards (GeneralSection.swift:35-51, :91-110),
-                    each its core heading, switch and caption, set from code
-                    (SettingsView.Shell.cs). The credit switch is on and the
-                    rail off until the person changes them, as on the Mac.
-                -->
-                <TextBlock x:Name="CreditAnimationTitle" Style="{StaticResource TcEyebrowTextStyle}" />
-                <ToggleSwitch x:Name="CreditAnimationSwitch" Toggled="OnCreditAnimationToggled" />
-                <TextBlock x:Name="CreditAnimationCaption"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="WrapWholeWords" />
-                <TextBlock x:Name="EdgeRailTitle" Style="{StaticResource TcEyebrowTextStyle}" />
-                <ToggleSwitch x:Name="EdgeRailSwitch" Toggled="OnEdgeRailToggled" />
-                <TextBlock x:Name="EdgeRailCaption"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="WrapWholeWords" />
-
-                <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="Applies to traces you send from now on."
-                           Style="{StaticResource TcCaptionTextStyle}" />
-
-                <TextBlock Text="ALWAYS INCLUDED"
-                           Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.AlwaysIncluded}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
-                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
-                                      IsEnabled="False"
-                                      Margin="0,2">
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="{x:Bind Title}"
-                                               Style="{StaticResource TcTitleCardTextStyle}" />
-                                    <TextBlock Text="{x:Bind Description}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                            </CheckBox>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
-                <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
-                           Style="{StaticResource TcCaptionSmallTextStyle}" />
-                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.OptionalScopes}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
-                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
-                                      IsEnabled="{x:Bind IsEnabled}"
-                                      Click="OnConsentChanged"
-                                      Margin="0,2">
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="{x:Bind Title}"
-                                               Style="{StaticResource TcTitleCardTextStyle}" />
-                                    <TextBlock Text="{x:Bind Description}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                            </CheckBox>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock Text="Nothing here is pre-selected on your behalf."
-                           Style="{StaticResource TcCaptionTextStyle}" />
-
-                <TextBlock Text="HOW IT BEHAVES"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <Border Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcHairlineBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="14,12">
-                    <StackPanel Spacing="10">
-                        <NumberBox x:Name="QuiescenceMinutes"
-                                   Header="Quiet time before a trace counts as finished (minutes)"
-                                   Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
-                                   Minimum="1"
-                                   Maximum="240"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <NumberBox x:Name="DigestHours"
-                                   Header="How often you can be interrupted (hours between notifications, at most)"
-                                   Value="{x:Bind Settings.DigestHours, Mode=OneWay}"
-                                   Minimum="1"
-                                   Maximum="24"
-                                   SmallChange="1"
-                                   SpinButtonPlacementMode="Inline"
-                                   IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
-                                   ValueChanged="OnBehaviorChanged" />
-                        <TextBlock Text="{x:Bind Settings.QueueExpiryText, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind Settings.NotificationOwnerText, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <TextBlock Text="These govern the background watcher, not this window, and take effect as soon as they are changed. The same values are readable and settable from the command line."
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                    </StackPanel>
-                </Border>
-
-                <TextBlock Text="PROJECTS"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
-                           Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.Projects}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:ProjectSettingViewModel">
-                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
-                                <StackPanel Grid.Column="0" Spacing="2">
-                                    <TextBlock Text="{x:Bind ProjectLabel}"
-                                               Style="{StaticResource TcBodyDenseTextStyle}"
-                                               TextWrapping="Wrap" />
-                                    <!--
-                                        Only the unresolvable bucket carries a
-                                        note, saying why it can never be armed.
-                                        Collapsed on every other row.
-                                    -->
-                                    <TextBlock Text="{x:Bind Note}"
-                                               Visibility="{x:Bind HasNote}"
-                                               Style="{StaticResource TcCaptionTextStyle}"
-                                               TextWrapping="Wrap" />
-                                </StackPanel>
-                                <!--
-                                    Top rather than centre: a row carrying the
-                                    note is three times the height of an
-                                    ordinary one, and centred controls would
-                                    float away from the name they act on.
-                                -->
-                                <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           VerticalAlignment="Top" />
-                                <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
-                                        IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
-                                        VerticalAlignment="Top"
-                                        Click="OnProjectMode"
-                                        Style="{StaticResource TcSecondaryButtonStyle}" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
+                </StackPanel>
+                <TextBlock x:Name="RuleReferrals" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyReferrals" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="ReferralsHost" HorizontalContentAlignment="Stretch" />
+                <!-- Watching: how the watcher behaves. -->
+                </StackPanel>
+                <TextBlock x:Name="RuleWatching" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyWatching" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="WatcherHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+                <TextBlock x:Name="RuleTools" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyTools" Spacing="12">
+                <!-- The CLI options card, first in Tools as on the Mac (ToolsSection.swift:36). -->
+                <ContentControl IsTabStop="False" x:Name="CliOptionsHost" HorizontalContentAlignment="Stretch" />
                 <!--
                     The routing surface.
 
@@ -558,6 +528,265 @@
                     </StackPanel>
                 </Border>
 
+                </StackPanel>
+                <TextBlock x:Name="RuleInsights" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyInsights" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="InsightsHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+                <TextBlock x:Name="RuleProjects" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyProjects" Spacing="12">
+                <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
+                           Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}" />
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.Projects}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ProjectSettingViewModel">
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10" Margin="0,3">
+                                <StackPanel Grid.Column="0" Spacing="2">
+                                    <TextBlock Text="{x:Bind ProjectLabel}"
+                                               Style="{StaticResource TcBodyDenseTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <!--
+                                        Only the unresolvable bucket carries a
+                                        note, saying why it can never be armed.
+                                        Collapsed on every other row.
+                                    -->
+                                    <TextBlock Text="{x:Bind Note}"
+                                               Visibility="{x:Bind HasNote}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <!--
+                                    Top rather than centre: a row carrying the
+                                    note is three times the height of an
+                                    ordinary one, and centred controls would
+                                    float away from the name they act on.
+                                -->
+                                <TextBlock Grid.Column="1" Text="{x:Bind StateText, Mode=OneWay}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           VerticalAlignment="Top" />
+                                <Button Grid.Column="2" Content="{x:Bind ActionText, Mode=OneWay}"
+                                        IsEnabled="{x:Bind CanToggle, Mode=OneWay}"
+                                        VerticalAlignment="Top"
+                                        Click="OnProjectMode"
+                                        Style="{StaticResource TcSecondaryButtonStyle}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                </StackPanel>
+                <TextBlock x:Name="RuleConsent" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyConsent" Spacing="12">
+                <TextBlock Text="HOW MAY YOUR TRACES BE USED?"
+                           Style="{StaticResource TcEyebrowTextStyle}" />
+                <TextBlock Text="Applies to traces you send from now on."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                <TextBlock Text="ALWAYS INCLUDED"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.AlwaysIncluded}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                                      IsEnabled="False"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <TextBlock Text="OPTIONAL — EACH ONE LETS YOUR TRACES DO MORE"
+                           Style="{StaticResource TcCaptionSmallTextStyle}" />
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.OptionalScopes}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ConsentScopeViewModel">
+                            <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                      IsEnabled="{x:Bind IsEnabled}"
+                                      Click="OnConsentChanged"
+                                      Margin="0,2">
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="{x:Bind Title}"
+                                               Style="{StaticResource TcTitleCardTextStyle}" />
+                                    <TextBlock Text="{x:Bind Description}"
+                                               Style="{StaticResource TcCaptionTextStyle}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </CheckBox>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <TextBlock Text="Nothing here is pre-selected on your behalf."
+                           Style="{StaticResource TcCaptionTextStyle}" />
+
+                </StackPanel>
+                <TextBlock x:Name="RulePublicProfile" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPublicProfile" Spacing="12">
+                <TextBlock Text="{x:Bind ViewModel.HeadingText}"
+                           Style="{StaticResource TcTitleSectionTextStyle}" />
+
+                <!--
+                    Off the roster. One control, and turning it on does not
+                    put anyone on the roster: it opens the consent dialog,
+                    which is where the handle is typed and the acknowledgement
+                    is given. Nothing is claimed by a toggle flip.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsNotListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcHairlineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="14,12">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                        <TextBlock Grid.Column="0"
+                                   Text="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                   Style="{StaticResource TcBodyTextStyle}"
+                                   TextWrapping="Wrap"
+                                   VerticalAlignment="Center" />
+                        <!--
+                            A ToggleSwitch with no on/off words, because the
+                            row's own label already says what it does and the
+                            switch is never the thing that grants anything.
+                            It is put back to off if the dialog is abandoned:
+                            see OnGoPublicToggled.
+                        -->
+                        <ToggleSwitch x:Name="GoPublicToggle"
+                                      Grid.Column="1"
+                                      OnContent=""
+                                      OffContent=""
+                                      IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                      AutomationProperties.Name="{x:Bind ViewModel.ListHandlePubliclyText}"
+                                      Toggled="OnGoPublicToggled" />
+                    </Grid>
+                </Border>
+
+                <!--
+                    On the roster. The fields as published, and the two acts
+                    available on them.
+
+                    Save re-publishes the WHOLE profile, because that is what
+                    the PUT does: the handle and the bio as they stand in
+                    these two boxes, both of them, every time. There is no
+                    partial update to offer, so there is no per field save.
+                -->
+                <Border Visibility="{x:Bind ViewModel.IsListed, Mode=OneWay}"
+                        Background="{ThemeResource TcSurfaceCardBrush}"
+                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="{StaticResource TcCardCornerRadius}"
+                        Padding="16,14">
+                    <StackPanel Spacing="12">
+
+                        <TextBlock Text="{x:Bind ViewModel.OnRosterSinceText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasOnRosterSince, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   HorizontalAlignment="Right" />
+
+                        <TextBox Header="{x:Bind ViewModel.HandleLabelText}"
+                                 Text="{x:Bind ViewModel.Handle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 FontFamily="{ThemeResource TcMonoFontFamily}"
+                                 IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+
+                        <StackPanel Spacing="4">
+                            <TextBox Header="{x:Bind ViewModel.BioLabelText}"
+                                     Text="{x:Bind ViewModel.Bio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     Height="78"
+                                     IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
+                            <!--
+                                The counter counts UTF-8 bytes, which is the
+                                unit the budget is denominated in, and it
+                                refuses nothing: what happens at and above the
+                                limit is the server's call.
+                            -->
+                            <TextBlock Text="{x:Bind ViewModel.BioCounterText, Mode=OneWay}"
+                                       Style="{StaticResource TcCaptionSmallTextStyle}"
+                                       HorizontalAlignment="Right" />
+                        </StackPanel>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Style="{StaticResource TcPrimaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.SaveProfileText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnSaveProfile" />
+                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
+                                    Content="{x:Bind ViewModel.LeaveRosterText}"
+                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
+                                    Click="OnLeaveRoster" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!--
+                    What the last act actually did. It is the one place this
+                    screen reports an outcome, and the sentence is chosen in
+                    TraceCommons.Interop.PublicProfileCopy rather than here: a
+                    claim the daemon could not cache locally is still a
+                    PUBLISHED profile, and saying otherwise is the one error
+                    this surface must never make.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcBodyDenseTextStyle}"
+                           TextWrapping="Wrap" />
+
+                <TextBlock Text="{x:Bind ViewModel.FootnoteText}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcInkTertiaryBrush}"
+                           TextWrapping="Wrap" />
+
+                </StackPanel>
+                <TextBlock x:Name="RuleChanges" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyChanges" Spacing="12">
+                <!--
+                    The change log (ChangesSection.swift): the core's heading
+                    over the changes, newest first, each its time then the
+                    core's sentence for it; the core's line when there is none.
+                    Until list_audit answers, the read notice stands in the
+                    log's place (ChangesSection.swift:11-15), set from code.
+                -->
+                <Border Style="{StaticResource SettingsCardStyle}">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="{x:Bind interop:SettingsLegacyWords.ChangesHeading}"
+                                   Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ContentControl x:Name="AuditNoticeHost" IsTabStop="False" HorizontalContentAlignment="Stretch" />
+                        <TextBlock Text="{x:Bind interop:SettingsLegacyWords.NothingChanged}"
+                                   Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}" />
+                        <ItemsControl ItemsSource="{x:Bind Settings.AuditEntries}" IsTabStop="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="vm:AuditSettingViewModel">
+                                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3"
+                                          BorderBrush="{ThemeResource TcHairlineDividerBrush}"
+                                          BorderThickness="0,0,0,1" Padding="0,0,0,6">
+                                        <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
+                                                   Foreground="{ThemeResource TcInkSecondaryBrush}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
+                                                   Style="{StaticResource TcBodyTextStyle}"
+                                                   TextWrapping="Wrap" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+                <!-- About (spec W24-D1 (a)): opens the About window, after the change log as on main. -->
+                <HyperlinkButton Content="{x:Bind AboutTitle}"
+                                 AutomationProperties.Name="{x:Bind AboutTitle}"
+                                 Click="OnAbout"
+                                 Padding="0" />
+                </StackPanel>
+                <TextBlock x:Name="RulePrivateAI" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyPrivateAI" Spacing="12">
                 <!--
                     Answering model calls on this computer.
 
@@ -624,6 +853,70 @@
                 <ContentControl IsTabStop="False" x:Name="ManagedTerminalHost"
                                 HorizontalContentAlignment="Stretch" />
 
+                </StackPanel>
+                <TextBlock x:Name="RuleSavedAccounts" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodySavedAccounts" Spacing="12">
+                </StackPanel>
+                <TextBlock x:Name="RuleGeneral" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyGeneral" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="GeneralHost" HorizontalContentAlignment="Stretch" />
+                <!--
+                    The edge rail, promotions and credit arrivals (W11-W13):
+                    the Mac's General section cards in its order, the rail
+                    after Appearance, then the Traces map's style (set from
+                    code, MapStyleSwitch), promotions, credit arrivals last
+                    (GeneralSection.swift:26-31), each a card (GlassEyebrowCard) with its core heading,
+                    switch and caption, set from code (SettingsView.Shell.cs).
+                    The credit switch is on and the rail off until the person
+                    changes them, as on the Mac.
+                -->
+                <Border x:Name="EdgeRailCard" Style="{StaticResource SettingsCardStyle}">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="EdgeRailTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ToggleSwitch x:Name="EdgeRailSwitch" Toggled="OnEdgeRailToggled" />
+                        <TextBlock x:Name="EdgeRailCaption"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="WrapWholeWords" />
+                    </StackPanel>
+                </Border>
+                <Border x:Name="MapStyleCard" Style="{StaticResource SettingsCardStyle}">
+                    <ContentControl x:Name="MapStyleHost" IsTabStop="False" HorizontalContentAlignment="Stretch" />
+                </Border>
+                <Border x:Name="PromotionsCard" Style="{StaticResource SettingsCardStyle}">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="PromotionsTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ToggleSwitch x:Name="PromotionsSwitch" Toggled="OnPromotionsToggled" />
+                        <TextBlock x:Name="PromotionsCaption"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="WrapWholeWords" />
+                    </StackPanel>
+                </Border>
+                <Border x:Name="CreditAnimationCard" Style="{StaticResource SettingsCardStyle}">
+                    <StackPanel Spacing="8">
+                        <TextBlock x:Name="CreditAnimationTitle" Style="{StaticResource TcEyebrowTextStyle}" />
+                        <ToggleSwitch x:Name="CreditAnimationSwitch" Toggled="OnCreditAnimationToggled" />
+                        <TextBlock x:Name="CreditAnimationCaption"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="WrapWholeWords" />
+                    </StackPanel>
+                </Border>
+                </StackPanel>
+                <TextBlock x:Name="RuleStartup" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyStartup" Spacing="12">
+                <ToggleSwitch x:Name="StartAtLoginSwitch"
+                              IsOn="{x:Bind Settings.StartAtLogin, Mode=OneWay}"
+                              IsEnabled="{x:Bind Settings.IsNotBusy, Mode=OneWay}"
+                              Visibility="{x:Bind Settings.StartupSupported, Mode=OneWay}"
+                              Toggled="OnStartAtLoginToggled" />
+                <!-- Notifications, drawn under Startup as on the Mac, which names no row of its own for it. -->
+                <ContentControl IsTabStop="False" x:Name="NotificationsHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+                <TextBlock x:Name="RuleUpdates" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyUpdates" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="UpdatesHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+                <TextBlock x:Name="RuleWitness" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyWitness" Spacing="12">
                 <!--
                     K11: where sessions go. The raw send, both enclaves, and
                     where the witness came from, above the witness card they
@@ -898,145 +1191,13 @@
                            Style="{StaticResource TcBodyDenseTextStyle}"
                            TextWrapping="Wrap" />
 
-                <TextBlock Text="{x:Bind ViewModel.HeadingText}"
-                           Style="{StaticResource TcTitleSectionTextStyle}" />
-
-                <!--
-                    Off the roster. One control, and turning it on does not
-                    put anyone on the roster: it opens the consent dialog,
-                    which is where the handle is typed and the acknowledgement
-                    is given. Nothing is claimed by a toggle flip.
-                -->
-                <Border Visibility="{x:Bind ViewModel.IsNotListed, Mode=OneWay}"
-                        Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcHairlineBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="14,12">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
-                        <TextBlock Grid.Column="0"
-                                   Text="{x:Bind ViewModel.ListHandlePubliclyText}"
-                                   Style="{StaticResource TcBodyTextStyle}"
-                                   TextWrapping="Wrap"
-                                   VerticalAlignment="Center" />
-                        <!--
-                            A ToggleSwitch with no on/off words, because the
-                            row's own label already says what it does and the
-                            switch is never the thing that grants anything.
-                            It is put back to off if the dialog is abandoned:
-                            see OnGoPublicToggled.
-                        -->
-                        <ToggleSwitch x:Name="GoPublicToggle"
-                                      Grid.Column="1"
-                                      OnContent=""
-                                      OffContent=""
-                                      IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                      AutomationProperties.Name="{x:Bind ViewModel.ListHandlePubliclyText}"
-                                      Toggled="OnGoPublicToggled" />
-                    </Grid>
-                </Border>
-
-                <!--
-                    On the roster. The fields as published, and the two acts
-                    available on them.
-
-                    Save re-publishes the WHOLE profile, because that is what
-                    the PUT does: the handle and the bio as they stand in
-                    these two boxes, both of them, every time. There is no
-                    partial update to offer, so there is no per field save.
-                -->
-                <Border Visibility="{x:Bind ViewModel.IsListed, Mode=OneWay}"
-                        Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="16,14">
-                    <StackPanel Spacing="12">
-
-                        <TextBlock Text="{x:Bind ViewModel.OnRosterSinceText, Mode=OneWay}"
-                                   Visibility="{x:Bind ViewModel.HasOnRosterSince, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   HorizontalAlignment="Right" />
-
-                        <TextBox Header="{x:Bind ViewModel.HandleLabelText}"
-                                 Text="{x:Bind ViewModel.Handle, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 FontFamily="{ThemeResource TcMonoFontFamily}"
-                                 IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
-
-                        <StackPanel Spacing="4">
-                            <TextBox Header="{x:Bind ViewModel.BioLabelText}"
-                                     Text="{x:Bind ViewModel.Bio, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     AcceptsReturn="True"
-                                     TextWrapping="Wrap"
-                                     Height="78"
-                                     IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}" />
-                            <!--
-                                The counter counts UTF-8 bytes, which is the
-                                unit the budget is denominated in, and it
-                                refuses nothing: what happens at and above the
-                                limit is the server's call.
-                            -->
-                            <TextBlock Text="{x:Bind ViewModel.BioCounterText, Mode=OneWay}"
-                                       Style="{StaticResource TcCaptionSmallTextStyle}"
-                                       HorizontalAlignment="Right" />
-                        </StackPanel>
-
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Style="{StaticResource TcPrimaryButtonStyle}"
-                                    Content="{x:Bind ViewModel.SaveProfileText}"
-                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                    Click="OnSaveProfile" />
-                            <Button Style="{StaticResource TcSecondaryButtonStyle}"
-                                    Content="{x:Bind ViewModel.LeaveRosterText}"
-                                    IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
-                                    Click="OnLeaveRoster" />
-                        </StackPanel>
-                    </StackPanel>
-                </Border>
-
-                <!--
-                    What the last act actually did. It is the one place this
-                    screen reports an outcome, and the sentence is chosen in
-                    TraceCommons.Interop.PublicProfileCopy rather than here: a
-                    claim the daemon could not cache locally is still a
-                    PUBLISHED profile, and saying otherwise is the one error
-                    this surface must never make.
-                -->
-                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
-                           Style="{StaticResource TcBodyDenseTextStyle}"
-                           TextWrapping="Wrap" />
-
-                <TextBlock Text="{x:Bind ViewModel.FootnoteText}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcInkTertiaryBrush}"
-                           TextWrapping="Wrap" />
-
-                <TextBlock Text="WHAT HAS BEEN CHANGED ON THIS MACHINE"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="Nothing has been changed."
-                           Visibility="{x:Bind Settings.HasNoAuditEntries, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}" />
-                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind Settings.AuditEntries}">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="vm:AuditSettingViewModel">
-                            <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="0,3">
-                                <TextBlock Grid.Column="0" Text="{x:Bind AtText}"
-                                           Style="{StaticResource TcMonoChipTextStyle}" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind WhatText}"
-                                           Style="{StaticResource TcCaptionTextStyle}"
-                                           TextWrapping="Wrap" />
-                            </Grid>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-
-                <!-- About (spec W24-D1 (a)): opens the About window. -->
-                <HyperlinkButton Content="{x:Bind AboutTitle}"
-                                 AutomationProperties.Name="{x:Bind AboutTitle}"
-                                 Click="OnAbout"
-                                 Padding="0" />
+                </StackPanel>
+                <TextBlock x:Name="RuleCompute" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
+                <StackPanel x:Name="BodyCompute" Spacing="12">
+                <ContentControl IsTabStop="False" x:Name="ComputeHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
             </StackPanel>
-        </ScrollViewer>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </UserControl>

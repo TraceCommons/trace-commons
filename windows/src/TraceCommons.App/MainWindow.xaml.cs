@@ -120,10 +120,14 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        FollowAppearance();
 
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
         // every event hop targets.
         _host = new DaemonHost(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        // reengage_due is declared only while the tray can show it: the
+        // daemon stamps its caps only while a renderer is declared.
+        _host.AcceptedEvents = ReengageNotice.AcceptedEvents(_tray.IsPresent);
         ViewModel = new MainViewModel(_host, new AppUpdater(_host));
         ViewModel.PropertyChanged += (_, change) =>
         {
@@ -149,6 +153,7 @@ public sealed partial class MainWindow : Window
         _host.QueueChanged += OnTrayWorthyChange;
         _host.StatusChanged += OnTrayWorthyChange;
         _host.DigestDue += OnDigestDue;
+        _host.ReengageDue += OnReengageDue;
 
         // The daemon's feature flags, read as the Mac reads them: at start,
         // on its change event (and after a lag or resync), and after a wake.
@@ -174,6 +179,7 @@ public sealed partial class MainWindow : Window
             if (InsightsPane.Content is InsightsView insights) insights.ViewModel.SetClocksRunning(running);
         };
         _tray.OpenRequested += OnTrayOpenRequested;
+        _tray.BalloonClicked += OnTrayBalloonClicked;
         _tray.ReviewRequested += OnTrayReviewRequested;
         _tray.SettingsRequested += OnTraySettingsRequested;
         _tray.AboutRequested += OnTrayAboutRequested;
@@ -500,6 +506,7 @@ public sealed partial class MainWindow : Window
         // about it should stand between a contributor and the sessions they
         // opened the app to review.
         await ViewModel.CheckForUpdateAsync();
+        await RefreshNotifyOffersAsync();
 
         await RefreshTrayAsync();
         RefreshHomeIfShown();
@@ -706,10 +713,80 @@ public sealed partial class MainWindow : Window
             lines.Add(contributed);
         }
 
-        if (lines.Count > 0)
+        if (lines.Count > 0 && _tray.ShowDigest(string.Join("\n", lines)))
         {
-            _tray.ShowDigest(string.Join("\n", lines));
+            // The balloon on screen is the digest now; a click on it only
+            // raises the window.
+            _balloonClick = null;
         }
+    }
+
+    /// <summary>
+    /// What a click on the balloon now on screen does: a re-engagement
+    /// notice's default action, or null (the digest, or nothing shown),
+    /// which only raises the window.
+    /// </summary>
+    private NudgeClick? _balloonClick;
+
+    /// <summary>
+    /// A re-engagement notification (W17-D2; <c>Notifier.postReengage</c>):
+    /// the daemon's title and body, unchanged. The daemon has already decided
+    /// it is due, under the kind's switch, the master switch and its caps, so
+    /// nothing here gates it again.
+    /// </summary>
+    private void OnReengageDue(ReengageNotice notice)
+    {
+        if (_tray.ShowNotice(notice.Title, notice.Body))
+        {
+            _balloonClick = notice.Click;
+        }
+    }
+
+    /// <summary>
+    /// A click on the balloon: a re-engagement notice's default action (its
+    /// request, then its place), as the Mac's notification click does; for
+    /// the digest, or a notice without one, the window is raised.
+    /// </summary>
+    private void OnTrayBalloonClicked()
+    {
+        _host.Dispatcher.TryEnqueue(async () =>
+        {
+            NudgeClick? click = _balloonClick;
+            _balloonClick = null;
+            if (click is null)
+            {
+                BringForward();
+                return;
+            }
+
+            if (click.Request is { } request)
+            {
+                // Best effort, as on the Mac: a refused stamp still opens the place.
+                await _host.CallAsync(request.Method, request.ParamsJson);
+            }
+
+            switch (click.Destination)
+            {
+                case NudgeDestination.History:
+                    if (await StartContributionsAsync())
+                    {
+                        HistoryPane.Content ??= new HistoryView(_host);
+                        ViewModel.ShowHistory();
+                    }
+
+                    break;
+                case NudgeDestination.PrivateAI:
+                    ShowPrivateInferencePane();
+                    break;
+                default:
+                    // Traces. This window has no idle-only filter, so the
+                    // idle kind opens the whole queue.
+                    ViewModel.ShowQueue();
+                    break;
+            }
+
+            BringForward();
+        });
     }
 
     /// <summary>
@@ -1855,6 +1932,8 @@ public sealed partial class MainWindow : Window
         // that is no longer running.
         _tray.Dispose();
 
+        // No compute worker outlives the app (#2219 review, defect 3).
+        await Controls.SettingsView.ShutdownComputeAsync();
         await _host.DisposeAsync();
     }
 }

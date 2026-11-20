@@ -62,7 +62,8 @@ public sealed record ManagedSnapshot(
     ulong Revision, ManagedAccount[] Accounts, ManagedSession[] Sessions,
     Dictionary<string, ulong> Generations, ManagedCapabilities Capabilities,
     Dictionary<string, string> Copy,
-    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null)
+    [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null,
+    [property: JsonPropertyName("cli_options")] Dictionary<string, string>? CliOptions = null)
 {
     /// <summary>The tools this shell launches, in the order the Add and
     /// Launch dialogs offer them. OpenCode is one since #1418.</summary>
