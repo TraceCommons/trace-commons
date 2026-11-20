@@ -73,6 +73,35 @@ async fn post(
     request.headers_mut().extend(headers);
     app(state).oneshot(request).await.unwrap()
 }
+/// Wait until no session holds `submission`'s admission processing lock.
+/// A request's lock is a session advisory lock the server lets go of by
+/// closing that connection, and PostgreSQL frees it only once the backend
+/// has seen the close. A request sent straight after another for the same
+/// submission can still find it held and be answered `409
+/// admission_in_progress`, which a contributor retries; a test that means
+/// to send the second request after the first has finished waits here.
+/// Bounded by a count of polls, not by time.
+async fn admission_lock_released(client: &tokio_postgres::Client, tenant: &str, submission: Uuid) {
+    let key =
+        trace_commons_server::admission_ledger::admission_processing_lock_key(tenant, submission);
+    for _ in 0..2_000 {
+        let held: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND ((classid::bigint << 32) | objid::bigint) = $1)",
+                &[&key],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        if !held {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("the admission processing lock was never released");
+}
 async fn require_ok(response: axum::response::Response) -> Vec<u8> {
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -2701,6 +2730,7 @@ async fn attested_uploads_are_not_capped_by_the_account_allowance() {
         account_row(submission_of(&attested)).await,
         Some(("attested".into(), false, "completed".into()))
     );
+    admission_lock_released(&client, &tenant, submission_of(&attested)).await;
     assert_eq!(
         require_ok(
             post(
@@ -2729,6 +2759,7 @@ async fn attested_uploads_are_not_capped_by_the_account_allowance() {
     let mut unwitnessed = refused_headers.clone();
     unwitnessed.remove(trace_commons_server::redaction_witness::request::CERTIFICATE_HEADER);
     for headers in [bad_signature, partial, unwitnessed] {
+        admission_lock_released(&client, &tenant, submission_of(&refused)).await;
         assert_eq!(
             error_label(post(state.clone(), "/v1/traces", refused.clone(), headers).await).await,
             (
