@@ -41,8 +41,15 @@
     MinWidth="720"
     MinHeight="560">
 
-    <Grid Background="{ThemeResource TcWindowBackgroundBrush}"
-          RowDefinitions="Auto,Auto,*,Auto">
+    <Grid Background="{ThemeResource TcWindowBackgroundBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <!-- Auto, or a star share when the footer needs more than half
+                 the room (PreviewSheet.FitFooter). -->
+            <RowDefinition x:Name="FooterRow" Height="Auto" />
+        </Grid.RowDefinitions>
 
         <!--
             Header: the same identity line and the same labelled figures as
@@ -655,11 +662,11 @@
             in the product.
         -->
         <!--
-            At most half the sheet, and never more than the room the rows
-            above leave, scrolling inside itself beyond that: on a short
-            window the footer used to run off the bottom, and Tab reached Not
-            this one and Close where nothing could be seen (box tab walk,
-            2026-11-19, a 754 by 512 window).
+            When the footer needs more than half the room under the header
+            rows, its row shares that room with the page and the footer
+            scrolls inside its share: on a short window it used to run off
+            the bottom, and Tab reached Not this one and Close where nothing
+            could be seen (box tab walk, 2026-11-19, a 754 by 512 window).
         -->
         <ScrollViewer x:Name="FooterScroller"
                       Grid.Row="3"

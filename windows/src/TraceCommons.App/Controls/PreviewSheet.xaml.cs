@@ -72,18 +72,29 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
     }
 
     /// <summary>
-    /// The footer's most height: half the sheet, and no more than what the
-    /// header rows leave, so its own scrolling keeps a focused control on
-    /// screen rather than past the window's edge.
+    /// The footer's row: its own height while that fits in half the room
+    /// under the header rows, else a star share beside the page, so the
+    /// footer is bounded and its scrolling keeps a focused control on screen
+    /// (an Auto row took the whole footer and the window cut it off).
     /// </summary>
     private void FitFooter()
     {
-        double left = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight;
-        FooterScroller.MaxHeight = Math.Max(FooterFloor, Math.Min(ActualHeight / 2, left));
+        double room = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight;
+        if (room <= 0 || FooterScroller.Content is not FrameworkElement footer)
+        {
+            return;
+        }
+
+        double width = FooterScroller.ActualWidth > 0 ? FooterScroller.ActualWidth : ActualWidth;
+        footer.Measure(new Windows.Foundation.Size(width, double.PositiveInfinity));
+        GridLength want = footer.DesiredSize.Height > room / 2 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+        if (!FooterRow.Height.Equals(want))
+        {
+            FooterRow.Height = want;
+        }
     }
 
-    /// <summary>The footer's least height: the action row and a line above it.</summary>
-    private const double FooterFloor = 120;
+
 
     /// <summary>Ctrl+F: the Search tab, focused, wherever the sheet was.</summary>
     private void OnFindInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
