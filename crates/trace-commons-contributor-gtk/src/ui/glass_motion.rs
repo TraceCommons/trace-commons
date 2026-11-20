@@ -1205,6 +1205,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn mounted_an_unfocused_window_draws_at_most_fifteen_frames_a_second() {
+        use std::io::Write as _;
         /// The process's user and system CPU time, in milliseconds, where
         /// `/proc` has it.
         fn cpu_ms() -> Option<f64> {
@@ -1266,7 +1267,10 @@ mod tests {
         let (unfocused, unfocused_cpu) = run(3);
         unfocus_for_test(&window, false);
         wake.remove();
-        println!(
+        // Straight to stderr: libtest keeps a passing test's `println!`
+        // out of the log.
+        let _ = writeln!(
+            std::io::stderr(),
             "fps-cpu: focused {focused} frames in 3 s, cpu {focused_cpu:?} ms; \
              unfocused {unfocused} frames in 3 s, cpu {unfocused_cpu:?} ms"
         );
