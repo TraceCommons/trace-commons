@@ -24,7 +24,23 @@ public sealed partial class MainWindow
     /// state the History inspector draws (<c>AppModel.skillLearningStore</c>).
     /// </summary>
     private SkillLearningModel SkillLearning =>
-        _skillLearning ??= SkillLearningModel.WithCore((method, parameters) => _host.CallAsync(method, parameters));
+        _skillLearning ??= SkillLearningModel.WithCore(SkillLearningCall());
+
+    /// <summary>
+    /// The daemon the skill flow asks, or none in a sample window: the flow
+    /// spends on NEAR AI and writes into a tool's folder, and a recorded
+    /// sample answers none of it (Program.IsSampleLaunch).
+    /// </summary>
+    private System.Func<string, string, Task<DaemonResponse>>? SkillLearningCall()
+    {
+#if DEBUG
+        if (_host.IsSample)
+        {
+            return null;
+        }
+#endif
+        return (method, parameters) => _host.CallAsync(method, parameters);
+    }
 
     /// <summary>The model, made on first use over this window's daemon.</summary>
     private SentTracesTrainingModel SentTraining =>

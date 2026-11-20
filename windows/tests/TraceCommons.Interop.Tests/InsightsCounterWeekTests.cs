@@ -256,6 +256,12 @@ public sealed class InsightsCounterWeekTests
         Assert.Equal(W("analytics_unavailable"), unknown.Tokens);
         Assert.Equal(W("analytics_state_unknown"), unknown.Coverage);
         Assert.Equal(W("analytics_reason_no_usage_counters"), unknown.Reason);
+
+        // The other figures read no saved breakdown under the daemon's week.
+        await model.Overview.ToggleInputsAsync("tokens");
+        await model.Overview.ToggleInputsAsync("cache_share");
+        Assert.Equal(0, local.Count("card_inputs"));
+        Assert.Equal("sessions", model.Overview.OpenCard);
     }
 
     [Fact]

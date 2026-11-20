@@ -145,7 +145,11 @@ public sealed class HistoryDetailInspector : UserControl
     {
         if (submissionId == Record.SubmissionId)
         {
-            DispatcherQueue.TryEnqueue(Render);
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _skillPanel?.Refresh();
+                Render();
+            });
         }
     }
     private ContentControl? _trainingSlot;

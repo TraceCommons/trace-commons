@@ -1373,6 +1373,10 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
     public Task ToggleInputsAsync(string card)
     {
         if (_shownWeek is not { } week) return Task.CompletedTask;
+        // Under feed T only the Sessions figure breaks down, into the daemon's
+        // counted sessions: the store's card_inputs would put saved figures
+        // under the daemon's (the Mac reads none, InsightsModel.swift:151-155).
+        if (_counter is not null && card != "sessions") return Task.CompletedTask;
         DropDetail();
         if (OpenCard == card) { CloseInputs(); Changed(); return Task.CompletedTask; }
         CloseInputs();

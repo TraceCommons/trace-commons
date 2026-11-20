@@ -72,32 +72,23 @@ public sealed class SkillLearningPanel : UserControl
         Content = Card(panel);
 
         Loaded += OnLoaded;
-        Unloaded += (_, _) =>
-        {
-            _model.SessionChanged -= OnSessionChanged;
-            _validate.Stop();
-        };
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        _model.SessionChanged -= OnSessionChanged;
-        _model.SessionChanged += OnSessionChanged;
-        ConfigureDraft();
-        Render();
+        Refresh();
         await _model.EnsureLocalInstalledSkillStatusAsync(_id);
     }
 
-    private void OnSessionChanged(string submissionId)
+    /// <summary>
+    /// The session's state changed: take a new candidate's draft and redraw.
+    /// The inspector that holds this panel calls it; the panel subscribes to
+    /// nothing, so a detach and re-add never leaves it deaf.
+    /// </summary>
+    public void Refresh()
     {
-        if (submissionId == _id)
-        {
-            DispatcherQueue.TryEnqueue(() =>
-            {
-                ConfigureDraft();
-                Render();
-            });
-        }
+        ConfigureDraft();
+        Render();
     }
 
     /// <summary>A new candidate, or its draft changed: the editor takes it (<c>configureDraft</c>, :256-265).</summary>
@@ -192,7 +183,7 @@ public sealed class SkillLearningPanel : UserControl
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(Strong(_copy.CandidateHeading));
-        Border tag = Tag(_copy.GeneratedSource, "TcInkSecondaryBrush");
+        Border tag = Pill(_copy.GeneratedSource, "TcInkSecondaryBrush");
         Grid.SetColumn(tag, 1);
         title.Children.Add(tag);
         _stage.Children.Add(title);
@@ -285,8 +276,8 @@ public sealed class SkillLearningPanel : UserControl
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.Children.Add(Strong(_copy.Results));
         Border gate = report.InstallAllowed
-            ? Tag(_copy.PassedGate, "TcStatusOnTextBrush")
-            : Tag(_copy.FailedGate, "TcStatusOutsideTextBrush");
+            ? Pill(_copy.PassedGate, "TcStatusOnTextBrush")
+            : Pill(_copy.FailedGate, "TcStatusOutsideTextBrush");
         Grid.SetColumn(gate, 1);
         title.Children.Add(gate);
         _stage.Children.Add(title);
@@ -377,7 +368,7 @@ public sealed class SkillLearningPanel : UserControl
             SkillEvaluationArm.ManualInstruction => _copy.SimpleInstruction,
             _ => _copy.CandidateSkill,
         };
-        Border tag = Tag(arm + " · " + (trial.Passed ? _copy.Passed : _copy.Failed),
+        Border tag = Pill(arm + " · " + (trial.Passed ? _copy.Passed : _copy.Failed),
             trial.Passed ? "TcStatusOnTextBrush" : "TcStatusOutsideTextBrush");
         Grid.SetColumn(tag, 1);
         title.Children.Add(tag);
@@ -473,7 +464,7 @@ public sealed class SkillLearningPanel : UserControl
     /// <summary>The installed skill and its rollback, which asks first (<c>InstalledSkillPanel</c>, :575-646).</summary>
     private void InstalledPanel(SkillLearningInstall installed, bool working)
     {
-        _stage.Children.Add(Tag(_copy.Installed, "TcStatusOnTextBrush"));
+        _stage.Children.Add(Pill(_copy.Installed, "TcStatusOnTextBrush"));
         _stage.Children.Add(Text(installed.Name, "TcTitleSectionTextStyle", "TcInkPrimaryBrush"));
         _stage.Children.Add(Labeled(_copy.TargetPath, installed.TargetLocation));
         _stage.Children.Add(Labeled(_copy.Digest, installed.SkillSha256));
@@ -620,7 +611,7 @@ public sealed class SkillLearningPanel : UserControl
         Child = child,
     };
 
-    private static Border Tag(string word, string brush) => new()
+    private static Border Pill(string word, string brush) => new()
     {
         BorderBrush = Res<Brush>(brush),
         BorderThickness = new Thickness(1),
