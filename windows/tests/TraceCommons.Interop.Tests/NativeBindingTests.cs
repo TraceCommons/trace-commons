@@ -39,12 +39,16 @@ public class NativeBindingTests
     /// 145 after merging main into the W17 settings branch (2026-11-19):
     /// main's 129, the W16/W17 settings slices' bindings, and W17-D2's
     /// tc_nudge_copy_json and tc_nudge_digest_help_json, with
-    /// tc_subscribe_with_accepts bound once (main's, from #2234).
+    /// tc_subscribe_with_accepts bound once (main's, from #2234). 147 after
+    /// the next merge of main (2026-11-19): main's tc_private_ai_campaign_json
+    /// and tc_windows_words_copy_json (#2211), counted from the
+    /// [DllImport(Library)] declarations (133 in NativeMethods.cs, 14 in
+    /// NativeMethods.Settings.cs, no entry point twice).
     /// </summary>
-    private const int BoundFunctions = 145;
+    private const int BoundFunctions = 147;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
-    private const int HeaderFunctions = 187;
+    private const int HeaderFunctions = 188;
 
     private static string HeaderPath => Path.Combine(AppContext.BaseDirectory, "abi", "trace_commons.h.txt");
 

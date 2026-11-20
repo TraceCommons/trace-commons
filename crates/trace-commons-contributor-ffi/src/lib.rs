@@ -6368,6 +6368,20 @@ pub extern "C" fn tc_monitor_screens_copy_json() -> *mut c_char {
     })
 }
 
+/// The Windows app's own words (`preview_copy::windows_words_copy`): a JSON
+/// object of `WindowsWordsCopy`'s fields, the words Windows says where the
+/// Mac names the Dock and menu bar.
+///
+/// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
+/// on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_windows_words_copy_json() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::preview_copy::windows_words_copy();
+        Ok(to_owned_cstring(&serde_json::to_string(&copy)?))
+    })
+}
+
 /// The compiled fallback for the remotely editable Private AI campaign.
 /// Returns an owned JSON string; free it with [`tc_string_free`].
 #[unsafe(no_mangle)]

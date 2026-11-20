@@ -30,6 +30,7 @@ pub mod disclosure;
 pub mod document_portal;
 pub mod edge;
 pub mod eligibility;
+pub mod feature_flags;
 pub mod first_run;
 pub mod home;
 pub mod home_cards;

@@ -1,0 +1,12 @@
+{
+  "id": 1,
+  "result": {
+    "valid": true,
+    "issuer_display_name": "Sample Pilot",
+    "credit_range": {
+      "min": 1,
+      "max": 5,
+      "unit": "points_per_accepted_trace"
+    }
+  }
+}

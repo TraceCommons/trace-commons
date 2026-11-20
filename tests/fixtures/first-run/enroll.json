@@ -1,0 +1,11 @@
+{
+  "id": 1,
+  "result": {
+    "enrolled": true,
+    "tenant_id": "tenant-mock",
+    "device_key_id": "sha256:mockdevice",
+    "consent_scopes": [
+      "debugging_evaluation"
+    ]
+  }
+}

@@ -286,6 +286,7 @@ else
     ui::settings::consent_mounted_tests::mounted_bulk_change_plans_asks_and_sends_what_was_agreed \
     ui::settings::consent_mounted_tests::mounted_turning_on_training_offers_it_on_sent_traces \
     ui::first_run::dark_tests::welcome_is_readable_in_dark_and_title_is_larger_than_body \
+    ui::feature_flag_reads::tests::mounted::mounted_the_window_reads_flags_at_start_and_again_on_a_change \
     ui::edge_surfaces::tests::mounted_rail_switch_is_hidden_until_the_session_is_known \
     ui::edge_surfaces::tests::mounted_rail_slides_and_fades_under_reduced_motion \
     ui::edge_surfaces::tests::mounted_compact_graph_is_shown_without_its_controls \

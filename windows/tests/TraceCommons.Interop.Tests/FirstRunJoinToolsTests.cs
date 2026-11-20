@@ -400,4 +400,69 @@ public sealed class FirstRunJoinToolsTests
         await runner.BackFromSignIn();
         Assert.Equal(FirstRunStep.Terms, runner.State.Step);
     }
+
+    /// <summary>A sign-in whose browser wait and cancel answer each end only when the test says.</summary>
+    private sealed class LateDaemon : IFirstRunDaemon
+    {
+        public readonly TaskCompletionSource<NearAILoginOutcome> Outcome = new();
+        public readonly TaskCompletionSource<bool> CancelAnswer = new();
+        public Task<bool> StartDaemon(string settingsJson) => Task.FromResult(true);
+        public Task<bool> SetSourceSettings(string settingsJson) => Task.FromResult(true);
+        public Task<FirstRunLookup> LookupInvite(string invite) => Task.FromResult<FirstRunLookup>(new FirstRunLookup.Unavailable());
+        public Task<bool> EnrollInvite(string invite) => Task.FromResult(true);
+        public Task<bool> SignInNearAI() => Task.FromResult(true);
+
+        // The wait ignores the cancel and ends on the test's word, as a
+        // daemon poll that is already in flight does.
+        public Task<NearAILoginOutcome> NearAILoginOutcome(CancellationToken cancel) => Outcome.Task;
+        public Task<bool> CancelNearAILogin() => CancelAnswer.Task;
+        public Task<NearAIEnrolment> EnrollNearAI(string? referralCode) => Task.FromResult(new NearAIEnrolment(true, null));
+        public Task<bool> SetAskEachTime() => Task.FromResult(true);
+        public Task<bool> SaveConsentScopes(IReadOnlyList<string> scopes) => Task.FromResult(true);
+        public Task<bool> SetProjectMode(string projectId, ProjectRule mode) => Task.FromResult(true);
+        public Task<bool> IncludePastSessions(string projectId, IReadOnlyList<string> sessionIds) => Task.FromResult(true);
+        public Task<bool> SetPrivateAI(bool on) => Task.FromResult(true);
+        public Task<GrantAnswer> GrantAutomatic(string? witness) => Task.FromResult(new GrantAnswer(true, null));
+        public Task<bool> MarkComplete() => Task.FromResult(true);
+        public Task<bool> MarkWatchOnlyComplete() => Task.FromResult(true);
+        public Task<bool> RecordTermsAcceptance(AcceptedTerms terms) => Task.FromResult(true);
+        public void FirstRunFinished(FirstRunFailure? notice) { }
+    }
+
+    [Fact]
+    public Task BackWaitsForTheCommitSoALateFailureNeverReturnsToJoin()
+    {
+        // FirstRunRunner.swift:403-414: Back goes back a step only once the
+        // commit is over, so a failure the sign-in reports late never lands
+        // on the step the person moved to, or returns them to Join (review
+        // of #2210, mutation N9). Run without a synchronization context, so
+        // each answer's continuation runs at once and the order is fixed.
+        return Task.Run(async () =>
+        {
+            var state = new FirstRunState { Step = FirstRunStep.Join, Account = AccountAnswer.NearAI, DaemonStarted = true };
+            state.ToolAnswers["claude-code"] = ToolChoice.Watch(@"C:\a");
+            state.ToolAnswers["codex"] = ToolChoice.Off;
+            state.StartedSettingsJson = state.SessionRoots.SettingsJson();
+            var daemon = new LateDaemon();
+            var runner = new FirstRunRunner(state, daemon);
+            Task commit = runner.Commit(CommitPoint.SignIn);
+            Assert.True(runner.SignInWaiting);
+
+            Task back = runner.BackFromSignIn();
+            daemon.CancelAnswer.SetResult(true);
+            // The cancel is answered, the commit is not over: Back waits.
+            Assert.True(runner.IsCommitting);
+            Assert.False(back.IsCompleted, "Back went back a step while the commit still ran");
+            Assert.Equal(FirstRunStep.Join, runner.State.Step);
+
+            // The wait ends late, as a failure.
+            daemon.Outcome.SetResult(NearAILoginOutcome.Failed);
+            await back;
+            await commit;
+            Assert.False(runner.IsCommitting);
+            Assert.Null(runner.Failure);
+            Assert.Equal(FirstRunStep.Terms, runner.State.Step);
+            Assert.Equal(AccountAnswer.NearAI, runner.State.Account);
+        });
+    }
 }
