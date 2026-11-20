@@ -790,7 +790,7 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
     // Answers every call the window has made: the write, `list_projects`
     // with `off` turned off, `list_pending` with the traces, and every
     // other read refused, until none is left.
-    let answer_all = |off: &[&str]| {
+    let answer_all = |off: &[&str], write_ok: bool| {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             settle(&context);
@@ -800,7 +800,8 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
                 let reply = match job {
                     crate::worker::Job::Call { method, .. } => {
                         Outcome::Call(match method.as_str() {
-                            "set_project_mode" => Ok(serde_json::json!({})),
+                            "set_project_mode" if write_ok => Ok(serde_json::json!({})),
+                            "set_project_mode" => Err("synthetic_write_refused".to_string().into()),
                             "list_projects" => Ok(serde_json::json!({ "projects": projects(off) })),
                             "list_pending" => Ok(serde_json::json!({ "pending": pending })),
                             _ => Err("synthetic_read_refused".to_string().into()),
@@ -816,9 +817,9 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
         }
         settle(&context);
     };
-    answer_all(&[]);
+    answer_all(&[], true);
 
-    let press = |name: &str, off: &[&str], rebuild_all: bool| {
+    let press = |name: &str, off: &[&str], rebuild_all: bool, write_ok: bool| {
         crate::ui::redraw_counts::set_rebuild_all(rebuild_all);
         let row = with_class(&page, "tc-tree-row")
             .into_iter()
@@ -844,7 +845,7 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
             .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
             .unwrap()
             .set_active(false);
-        answer_all(off);
+        answer_all(off, write_ok);
         let cpu = cpu.zip(cpu_ms()).map(|(a, b)| b - a);
         crate::ui::redraw_counts::set_rebuild_all(false);
         (
@@ -855,12 +856,12 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
         )
     };
     let mut log = std::io::stderr();
-    let (rows, layouts, cpu, took) = press("api", &["api"], true);
+    let (rows, layouts, cpu, took) = press("api", &["api"], true, true);
     let _ = writeln!(
         log,
         "switch-press: every row built on every render: {rows} rows built, {layouts} map layouts, cpu {cpu:?} ms, {took:?} with the fixture's settling"
     );
-    let (rows, layouts, cpu, took) = press("web", &["api", "web"], false);
+    let (rows, layouts, cpu, took) = press("web", &["api", "web"], false, true);
     let _ = writeln!(
         log,
         "switch-press: unchanged rows kept: {rows} rows built, {layouts} map layouts, cpu {cpu:?} ms, {took:?} with the fixture's settling"
@@ -889,5 +890,32 @@ fn mounted_a_switch_press_builds_only_the_changed_row() {
         !switch.is_active() && !switch.state(),
         "the switch shows the daemon's mode"
     );
+
+    // A refused write: the reads that follow still say cli is Automatic,
+    // and its switch, its knob moved by the press, is built again from
+    // them rather than kept.
+    let (rows, _, _, _) = press("cli", &["api", "web"], false, false);
+    let cli = with_class(&page, "tc-tree-row")
+        .into_iter()
+        .find(|row| {
+            with_class(row, "tc-tree-title-folder")
+                .first()
+                .and_then(|label| {
+                    label
+                        .downcast_ref::<gtk::Label>()
+                        .map(|l| l.text().as_str() == "cli")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap();
+    let switch = with_class(&cli, "tc-tree-switch").remove(0);
+    let switch = switch
+        .downcast_ref::<crate::ui::glass_switch::GlassSwitch>()
+        .unwrap();
+    assert!(
+        switch.is_active() && switch.state(),
+        "a refused write leaves the switch as the daemon has it"
+    );
+    assert_eq!(rows, 1, "only the pressed folder's row is built again");
     app.window.destroy();
 }

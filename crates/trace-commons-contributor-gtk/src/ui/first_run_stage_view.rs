@@ -132,9 +132,10 @@ pub(super) struct Stage {
     estimate: RefCell<Option<Lift>>,
     /// The backdrop's ground, drawn once per size and painted each frame.
     ground: paint::GroundCache,
-    /// How much of the backdrop is drawn: lighter where the stage cannot
-    /// keep its frame rate (`stage::Lighten`). `None` until the stage is
-    /// first drawn and its renderer is known.
+    /// How much of the backdrop is drawn: without the breath where the
+    /// stage cannot keep its frame rate and the breath is a real share of
+    /// each frame (`stage::Lighten`). `None` until the stage is first
+    /// drawn.
     lighten: RefCell<Option<stage::Lighten>>,
     /// Tools' rows: told None while the scan holds them back, then the
     /// seconds since they began to rise.
@@ -143,13 +144,6 @@ pub(super) struct Stage {
 
 fn animations() -> bool {
     gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
-}
-
-/// Whether `renderer` draws in software: GSK's cairo renderer. A GL
-/// renderer on a software driver is not named so, and is caught by the
-/// frame-rate watch instead.
-fn software(renderer: &gtk::gsk::Renderer) -> bool {
-    renderer.type_().name() == "GskCairoRenderer"
 }
 
 /// The refresh rate of the display `widget` is on, in hertz, if known.
@@ -855,11 +849,19 @@ impl Stage {
         };
         let focused = super::glass_motion::seen(area) == super::glass_motion::Seen::Focused;
         let asked = focused.then(|| stage::Lighten::asked_fps(interval, refresh_hz(area)));
-        watch.frame(at, asked);
+        if let Some(reached) = watch.frame(at, asked) {
+            // Slow for long enough: is the breath what slows it?
+            let breath = paint::breath_cost(
+                f64::from(area.width()),
+                f64::from(area.height()),
+                area.scale_factor(),
+                &self.palette,
+            );
+            watch.judge(breath, reached);
+        }
     }
 
-    /// The backdrop the stage draws now: all of it until its renderer is
-    /// known, then what its frame-rate watch allows.
+    /// The backdrop the stage draws now: what its frame-rate watch allows.
     fn backdrop_detail(&self) -> stage::Backdrop {
         #[cfg(test)]
         if let Some(level) = FORCED.with(Cell::get) {
@@ -867,9 +869,7 @@ impl Stage {
         }
         let mut lighten = self.lighten.borrow_mut();
         if lighten.is_none() && lightens() {
-            if let Some(renderer) = self.area.native().and_then(|n| n.renderer()) {
-                *lighten = Some(stage::Lighten::new(software(&renderer)));
-            }
+            *lighten = Some(stage::Lighten::default());
         }
         lighten
             .as_ref()
@@ -1157,13 +1157,13 @@ mod mounted_tests {
     /// The stage on Traces (60 frames a second asked) in an 860 by 760
     /// window on this compositor and renderer, three seconds at a time:
     /// the ground drawn whole each frame (as before its cache), then
-    /// cached with the whole look, without the breath, and the navy base
-    /// alone; then the app's own rule, left to choose. Logs frames and
-    /// the process's CPU time for each (`stage-fps-cpu:` lines in the
-    /// weston job's log), and the renderer; asserts only that frames are
-    /// drawn and the rule picks a lighter look only where frames fall
-    /// short. The numbers are logged, not asserted: a shared runner's
-    /// load varies.
+    /// cached with the whole look and without the breath; then the app's
+    /// own rule, left to choose for ten seconds. Logs frames, the
+    /// process's CPU time, the renderer and the breath's cost
+    /// (`stage-fps-cpu:` lines in the weston job's log). Asserts that the
+    /// rule keeps the whole look wherever dropping the breath bought no
+    /// frames; the CPU is logged, not asserted, as a shared runner's load
+    /// varies.
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn mounted_the_stage_frame_rate_and_cpu_at_each_backdrop() {
@@ -1226,38 +1226,54 @@ mod mounted_tests {
         let (frames, cpu) = run(&stage, 3);
         let _ = writeln!(
             log,
-            "stage-fps-cpu: renderer {renderer}, ground drawn each frame, full look: {frames} frames in 3 s, cpu {cpu:?} ms"
+            "stage-fps-cpu: renderer {renderer}, ground drawn each frame, full look: \
+             {frames} frames in 3 s, cpu {cpu:?} ms"
         );
         assert!(frames > 0, "the stage drew nothing");
         UNCACHED.with(|c| c.set(false));
-        for level in [
-            stage::Backdrop::Full,
-            stage::Backdrop::Ground,
-            stage::Backdrop::Base,
-        ] {
+        let mut forced = Vec::new();
+        for level in [stage::Backdrop::Full, stage::Backdrop::Ground] {
             FORCED.with(|c| c.set(Some(level)));
             let (frames, cpu) = run(&stage, 3);
             let _ = writeln!(
                 log,
-                "stage-fps-cpu: renderer {renderer}, ground cached, {level:?}: {frames} frames in 3 s, cpu {cpu:?} ms"
+                "stage-fps-cpu: renderer {renderer}, ground cached, {level:?}: \
+                 {frames} frames in 3 s, cpu {cpu:?} ms"
             );
+            forced.push(frames);
         }
         FORCED.with(|c| c.set(None));
+        let breath = paint::breath_cost(
+            f64::from(stage.area.width()),
+            f64::from(stage.area.height()),
+            stage.area.scale_factor(),
+            &stage.palette,
+        );
         window.destroy();
 
         // The app's rule, left to choose for 10 seconds.
         let (stage, window) = open(true);
         let (frames, cpu) = run(&stage, 10);
-        let level = stage.lighten.borrow().as_ref().map(stage::Lighten::level);
+        let (level, judged) = stage
+            .lighten
+            .borrow()
+            .as_ref()
+            .map(|watch| (watch.level(), watch.judged()))
+            .expect("the stage was drawn");
         let _ = writeln!(
             log,
-            "stage-fps-cpu: renderer {renderer}, the app's rule chose {level:?}: {frames} frames in 10 s, cpu {cpu:?} ms"
+            "stage-fps-cpu: renderer {renderer}, breath alone {breath:.2} ms; the app's rule \
+             (judged {judged}) chose {level:?}: {frames} frames in 10 s, cpu {cpu:?} ms"
         );
-        assert!(level.is_some(), "the rule never learned the renderer");
-        if level != Some(stage::Backdrop::Full) && renderer != "GskCairoRenderer" {
-            assert!(
-                f64::from(frames as u32) / 10.0 < stage::Lighten::LOW_SHARE * 60.0,
-                "a lighter look at {frames} frames in 10 s"
+        // Dropping the breath bought under a tenth more frames here: the
+        // rule must have kept the whole look.
+        if forced[1] * 10 < forced[0] * 11 {
+            assert_eq!(
+                level,
+                stage::Backdrop::Full,
+                "the breath went for {} frames against {}",
+                forced[1],
+                forced[0]
             );
         }
         window.destroy();

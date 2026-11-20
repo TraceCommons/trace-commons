@@ -250,8 +250,7 @@ pub fn backdrop(cr: &cairo::Context, w: f64, h: f64, p: &Palette, phase: f64) {
 }
 
 /// The backdrop as much as `detail` keeps (`stage::Backdrop`): the
-/// lighter looks leave out the breathing ellipse, then the ground's
-/// gradients too, leaving the navy base.
+/// lighter look leaves out the breathing ellipse.
 #[cfg(test)]
 pub fn backdrop_in(
     cr: &cairo::Context,
@@ -264,10 +263,7 @@ pub fn backdrop_in(
     let _ = cr.save();
     cr.rectangle(0.0, 0.0, w, h);
     cr.clip();
-    match detail {
-        stage::Backdrop::Base => base(cr, p),
-        _ => ground(cr, w, h, p),
-    }
+    ground(cr, w, h, p);
     if detail == stage::Backdrop::Full {
         breath(cr, p, phase);
     }
@@ -292,20 +288,11 @@ pub fn backdrop_cached(
     let _ = cr.save();
     cr.rectangle(0.0, 0.0, w, h);
     cr.clip();
-    match detail {
-        stage::Backdrop::Base => base(cr, p),
-        _ => cache.paint(cr, w, h, scale, p),
-    }
+    cache.paint(cr, w, h, scale, p);
     if detail == stage::Backdrop::Full {
         breath(cr, p, phase);
     }
     let _ = cr.restore();
-}
-
-/// The navy base alone, flat.
-fn base(cr: &cairo::Context, p: &Palette) {
-    source(cr, p.scene_base);
-    let _ = cr.paint();
 }
 
 /// The glow's strengths in the scheme: its strongest and its soft stop.
@@ -356,6 +343,31 @@ fn breath(cr: &cairo::Context, p: &Palette, phase: f64) {
     let _ = cr.restore();
     let _ = cr.fill();
     let _ = cr.restore();
+}
+
+/// What drawing the breath once costs, in milliseconds, on a stage `w` by
+/// `h` at `scale` device pixels a point: the least of three draws into an
+/// image of that size, as the stage's frames draw it.
+pub fn breath_cost(w: f64, h: f64, scale: i32, p: &Palette) -> f64 {
+    let scale = scale.max(1);
+    let (width, height) = (
+        (w * f64::from(scale)).ceil() as i32,
+        (h * f64::from(scale)).ceil() as i32,
+    );
+    let Ok(surface) = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height) else {
+        return 0.0;
+    };
+    (0..3)
+        .filter_map(|_| {
+            let cr = cairo::Context::new(&surface).ok()?;
+            cr.scale(f64::from(scale), f64::from(scale));
+            let start = std::time::Instant::now();
+            breath(&cr, p, 0.5);
+            drop(cr);
+            surface.flush();
+            Some(start.elapsed().as_secs_f64() * 1e3)
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// What the ground was drawn for: its size, the display's scale and the
@@ -2061,12 +2073,11 @@ mod tests {
                 }
                 start.elapsed().as_secs_f64() * 1e3 / f64::from(frames)
             };
-            let mut line = format!("stage paint at {scale}x:");
-            for detail in [
-                stage::Backdrop::Full,
-                stage::Backdrop::Ground,
-                stage::Backdrop::Base,
-            ] {
+            let mut line = format!(
+                "stage paint at {scale}x: breath alone {:.2} ms;",
+                breath_cost(860.0, 760.0, scale, &p)
+            );
+            for detail in [stage::Backdrop::Full, stage::Backdrop::Ground] {
                 let ms = time(&mut s, &|cr, t| {
                     backdrop_in(
                         cr,

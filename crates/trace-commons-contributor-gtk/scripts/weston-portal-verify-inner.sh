@@ -328,6 +328,15 @@ else
       -- --exact --ignored --test-threads=1
   done
 
+  # The first-run stage's frame rate and CPU once more under GSK's cairo
+  # renderer, the software path GTK takes with no GL at all, beside the
+  # run above on whatever renderer GTK picked here.
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory GSK_RENDERER=cairo \
+    run_ignored_test "GTK display regression failed: the stage under the cairo renderer" \
+    cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+    ui::first_run_stage_view::mounted_tests::mounted_the_stage_frame_rate_and_cpu_at_each_backdrop \
+    -- --exact --ignored --test-threads=1
+
   # Mission drafts are absent while missions are hidden and, with the switch
   # on, reachable without starting Contributions, and
   # inspection/quit failures must preserve the live local view.
