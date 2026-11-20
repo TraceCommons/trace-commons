@@ -1042,16 +1042,19 @@ async fn rollout_live_disable_drains_and_reenable_preserves_the_same_capability(
     drop(response);
     finish_drains(&shared).await;
     set_rollout(&shared, true);
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            if shared.claude_desktop.lock().unwrap().route.is_some() {
-                break;
-            }
-            tokio::task::yield_now().await;
+    // A restart is a whole route startup, which may take up to the route's
+    // own readiness budget (`READY_WITHIN`, 15 s): on Windows one readiness
+    // probe refused before the proxy listens costs about 2 s on its own. A
+    // 3-second wait here failed twice on the Windows runner with the
+    // restart still waiting for readiness. The bound only turns a restart
+    // that never comes into a failure.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while shared.claude_desktop.lock().unwrap().route.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("the route restarts once the rollout is back on");
     assert_eq!(
         call(&shared, "claude_desktop_preset", json!({})).await["environment"],
         configured["environment"]
