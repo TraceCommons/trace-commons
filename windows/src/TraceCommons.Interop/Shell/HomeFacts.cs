@@ -112,6 +112,70 @@ public static class HomeFacts
         return (Points(received, figure), PendingFigure(pending, credit, figure));
     }
 
+    /// <summary>
+    /// The credit tile's words from the core's monitor table: <c>pending</c>,
+    /// <c>credit_final</c> and <c>shell.credit_pending_amount</c>
+    /// (<c>MonitorWords.pending</c>, <c>.final</c>, <c>shell.creditPendingAmount</c>).
+    /// </summary>
+    public sealed record CreditTileWords(string Pending, string Final, string PendingAmount)
+    {
+        public static CreditTileWords FromMonitorTable() =>
+            new(MonitorShellCopy.Top("pending"), MonitorShellCopy.Top("credit_final"), MonitorShellCopy.Shell("credit_pending_amount"));
+    }
+
+    /// <summary>
+    /// HomeViews.swift:2095-2104: whether the tile's figure is the decided
+    /// one, which the rollup alone says. With traces accepted and nothing
+    /// pending or waiting, every one is decided, so Final reads even at 0.
+    /// </summary>
+    public static bool ShowsFinalFigure(double? final, double? pending, int? accepted, int? submitted)
+    {
+        if (final is not double decided) return false;
+        bool allDecided = (accepted ?? 0) > 0 && (pending ?? 0) == 0 && submitted == 0;
+        return decided > 0 || allDecided;
+    }
+
+    /// <summary>
+    /// HomeViews.swift:2065-2072: "X credit pending" under the decided
+    /// figure, only beside the commons' statement (D6) and never for nothing.
+    /// </summary>
+    public static string? CreditPendingAccessory(double? pending, string? condition, string template, Func<double, string?> figure) =>
+        pending is double p && p > 0 && condition is not null && template.Length > 0
+            ? template.Replace("{amount}", Points(p, figure), StringComparison.Ordinal)
+            : null;
+
+    /// <summary>
+    /// HomeViews.swift:2074-2093: one credit tile. History's Final figure
+    /// once any credit is decided, with the pending accessory (or Final)
+    /// under it; before that the pending figure under D6, marked Pending.
+    /// While a contributed trace still waits to be scored nothing is Final,
+    /// and an unknown waiting count is not zero.
+    /// </summary>
+    public static (string Value, string Detail) CreditTile(double? final, double? pending, int? accepted, int? submitted, CommonsCredit? credit,
+        Func<double, string?> figure, CreditTileWords words)
+    {
+        if (!ShowsFinalFigure(final, pending, accepted, submitted))
+        {
+            return (PendingFigure(pending, credit, figure), words.Pending);
+        }
+
+        bool waiting = (submitted ?? 1) > 0;
+        return (Points(final, figure),
+            CreditPendingAccessory(pending, PendingCondition(credit), words.PendingAmount, figure) ?? (waiting ? words.Pending : words.Final));
+    }
+
+    /// <summary>
+    /// InsightsView.swift:177-182: Insights' "Credits earned" tile is Home's,
+    /// from Home's own reads, so the two never disagree; null (no tile) until
+    /// the rollup or the commons' credit came.
+    /// </summary>
+    public static (string Value, string Detail)? InsightsCreditTile(HistoryRollup? rollup, CommonsCredit? credit, Func<double, string?> figure,
+        CreditTileWords words)
+    {
+        if (rollup is null && credit is null) return null;
+        return CreditTile(rollup?.CreditFinal, rollup?.CreditPending, rollup?.AllTime.Accepted, rollup?.AllTime.Submitted, credit, figure, words);
+    }
+
     /// <summary>HomeViews.swift:2031-2036: the account's lifetime points under this machine's figure, in the core's words.</summary>
     public static string? CreditAccountTotal(CommonsCredit? credit, string? template, Func<double, string?> figure)
     {

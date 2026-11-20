@@ -308,9 +308,20 @@ public static class InsightsWorkWords
     }).ToList();
 
     /// <summary>
+    /// The row with Home's credit tile after the week's own, under either
+    /// feed (InsightsWorkViews.swift:188-190); null leaves it out.
+    /// </summary>
+    public static IReadOnlyList<Tile> Tiles(InsightsWork? work, (string Value, string Detail)? credit, Func<string, string?> copy)
+    {
+        var tiles = new List<Tile>(Tiles(work, copy));
+        if (credit is { } tile) tiles.Add(new Tile(Text(copy, "analytics_tile_credits"), tile.Value, tile.Detail));
+        return tiles;
+    }
+
+    /// <summary>
     /// The tiles that lead Overview from <c>work</c>, each left out when
     /// nothing is known (<c>InsightsWeekTiles</c>, InsightsWorkViews.swift:178-203).
-    /// Home's credit tile is not among them here.
+    /// Home's credit tile joins them in the overload above.
     /// </summary>
     public static IReadOnlyList<Tile> Tiles(InsightsWork? work, Func<string, string?> copy)
     {

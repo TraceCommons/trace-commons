@@ -196,6 +196,23 @@ public sealed class InsightsWeekExtrasTests
     }
 
     /// <summary>
+    /// Home's credit tile joins the row after spend and top model, under
+    /// either feed, and is left out until Home's reads came
+    /// (InsightsWorkViews.swift:188-190).
+    /// </summary>
+    [Fact]
+    public void TheCreditTileFollowsTheWeeksTilesUnderEitherFeed()
+    {
+        Assert.Empty(InsightsWorkWords.Tiles(null, null, Copy));
+        InsightsWorkWords.Tile alone = Assert.Single(InsightsWorkWords.Tiles(null, ("12.5", "Final"), Copy));
+        Assert.Equal(new InsightsWorkWords.Tile(Copy("analytics_tile_credits")!, "12.5", "Final"), alone);
+        InsightsWork claudeOnly = Work(Totals(1, 4_120_000), byModel: new[] { new InsightsWorkModel("claude-sonnet-4-5", "claude_code", 1, 10, 4_120_000, false) });
+        IReadOnlyList<InsightsWorkWords.Tile> tiles = InsightsWorkWords.Tiles(claudeOnly, ("12.5", "Final"), Copy);
+        Assert.Equal(new[] { Copy("analytics_tile_spend"), Copy("analytics_tile_top_model"), Copy("analytics_tile_credits") }, tiles.Select(t => t.Label));
+        Assert.Equal(InsightsWorkWords.Tiles(claudeOnly, Copy), tiles.Take(2));
+    }
+
+    /// <summary>
     /// The tiles (<c>InsightsWeekTiles</c>): a tile with nothing known is left
     /// out; the spend tile's note is the change, else whose API prices.
     /// </summary>
