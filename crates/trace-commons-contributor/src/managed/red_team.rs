@@ -254,6 +254,20 @@ fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyho
 /// use staging, production builds production, matching the channel's
 /// `NEAR_AI_INFERENCE_BASE` (a test holds the two together). rts defaults to
 /// production, which refuses a staging key.
+/// How strictly rts checks NEAR AI's attestation. Production requires the
+/// gateway and model compose hashes to be pinned. NEAR redeploys the staging
+/// gateway several times a day, so staging accepts any compose the TEE
+/// measured (mr_config_id == sha256(app_compose)); the TDX quote, TCB status,
+/// nonce binding and GPU checks still apply.
+#[cfg(target_os = "macos")]
+pub(crate) fn attest_options() -> rts::attest::AttestOptions {
+    let mut options = rts::attest::AttestOptions::default();
+    if cfg!(feature = "near-ai-staging") {
+        options.compose_policy = rts::attest::ComposePolicy::MrConfigOnly;
+    }
+    options
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     if cfg!(feature = "near-ai-staging") {
@@ -336,7 +350,7 @@ pub(crate) fn spec_for(
 
     Ok(rts::launch::LaunchSpec {
         config,
-        attest: rts::attest::AttestOptions::default(),
+        attest: attest_options(),
         credential: rts::launch::CredentialSource::Supplied(
             ironwire_proxy::embed::HostSecret::from(key_str.to_owned()),
         ),
