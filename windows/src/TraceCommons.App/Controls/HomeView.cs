@@ -41,6 +41,7 @@ public sealed class HomeView : UserControl
     private readonly List<HeroGlyphView> _glyphs = new();
     private readonly Stopwatch _burstClock = new();
     private HomeOverviewModel? _model;
+    private bool _drawnHighContrast;
     private TextBlock? _balanceValue;
     private FrameworkElement? _balanceTile;
     private IReadOnlyList<long> _countSteps = Array.Empty<long>();
@@ -93,15 +94,15 @@ public sealed class HomeView : UserControl
             _loaded = true;
             WindowClocks.Changed -= OnWindowClocks;
             WindowClocks.Changed += OnWindowClocks;
-            SystemSettingWatch.Changed -= UpdateClocks;
-            SystemSettingWatch.Changed += UpdateClocks;
-            UpdateClocks();
+            SystemSettingWatch.Changed -= OnSystemSettings;
+            SystemSettingWatch.Changed += OnSystemSettings;
+            OnSystemSettings();
         };
         Unloaded += (_, _) =>
         {
             _loaded = false;
             WindowClocks.Changed -= OnWindowClocks;
-            SystemSettingWatch.Changed -= UpdateClocks;
+            SystemSettingWatch.Changed -= OnSystemSettings;
             UpdateClocks();
             EndBurst();
         };
@@ -109,6 +110,20 @@ public sealed class HomeView : UserControl
     }
 
     private void OnWindowClocks(bool running) => DispatcherQueue.TryEnqueue(UpdateClocks);
+
+    /// <summary>
+    /// The clocks follow the motion setting; the heroes, which pick their own
+    /// colours, are drawn again when a high contrast theme comes or goes.
+    /// </summary>
+    private void OnSystemSettings()
+    {
+        UpdateClocks();
+        if (_model is HomeOverviewModel model && _drawnHighContrast != SystemSettingWatch.HighContrast)
+        {
+            _model = null;
+            Show(model);
+        }
+    }
 
     /// <summary>Where a tile or a hero leads; the window opens it.</summary>
     public event Action<HomeLink>? LinkRequested;
@@ -141,12 +156,13 @@ public sealed class HomeView : UserControl
     /// <summary>Draws <paramref name="model"/>. Only what changed is rebuilt; the glyphs keep their clock.</summary>
     public void Show(HomeOverviewModel model)
     {
-        if (model.Same(_model))
+        if (model.Same(_model) && _drawnHighContrast == SystemSettingWatch.HighContrast)
         {
             return;
         }
 
         _model = model;
+        _drawnHighContrast = SystemSettingWatch.HighContrast;
         _column.Children.Clear();
         _glyphs.Clear();
         _balanceValue = null;
@@ -494,23 +510,35 @@ public sealed class HomeView : UserControl
     /// </summary>
     private FrameworkElement BuildHero(HomeHero hero, HomeOverviewModel model)
     {
-        var ink = new SolidColorBrush(Argb(HomeTrayInks.HeroInk));
+        bool highContrast = SystemSettingWatch.HighContrast;
+        HeroGround ground = hero.Ground switch
+        {
+            HomeGround.Campaign => HeroGround.Campaign,
+            HomeGround.Missions => HeroGround.Missions,
+            _ => HeroGround.Insights,
+        };
+        Color inkColor = HeroColor(HeroPart.Ink, ground, highContrast);
+        var ink = new SolidColorBrush(inkColor);
         var card = new Grid
         {
             MinHeight = HeroCard.MinHeight,
             CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
-            Background = new SolidColorBrush(Argb(HeroCard.Ground(hero.Ground switch
-            {
-                HomeGround.Campaign => HeroGround.Campaign,
-                HomeGround.Missions => HeroGround.Missions,
-                _ => HeroGround.Insights,
-            }))),
+            Background = new SolidColorBrush(HeroColor(HeroPart.Ground, ground, highContrast)),
+
+            // Under high contrast the card is outlined in the ink, as the
+            // tiles above it are.
+            BorderBrush = highContrast ? ink : null,
+            BorderThickness = new Thickness(highContrast ? 1 : 0),
         };
 
         // The graphic, behind the words, past the card's edges.
         var art = new Canvas { IsHitTestVisible = false };
         card.Children.Add(art);
-        if (hero.Symbol is string symbol && HeroGlyph.HeroMask(symbol) is HeroGlyph.Mask mask)
+        if (!HeroCard.DrawsArt(highContrast))
+        {
+            // No art under high contrast: decoration in fixed blues.
+        }
+        else if (hero.Symbol is string symbol && HeroGlyph.HeroMask(symbol) is HeroGlyph.Mask mask)
         {
             var glyph = new HeroGlyphView(mask, art);
             _glyphs.Add(glyph);
@@ -518,7 +546,7 @@ public sealed class HomeView : UserControl
         }
         else if (hero.Ground == HomeGround.Insights && model.InsightsBars.Count > 0)
         {
-            var bars = BuildInsightsBars(model.InsightsBars);
+            var bars = BuildInsightsBars(model.InsightsBars, inkColor);
             art.Children.Add(bars);
             card.SizeChanged += (_, e) =>
             {
@@ -580,7 +608,9 @@ public sealed class HomeView : UserControl
         {
             words.Children.Add(new Border
             {
-                Background = new SolidColorBrush(Argb(HomeTrayInks.HeroButtonFill)),
+                Background = new SolidColorBrush(HeroColor(HeroPart.PillFill, ground, highContrast)),
+                BorderBrush = highContrast ? ink : null,
+                BorderThickness = new Thickness(highContrast ? 1 : 0),
                 CornerRadius = new CornerRadius(HomeTrayInks.Measures.PillRadius),
                 Padding = new Thickness(HeroCard.PillPaddingX, HeroCard.PillPaddingY, HeroCard.PillPaddingX, HeroCard.PillPaddingY),
                 Margin = new Thickness(0, HomeTrayInks.Measures.S1, 0, 0),
@@ -590,7 +620,7 @@ public sealed class HomeView : UserControl
                     Text = action,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = HomeTrayInks.Measures.LabelSize,
-                    Foreground = new SolidColorBrush(Argb(HomeTrayInks.HeroButtonInk)),
+                    Foreground = new SolidColorBrush(HeroColor(HeroPart.PillInk, ground, highContrast)),
                 },
             });
         }
@@ -628,7 +658,7 @@ public sealed class HomeView : UserControl
         // at 0.75, whole under the pointer (HeroCard.swift:197-224).
         var outer = new Grid();
         outer.Children.Add(button);
-        var glyphInk = new SolidColorBrush(Argb(HomeTrayInks.HeroInk)) { Opacity = HeroCard.CloseInk };
+        var glyphInk = new SolidColorBrush(inkColor) { Opacity = HeroCard.CloseInk };
         var close = new Button
         {
             Content = new FontIcon { Glyph = "", FontSize = HeroCard.CloseGlyph, Foreground = glyphInk },
@@ -653,11 +683,10 @@ public sealed class HomeView : UserControl
     /// from 0.95 to 0.45, cut off by the card's bottom edge
     /// (HomeInsightsVisual.swift:61-85).
     /// </summary>
-    private static FrameworkElement BuildInsightsBars(IReadOnlyList<GlanceBar> bars)
+    private static FrameworkElement BuildInsightsBars(IReadOnlyList<GlanceBar> bars, Color ink)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 14, VerticalAlignment = VerticalAlignment.Bottom };
         ulong most = bars[0].Tokens;
-        Color ink = Argb(HomeTrayInks.HeroInk);
         foreach (GlanceBar bar in bars)
         {
             var fill = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(0, 1) };
@@ -675,6 +704,22 @@ public sealed class HomeView : UserControl
         }
 
         return row;
+    }
+
+    /// <summary>
+    /// A hero part's colour (<see cref="HeroCard.Ink"/>): the Mac's literal,
+    /// or under high contrast the theme brush the Home tiles take, read now.
+    /// </summary>
+    private static Color HeroColor(HeroPart part, HeroGround ground, bool highContrast)
+    {
+        HeroInk ink = HeroCard.Ink(part, ground, highContrast);
+        if (ink.ThemeKey is string key && Application.Current.Resources[key] is SolidColorBrush themed)
+        {
+            return themed.Color;
+        }
+
+        // A key that did not resolve keeps the Mac's colour, never a blank.
+        return Argb(ink.ThemeKey is null ? ink.Argb : HeroCard.Ink(part, ground, highContrast: false).Argb);
     }
 
     /// <summary>A fade over the fast token (0.15 s) on the token curve (0.2, 0.8, 0.2, 1).</summary>

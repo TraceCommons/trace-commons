@@ -29,6 +29,7 @@ internal static class SystemSettingWatch
     private static readonly UISettings Ui = new();
     private static readonly CachedReading<bool> Animations = new(() => Ui.AnimationsEnabled);
     private static readonly CachedReading<bool> Taskbar = new(TrayIcon.ReadTaskbarLight);
+    private static readonly CachedReading<bool> Contrast = new(() => new AccessibilitySettings().HighContrast);
     private static readonly SubclassProc Proc = WndProc;
     private static readonly HashSet<IntPtr> Installed = new();
 
@@ -46,7 +47,14 @@ internal static class SystemSettingWatch
     /// <summary>The taskbar draws itself light.</summary>
     public static bool TaskbarLight => Taskbar.Value;
 
-    /// <summary>Raised on the UI thread when either setting changed.</summary>
+    /// <summary>
+    /// A high contrast theme is on. Code that picks a colour itself (Home's
+    /// hero, the rail's mark) reads it at draw time and draws again on
+    /// <see cref="Changed"/>; XAML theme resources follow on their own.
+    /// </summary>
+    public static bool HighContrast => Contrast.Value;
+
+    /// <summary>Raised on the UI thread when any of the settings changed.</summary>
     public static event Action? Changed;
 
     /// <summary>Watches <paramref name="hwnd"/>'s setting changes; once per window.</summary>
@@ -59,12 +67,13 @@ internal static class SystemSettingWatch
         }
     }
 
-    /// <summary>Reads both settings again, as the window is activated; raises <see cref="Changed"/> if either moved.</summary>
+    /// <summary>Reads the settings again, as the window is activated; raises <see cref="Changed"/> if any moved.</summary>
     public static void Refresh()
     {
         bool animations = Animations.Refresh();
         bool taskbar = Taskbar.Refresh();
-        if (animations || taskbar)
+        bool contrast = Contrast.Refresh();
+        if (animations || taskbar || contrast)
         {
             Changed?.Invoke();
         }

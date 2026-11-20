@@ -248,14 +248,18 @@ internal sealed class EdgeRailWindow : Window
 
     private void BuildClosed()
     {
-        Color handle = Argb(ActualDark ? HomeTrayInks.Dark.EdgeRailHandle : HomeTrayInks.Light.EdgeRailHandle);
+        // Under high contrast the handle and the mark take the ink, not the
+        // Mac's fixed tints (checklist D2).
+        Brush handle = SystemSettingWatch.HighContrast
+            ? (Brush)Application.Current.Resources["TcInkPrimaryBrush"]
+            : new SolidColorBrush(Argb(ActualDark ? HomeTrayInks.Dark.EdgeRailHandle : HomeTrayInks.Light.EdgeRailHandle));
         _closed.Children.Add(new Rectangle
         {
             Width = EdgeRailGeometry.HandleWidth,
             Height = EdgeRailGeometry.HandleHeight,
             RadiusX = EdgeRailGeometry.HandleWidth / 2 + 0.5,
             RadiusY = EdgeRailGeometry.HandleWidth / 2 + 0.5,
-            Fill = new SolidColorBrush(handle),
+            Fill = handle,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
         });
@@ -401,7 +405,9 @@ internal sealed class EdgeRailWindow : Window
         {
             Data = NearMarkGeometry.Build(),
             Stretch = Stretch.Uniform,
-            Fill = new SolidColorBrush(Argb(HomeTrayInks.Dark.HeroTints[1])),
+            Fill = SystemSettingWatch.HighContrast
+                ? (Brush)Application.Current.Resources["TcInkPrimaryBrush"]
+                : new SolidColorBrush(Argb(HomeTrayInks.Dark.HeroTints[1])),
             Width = side,
             Height = side,
         };
