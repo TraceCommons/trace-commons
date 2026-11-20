@@ -2093,6 +2093,42 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
     }
 }
 
+/// The release notes are on the public Release page. They open with the
+/// app's name from core copy, and never with the commons' name or a former
+/// app name (owner rule: neither is user-visible). They opened with
+/// "Trace Commons contributor apps." until 2026-11-19.
+#[test]
+fn release_notes_open_with_the_app_name() {
+    let workflow = read(".github/workflows/release-apps.yml");
+    let publish_job = extract_job(&workflow, "publish");
+    let expected = format!("NOTES=\"{}.\"", trace_commons_contributor::brand::APP_NAME);
+    assert!(
+        publish_job.contains(&expected),
+        "the release notes must open with `{expected}`"
+    );
+    // Comments, URLs and backticked commands carry identifiers (bucket
+    // names, the cask, file names), not words a reader is meant to read.
+    let notes: String = publish_job
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter(|line| !line.contains("http") && !line.contains('`'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in ["Trace Commons", "TraceCommons contributor", "Near.ai"]
+        .into_iter()
+        .chain(
+            trace_commons_contributor::brand::FORMER_APP_NAMES
+                .iter()
+                .copied(),
+        )
+    {
+        assert!(
+            !notes.contains(forbidden),
+            "the publish job's user-visible text must not say {forbidden}"
+        );
+    }
+}
+
 /// `make-msix.ps1` must run under Windows PowerShell 5.1 as well as 7. It
 /// used a three-argument `Join-Path`, which 5.1 rejects before building
 /// anything, and the only thing that ran it was the release job, under pwsh.

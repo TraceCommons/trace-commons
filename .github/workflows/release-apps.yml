@@ -1344,7 +1344,7 @@ jobs:
           LINUX_RESULT: ${{ needs.linux-flatpak.result }}
         run: |
           set -euo pipefail
-          NOTES="Trace Commons contributor apps."
+          NOTES="Near AI Gateway."
           if [ "$MACOS_RESULT" = success ]; then
             NOTES="$NOTES
 
