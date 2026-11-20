@@ -77,4 +77,62 @@ final class LibraryStationTests: XCTestCase {
         XCTAssertGreaterThan(GlassLibraryStation.glow(lit: false), 0)
         XCTAssertLessThan(GlassLibraryStation.glow(lit: false), GlassLibraryStation.glow(lit: true))
     }
+
+    /// The ring lies in the plane the station turns in, so every turn of
+    /// it projects to the same outline: what lets its glow be drawn once.
+    @MainActor
+    func test_theRingsOutlineIsTheSameAtEveryAngle() {
+        let size = CGSize(width: 150, height: 130)
+        let radius = GlassLibraryStation.ringRadius
+        for a in stride(from: 0.0, to: 2 * Double.pi, by: 0.37) {
+            let p = SIMD3<Double>(radius * cos(a), 0, radius * sin(a))
+            let turned = GlassLibraryStation.turned(p, angle: 1.3)
+            let projected = GlassLibraryStation.project(turned, size: size)
+            let onRing = (0 ..< 720).contains { step in
+                let b = Double(step) / 720 * 2 * .pi
+                let q = GlassLibraryStation.project(
+                    GlassLibraryStation.turned(SIMD3(radius * cos(b), 0, radius * sin(b)), angle: 0), size: size)
+                return hypot(q.x - projected.x, q.y - projected.y) < 0.5
+            }
+            XCTAssertTrue(onRing, "a turned point of the ring left the ring's outline")
+        }
+    }
+
+    /// The glow is an image with room for its blur, lit round the ring
+    /// and clear at the centre, and drawn once per size.
+    @MainActor
+    func test_theGlowIsDrawnOnceRoundTheRing() throws {
+        let size = CGSize(width: 150, height: 130)
+        let image = try XCTUnwrap(GlassLibraryStationGlow.image(size: size, scale: 2, lit: true))
+        let margin = GlassLibraryStationGlow.margin
+        XCTAssertEqual(image.width, Int((size.width + margin * 2) * 2))
+        XCTAssertEqual(image.height, Int((size.height + margin * 2) * 2))
+        XCTAssertTrue(GlassLibraryStationGlow.image(size: size, scale: 2, lit: true) === image, "drawn again for the same size")
+
+        let data = try XCTUnwrap(image.dataProvider?.data as Data?)
+        func alpha(atPoint point: CGPoint) -> UInt8 {
+            let x = Int((point.x + margin) * 2), y = Int((point.y + margin) * 2)
+            return data[y * image.bytesPerRow + x * 4 + 3]
+        }
+        let outline = GlassLibraryStation.ringOutline(size: size).boundingRect
+        XCTAssertEqual(alpha(atPoint: CGPoint(x: size.width / 2, y: size.height / 2)), 0, "the glow covers the mark")
+        XCTAssertGreaterThan(alpha(atPoint: CGPoint(x: outline.maxX - 1, y: outline.midY)), 0, "no glow on the ring")
+        XCTAssertEqual(alpha(atPoint: CGPoint(x: -margin + 1, y: -margin + 1)), 0, "the glow runs off the image")
+        XCTAssertNil(GlassLibraryStationGlow.image(size: .zero, scale: 2, lit: true))
+    }
+
+    /// The indexed mesh a frame draws from is the mesh itself: every face
+    /// gets back its own corners in its own order, and the corners the
+    /// ring's faces share are stored once.
+    @MainActor
+    func test_theIndexedMeshIsTheMesh() {
+        let mesh = GlassLibraryStation.mesh
+        let indexed = GlassLibraryStation.indexed
+        XCTAssertEqual(indexed.starts.count, mesh.count + 1)
+        for (f, face) in mesh.enumerated() {
+            let corners = indexed.corners[indexed.starts[f] ..< indexed.starts[f + 1]].map { indexed.vertices[$0] }
+            XCTAssertEqual(corners, face.points, "face \(f) changed")
+        }
+        XCTAssertLessThan(indexed.vertices.count, mesh.reduce(0) { $0 + $1.points.count } / 2)
+    }
 }
