@@ -564,10 +564,19 @@ public class SampleDaemonTests
         Assert.False(status.IsError);
         Assert.Equal(2UL, status.Result!.Value.GetProperty("eligible_count").GetUInt64());
         Assert.NotNull(SessionDetail.Parse(Answer(sample, "history_detail").Result!.Value));
-        Assert.NotNull(SkillCandidate.Parse(Answer(sample, SkillLearningClient.CandidateMethod).Result!.Value));
-        Assert.NotNull(SkillReview.Parse(Answer(sample, SkillLearningClient.ReviewMethod).Result!.Value));
-        Assert.NotNull(SkillEvaluationReport.Parse(Answer(sample, SkillLearningClient.EvaluateMethod).Result!.Value));
-        Assert.NotNull(SkillInstallPlan.Parse(Answer(sample, SkillLearningClient.InstallPlanMethod).Result!.Value));
+        // One lineage from the candidate to the plan, on a sample record that
+        // History lists accepted, so the model takes each step.
+        SkillCandidate candidate = SkillCandidate.Parse(Answer(sample, SkillLearningClient.CandidateMethod).Result!.Value)!;
+        SkillReview review = SkillReview.Parse(Answer(sample, SkillLearningClient.ReviewMethod).Result!.Value)!;
+        SkillEvaluationReport report = SkillEvaluationReport.Parse(Answer(sample, SkillLearningClient.EvaluateMethod).Result!.Value)!;
+        SkillInstallPlan plan = SkillInstallPlan.Parse(Answer(sample, SkillLearningClient.InstallPlanMethod).Result!.Value)!;
+        Assert.Equal("644587ac-f321-57d9-9b27-2c280db3de77", candidate.SourceSubmissionId);
+        Assert.Equal(candidate.SourceSubmissionId, review.SourceSubmissionId);
+        Assert.Equal(candidate.CandidateId, review.CandidateId);
+        Assert.Equal(review.ReviewId, report.ReviewId);
+        Assert.Equal(review.SkillSha256, report.SkillSha256);
+        Assert.Equal(report.EvaluationId, plan.EvaluationId);
+        Assert.True(report.InstallAllowed);
         Assert.NotNull(SkillInstallStatus.Parse(Answer(sample, SkillLearningClient.InstallStatusMethod).Result!.Value));
         foreach (string write in new[] { SentTracesTrainingClient.GrantMethod, SkillLearningClient.InstallCommitMethod, SkillLearningClient.RollbackMethod })
         {
