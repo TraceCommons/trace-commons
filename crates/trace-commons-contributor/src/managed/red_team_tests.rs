@@ -280,6 +280,31 @@ fn the_spec_targets_the_builds_near_ai_environment() {
     assert_eq!(super::near_environment(), expected);
 }
 
+/// NEAR redeploys the staging gateway several times a day, so a staging
+/// build does not require its compose hash to be pinned (staging 0.24.68:
+/// 10d29b73 pinned in the morning, 4c544d60 live by the afternoon). Every
+/// other check stays on, and production stays strictly pinned.
+#[cfg(target_os = "macos")]
+#[test]
+fn only_staging_accepts_an_unpinned_compose_that_the_tee_measured() {
+    use rts::attest::{AttestOptions, ComposePolicy};
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-compose-policy-test");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    let expected = if cfg!(feature = "near-ai-staging") {
+        AttestOptions {
+            compose_policy: ComposePolicy::MrConfigOnly,
+            ..AttestOptions::default()
+        }
+    } else {
+        AttestOptions::default()
+    };
+    assert_eq!(spec.attest, expected);
+    assert!(!spec.attest.allow_tcb_out_of_date);
+    assert!(!spec.attest.allow_unattested_provider);
+}
+
 /// rts and the daemon must never disagree about which NEAR AI the key is for:
 /// the environment rts attests and proxies to is the channel's own inference
 /// base, the one the model catalogue is read from.
