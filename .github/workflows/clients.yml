@@ -847,3 +847,25 @@ jobs:
           if ($main.Name -ne $manifest.Package.Identity.Name) {
             throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
           }
+
+      # make-msix.ps1 is what the `windows` release job runs (under pwsh) and
+      # what a person runs by hand on a box, often under Windows PowerShell
+      # 5.1, the only PowerShell a fresh Windows install has. It once used a
+      # three-argument Join-Path, which 5.1 rejects before building anything,
+      # and nothing ran it under 5.1. So it runs here under both hosts. The
+      # second run reuses the first one's build output.
+      - name: Build the MSIX with make-msix.ps1 under PowerShell 5.1 and 7
+        shell: pwsh
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\debug
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($shell in @('powershell', 'pwsh')) {
+            $out = Join-Path $env:RUNNER_TEMP "make-msix-$shell"
+            & $shell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/scripts/make-msix.ps1 `
+              -Version 0.0.1 -OutputDir $out -SignListPath "$out.signlist"
+            if ($LASTEXITCODE -ne 0) { throw "make-msix.ps1 failed under $shell with exit code $LASTEXITCODE" }
+            $built = @(Get-ChildItem -Path $out -Filter *.msix)
+            if ($built.Count -ne 1) { throw "make-msix.ps1 under $shell wrote $($built.Count) packages" }
+            Write-Host "$shell built $($built[0].Name)"
+          }

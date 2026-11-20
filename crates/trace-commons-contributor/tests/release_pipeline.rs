@@ -2093,6 +2093,32 @@ fn ci_packages_and_validates_the_windows_app_feed_identity() {
     }
 }
 
+/// `make-msix.ps1` must run under Windows PowerShell 5.1 as well as 7. It
+/// used a three-argument `Join-Path`, which 5.1 rejects before building
+/// anything, and the only thing that ran it was the release job, under pwsh.
+/// clients.yml now runs it under both hosts; this keeps that step from
+/// losing either one.
+#[test]
+fn make_msix_runs_under_both_powershell_hosts_in_ci() {
+    let ci = read(".github/workflows/clients.yml");
+    let step_at = ci
+        .find("name: Build the MSIX with make-msix.ps1 under PowerShell 5.1 and 7")
+        .expect("clients.yml must run make-msix.ps1 under both PowerShell hosts");
+    let step = &ci[step_at..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    assert!(
+        step.contains("@('powershell', 'pwsh')"),
+        "the make-msix step must loop over Windows PowerShell 5.1 and PowerShell 7"
+    );
+    assert!(step.contains("windows/scripts/make-msix.ps1"));
+
+    let script = read("windows/scripts/make-msix.ps1");
+    assert!(
+        !script.contains("Join-Path $PSScriptRoot '..' '..'"),
+        "make-msix.ps1 must not use a three-argument Join-Path; 5.1 rejects it"
+    );
+}
+
 /// A Windows checkout has CRLF line endings -- `core.autocrlf` defaults to
 /// true there, and the box this was found on reported 1367 CRLF pairs in
 /// `release-apps.yml` alone. That must not change what these tests read.
