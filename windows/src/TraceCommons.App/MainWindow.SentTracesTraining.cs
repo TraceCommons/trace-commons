@@ -58,6 +58,13 @@ public sealed partial class MainWindow
     /// </summary>
     private void ClearAccountOwnedContent()
     {
+        // Raised on the UI thread today; the inspector redraws, so make sure.
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(ClearAccountOwnedContent);
+            return;
+        }
+
         _skillLearning?.ClearAccountOwnedContent();
         _historyDetail?.ClearAccountOwnedContent();
     }
@@ -131,13 +138,45 @@ public sealed partial class MainWindow
             }
         });
 
-    /// <summary>The first run has handed off: an offer it raised is shown on this window.</summary>
+    private bool _offerWaitsForWindow;
+
+    /// <summary>
+    /// The first run has handed off: an offer it raised is shown on this
+    /// window, once it is on screen. A window hidden to the tray keeps the
+    /// offer until it is next activated (the Mac's Monitor shows its sheet
+    /// when it appears); Home's Review shows the same sheet meanwhile.
+    /// </summary>
     private void ShowFirstRunTrainingOffer()
     {
-        if (SentTraining.Sheet is { Site: SentTracesTrainingSite.Monitor } && Content?.XamlRoot is XamlRoot root)
+        if (SentTraining.Sheet is not { Site: SentTracesTrainingSite.Monitor })
         {
-            _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
+            return;
         }
+
+        if (!AppWindow.IsVisible || Content?.XamlRoot is not XamlRoot root)
+        {
+            if (!_offerWaitsForWindow)
+            {
+                _offerWaitsForWindow = true;
+                Activated += OnActivatedWithOffer;
+            }
+
+            return;
+        }
+
+        _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
+    }
+
+    private void OnActivatedWithOffer(object sender, WindowActivatedEventArgs args)
+    {
+        if (args.WindowActivationState == WindowActivationState.Deactivated || !AppWindow.IsVisible)
+        {
+            return;
+        }
+
+        Activated -= OnActivatedWithOffer;
+        _offerWaitsForWindow = false;
+        DispatcherQueue.TryEnqueue(ShowFirstRunTrainingOffer);
     }
 
     /// <summary>

@@ -313,6 +313,7 @@ public class SentTracesTrainingTests
         string sheet = views.Substring(open, views.IndexOf("private static void Name(", open, StringComparison.Ordinal) - open);
         Assert.Contains("var opening = new ContentControl", sheet);
         Assert.Contains("IsTabStop = true,", sheet);
+        Assert.Contains("UseSystemFocusVisuals = true,", sheet);
         Assert.Contains("Content = opening,", sheet);
         Assert.Contains("opening.Focus(FocusState.Programmatic);", sheet);
         Assert.Contains("DefaultButton = ContentDialogButton.None,", sheet);

@@ -55,7 +55,8 @@ public static class SentTracesTrainingViews
             {
                 Content = body,
                 IsTabStop = true,
-                UseSystemFocusVisuals = false,
+                // A ring only when reached from the keyboard, never an invisible stop.
+                UseSystemFocusVisuals = true,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
             };
             AutomationProperties.SetName(opening, copy.Body(sheet.Count));
