@@ -39,7 +39,7 @@ public sealed class SpendOrganizationCard : UserControl
     private readonly ComboBox _picker = new() { MinWidth = 200, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _what = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Grid _notice = new();
-    private readonly Border _noticeWash = new() { Opacity = 0.14 };
+    private readonly Border _noticeWash = new();
     private readonly FontIcon _noticeIcon = new() { FontSize = 13, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 1, 0, 0) };
     private readonly TextBlock _noticeText = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, FontWeight = FontWeights.SemiBold };
     private bool _filling;
@@ -54,9 +54,10 @@ public sealed class SpendOrganizationCard : UserControl
         // GlassType bodyStrong: 13 semibold.
         _title.FontSize = 13;
         _title.FontWeight = FontWeights.SemiBold;
-        _what.Style = (Style)Application.Current.Resources["TcCaptionTextStyle"];
-        _what.Foreground = Brush("TcInkSecondaryBrush");
-        _noticeText.Foreground = Brush("TcInkPrimaryBrush");
+        // Brushes through the Settings window's styles, so the card follows
+        // the window's theme (SettingsCards.Named).
+        _what.Style = SettingsCards.Named("SettingsSecondaryCaptionStyle");
+        _noticeText.Style = SettingsCards.Named("SettingsNoticeTextStyle");
         AutomationProperties.SetAccessibilityView(_noticeIcon, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
         AutomationProperties.SetLiveSetting(_noticeText, Microsoft.UI.Xaml.Automation.Peers.AutomationLiveSetting.Polite);
 
@@ -69,7 +70,6 @@ public sealed class SpendOrganizationCard : UserControl
 
         // GlassNotice: the tone's icon in its colour, the title beside it,
         // on the tone's colour at 0.14, padded 10 all round.
-        _noticeWash.CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"];
         var noticeRow = new Grid { ColumnSpacing = 8, Padding = new Thickness(10) };
         noticeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         noticeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -85,11 +85,7 @@ public sealed class SpendOrganizationCard : UserControl
         stack.Children.Add(_notice);
         Content = new Border
         {
-            Background = Brush("TcSurfaceCardBrush"),
-            BorderBrush = Brush("TcHairlineBrush"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"],
-            Padding = new Thickness(14, 12, 14, 12),
+            Style = SettingsCards.Named("SettingsCardStyle"),
             Child = stack,
         };
 
@@ -185,8 +181,8 @@ public sealed class SpendOrganizationCard : UserControl
         if (_model.StateLine is { } line)
         {
             bool ask = line.Tone == SpendOrganizationTone.Ask;
-            _noticeWash.Background = Brush(ask ? "TcStatusAskBrush" : "TcStatusOutsideBrush");
-            _noticeIcon.Foreground = Brush(ask ? "TcStatusAskBrush" : "TcStatusOutsideBrush");
+            _noticeWash.Style = SettingsCards.Named(ask ? "SettingsNoticeWashAskStyle" : "SettingsNoticeWashOutsideStyle");
+            _noticeIcon.Style = SettingsCards.Named(ask ? "SettingsNoticeIconAskStyle" : "SettingsNoticeIconOutsideStyle");
             // exclamationmark.circle.fill for ask, exclamationmark.triangle.fill for outside.
             _noticeIcon.Glyph = ask ? "" : "";
             _noticeText.Text = line.Text;
@@ -225,6 +221,4 @@ public sealed class SpendOrganizationCard : UserControl
             IsTabStop = false;
         }
     }
-
-    private static Brush Brush(string key) => (Brush)Application.Current.Resources[key];
 }

@@ -36,8 +36,7 @@ public sealed class CliOptionsCard : UserControl
     {
         _saves.Clear();
         var body = new StackPanel { Spacing = 12 };
-        TextBlock scope = SettingsCards.Caption(ManagedWords.Text("cli_options_scope"));
-        scope.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcInkSecondaryBrush"];
+        TextBlock scope = SettingsCards.SecondaryCaption(ManagedWords.Text("cli_options_scope"));
         body.Children.Add(scope);
 
         if (_flow.Snapshot is not { } snapshot)
@@ -104,8 +103,7 @@ public sealed class CliOptionsCard : UserControl
 
         if (_flow.Refusal is { } refusal && refusal.Tool == tool)
         {
-            TextBlock line = SettingsCards.Caption(ManagedWords.Text(refusal.Key));
-            line.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcInkSecondaryBrush"];
+            TextBlock line = SettingsCards.SecondaryCaption(ManagedWords.Text(refusal.Key));
             row.Children.Add(line);
         }
 

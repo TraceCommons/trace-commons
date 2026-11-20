@@ -57,9 +57,7 @@ public sealed class WatchingSection : UserControl
     {
         if (_flow.QueueTtlDays is { } days)
         {
-            TextBlock line = SettingsCards.Caption(SettingsLegacyWords.UndecidedDropped(days));
-            line.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcInkTertiaryBrush"];
-            return line;
+            return SettingsCards.TertiaryCaption(SettingsLegacyWords.UndecidedDropped(days));
         }
 
         return SettingsCards.ReadNotice(_flow.SettingsReadFailed, async (_, _) =>
@@ -84,8 +82,7 @@ public sealed class WatchingSection : UserControl
         }
 
         var body = new StackPanel { Spacing = 12 };
-        TextBlock caption = SettingsCards.Caption(MonitorShellCopy.Shell("watcher_caption"));
-        caption.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcInkTertiaryBrush"];
+        TextBlock caption = SettingsCards.TertiaryCaption(MonitorShellCopy.Shell("watcher_caption"));
         body.Children.Add(caption);
         body.Children.Add(QueueLimit());
 

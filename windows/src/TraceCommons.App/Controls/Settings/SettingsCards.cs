@@ -73,6 +73,27 @@ internal static class SettingsCards
     public static TextBlock Caption(string text) => Text(text, "TcCaptionTextStyle");
 
     /// <summary>
+    /// One of the Settings window's own styles (<see cref="Styles"/>), whose
+    /// brushes are theme resources: the only way code here gets a brush, so
+    /// every one follows the window's theme and a live theme change.
+    /// </summary>
+    public static Style? Named(string key) => Styles?[key] as Style;
+
+    /// <summary>A caption in the secondary ink (<c>GlassColor.textSecondary</c>).</summary>
+    public static TextBlock SecondaryCaption(string text) => new()
+    {
+        Text = text,
+        Style = Named("SettingsSecondaryCaptionStyle") ?? (Style)Resource("TcCaptionTextStyle"),
+    };
+
+    /// <summary>A caption in the tertiary ink (<c>GlassColor.textTertiary</c>).</summary>
+    public static TextBlock TertiaryCaption(string text) => new()
+    {
+        Text = text,
+        Style = Named("SettingsTertiaryCaptionStyle") ?? (Style)Resource("TcCaptionTextStyle"),
+    };
+
+    /// <summary>
     /// A button named for Narrator by its own words, or by a fuller name the
     /// core gives for it.
     /// </summary>
@@ -111,19 +132,13 @@ internal static class SettingsCards
         var text = new TextBlock
         {
             Text = word,
-            Style = (Style)Resource("TcMonoChipTextStyle"),
-            Foreground = (Microsoft.UI.Xaml.Media.Brush)Resource(muted ? "TcInkSecondaryBrush" : "TcAccentTextBrush"),
+            Style = Named(muted ? "SettingsChipSecondaryTextStyle" : "SettingsChipAccentTextStyle"),
             MaxLines = 1,
         };
         var chip = new Border
         {
             Child = text,
-            Padding = new Thickness(9, 3, 9, 3),
-            CornerRadius = (CornerRadius)Resource("TcPillCornerRadius"),
-            BorderThickness = new Thickness(0.5),
-            BorderBrush = (Microsoft.UI.Xaml.Media.Brush)Resource("TcHairlineBrush"),
-            Background = muted ? (Microsoft.UI.Xaml.Media.Brush)Resource("TcSurfaceInsetBrush") : null,
-            VerticalAlignment = VerticalAlignment.Center,
+            Style = Named(muted ? "SettingsGlassChipMutedStyle" : "SettingsGlassChipStyle"),
         };
         AutomationProperties.SetName(chip, word);
         AutomationProperties.SetAccessibilityView(text, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
@@ -140,25 +155,18 @@ internal static class SettingsCards
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
         row.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse
         {
-            Width = 6,
-            Height = 6,
-            Fill = (Microsoft.UI.Xaml.Media.Brush)Resource(on ? "TcStatusOnBrush" : "TcStatusOffBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
+            Style = Named(on ? "SettingsStatusDotOnStyle" : "SettingsStatusDotOffStyle"),
         });
         row.Children.Add(new TextBlock
         {
             Text = word,
-            Style = (Style)Resource("TcMonoChipTextStyle"),
-            Foreground = (Microsoft.UI.Xaml.Media.Brush)Resource(on ? "TcStatusOnTextBrush" : "TcInkSecondaryBrush"),
+            Style = Named(on ? "SettingsChipOnTextStyle" : "SettingsChipSecondaryTextStyle"),
             MaxLines = 1,
         });
         var chip = new Border
         {
             Child = row,
-            Padding = new Thickness(9, 3, 9, 3),
-            CornerRadius = (CornerRadius)Resource("TcPillCornerRadius"),
-            Background = (Microsoft.UI.Xaml.Media.Brush)Resource("TcSurfaceInsetBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
+            Style = Named("SettingsStatusChipStyle"),
         };
         AutomationProperties.SetName(chip, word);
         AutomationProperties.SetAccessibilityView(row, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);

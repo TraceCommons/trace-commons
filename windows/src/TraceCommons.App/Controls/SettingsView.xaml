@@ -50,6 +50,76 @@
             <Setter Property="Margin" Value="0,6" />
             <Setter Property="Background" Value="{ThemeResource TcHairlineDividerBrush}" />
         </Style>
+
+        <!--
+            The chips' and lines' brushes (SettingsCards.GlassChip,
+            StatusChip, the secondary and tertiary captions, the spend
+            organization card's notice): the same rule, so they follow the
+            window's theme and a live theme change. Code never reads a brush
+            key itself (SettingsThemeBrushTests).
+        -->
+        <Style x:Key="SettingsChipAccentTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcAccentTextBrush}" />
+        </Style>
+        <Style x:Key="SettingsChipSecondaryTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsChipOnTextStyle" TargetType="TextBlock" BasedOn="{StaticResource TcMonoChipTextStyle}">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusOnTextBrush}" />
+        </Style>
+        <Style x:Key="SettingsGlassChipStyle" TargetType="Border">
+            <Setter Property="Padding" Value="9,3,9,3" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="BorderThickness" Value="0.5" />
+            <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="SettingsGlassChipMutedStyle" TargetType="Border" BasedOn="{StaticResource SettingsGlassChipStyle}">
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
+        </Style>
+        <Style x:Key="SettingsStatusChipStyle" TargetType="Border">
+            <Setter Property="Padding" Value="9,3,9,3" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="SettingsStatusDotOnStyle" TargetType="Ellipse">
+            <Setter Property="Width" Value="6" />
+            <Setter Property="Height" Value="6" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Fill" Value="{ThemeResource TcStatusOnBrush}" />
+        </Style>
+        <Style x:Key="SettingsStatusDotOffStyle" TargetType="Ellipse" BasedOn="{StaticResource SettingsStatusDotOnStyle}">
+            <Setter Property="Fill" Value="{ThemeResource TcStatusOffBrush}" />
+        </Style>
+        <Style x:Key="SettingsSecondaryCaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource TcCaptionTextStyle}">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkSecondaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsTertiaryCaptionStyle" TargetType="TextBlock" BasedOn="{StaticResource TcCaptionTextStyle}">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkTertiaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeTextStyle" TargetType="TextBlock">
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="{ThemeResource TcInkPrimaryBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeWashAskStyle" TargetType="Border">
+            <Setter Property="Opacity" Value="0.14" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcCardCornerRadius}" />
+            <Setter Property="Background" Value="{ThemeResource TcStatusAskBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeWashOutsideStyle" TargetType="Border" BasedOn="{StaticResource SettingsNoticeWashAskStyle}">
+            <Setter Property="Background" Value="{ThemeResource TcStatusOutsideBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeIconAskStyle" TargetType="FontIcon">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusAskBrush}" />
+        </Style>
+        <Style x:Key="SettingsNoticeIconOutsideStyle" TargetType="FontIcon">
+            <Setter Property="Foreground" Value="{ThemeResource TcStatusOutsideBrush}" />
+        </Style>
     </UserControl.Resources>
 
     <Grid RowDefinitions="Auto,*">

@@ -37,8 +37,7 @@ public sealed class UpdatesSection : UserControl
 
         var body = new StackPanel { Spacing = 12 };
         var versionRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        TextBlock label = SettingsCards.Text(card.VersionLabel, "TcCaptionTextStyle");
-        label.Foreground = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcInkSecondaryBrush"];
+        TextBlock label = SettingsCards.SecondaryCaption(card.VersionLabel);
         versionRow.Children.Add(label);
         TextBlock version = SettingsCards.Text(card.Version, "TcMonoCodeTextStyle");
         version.IsTextSelectionEnabled = true;
