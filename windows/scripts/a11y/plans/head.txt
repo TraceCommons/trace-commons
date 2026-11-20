@@ -11,8 +11,9 @@ audit main insights-breakdown 60
 tab TabTraces
 clickaid main TracesHistoryButton
 expect main lacks TracesHistoryButton
-click main api
-click main Withdraw
+invoke main api
+snap main history-folder
+invoke main Withdraw
 state main withdraw-dialog
 snap main withdraw-dialog
 key main 1B
@@ -20,16 +21,19 @@ state main after-esc-dialog
 expect main lacks TracesHistoryButton
 key main 1B
 expect main has TracesHistoryButton
-# The tree: one stop; the arrows move inside it; Return on a trace opens
-# the preview, whose Escape closes it.
+# The tree: one stop; the arrows move its selection (the Mac's, read by
+# a screen reader from the selected row), Return on a trace opens its
+# review, and the inspector's Look inside opens the preview, whose Escape
+# closes it.
 focusname main Tools, folders and traces
 key main 28
-state main tree-down
+selected main api
 key main 27
-state main tree-right
 key main 28
-state main tree-down-again
+snap main tree-trace-selected
 key main 0D
+snap main tree-after-return
+clicklast main Look inside
 newwin preview
 audit preview preview 60
 scroll preview preview
