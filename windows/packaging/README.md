@@ -116,8 +116,8 @@ updated in place on Windows Server 2025 (tc-win-az3, 2026-11-19 and
   `%LOCALAPPDATA%\trace-commons`;
 - the manifest-declared protocol handler is registered by the deployment;
 - the `.appinstaller` feed installs, registers the intended update settings,
-  and the in-app update installs the next version with the state intact. It
-  does not start the app again afterwards.
+  and the in-app update installs the next version with the state intact and
+  starts it again (through the `UpdateRelaunch` helper).
 
 Still unproven: that `signtool` accepts the publisher string against a real
 Trusted Signing certificate (the failure mode is an outright signing

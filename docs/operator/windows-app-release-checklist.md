@@ -121,22 +121,27 @@ the version; the MSIX version is stamped from the tag at build time.
   whole file: `Add-AppxPackage -AppInstallerFile` failed with 0x8008020C,
   "Element '{.../2021}AutomaticBackgroundTask' is unexpected ... Expecting:
   {.../2017/2}AutomaticBackgroundTask". The generator at `app-v0.23.0` had
-  the same line, so the live feed is very likely the same invalid file
-  (inferred from the generator; the live feed was not fetched). Installed
-  MSIX apps would then never have updated from it. The `clients.yml` check
+  the same line, and the live feed (0.23.0.0) carries it: the owner checked
+  it on 2026-11-20. Installed MSIX apps cannot have updated from it. The `clients.yml` check
   required the wrong namespace too; both are fixed and pinned.
+
+- **"Update and restart" did not restart.** The deployment ends the app
+  (`TerminateApplications`) and installs the new version, and nothing
+  started it again; `RegisterApplicationRestart` (flags 11, and flags 0 with
+  `AddPackageByAppInstallerFileAsync`) changed nothing. A process the app
+  starts runs outside the package's container and survives that ending
+  (measured: plain children, a scheduled task and a WMI-created process all
+  outlived the update; only one forced into the container did not). So
+  `AppUpdater.ApplyAsync` now starts a hidden Windows PowerShell helper
+  (`UpdateRelaunch`, script in `UpdateRelaunch.ps1`) just before the
+  hand-off. It waits up to 180 s for the package family to be registered at
+  another version and starts the app through its AUMID; a refused hand-off
+  stops it. Proved twice on tc-win-az3: 1.0.25 to 1.0.26 relaunched 14 s
+  after the click, 1.0.27 to 1.0.28 12 s after, each on the same state with
+  its daemon running.
 
 ## Still open
 
-- **"Update and restart" does not restart.** The in-app update installs the
-  new version and ends the app, and nothing starts it again (see the trial
-  below). `RegisterApplicationRestart` was tried twice: with flags 11, and
-  with flags 0 together with `AddPackageByAppInstallerFileAsync` in place
-  of the `Request...` call (that run logged S_OK from the registration).
-  The app stayed closed both times. For the flags-11 run the deployment log
-  shows `TerminateApplications` and the Restart Manager log is empty. Tried
-  only as the box's built-in Administrator. Whether to change
-  the button's words or find another relaunch is the owner's call.
 - The `windows` job publishes the app without `-p:Version`, so the portable
   app's assembly version is the SDK default until #2216 (which reads the
   contributor crate's version) lands. The MSIX is unaffected: its version is
@@ -197,7 +202,7 @@ directory were removed afterwards, and the box was deallocated.
 | Launch from `shell:AppsFolder` | ran from `C:\Program Files\WindowsApps\Iqlusion.TraceCommons_1.0.12.0_x64__...`; main window up |
 | Feed moved to 1.0.13; Settings opened (starts the daemon, then the update check) | the app fetched the feed; the "Update available" banner offered "Update and restart" on Insights (on Traces it sits behind the first-contribution card, by the notice order) |
 | "Update and restart" | the daemon shut down cleanly (`daemon.lock` removed, as on a clean close); `AddFromAppInstallerOperation` with `ForceTargetApplicationShutdownOption`; 1.0.13.0 registered about 7 s later |
-| Relaunch | **none**: no process in the 120 s watched at 1.0.13, nor in 90 s at 1.0.15 and 60 s at 1.0.17 with the restart registration tried (see "Still open") |
+| Relaunch | **none** before the helper: no process in the 120 s watched at 1.0.13, nor in 90 s at 1.0.15 and 60 s at 1.0.17 with the restart registration tried. With the helper (2026-11-20 13:37 and 13:45 UTC): the new version running 14 s and 12 s after the click (see "Fixed") |
 | State across the update | `daemon-settings.json`, `daemon-state.json` and a sentinel file byte-identical before and after; launched by hand, 1.0.17 started its daemon on the same state |
 
 Box notes: `Add-AppxPackage -AppInstallerFile` over SSH fails ("Failed to
@@ -208,6 +213,12 @@ itself from the same declarations (passed as start settings) worked. Under the h
 `feature-flags/production.json` fetch got a 404, so these runs had no
 remote flags.
 
+Windows' own on-launch check: with a newer version in the feed, launching
+the installed app from Start can open App Installer's "Update Near AI
+Gateway?" prompt (Finish Updating / Open Now / Cancel) instead of the app,
+although the feed writes no `ShowPrompt` and `HoursBetweenUpdateChecks` is 8
+(seen at 13:31 to 13:34 UTC, `LastCheckedForUpdates` 13:31).
+
 Not covered: a standard (non-administrator) user, Windows 10 and 11
 clients, the Trusted Signing certificate, and Windows' own OnLaunch and
 background updates (the 8-hour interval did not elapse).
@@ -216,5 +227,5 @@ background updates (the 8-hour interval did not elapse).
 
 - Install from the feed on a clean standard user and confirm the version.
 - Confirm an installed earlier build updates from the real feed. The in-app
-  path is proved on the box (above) apart from the relaunch; Windows' own
-  OnLaunch and background checks are not.
+  path, relaunch included, is proved on the box (above); Windows' own
+  background check is not.
