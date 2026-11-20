@@ -36,8 +36,8 @@ public sealed class DaemonHost : IAsyncDisposable
     /// <summary>Whether this launch reads recorded samples instead of a daemon.</summary>
     public bool IsSample => _sample is not null;
 
-    /// <summary>Whether this sample also answers the tested-skill flow (the skillLearning extra).</summary>
-    public bool SampleAnswersSkillLearning => _sample?.ExtraName == SampleDaemon.SkillLearningExtra;
+    /// <summary>Whether this sample also answers the tested-skill flow (the skillLearning and skillInstalled extras).</summary>
+    public bool SampleAnswersSkillLearning => _sample?.ExtraName is SampleDaemon.SkillLearningExtra or SampleDaemon.SkillInstalledExtra;
 #endif
 
     /// <summary>

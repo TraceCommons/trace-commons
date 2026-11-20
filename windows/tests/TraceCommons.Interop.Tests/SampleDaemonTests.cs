@@ -585,4 +585,56 @@ public class SampleDaemonTests
 
         Assert.True(Answer(WithExtra("normalDay", null), SentTracesTrainingClient.StatusMethod).IsError);
     }
+
+    // ---- Drawing the Settings sheet and the installed skill (W20 round 2) ----
+
+    /// <summary>
+    /// The skill-learning extra confirms a consent write with the daemon's
+    /// own recorded reply (tests/fixtures/first-run), so a confirmed turn-on
+    /// in Settings raises the sheet. It is a static answer: nothing is
+    /// written, and the status still reports the scopes it did.
+    /// </summary>
+    [Fact]
+    public void TheSkillLearningExtraConfirmsATurnOnWithTheDaemonsRecordedReply()
+    {
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SkillLearningExtra);
+        DaemonResponse write = Answer(sample, DaemonProtocol.Methods.SetConsentScopes);
+        Assert.False(write.IsError);
+        using JsonDocument recorded = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "first-run", "set_consent_scopes.json")));
+        Assert.True(System.Text.Json.Nodes.JsonNode.DeepEquals(
+            System.Text.Json.Nodes.JsonNode.Parse(recorded.RootElement.GetProperty("result").GetRawText()),
+            System.Text.Json.Nodes.JsonNode.Parse(write.Result!.Value.GetRawText())));
+        IReadOnlyList<string> confirmed = SentTracesTrainingState.ConfirmedScopes(write)!;
+        IReadOnlyList<string> before = Answer(sample, DaemonProtocol.Methods.Status).ResultAs<DaemonStatus>()!.ConsentScopes;
+        Assert.True(SentTracesTrainingState.TurnsOn(before, confirmed));
+        Assert.True(Answer(WithExtra("normalDay", null), DaemonProtocol.Methods.SetConsentScopes).IsError);
+    }
+
+    /// <summary>
+    /// The installed-skill extra: the sample record's skill reads as installed,
+    /// so the installed panel and its rollback confirmation draw. A rollback
+    /// stays unrecorded, so confirming it is refused and nothing is removed.
+    /// </summary>
+    [Fact]
+    public void TheSkillInstalledExtraReportsAnInstalledSkillAndRecordsNoWrite()
+    {
+        Assert.NotNull(SampleDaemon.Extra(SampleDaemon.SkillInstalledExtra, "root"));
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SkillInstalledExtra);
+        SkillInstallStatus status = SkillInstallStatus.Parse(Answer(sample, SkillLearningClient.InstallStatusMethod).Result!.Value)!;
+        Assert.True(status.Installed);
+        Assert.Equal("644587ac-f321-57d9-9b27-2c280db3de77", status.Skill!.SourceSubmissionId);
+        Assert.NotNull(SessionDetail.Parse(Answer(sample, "history_detail").Result!.Value));
+        Assert.False(Answer(sample, SentTracesTrainingClient.StatusMethod).IsError);
+        foreach (string write in new[] { SentTracesTrainingClient.GrantMethod, SkillLearningClient.InstallCommitMethod, SkillLearningClient.RollbackMethod })
+        {
+            Assert.Equal(SampleDaemon.UnrecordedLabel, Answer(sample, write).Error!.Message);
+        }
+    }
+
+    [Fact]
+    public void BothSkillExtrasAnswerTheSkillFlowInASampleWindow()
+    {
+        string host = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "DaemonHost.cs.txt"));
+        Assert.Contains("_sample?.ExtraName is SampleDaemon.SkillLearningExtra or SampleDaemon.SkillInstalledExtra", host);
+    }
 }
