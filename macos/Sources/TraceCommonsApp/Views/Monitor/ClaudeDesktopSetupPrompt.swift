@@ -11,39 +11,27 @@ import TCShellCore
 /// confirmation, like the Settings row) and Set up to change models; the
 /// offer's dismissal and an absent Claude.app do not hide it.
 struct ClaudeDesktopSetupPrompt: View {
+    /// The status the tab reads (`claudeDesktopPolling` on the tab's stack).
+    let setup: ClaudeDesktopSetupModel?
     /// Opens the Private AI section of Settings.
     let onOpenSettings: () -> Void
     @EnvironmentObject private var model: AppModel
     @AppStorage(ClaudeDesktopPrompt.dismissedKey) private var dismissed = false
-    @State private var setup: ClaudeDesktopSetupModel?
-    @State private var desktopInstalled = false
     private var featureOn: Bool { model.featureIsEnabled(ClaudeDesktopSetupModel.featureID) }
+    /// Looked up once per launch: a Claude Desktop installed later shows
+    /// the offer after the next launch.
+    private static let desktopInstalled = NSWorkspace.shared.urlForApplication(
+        withBundleIdentifier: ClaudeDesktopPrompt.desktopBundleID) != nil
 
     var body: some View {
-        Group {
-            if let setup, let status = setup.status {
-                switch ClaudeDesktopPrompt.mode(featureOn: featureOn, desktopInstalled: desktopInstalled,
-                                                dismissed: dismissed, status: status) {
-                case .offer: offer(status)
-                case .connected: connected(setup, status)
-                case .hidden: EmptyView()
-                }
+        if let setup, let status = setup.status {
+            switch ClaudeDesktopPrompt.mode(featureOn: featureOn, desktopInstalled: Self.desktopInstalled,
+                                            dismissed: dismissed, status: status) {
+            case .offer: offer(status)
+            case .connected: connected(setup, status)
+            case .hidden: EmptyView()
             }
         }
-        // Reads nothing while the flag is off; otherwise re-reads the status
-        // while the tab is in view, so the card follows setup and disconnect
-        // done in Settings.
-        .task(id: featureOn) {
-            guard featureOn else { setup = nil; return }
-            desktopInstalled = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: ClaudeDesktopPrompt.desktopBundleID) != nil
-            while !Task.isCancelled {
-                if setup == nil { setup = model.makeClaudeDesktopSetup() }
-                await setup?.refresh()
-                do { try await Task.sleep(for: .seconds(15)) } catch { break }
-            }
-        }
-        .onDisappear { setup = nil }
     }
 
     private func offer(_ status: ClaudeDesktopStatus) -> some View {

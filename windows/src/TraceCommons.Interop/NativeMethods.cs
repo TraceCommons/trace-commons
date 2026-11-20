@@ -1422,8 +1422,9 @@ internal static partial class NativeMethods
 
     /// <summary>
     /// The core's nudge table (<c>nudge_copy</c>): every fixed nudge word,
-    /// key to text, as a JSON object. Free with tc_string_free. NULL only on
-    /// a caught panic.
+    /// key to text, as a JSON object, the Traces order control's words among
+    /// them (NudgeCopy.swift). Free with tc_string_free. NULL only on a
+    /// caught panic.
     /// </summary>
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr tc_nudge_copy_json();

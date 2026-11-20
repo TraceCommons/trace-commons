@@ -536,5 +536,22 @@ public class FeatureFlagsTests
 
         string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
         Assert.Contains("msg == WM_POWERBROADCAST && (int)wParam == PBT_APMRESUMEAUTOMATIC", shell, StringComparison.Ordinal);
+
+        // The Mac's daemon starts at launch (AppModel.swift:1782), so its
+        // flags are read whichever screen is open. The window lands on
+        // Insights, which needs no daemon: it starts one there, quietly, after
+        // a sample window's early return and before the Insights pane opens.
+        int activated = window.IndexOf("private void OnFirstActivated(", StringComparison.Ordinal);
+        Assert.True(activated > 0);
+        string first = window.Substring(activated, window.IndexOf("\n    }\n", activated, StringComparison.Ordinal) - activated);
+        int sample = first.IndexOf("OpenSampleLanding();", StringComparison.Ordinal);
+        int launch = first.IndexOf("_ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());", StringComparison.Ordinal);
+        int insights = first.IndexOf("ShowInsightsPane();", StringComparison.Ordinal);
+        Assert.True(sample > 0 && launch > sample && insights > launch, "the launch start sits after the sample return and before Insights");
+
+        // A contribution start pressed while that one runs joins it; the roots
+        // screen's answer, carrying new settings, starts again if it refused.
+        Assert.Contains("await _startGate.RunAsync(() => StartDaemonAsync(settingsJson, cancellationToken), () => _daemon is not null, retryAfterFailure: settingsJson is not null)",
+            host, StringComparison.Ordinal);
     }
 }

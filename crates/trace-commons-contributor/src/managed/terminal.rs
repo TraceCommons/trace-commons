@@ -37,11 +37,12 @@ pub enum TerminalApp {
     Xfce4Terminal,
     Foot,
     Terminator,
+    Powershell,
 }
 
 impl TerminalApp {
     /// Every app any platform offers.
-    pub const ALL: [TerminalApp; 15] = [
+    pub const ALL: [TerminalApp; 16] = [
         TerminalApp::Terminal,
         TerminalApp::Ghostty,
         TerminalApp::Iterm2,
@@ -57,6 +58,7 @@ impl TerminalApp {
         TerminalApp::Xfce4Terminal,
         TerminalApp::Foot,
         TerminalApp::Terminator,
+        TerminalApp::Powershell,
     ];
     /// macOS, in the order a picker shows them.
     pub const MACOS: [TerminalApp; 8] = [
@@ -69,8 +71,11 @@ impl TerminalApp {
         TerminalApp::Warp,
         TerminalApp::Rex,
     ];
-    /// Windows.
-    pub const WINDOWS: [TerminalApp; 1] = [TerminalApp::WindowsTerminal];
+    /// Windows: Windows Terminal, then Windows PowerShell in its own console
+    /// window, offered only where Windows Terminal is not installed (W14-D1
+    /// (b), owner 2026-11-19: "the console host (PowerShell) as the fallback
+    /// when Windows Terminal is not installed"; see [`installed_among`]).
+    pub const WINDOWS: [TerminalApp; 2] = [TerminalApp::WindowsTerminal, TerminalApp::Powershell];
     /// Linux, in the order a picker shows them. Also the order a missing
     /// default falls back in ([`effective`]): the desktops' own terminals
     /// first (GNOME's old and new, KDE's, Xfce's), then the rest.
@@ -119,6 +124,7 @@ impl TerminalApp {
             TerminalApp::Xfce4Terminal => "xfce4_terminal",
             TerminalApp::Foot => "foot",
             TerminalApp::Terminator => "terminator",
+            TerminalApp::Powershell => "powershell",
         }
     }
 
@@ -150,6 +156,7 @@ impl TerminalApp {
             TerminalApp::Xfce4Terminal => "Xfce Terminal",
             TerminalApp::Foot => "foot",
             TerminalApp::Terminator => "Terminator",
+            TerminalApp::Powershell => "Windows PowerShell",
         }
     }
 
@@ -186,6 +193,7 @@ impl TerminalApp {
             TerminalApp::Xfce4Terminal => Some("xfce4-terminal"),
             TerminalApp::Foot => Some("foot"),
             TerminalApp::Terminator => Some("terminator"),
+            TerminalApp::Powershell => Some("powershell.exe"),
             TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
                 None
             }
@@ -364,6 +372,7 @@ pub enum TerminalSetting {
     Xfce4Terminal,
     Foot,
     Terminator,
+    Powershell,
     #[serde(other)]
     Unrecognized,
 }
@@ -399,6 +408,7 @@ impl TerminalSetting {
             TerminalSetting::Xfce4Terminal => TerminalApp::Xfce4Terminal,
             TerminalSetting::Foot => TerminalApp::Foot,
             TerminalSetting::Terminator => TerminalApp::Terminator,
+            TerminalSetting::Powershell => TerminalApp::Powershell,
             TerminalSetting::Unrecognized => return None,
         };
         TerminalApp::offered().contains(&app).then_some(app)
@@ -423,6 +433,7 @@ impl From<TerminalApp> for TerminalSetting {
             TerminalApp::Xfce4Terminal => TerminalSetting::Xfce4Terminal,
             TerminalApp::Foot => TerminalSetting::Foot,
             TerminalApp::Terminator => TerminalSetting::Terminator,
+            TerminalApp::Powershell => TerminalSetting::Powershell,
         }
     }
 }
@@ -439,9 +450,10 @@ impl From<TerminalApp> for TerminalSetting {
 /// Why: the default exists only because Linux had to name one when the
 /// choice arrived (GNOME Terminal), and GNOME now ships Ptyxis instead, so
 /// on a stock Ubuntu 25.10+ or Fedora desktop the default was refused on
-/// every launch although an offered terminal was installed. macOS and
-/// Windows never reach the fallback: their defaults (Terminal, Windows
-/// Terminal) ship with the system.
+/// every launch although an offered terminal was installed. macOS never
+/// reaches the fallback: Terminal ships with it. Windows Server and older
+/// Windows 10 do not ship Windows Terminal, and there Windows PowerShell
+/// stands in (W14-D1 (b)).
 pub fn effective(
     setting: TerminalSetting,
     chosen: bool,
@@ -507,18 +519,25 @@ pub fn installed() -> Vec<TerminalApp> {
 /// The apps among `offered` whose program `found` finds. foot is counted
 /// only when a Wayland session is present (`wayland`): under X11 it cannot
 /// start, so offering it, or standing it in for a missing default, would
-/// refuse the launch.
+/// refuse the launch. Windows PowerShell is counted only when Windows
+/// Terminal is not found: it is the fallback, never a second choice, so a
+/// computer with Windows Terminal is not asked which terminal on every
+/// launch (`AsksForTerminal` asks only with more than one installed).
 #[cfg(any(windows, target_os = "linux", test))]
 fn installed_among(
     offered: &[TerminalApp],
     found: impl Fn(&str) -> bool,
     wayland: bool,
 ) -> Vec<TerminalApp> {
-    offered
+    let apps: Vec<TerminalApp> = offered
         .iter()
         .copied()
         .filter(|app| wayland || *app != TerminalApp::Foot)
         .filter(|app| app.executable().is_some_and(&found))
+        .collect();
+    let has_windows_terminal = apps.contains(&TerminalApp::WindowsTerminal);
+    apps.into_iter()
+        .filter(|app| !(has_windows_terminal && *app == TerminalApp::Powershell))
         .collect()
 }
 
@@ -984,6 +1003,13 @@ struct Plan {
     /// The folder the terminal is started in, for a terminal told its
     /// folder that way rather than by a flag.
     cwd: Option<PathBuf>,
+    /// Variables set for the terminal alone, for a terminal told its
+    /// command's values that way rather than by argv (Windows PowerShell).
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// Whether the program gets a console window of its own, with that
+    /// console's own input and output, never the daemon's (Windows
+    /// PowerShell; see [`spawn_plan`]).
+    new_console: bool,
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
@@ -996,6 +1022,7 @@ impl Plan {
         if let Some(cwd) = &self.cwd {
             command.current_dir(cwd);
         }
+        command.envs(self.env.iter().map(|(k, v)| (k, v)));
         command
     }
 }
@@ -1136,7 +1163,12 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             args.extend(cwd.map(|cwd| with_value("--working-directory=", cwd)));
             args.push("-x".into());
         }
-        TerminalApp::Terminal | TerminalApp::Iterm2 | TerminalApp::Warp | TerminalApp::Rex => {
+        // Not started by argv: see [`powershell_plan`].
+        TerminalApp::Terminal
+        | TerminalApp::Iterm2
+        | TerminalApp::Warp
+        | TerminalApp::Rex
+        | TerminalApp::Powershell => {
             return None;
         }
     }
@@ -1150,7 +1182,8 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
 ///
 /// Windows Terminal reads a `;` anywhere in its command line as the start
 /// of another command, so any argument holding one is refused rather than
-/// escaped. Ptyxis refuses a folder holding `%`, `#` or `?` (see
+/// escaped, and it expands `%NAME%` in the command it starts, so a helper
+/// path or config folder holding `%` is refused too. Ptyxis refuses a folder holding `%`, `#` or `?` (see
 /// [`program_plan`]).
 #[cfg(any(windows, target_os = "linux", test))]
 fn plan(
@@ -1170,9 +1203,108 @@ fn plan(
     {
         return Err(ManagedError::InvalidRequest);
     }
+    if app == TerminalApp::Powershell {
+        return powershell_plan(program, helper, config, cwd, session, ticket);
+    }
     let mut command = vec![helper.as_os_str().to_owned()];
     command.extend(helper_args(config, session, ticket));
     program_plan(app, program, cwd, command)
+}
+
+/// The variables Windows PowerShell reads the helper's path, the config
+/// folder and the session from ([`POWERSHELL_SCRIPT`]). The ticket travels
+/// in [`LAUNCH_TICKET_ENV`], which `redeem-launch` reads when `--ticket` is
+/// absent.
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_HELPER_ENV: &str = "NEAR_AI_LAUNCH_HELPER";
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_CONFIG_ENV: &str = "NEAR_AI_LAUNCH_CONFIG";
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_SESSION_ENV: &str = "NEAR_AI_LAUNCH_SESSION";
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_FOLDER_ENV: &str = "NEAR_AI_LAUNCH_FOLDER";
+
+/// The one script Windows PowerShell runs, the same on every launch: nothing
+/// is ever written into it. It moves to the folder by `-LiteralPath`, read
+/// from its own environment; reads the helper's path, the config folder and
+/// the session from there into variables; removes those variables; and
+/// calls the helper with them as arguments, so no folder, path or ticket is
+/// parsed as PowerShell. The ticket is removed from the window's
+/// environment once the helper returns; the helper has already removed it
+/// from the tool's.
+///
+/// The `Set-Location` is not redundant with the process's working folder:
+/// measured on Windows Server 2025 (2026-11-19), Windows PowerShell 5.1
+/// started in a folder named `$(whoami) @{a=1} [b] & c` read the brackets
+/// as a wildcard and began in its own folder,
+/// `C:\Windows\System32\WindowsPowerShell\v1.0`. If the move fails, the
+/// script stops there (`-ErrorAction Stop`) and no tool is started.
+#[cfg(any(windows, target_os = "linux", test))]
+pub(crate) const POWERSHELL_SCRIPT: &str = "Set-Location -LiteralPath $env:NEAR_AI_LAUNCH_FOLDER -ErrorAction Stop; \
+$nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
+$nearAiConfig = $env:NEAR_AI_LAUNCH_CONFIG; \
+$nearAiSession = $env:NEAR_AI_LAUNCH_SESSION; \
+Remove-Item Env:NEAR_AI_LAUNCH_FOLDER, Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
+& $nearAiHelper --config-dir $nearAiConfig redeem-launch --session-id $nearAiSession; \
+Remove-Item Env:NEAR_AI_LAUNCH_TICKET -ErrorAction SilentlyContinue";
+
+/// How Windows PowerShell opens a session when Windows Terminal is not
+/// installed (W14-D1 (b)): `powershell.exe -NoLogo -NoProfile -NoExit
+/// -Command` [`POWERSHELL_SCRIPT`], started in the folder, in a console of
+/// its own, with the helper's path, the config folder, the session and the
+/// ticket in its environment. `-NoExit` keeps the window, at a prompt in
+/// the folder, after the tool exits, as the Linux terminals' hold does;
+/// `-NoProfile` keeps a profile from changing what the script means.
+/// Windows PowerShell 5.1 has no working-directory option (`-WorkingDirectory`
+/// is PowerShell 7's), so the folder is the process's.
+///
+/// PowerShell 5.1 hands a native program its arguments by writing one
+/// command line, quoting an argument that holds a space without escaping a
+/// trailing backslash, so `"C:\a b\"` would end in an escaped quote. A
+/// helper path or config folder ending in `\` is refused; a Windows path
+/// cannot hold `"`.
+#[cfg(any(windows, target_os = "linux", test))]
+fn powershell_plan(
+    program: &Path,
+    helper: &Path,
+    config: &Path,
+    cwd: &Path,
+    session: Uuid,
+    ticket: &str,
+) -> Result<Plan, ManagedError> {
+    let ends_in_separator = |p: &Path| p.as_os_str().to_string_lossy().ends_with('\\');
+    if !program.is_absolute()
+        || !helper.is_absolute()
+        || !config.is_absolute()
+        || !cwd.is_absolute()
+        || !valid_ticket(ticket)
+        || ends_in_separator(helper)
+        || ends_in_separator(config)
+    {
+        return Err(ManagedError::InvalidRequest);
+    }
+    Ok(Plan {
+        program: program.to_path_buf(),
+        args: [
+            "-NoLogo",
+            "-NoProfile",
+            "-NoExit",
+            "-Command",
+            POWERSHELL_SCRIPT,
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+        cwd: Some(cwd.to_path_buf()),
+        env: vec![
+            (POWERSHELL_FOLDER_ENV.into(), cwd.as_os_str().to_owned()),
+            (POWERSHELL_HELPER_ENV.into(), helper.as_os_str().to_owned()),
+            (POWERSHELL_CONFIG_ENV.into(), config.as_os_str().to_owned()),
+            (POWERSHELL_SESSION_ENV.into(), session.to_string().into()),
+            (LAUNCH_TICKET_ENV.into(), ticket.into()),
+        ],
+        new_console: true,
+    })
 }
 
 /// The argv that opens `command` (a program and its arguments, each one
@@ -1191,6 +1323,17 @@ fn program_plan(
     // and open elsewhere when the result does not exist; told none, each
     // opens in its working directory, so that is where they are started.
     let started_in = matches!(app, TerminalApp::Konsole | TerminalApp::Kitty);
+    // Windows Terminal expands `%NAME%` in the command it starts, with no
+    // escape (measured with Windows Terminal 1.25.3131.0: a config folder
+    // `cfg %USERNAME% x` reached the helper as `cfg tcdev x`). The folder it
+    // is told by `-d` arrived unexpanded, so only the command is refused.
+    if app == TerminalApp::WindowsTerminal
+        && command
+            .iter()
+            .any(|arg| arg.to_string_lossy().contains('%'))
+    {
+        return Err(ManagedError::InvalidRequest);
+    }
     let mut args =
         terminal_args(app, (!started_in).then_some(cwd)).ok_or(ManagedError::InvalidRequest)?;
     args.extend(command);
@@ -1217,6 +1360,8 @@ fn program_plan(
         program: program.to_path_buf(),
         args,
         cwd: started_in.then(|| cwd.to_path_buf()),
+        env: vec![],
+        new_console: false,
     })
 }
 
@@ -1253,6 +1398,8 @@ fn open_plan(
         program: PathBuf::from("/usr/bin/open"),
         args,
         cwd: None,
+        env: vec![],
+        new_console: false,
     })
 }
 
@@ -1541,7 +1688,9 @@ fn setup_argv(body: &str) -> Result<Vec<std::ffi::OsString>, ManagedError> {
 /// Windows Terminal is refused: setup is not offered there.
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn setup_plan(app: TerminalApp, program: &Path, body: &str) -> Result<Plan, ManagedError> {
-    if !program.is_absolute() || app == TerminalApp::WindowsTerminal {
+    if !program.is_absolute()
+        || matches!(app, TerminalApp::WindowsTerminal | TerminalApp::Powershell)
+    {
         return Err(ManagedError::InvalidRequest);
     }
     let mut args = terminal_args(app, None).ok_or(ManagedError::InvalidRequest)?;
@@ -1550,6 +1699,8 @@ fn setup_plan(app: TerminalApp, program: &Path, body: &str) -> Result<Plan, Mana
         program: program.to_path_buf(),
         args,
         cwd: None,
+        env: vec![],
+        new_console: false,
     })
 }
 
@@ -1658,6 +1809,10 @@ pub fn launch(
 /// Start a Windows or Linux terminal and leave it running.
 #[cfg(any(windows, target_os = "linux"))]
 fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
+    #[cfg(windows)]
+    if plan.new_console {
+        return spawn_in_new_console(plan).map(|_| ());
+    }
     let mut process = plan
         .command()
         .stdin(std::process::Stdio::null())
@@ -1669,6 +1824,142 @@ fn spawn_plan(plan: &Plan) -> Result<(), ManagedError> {
         let _ = process.wait();
     });
     Ok(())
+}
+
+/// Start `plan` in a console window of its own, through `CreateProcessW`:
+/// `CREATE_NEW_CONSOLE`, no handles inherited and no standard handles
+/// passed (no `STARTF_USESTDHANDLES`), so the program reads and writes that
+/// console. `std::process::Command` cannot do this: it passes the daemon's
+/// own standard handles whenever it has any (a CLI daemon's console, or a
+/// log file), and the session would read from and write to those instead.
+/// The command line is [`Plan::command`]'s, quoted by the standard library
+/// for `CommandLineToArgvW`; the environment is the daemon's plus
+/// `plan.env`, sorted as Windows expects.
+/// Returns the new process's id.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn spawn_in_new_console(plan: &Plan) -> Result<u32, ManagedError> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, PROCESS_INFORMATION,
+        STARTUPINFOW,
+    };
+    let wide = |s: &std::ffi::OsStr| -> Option<Vec<u16>> {
+        let v: Vec<u16> = s.encode_wide().collect();
+        (!v.contains(&0)).then_some(v)
+    };
+    let mut line =
+        quote_windows_arg(plan.program.as_os_str()).ok_or(ManagedError::InvalidRequest)?;
+    for arg in &plan.args {
+        line.push(' ' as u16);
+        line.extend(quote_windows_arg(arg).ok_or(ManagedError::InvalidRequest)?);
+    }
+    line.push(0);
+    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(k, _)| {
+            !plan.env.iter().any(|(set, _)| {
+                set.to_string_lossy()
+                    .eq_ignore_ascii_case(&k.to_string_lossy())
+            })
+        })
+        .chain(plan.env.iter().cloned())
+        .collect();
+    vars.sort_by_key(|(k, _)| k.to_string_lossy().to_uppercase());
+    let mut block: Vec<u16> = Vec::new();
+    for (key, value) in &vars {
+        let (Some(k), Some(v)) = (wide(key), wide(value)) else {
+            return Err(ManagedError::InvalidRequest);
+        };
+        if k.is_empty() || k.contains(&('=' as u16)) {
+            continue;
+        }
+        block.extend(k);
+        block.push('=' as u16);
+        block.extend(v);
+        block.push(0);
+    }
+    block.push(0);
+    let program = wide(plan.program.as_os_str()).ok_or(ManagedError::InvalidRequest)?;
+    let mut program = program;
+    program.push(0);
+    let cwd = match &plan.cwd {
+        Some(cwd) => {
+            let mut w = wide(cwd.as_os_str()).ok_or(ManagedError::InvalidRequest)?;
+            w.push(0);
+            Some(w)
+        }
+        None => None,
+    };
+    // SAFETY: every pointer is to a NUL-terminated buffer that outlives the
+    // call; `CreateProcessW` may write to the command line, which is ours.
+    unsafe {
+        let mut startup: STARTUPINFOW = std::mem::zeroed();
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut info: PROCESS_INFORMATION = std::mem::zeroed();
+        let ok = CreateProcessW(
+            program.as_ptr(),
+            line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT,
+            block.as_ptr().cast(),
+            cwd.as_ref().map_or(std::ptr::null(), |w| w.as_ptr()),
+            &startup,
+            &mut info,
+        );
+        if ok == 0 {
+            return Err(ManagedError::LaunchUnknown);
+        }
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+        Ok(info.dwProcessId)
+    }
+}
+
+/// One argument as `CommandLineToArgvW` and the C runtime read it back:
+/// bare when it holds no space, tab, newline or quote and is not empty;
+/// otherwise in quotes, with each run of backslashes doubled before a quote
+/// or the closing quote, and each quote escaped. `None` for an argument
+/// holding NUL.
+#[cfg(any(windows, test))]
+fn quote_windows_arg(arg: &std::ffi::OsStr) -> Option<Vec<u16>> {
+    let units: Vec<u16> = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            arg.encode_wide().collect()
+        }
+        #[cfg(not(windows))]
+        {
+            arg.to_string_lossy().encode_utf16().collect()
+        }
+    };
+    if units.contains(&0) {
+        return None;
+    }
+    let special = |u: &u16| matches!(*u, 0x20 | 0x09 | 0x0A | 0x0B | 0x22);
+    if !units.is_empty() && !units.iter().any(special) {
+        return Some(units);
+    }
+    let mut out = vec!['"' as u16];
+    let mut backslashes = 0usize;
+    for &u in &units {
+        if u == '\\' as u16 {
+            backslashes += 1;
+        } else {
+            if u == '"' as u16 {
+                out.extend(std::iter::repeat_n('\\' as u16, backslashes + 1));
+            }
+            backslashes = 0;
+        }
+        out.push(u);
+    }
+    out.extend(std::iter::repeat_n('\\' as u16, backslashes));
+    out.push('"' as u16);
+    Some(out)
 }
 
 /// Open `program`, with no arguments and nothing secret, in the chosen
@@ -2432,7 +2723,7 @@ mod tests {
         );
         assert_eq!(
             TerminalApp::WINDOWS.map(TerminalApp::name),
-            ["Windows Terminal"]
+            ["Windows Terminal", "Windows PowerShell"]
         );
         assert_eq!(
             TerminalApp::LINUX.map(TerminalApp::name),
@@ -3335,6 +3626,188 @@ mod tests {
         );
     }
 
+    /// W14-D1 (b): Windows PowerShell is the fallback where Windows Terminal
+    /// is not installed, never a second choice beside it, so a computer with
+    /// Windows Terminal is not asked which terminal on every launch.
+    #[test]
+    fn windows_powershell_is_installed_only_without_windows_terminal() {
+        let both = |name: &str| matches!(name, "wt.exe" | "powershell.exe");
+        let only_powershell = |name: &str| name == "powershell.exe";
+        let neither = |_: &str| false;
+        assert_eq!(
+            installed_among(TerminalApp::WINDOWS.as_slice(), both, false),
+            [TerminalApp::WindowsTerminal]
+        );
+        assert_eq!(
+            installed_among(TerminalApp::WINDOWS.as_slice(), only_powershell, false),
+            [TerminalApp::Powershell]
+        );
+        assert!(installed_among(TerminalApp::WINDOWS.as_slice(), neither, false).is_empty());
+        assert_eq!(TerminalApp::Powershell.id(), "powershell");
+        assert_eq!(TerminalApp::Powershell.executable(), Some("powershell.exe"));
+    }
+
+    const PS: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+    const PS_HELPER: &str = r"C:\Program Files\NEAR AI\near-ai.exe";
+    const PS_CONFIG: &str = r"C:\Users\x\AppData\Roaming\near ai";
+
+    #[cfg(windows)]
+    fn powershell(cwd: &str) -> Result<Plan, ManagedError> {
+        plan(
+            TerminalApp::Powershell,
+            Path::new(PS),
+            Path::new(PS_HELPER),
+            Path::new(PS_CONFIG),
+            Path::new(cwd),
+            Uuid::nil(),
+            "abcdef01",
+        )
+    }
+
+    /// The literal launch: one fixed script, the folder as the process's
+    /// working folder, the values only in the environment, in a console of
+    /// its own. No folder, path or ticket is ever written into the script.
+    /// Windows paths: run on Windows, where they are absolute.
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_runs_one_fixed_script_with_the_values_in_its_environment() {
+        let plan = powershell(r"C:\Users\x\My Projects\app").unwrap();
+        assert_eq!(plan.program, Path::new(PS));
+        let args: Vec<&str> = plan.args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-NoExit",
+                "-Command",
+                "Set-Location -LiteralPath $env:NEAR_AI_LAUNCH_FOLDER -ErrorAction Stop; \
+                 $nearAiHelper = $env:NEAR_AI_LAUNCH_HELPER; \
+                 $nearAiConfig = $env:NEAR_AI_LAUNCH_CONFIG; \
+                 $nearAiSession = $env:NEAR_AI_LAUNCH_SESSION; \
+                 Remove-Item Env:NEAR_AI_LAUNCH_FOLDER, Env:NEAR_AI_LAUNCH_HELPER, Env:NEAR_AI_LAUNCH_CONFIG, Env:NEAR_AI_LAUNCH_SESSION; \
+                 & $nearAiHelper --config-dir $nearAiConfig redeem-launch --session-id $nearAiSession; \
+                 Remove-Item Env:NEAR_AI_LAUNCH_TICKET -ErrorAction SilentlyContinue",
+            ]
+        );
+        assert_eq!(
+            plan.cwd.as_deref(),
+            Some(Path::new(r"C:\Users\x\My Projects\app"))
+        );
+        let env: Vec<(&str, &str)> = plan
+            .env
+            .iter()
+            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("NEAR_AI_LAUNCH_FOLDER", r"C:\Users\x\My Projects\app"),
+                (
+                    "NEAR_AI_LAUNCH_HELPER",
+                    r"C:\Program Files\NEAR AI\near-ai.exe"
+                ),
+                (
+                    "NEAR_AI_LAUNCH_CONFIG",
+                    r"C:\Users\x\AppData\Roaming\near ai"
+                ),
+                (
+                    "NEAR_AI_LAUNCH_SESSION",
+                    "00000000-0000-0000-0000-000000000000"
+                ),
+                ("NEAR_AI_LAUNCH_TICKET", "abcdef01"),
+            ]
+        );
+        assert!(plan.new_console);
+    }
+
+    /// A folder PowerShell would read as code, were it ever written into the
+    /// script, reaches it only as the working folder: the script is the same
+    /// for every folder. A helper path or config folder ending in `\` is
+    /// refused, since PowerShell 5.1 would quote it into an escaped quote;
+    /// so is a folder that is not fully qualified (L4).
+    #[cfg(windows)]
+    #[test]
+    fn a_hostile_folder_never_reaches_the_powershell_script() {
+        let script = powershell(r"C:\plain").unwrap().args;
+        for cwd in [
+            "C:\\Users\\x\\it's \u{2018}curly\u{2019} q",
+            r"C:\Users\x\$(whoami) `n @{a=1} [b] & c",
+            r"C:\Users\x\--% & ; 100% %USERPROFILE%",
+            r"C:\Users\x\a b\",
+            r"C:\",
+        ] {
+            let plan = powershell(cwd).unwrap_or_else(|e| panic!("{cwd:?}: {e:?}"));
+            assert_eq!(plan.args, script, "{cwd:?}");
+            assert_eq!(plan.cwd.as_deref(), Some(Path::new(cwd)), "{cwd:?}");
+            assert_eq!(plan.env[0].1, std::ffi::OsString::from(cwd), "{cwd:?}");
+        }
+        for cwd in [r"C:proj", r"\proj", r"proj\sub"] {
+            assert_eq!(powershell(cwd), Err(ManagedError::InvalidRequest), "{cwd}");
+        }
+        let with = |helper: &str, config: &str, ticket: &str| {
+            plan(
+                TerminalApp::Powershell,
+                Path::new(PS),
+                Path::new(helper),
+                Path::new(config),
+                Path::new(r"C:\x"),
+                Uuid::nil(),
+                ticket,
+            )
+        };
+        assert_eq!(
+            with(PS_HELPER, r"C:\Users\x\near ai\", "abcdef01"),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert_eq!(
+            with(r"C:\near ai\", PS_CONFIG, "abcdef01"),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert_eq!(
+            with(PS_HELPER, PS_CONFIG, "not hex"),
+            Err(ManagedError::InvalidRequest)
+        );
+        assert!(with(PS_HELPER, PS_CONFIG, "abcdef01").is_ok());
+    }
+
+    /// Windows PowerShell opens sessions only: it is never handed another
+    /// program (herdr) or tool setup by argv.
+    #[test]
+    fn windows_powershell_takes_no_argv_command() {
+        assert_eq!(terminal_args(TerminalApp::Powershell, None), None);
+        assert_eq!(
+            program_plan(
+                TerminalApp::Powershell,
+                Path::new("/ps"),
+                Path::new("/x"),
+                vec!["/h".into()]
+            ),
+            Err(ManagedError::InvalidRequest)
+        );
+        let _ = (PS, PS_HELPER, PS_CONFIG);
+    }
+
+    /// The new console's command line is read back by `CommandLineToArgvW`
+    /// and the C runtime: an argument with a space is quoted, a quote is
+    /// escaped, and backslashes before a quote or the closing quote are
+    /// doubled; anything else is bare.
+    #[test]
+    fn a_new_consoles_arguments_are_quoted_for_command_line_to_argv() {
+        let q = |s: &str| {
+            String::from_utf16(&quote_windows_arg(std::ffi::OsStr::new(s)).unwrap()).unwrap()
+        };
+        assert_eq!(q("-NoExit"), "-NoExit");
+        assert_eq!(q(r"C:\a\b.exe"), r"C:\a\b.exe");
+        assert_eq!(q(r"C:\Program Files\x.exe"), r#""C:\Program Files\x.exe""#);
+        assert_eq!(q(""), r#""""#);
+        assert_eq!(q(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(q(r"a b\"), r#""a b\\""#);
+        assert_eq!(q(r#"a\"b c"#), r#""a\\\"b c""#);
+        assert_eq!(q("$x = 1; & $y"), r#""$x = 1; & $y""#);
+        assert!(quote_windows_arg(std::ffi::OsStr::new("a\0b")).is_none());
+    }
+
     #[cfg(unix)]
     fn tail_of(argv: &[std::ffi::OsString]) -> Vec<&str> {
         argv[..2].iter().map(|a| a.to_str().unwrap()).collect()
@@ -3493,3 +3966,7 @@ mod tests {
             .collect()
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "terminal_windows_tests.rs"]
+mod windows_tests;

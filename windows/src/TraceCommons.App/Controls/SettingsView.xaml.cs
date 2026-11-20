@@ -35,6 +35,18 @@ public sealed partial class SettingsView : UserControl
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
         InitializeShellSwitches();
 
+        // The Traces map's style (W6-D1), its card in General after the edge
+        // rail, as the Mac's (GeneralSection.swift:28); left out when the
+        // core gave no words for it.
+        if (MapStyleSwitch.Build() is { } mapStyle)
+        {
+            MapStyleHost.Content = mapStyle;
+        }
+        else
+        {
+            MapStyleCard.Visibility = Visibility.Collapsed;
+        }
+
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
         Settings.AuditReadChanged += DrawAuditNotice;

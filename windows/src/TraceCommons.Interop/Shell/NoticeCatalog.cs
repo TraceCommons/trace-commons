@@ -21,6 +21,12 @@ public enum NoticeGroup
     PrivateAI,
     /// <summary>A failed or finished action, in front of the rest (<c>actionItems</c>).</summary>
     Action,
+
+    /// <summary>
+    /// The traces being contributed, kept or dismissed, in front of every
+    /// other card on Traces and History (MonitorNotices.swift:157-161).
+    /// </summary>
+    Transfers,
 }
 
 /// <summary>
@@ -135,6 +141,17 @@ public static class NoticeCatalog
     public static NoticeKind Undo(IEnumerable<string> entryIds) =>
         new(UndoPrefix + string.Join(",", entryIds), NoticeGroup.TracesNow, NoticeClose.PutsAway);
 
+    private const string TransferPrefix = "transfer:";
+
+    /// <summary>A trace's transfer card: its X closes it alone (TraceTransferCard.swift:151-160).</summary>
+    public static NoticeKind Transfer(string transferId) => new(TransferPrefix + transferId, NoticeGroup.Transfers, NoticeClose.PutsAway);
+
+    /// <summary>Whether <paramref name="id"/> is a transfer card.</summary>
+    public static bool IsTransfer(string id) => id.StartsWith(TransferPrefix, StringComparison.Ordinal);
+
+    /// <summary>The transfer a card's id names.</summary>
+    public static string TransferId(string id) => id[TransferPrefix.Length..];
+
     /// <summary>Whether <paramref name="id"/> is an approval's undo card.</summary>
     public static bool IsUndo(string id) => id.StartsWith(UndoPrefix, StringComparison.Ordinal);
 
@@ -174,9 +191,9 @@ public static class NoticeCatalog
     public static IReadOnlyList<NoticeGroup> Groups(NoticePlace place) => place switch
     {
         NoticePlace.Traces =>
-            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.TracesNow, NoticeGroup.Action },
+            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
         NoticePlace.History =>
-            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.HistoryOffers, NoticeGroup.TracesNow, NoticeGroup.Action },
+            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.HistoryOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
         NoticePlace.HomeHistory => new[] { NoticeGroup.App, NoticeGroup.HistoryOffers, NoticeGroup.Action },
         NoticePlace.PrivateAI => new[] { NoticeGroup.App, NoticeGroup.PrivateAI, NoticeGroup.Action },
         _ => new[] { NoticeGroup.App, NoticeGroup.Action },

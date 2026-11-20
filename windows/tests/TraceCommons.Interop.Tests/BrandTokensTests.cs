@@ -202,6 +202,17 @@ public class BrandTokensTests
     }
 
     [Fact]
+    public void UnderHighContrastTheFolderTileIsAGroundItsGlyphCanBeSeenOn()
+    {
+        // Review of #2207: the folder glyph is drawn in the primary text
+        // brush on the folder tile (LaunchArtView, the launch dialog's
+        // folder row), so the tile aliasing that same brush hid the glyph.
+        string highContrast = ThemeBlock(BrandTokens, "HighContrast");
+        Assert.Contains("<StaticResource x:Key=\"TcTileFolderBrush\" ResourceKey=\"ApplicationPageBackgroundThemeBrush\" />", highContrast);
+        Assert.Contains("<StaticResource x:Key=\"TcToolClaudeBrush\" ResourceKey=\"TextFillColorPrimaryBrush\" />", highContrast);
+    }
+
+    [Fact]
     public void TheDesignSystemMergesTheBrandTokens()
     {
         Assert.Contains("<ResourceDictionary Source=\"ms-appx:///Themes/BrandTokens.xaml\" />", DesignSystem);

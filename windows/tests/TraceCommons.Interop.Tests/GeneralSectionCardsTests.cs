@@ -6,8 +6,8 @@ namespace TraceCommons.Interop.Tests;
 
 /// <summary>
 /// Settings > General draws the Mac's cards in the Mac's order
-/// (GeneralSection.swift:26-31): Appearance, the edge rail, promotions,
-/// then credit arrivals (Windows has no Traces map, so no map style card).
+/// (GeneralSection.swift:26-31): Appearance, the edge rail, the Traces
+/// map's style, promotions, then credit arrivals.
 /// The promotions switch is the core's words over the shell preference Home
 /// reads (#2219 review, defect 5).
 /// </summary>
@@ -23,13 +23,14 @@ public class GeneralSectionCardsTests
         string general = xaml[body..end];
         int appearance = general.IndexOf("x:Name=\"GeneralHost\"", StringComparison.Ordinal);
         int rail = general.IndexOf("x:Name=\"EdgeRailSwitch\"", StringComparison.Ordinal);
+        int map = general.IndexOf("x:Name=\"MapStyleHost\"", StringComparison.Ordinal);
         int promotions = general.IndexOf("x:Name=\"PromotionsSwitch\"", StringComparison.Ordinal);
         int credit = general.IndexOf("x:Name=\"CreditAnimationSwitch\"", StringComparison.Ordinal);
-        Assert.True(appearance >= 0 && appearance < rail && rail < promotions && promotions < credit,
-            $"appearance {appearance}, rail {rail}, promotions {promotions}, credit {credit}");
+        Assert.True(appearance >= 0 && appearance < rail && rail < map && map < promotions && promotions < credit,
+            $"appearance {appearance}, rail {rail}, map {map}, promotions {promotions}, credit {credit}");
 
         // Each a card, as the Mac's GlassEyebrowCard.
-        foreach (string card in new[] { "EdgeRailCard", "PromotionsCard", "CreditAnimationCard" })
+        foreach (string card in new[] { "EdgeRailCard", "MapStyleCard", "PromotionsCard", "CreditAnimationCard" })
         {
             Assert.Contains($"<Border x:Name=\"{card}\" Style=\"{{StaticResource SettingsCardStyle}}\">", general);
         }

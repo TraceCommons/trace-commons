@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -134,18 +135,96 @@ public sealed record ManagedSnapshot(
         : null;
 
     /// <summary>
-    /// The <c>managed_launch_prepare</c> request that starts <paramref name="tool"/>
-    /// on the NEAR AI sign-in in <paramref name="cwd"/>; null without an entry for it.
+    /// The tools the sign-in card offers a Start button for, in order: each
+    /// with a sign-in entry that can launch. OpenCode only while the daemon's
+    /// <c>tools</c> row says it is installed; an older daemon that sends no
+    /// <c>tools</c> offers no OpenCode button (fail closed). Then Red Team,
+    /// when its entry can launch (ManagedSessionsSurface.swift:1082-1098).
     /// </summary>
-    public Dictionary<string, object>? SignInLaunchParams(string tool, string cwd, string requestId) =>
-        SignInEntry(tool) is { } entry
-            ? new()
-            {
-                ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = entry.Tool,
-                ["connection"] = entry.Connection, ["account_id"] = entry.Id, ["cwd"] = cwd,
-                ["expected_generation"] = Generations.GetValueOrDefault(entry.Tool), ["save_default"] = false,
-            }
-            : null;
+    [JsonIgnore] public string[] SignInStartTools
+    {
+        get
+        {
+            var list = ManagedSignIn.StartTools.Where(tool =>
+                SignInEntry(tool) is not null && CanLaunch(tool)
+                && (tool != "opencode" || Tools?.FirstOrDefault(t => t.Tool == tool)?.Installed == true)).ToList();
+            if (SignInEntry("red_team") is not null && CanLaunch("red_team")) list.Add("red_team");
+            return list.ToArray();
+        }
+    }
+
+    /// <summary>
+    /// The <c>managed_launch_prepare</c> request that starts <paramref name="tool"/>
+    /// on the NEAR AI sign-in in <paramref name="cwd"/>; null unless the card
+    /// offers that tool's Start button. A null <paramref name="cwd"/> names no
+    /// folder, and the daemon starts the session in the person's home folder
+    /// (owner, 2026-10-29; ManagedSessionsSurface.swift:1100-1114). A folder
+    /// that is not fully qualified is refused here (null), never sent.
+    /// </summary>
+    public Dictionary<string, object>? SignInLaunchParams(string tool, string? cwd, string requestId)
+    {
+        if (!SignInStartTools.Contains(tool) || SignInEntry(tool) is not { } entry) return null;
+        if (cwd is not null && !ManagedLaunchFolder.IsAcceptable(cwd)) return null;
+        var request = new Dictionary<string, object>
+        {
+            ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = entry.Tool,
+            ["connection"] = entry.Connection, ["account_id"] = entry.Id,
+            ["expected_generation"] = Generations.GetValueOrDefault(entry.Tool), ["save_default"] = false,
+        };
+        if (cwd is not null) request["cwd"] = cwd;
+        return request;
+    }
+
+    /// <summary>
+    /// The <c>managed_launch_prepare</c> request the saved-account Launch
+    /// dialog sends: <paramref name="account"/> in <paramref name="cwd"/>,
+    /// decided at send time. Null when the folder is not fully qualified, or
+    /// for OpenCode without a model (checklist L4, the sibling of
+    /// <see cref="SignInLaunchParams"/>). The wire shape is the one the
+    /// dialog sent before: <c>model</c> null and no collection for any other
+    /// tool.
+    /// </summary>
+    public Dictionary<string, object?>? AccountLaunchParams(
+        ManagedAccount account, string? cwd, string? model, bool collectTraces, string requestId)
+    {
+        if (!ManagedLaunchFolder.IsAcceptable(cwd)) return null;
+        bool openCode = account.Tool == "opencode";
+        string? trimmed = openCode ? model?.Trim() : null;
+        if (openCode && string.IsNullOrEmpty(trimmed)) return null;
+        return new Dictionary<string, object?>
+        {
+            ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = account.Tool,
+            ["connection"] = account.Connection, ["account_id"] = account.Id, ["cwd"] = cwd,
+            ["expected_generation"] = Generations.GetValueOrDefault(account.Tool), ["save_default"] = false,
+            ["model"] = trimmed, ["collect_traces"] = openCode && collectTraces,
+        };
+    }
+
+    /// <summary>What the sign-in card holds at its foot (ManagedSessionsView.swift:119-129).</summary>
+    [JsonIgnore] public ManagedToolArea ToolArea =>
+        !Capabilities.TerminalLaunch ? ManagedToolArea.NoTerminal
+        : NeedsToolInstallation ? ManagedToolArea.Install
+        : ManagedToolArea.Buttons;
+
+    /// <summary>
+    /// Whether no tool this shell launches is installed: the daemon sends a
+    /// <c>tools</c> row and none of the launched tools in it is installed
+    /// (<c>needsToolInstallation</c>, ManagedSessionsSurface.swift:1004-1007).
+    /// An older daemon that sends no row never asks for an install.
+    /// </summary>
+    [JsonIgnore] public bool NeedsToolInstallation =>
+        Tools is not null && !Tools.Any(t => LaunchedTools.Contains(t.Tool) && t.Installed);
+
+    /// <summary>
+    /// The launched tools the daemon reports as not installed, in the
+    /// shell's order: the Install links beside the Start buttons, and the
+    /// signed-out install row (<c>missingInstallTools</c>,
+    /// ManagedSessionsSurface.swift:990-994).
+    /// </summary>
+    [JsonIgnore] public ManagedTool[] MissingInstallTools =>
+        LaunchedTools.Select(tool => Tools?.FirstOrDefault(t => t.Tool == tool && !t.Installed))
+            .OfType<ManagedTool>().ToArray();
+
     public static ManagedSnapshot? Parse(string json) => JsonSerializer.Deserialize<ManagedSnapshot>(json,
         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 }
@@ -157,8 +236,20 @@ public static class ManagedSignIn
     /// <summary>The tools a sign-in session can start, in the order shown.</summary>
     public static readonly string[] Tools = ["claude", "codex"];
 
-    /// <summary>The Start button's key, or null for a tool this shell does not know.</summary>
-    public static string? StartKey(string tool) => System.Array.IndexOf(Tools, tool) >= 0 ? "start_" + tool : null;
+    /// <summary>The tools a sign-in session can start, in the order the
+    /// card shows their buttons (<c>ManagedSurface.signInTools</c>,
+    /// ManagedSessionsSurface.swift:323); <see cref="ManagedSnapshot.SignInStartTools"/>
+    /// filters them.</summary>
+    public static readonly string[] StartTools = ["claude", "codex", "opencode"];
+
+    /// <summary>The Start button's key, or null for a tool this shell does
+    /// not know (ManagedSessionsSurface.swift:327-329).</summary>
+    public static string? StartKey(string tool) =>
+        tool is "claude" or "codex" or "opencode" or "red_team" ? "start_" + tool : null;
+
+    /// <summary>The launch dialog's Open button: "Open {tool}" with the
+    /// core's tool name (ManagedFolderExplainer.swift:51-55).</summary>
+    public static string OpenLabel(string template, string toolName) => template.Replace("{tool}", toolName);
 
     /// <summary>
     /// The Add dialog's sign-in types. Signed in, NEAR AI is not offered: the
@@ -199,4 +290,141 @@ public static class ManagedSignIn
     /// </summary>
     public static string FillTerminal(string template, string? terminal, string fallback) =>
         template.Replace("{terminal}", terminal ?? fallback);
+}
+
+/// <summary>What the sign-in card's foot holds (ManagedSessionsView.swift:119-123).</summary>
+public enum ManagedToolArea
+{
+    Buttons,
+    NoTerminal,
+    Install,
+}
+
+/// <summary>
+/// The folder a launch names. A launch decides from the folder at send time
+/// and sends only a fully qualified path: never drive-relative
+/// (<c>C:proj</c>), rooted without a drive (<c>\proj</c>) or relative, which
+/// the terminal's own current folder would resolve (checklist L4).
+/// </summary>
+public static class ManagedLaunchFolder
+{
+    public static bool IsAcceptable(string? folder) =>
+        !string.IsNullOrWhiteSpace(folder) && folder.Trim() == folder && IsFullyQualified(folder);
+
+    /// <summary><c>Path.IsPathFullyQualified</c> under Windows rules on every
+    /// host, so the rule is tested on the Mac too.</summary>
+    private static bool IsFullyQualified(string path)
+    {
+        if (path.Length >= 3 && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] is '\\' or '/') return true;
+        if (path.Length >= 3 && path[0] is '\\' or '/' && path[1] is '\\' or '/' && path[2] is not ('\\' or '/')) return true;
+        return false;
+    }
+}
+
+/// <summary>
+/// A managed action's failure, and where it is said: under the NEAR AI
+/// card's Start buttons for a launch begun there, as the Mac's
+/// <c>failureOnSignInCard</c> (ManagedSessionsView.swift:131-136), and under
+/// the sessions otherwise. The next action clears it (checklist L3).
+/// </summary>
+public sealed class ManagedFailure
+{
+    /// <summary>The core key of the line that says why, or null with no failure.</summary>
+    public string? Key { get; private set; }
+
+    /// <summary>Whether the failure came from a launch begun on the card.</summary>
+    public bool FromCard { get; private set; }
+
+    /// <summary>An action begins: the last failure is cleared.</summary>
+    public void Begin()
+    {
+        Key = null;
+        FromCard = false;
+    }
+
+    /// <summary>The action was refused with <paramref name="key"/>.</summary>
+    public void Refuse(string key, bool fromCard)
+    {
+        Key = key;
+        FromCard = fromCard;
+    }
+
+    /// <summary>Whether the card says it: a card launch's failure while the card is drawn.</summary>
+    public bool OnCard(bool cardShown) => Key is not null && FromCard && cardShown;
+
+    /// <summary>
+    /// The card's lines (ManagedSessionsView.swift:215-228): "That didn't
+    /// work.", then the line that says why unless that is the same line,
+    /// with <c>{terminal}</c> filled. Empty with no failure.
+    /// </summary>
+    public string[] CardLines(Func<string, string> text, string? terminal)
+    {
+        if (Key is null)
+        {
+            return [];
+        }
+
+        string failed = text("action_failed");
+        return Key == "action_failed"
+            ? [failed]
+            : [failed, ManagedSignIn.FillTerminal(text(Key), terminal, text("terminal"))];
+    }
+}
+
+/// <summary>
+/// Keeps keyboard focus on the same button across a rebuild of the managed
+/// sessions view: a button is known by its name and its place among buttons
+/// of that name, since every read rebuilds every button.
+/// </summary>
+public static class ManagedFocus
+{
+    /// <summary>The key of the button at <paramref name="focused"/> among
+    /// <paramref name="names"/> (every button's name, in order); null when
+    /// no button there has focus.</summary>
+    public static (string Name, int Index)? KeyOf(IReadOnlyList<string> names, int focused)
+    {
+        if (focused < 0 || focused >= names.Count)
+        {
+            return null;
+        }
+
+        string name = names[focused];
+        int index = 0;
+        for (int i = 0; i < focused; i++)
+        {
+            if (names[i] == name)
+            {
+                index++;
+            }
+        }
+
+        return (name, index);
+    }
+
+    /// <summary>The position of the button <paramref name="key"/> names
+    /// among <paramref name="names"/>, or -1 when it is gone.</summary>
+    public static int Find(IReadOnlyList<string> names, (string Name, int Index) key)
+    {
+        int seen = 0;
+        for (int i = 0; i < names.Count; i++)
+        {
+            if (names[i] == key.Name && seen++ == key.Index)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Which button a rebuild focuses, and the return kept for the next one.
+    /// The focused button keeps focus. While a dialog is open
+    /// (<paramref name="busy"/>) the pressed button's return is kept for
+    /// when it closes; once it has closed, focus goes back to that button
+    /// (box, 2026-11-19: it had dropped to the Settings gear).
+    /// </summary>
+    public static ((string Name, int Index)? Target, (string Name, int Index)? Keep) Rebuild(
+        (string Name, int Index)? focused, bool busy, (string Name, int Index)? returnTo) =>
+        busy ? (focused, returnTo) : (focused ?? returnTo, null);
 }

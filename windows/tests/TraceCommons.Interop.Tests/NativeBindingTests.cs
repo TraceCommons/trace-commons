@@ -43,7 +43,9 @@ public class NativeBindingTests
     /// the next merge of main (2026-11-19): main's tc_private_ai_campaign_json
     /// and tc_windows_words_copy_json (#2211), counted from the
     /// [DllImport(Library)] declarations (133 in NativeMethods.cs, 14 in
-    /// NativeMethods.Settings.cs, no entry point twice).
+    /// NativeMethods.Settings.cs, no entry point twice). Still 147 after
+    /// the merge of #2215: its tc_nudge_copy_json is the one this branch
+    /// already binds, declared once.
     /// </summary>
     private const int BoundFunctions = 147;
 

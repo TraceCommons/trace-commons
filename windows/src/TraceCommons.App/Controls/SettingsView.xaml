@@ -863,9 +863,9 @@
                 <!--
                     The edge rail, promotions and credit arrivals (W11-W13):
                     the Mac's General section cards in its order, the rail
-                    after Appearance, then promotions, credit arrivals last
-                    (GeneralSection.swift:26-31; Windows has no Traces map,
-                    so no map style card), each a card (GlassEyebrowCard) with its core heading,
+                    after Appearance, then the Traces map's style (set from
+                    code, MapStyleSwitch), promotions, credit arrivals last
+                    (GeneralSection.swift:26-31), each a card (GlassEyebrowCard) with its core heading,
                     switch and caption, set from code (SettingsView.Shell.cs).
                     The credit switch is on and the rail off until the person
                     changes them, as on the Mac.
@@ -878,6 +878,9 @@
                                    Style="{StaticResource TcCaptionTextStyle}"
                                    TextWrapping="WrapWholeWords" />
                     </StackPanel>
+                </Border>
+                <Border x:Name="MapStyleCard" Style="{StaticResource SettingsCardStyle}">
+                    <ContentControl x:Name="MapStyleHost" IsTabStop="False" HorizontalContentAlignment="Stretch" />
                 </Border>
                 <Border x:Name="PromotionsCard" Style="{StaticResource SettingsCardStyle}">
                     <StackPanel Spacing="8">

@@ -88,7 +88,6 @@ public sealed partial class MainWindow : Window
     /// surface to watch for a scroll settling even though the per-row
     /// realization signal below now comes from the inner control.
     /// </summary>
-    private ScrollViewer? _queueScrollViewer;
 
     /// <summary>
     /// Coalesces every visibility-worthy signal -- a row realizing or being
@@ -147,7 +146,6 @@ public sealed partial class MainWindow : Window
 
         // Found once the template is realized, not here: the ScrollViewer
         // inside a ListView's default template does not exist before Loaded.
-        QueueListView.Loaded += OnQueueListViewLoaded;
 
         // The tray reflects daemon state and never drives it: it re-reads
         // status on the same events the queue does rather than being told
@@ -159,15 +157,19 @@ public sealed partial class MainWindow : Window
 
         // The daemon's feature flags, read as the Mac reads them: at start,
         // on its change event (and after a lag or resync), and after a wake.
-        // Nothing on this window is gated yet: the Mac gates the Insights
-        // Skills tab and the Claude Desktop setup, and neither exists here.
+        // Insights shows Skills while insights_skills is on.
         _flags = new FeatureFlagGate(ReadsNoFlags() ? null : (method, parameters) => _host.CallAsync(method, parameters));
+        _flags.Changed += OnFeatureFlagsChanged;
         _host.Started += () => { _flags.Reset(); _ = _flags.RefreshAsync(); };
         _host.FeatureFlagsChanged += () => _ = _flags.RefreshAsync();
         WindowMinimumSize.Resumed += () => _host.Dispatcher.TryEnqueue(() => _ = _flags.RefreshAfterWakeAsync());
 #if DEBUG
         _flags.Changed += TraceFeatureFlags;
 #endif
+        WindowClocks.Changed += running =>
+        {
+            if (InsightsPane.Content is InsightsView insights) insights.ViewModel.SetClocksRunning(running);
+        };
         _tray.OpenRequested += OnTrayOpenRequested;
         _tray.BalloonClicked += OnTrayBalloonClicked;
         _tray.ReviewRequested += OnTrayReviewRequested;
@@ -385,8 +387,10 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts with local Insights. Contribution startup remains an explicit
-    /// action and retains the existing source declaration and enrollment gates.
+    /// Starts with local Insights, and starts the daemon quietly beside it.
+    /// The contribution screens keep the existing source declaration and
+    /// enrollment gates: a daemon refused for undeclared sources is asked
+    /// for them when one of those screens opens.
     /// </summary>
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
@@ -401,6 +405,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
+        // The Mac starts its daemon at launch and reads its feature flags
+        // then (AppModel.swift:1782, :2085), whichever screen is open, so
+        // this starts one too: Insights needs none, but the flags it gates
+        // Skills on come from it. Quietly: a refusal leaves no daemon and
+        // every flag off, as on the Mac, and nothing on screen; the
+        // contribution start still asks for the sources and reports its own
+        // failure. This also means the watcher now starts at launch, as on
+        // the Mac, rather than at the first contribution screen.
+        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
         ShowInsightsPane();
     }
 
@@ -1283,6 +1296,12 @@ public sealed partial class MainWindow : Window
         await ((MissionDraftsView)MissionDraftsPane.Content).ActivateAsync();
     }
 
+    /// <summary>The flags changed: Insights adds or removes its Skills tab (InsightsView.swift:306-308).</summary>
+    private void OnFeatureFlagsChanged()
+    {
+        if (InsightsPane.Content is InsightsView insights) insights.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
+    }
+
     private async void ShowInsightsPane()
     {
         if (InsightsPane.Content is not InsightsView)
@@ -1292,7 +1311,10 @@ public sealed partial class MainWindow : Window
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
             };
+            page.SkillsSettingsRequested += (_, _) => ShowSettingsWindow();
             InsightsPane.Content = page;
+            page.ViewModel.SetClocksRunning(WindowClocks.Running);
+            page.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
         }
         ViewModel.ShowInsights();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
@@ -1313,7 +1335,8 @@ public sealed partial class MainWindow : Window
             return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
         }
 #endif
-        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word));
+        return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
+            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
@@ -1575,76 +1598,9 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    /// <summary>
-    /// "Submit all" from a project's group header: one <c>approve</c> call
-    /// for every pending entry in that project, not a loop over its rows.
-    /// </summary>
-    /// <remarks>
-    /// Sends <see cref="QueueGroupViewModel.ProjectId"/>, the id
-    /// <c>entry_value</c> publishes, never <see cref="QueueGroupViewModel.ProjectLabel"/>,
-    /// which is display text only. Shown only on a multi-entry group (see
-    /// <see cref="QueueGroupViewModel.ShowSubmitAll"/>), so this handler does
-    /// not need to guard against being reachable from a single-entry one.
-    /// <see cref="MainViewModel.SubmitProjectAsync"/> does everything else:
-    /// building the request, decoding the response, arming Undo.
-    /// </remarks>
-    private async void OnSubmitAll(object sender, RoutedEventArgs e)
+    /// <summary>Ignore, asked first, from a Traces tree folder's menu.</summary>
+    private async Task ConfirmIgnoreAsync(QueueGroupViewModel group)
     {
-        if (GroupOf(sender) is QueueGroupViewModel group)
-        {
-            await ViewModel.SubmitProjectAsync(group.ProjectId);
-        }
-    }
-
-    /// <summary>
-    /// "Submit all as..." from a project's group header: the same
-    /// <c>approve</c> call "Submit all" makes, carrying the verdict the
-    /// contributor picked from the menu.
-    /// </summary>
-    /// <remarks>
-    /// One handler per verdict rather than one reading a Tag, for the same
-    /// reason the preview sheet has three: which of the three was chosen is
-    /// the whole content of the event, and every entry this call covers is
-    /// recorded with it. The plain "Submit all" beside this is untouched and
-    /// still sends no <c>outcome</c> -- an unanswered bulk submit stays one
-    /// click.
-    /// </remarks>
-    private async void OnSubmitAllWorked(object sender, RoutedEventArgs e) =>
-        await SubmitAllAsAsync(sender, Verdict.Worked);
-
-    private async void OnSubmitAllPartly(object sender, RoutedEventArgs e) =>
-        await SubmitAllAsAsync(sender, Verdict.Partly);
-
-    private async void OnSubmitAllFailed(object sender, RoutedEventArgs e) =>
-        await SubmitAllAsAsync(sender, Verdict.Failed);
-
-    private async Task SubmitAllAsAsync(object sender, string outcome)
-    {
-        if (GroupOf(sender) is QueueGroupViewModel group)
-        {
-            await ViewModel.SubmitProjectAsync(group.ProjectId, outcome);
-        }
-    }
-
-    /// <summary>
-    /// "Ignore project" from a project's group header: confirms, then hands
-    /// off to <see cref="MainViewModel.IgnoreProjectAsync"/>.
-    /// </summary>
-    /// <remarks>
-    /// The confirmation is built here, from <see cref="ProjectIgnoreCopy"/>,
-    /// the same word-for-word text macOS and GTK show -- and shown through
-    /// <see cref="DialogGuard"/> rather than a raw ShowAsync, because this is
-    /// now a third caller into the one <see cref="XamlRoot"/> this window
-    /// owns, alongside <see cref="Controls.WithdrawDialog"/> and
-    /// <see cref="Controls.GoPublicDialog"/>.
-    /// </remarks>
-    private async void OnIgnoreProject(object sender, RoutedEventArgs e)
-    {
-        if (GroupOf(sender) is not QueueGroupViewModel group)
-        {
-            return;
-        }
-
         var dialog = new ContentDialog
         {
             XamlRoot = Content.XamlRoot,
@@ -1700,36 +1656,6 @@ public sealed partial class MainWindow : Window
             ? element.Tag as QueueEntryViewModel ?? element.DataContext as QueueEntryViewModel
             : null;
 
-    /// <summary>
-    /// Which project's group header a "Submit all" click came from. Same
-    /// Tag-first, DataContext-second pattern as <see cref="EntryOf"/>, for
-    /// the same reason: which project a click means must never be ambiguous.
-    /// </summary>
-    private static QueueGroupViewModel? GroupOf(object sender) =>
-        sender is FrameworkElement element
-            ? element.Tag as QueueGroupViewModel ?? element.DataContext as QueueGroupViewModel
-            : null;
-
-    /// <summary>
-    /// A folder row: shows that project's sessions.
-    /// </summary>
-    /// <remarks>
-    /// The location itself lives on the view model and is re-resolved through
-    /// <see cref="QueueNavigation.Resolve"/> on every queue snapshot, so a
-    /// folder that empties underneath the contributor returns them to the
-    /// list rather than leaving them on an empty pane. This handler only
-    /// routes the click to the folder it came from, the same Tag-first
-    /// pattern every other queue handler follows.
-    /// </remarks>
-    private void OnOpenFolder(object sender, RoutedEventArgs e)
-    {
-        if (GroupOf(sender) is QueueGroupViewModel group)
-        {
-            ViewModel.OpenFolder(group.ProjectId);
-            OpenInspectorForFolder();
-        }
-    }
-
     /// <summary>Back to the folder list.</summary>
     private void OnCloseFolder(object sender, RoutedEventArgs e) => ViewModel.CloseFolder();
 
@@ -1739,33 +1665,13 @@ public sealed partial class MainWindow : Window
     /// </summary>
     /// <remarks>
     /// Declared in the markup rather than found by walking a template, which
-    /// is what <see cref="OnQueueListViewLoaded"/> has to do for a ListView:
+    /// is what the folder list's ListView once needed a template walk for:
     /// this ScrollViewer is an element of the page, so it can say who handles
     /// its own event. It matters because the session rows live here now, so
     /// this is the scroller whose settling changes what is on screen.
     /// </remarks>
     private void OnQueueDetailScrolled(object sender, ScrollViewerViewChangedEventArgs e) =>
         OnQueueScrollViewChanged(sender, e);
-
-    /// <summary>
-    /// Finds the ScrollViewer once <see cref="QueueListView"/>'s template is
-    /// realized, so its <c>ViewChanged</c> can be watched for a scroll
-    /// settling. Runs at most once: a second Loaded (a theme change, a
-    /// re-parent) would otherwise double-subscribe the handler.
-    /// </summary>
-    private void OnQueueListViewLoaded(object sender, RoutedEventArgs e)
-    {
-        if (_queueScrollViewer is not null)
-        {
-            return;
-        }
-
-        _queueScrollViewer = FindDescendant<ScrollViewer>(QueueListView);
-        if (_queueScrollViewer is not null)
-        {
-            _queueScrollViewer.ViewChanged += OnQueueScrollViewChanged;
-        }
-    }
 
     /// <summary>
     /// One signal a settle may have happened. <c>IsIntermediate</c> is true

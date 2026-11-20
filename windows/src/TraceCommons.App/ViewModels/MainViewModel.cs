@@ -180,6 +180,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    /// <summary>The daemon host, for the map pane's own reads (TracesMapView).</summary>
+    internal DaemonHost Host => _host;
+
     /// <summary>The pending queue, newest state as the daemon reports it.</summary>
     public ObservableCollection<QueueEntryViewModel> Pending { get; } = new();
 

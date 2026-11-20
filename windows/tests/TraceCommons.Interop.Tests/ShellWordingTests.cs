@@ -121,7 +121,7 @@ public class ShellWordingTests
             // "For 1 hour" became "1 hour". Lowered from 17 (W2): the update
             // button's hand-written accessible name, which also spelled the
             // former app name, is gone; the button is named by its label.
-            { "TraceCommons.App/MainWindow.xaml", 16 },
+            { "TraceCommons.App/MainWindow.xaml", 15 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };
 

@@ -68,7 +68,14 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     /// daemon), or the Mac's sample in a sample window; with none, the tab
     /// says the figure is unknown, as the Mac's does with no daemon.
     /// </param>
-    public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null)
+    /// <param name="skills">
+    /// The Skills tab's model (<c>insights_skills</c> through the daemon);
+    /// with none, the tab says Skills are unavailable, as the Mac's does with
+    /// no daemon. The tab is shown only while <see cref="SetSkillsEnabled"/>
+    /// says the daemon's <c>insights_skills</c> flag is on.
+    /// </param>
+    public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null,
+        Func<Func<string, string?>, InsightsSkillsModel>? skills = null)
     {
         _service = service ?? new LocalInsights();
         // The tab headers bind while the control is built, before any read:
@@ -80,16 +87,85 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         Sessions = new InsightsSessionsViewModel(_service, copy);
         Func<string, string> word = key => _copy.TryGetValue(key, out var text) ? text : string.Empty;
         Benchmarks = benchmarks?.Invoke(word) ?? new InsightsBenchmarksModel((Func<string, string, Task<DaemonResponse>>?)null, word);
+        Skills = skills?.Invoke(copy) ?? new InsightsSkillsModel(copy: copy);
     }
 
     /// <summary>
     /// The tabs: the Mac's Overview, Breakdown and Benchmarks in its order
-    /// (InsightsView.swift:162 <c>shownTabs</c>), then this app's Sessions and
-    /// Analyze, which the Mac does not have (their place is the owner's to
-    /// decide; listed in the PR). Skills follows the Mac's feature flag and is
-    /// not drawn here yet.
+    /// (InsightsView.swift:162 <c>shownTabs</c>), then Skills while the
+    /// daemon's <c>insights_skills</c> flag is on (:164-166), then this app's
+    /// Sessions and Analyze, which the Mac does not have (their place is the
+    /// owner's to decide; listed in the PR). These are ids, not positions:
+    /// <see cref="ShownTabs"/> gives the order on screen.
     /// </summary>
-    public const int OverviewTab = 0, PatternsTab = 1, BenchmarksTab = 2, SessionsTab = 3, AnalyzeTab = 4;
+    public const int OverviewTab = 0, PatternsTab = 1, BenchmarksTab = 2, SessionsTab = 3, AnalyzeTab = 4, SkillsTab = 5;
+
+    /// <summary>The tabs on screen, in order (<c>enabledShownTabs(isSkillsEnabled:)</c>).</summary>
+    public static IReadOnlyList<int> ShownTabs(bool skillsEnabled) => skillsEnabled
+        ? new[] { OverviewTab, PatternsTab, BenchmarksTab, SkillsTab, SessionsTab, AnalyzeTab }
+        : new[] { OverviewTab, PatternsTab, BenchmarksTab, SessionsTab, AnalyzeTab };
+
+    public IReadOnlyList<int> Tabs => ShownTabs(SkillsEnabled);
+
+    /// <summary>The tab id at a position on screen; Overview when out of range.</summary>
+    public int TabAt(int position) => position >= 0 && position < Tabs.Count ? Tabs[position] : OverviewTab;
+
+    public bool SkillsEnabled { get; private set; }
+    public InsightsSkillsModel Skills { get; }
+    private CancellationTokenSource? _skillsObservation;
+    private bool _clocksRunning = true;
+
+    /// <summary>The tab on screen, by id; -1 before the first.</summary>
+    public int ShownTab => _shownTab;
+
+    /// <summary>
+    /// Follows the daemon's flag. Turning it off stops Skills' reads at once
+    /// and moves a Skills selection to Overview, so turning it on again does
+    /// not open on Skills (InsightsView.swift:306-308).
+    /// </summary>
+    public Task SetSkillsEnabled(bool enabled)
+    {
+        if (_closed || SkillsEnabled == enabled) return Task.CompletedTask;
+        SkillsEnabled = enabled;
+        Changed();
+        if (!enabled && _shownTab == SkillsTab)
+        {
+            StopSkills();
+            Skills.InvalidateDetails();
+            _shownTab = OverviewTab;
+            return LoadTabAsync(OverviewTab);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// The window's clocks: Skills polls only while they run, as the Mac's
+    /// <c>.task(id: scenePhase)</c> does only while the scene is active.
+    /// </summary>
+    public void SetClocksRunning(bool running)
+    {
+        if (_clocksRunning == running) return;
+        _clocksRunning = running;
+        if (!running) StopSkills();
+        else if (_shownTab == SkillsTab && SkillsEnabled && !_closed) StartSkills();
+    }
+
+    private void StartSkills()
+    {
+        StopSkills();
+        if (!_clocksRunning) return;
+        var observation = new CancellationTokenSource();
+        _skillsObservation = observation;
+        _ = Skills.ObserveAsync(observation.Token);
+    }
+
+    private void StopSkills()
+    {
+        _skillsObservation?.Cancel();
+        _skillsObservation = null;
+    }
+
     private int _shownTab = -1;
     private IReadOnlyList<AnalyticsChoice> _savedChoices = Array.Empty<AnalyticsChoice>();
     public InsightsOverviewViewModel Overview { get; }
@@ -101,7 +177,21 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public Task SelectTabAsync(int tab)
     {
         if (_closed) return Task.CompletedTask;
+        // A Skills selection while the flag is off shows Overview (`visibleTab`).
+        if (tab == SkillsTab && !SkillsEnabled) tab = OverviewTab;
+        if (_shownTab == SkillsTab && tab != SkillsTab)
+        {
+            StopSkills();
+            Skills.InvalidateDetails();
+        }
+
         _shownTab = tab;
+        if (tab == SkillsTab)
+        {
+            StartSkills();
+            return Task.CompletedTask;
+        }
+
         return LoadTabAsync(tab);
     }
 
@@ -856,6 +946,9 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     public void Cancel()
     {
         if (_closed) return;
+        // Leaving Insights stops Skills' reads (the Mac's task ends with the view).
+        if (_skillsObservation is not null) Skills.InvalidateDetails();
+        StopSkills();
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;
@@ -869,6 +962,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_closed) return;
         _closed = true;
+        StopSkills();
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;
