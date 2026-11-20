@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Shell;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -408,7 +409,7 @@ public sealed class ManagedSessionsView : UserControl
         var tile = new Border
         {
             Width = 22, Height = 22, CornerRadius = new CornerRadius(6),
-            Background = (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TcTileFolderBrush"],
+            Background = ThemeBrushes.Get("TcTileFolderBrush"),
             Child = new FontIcon { Glyph = LaunchHandoff.FolderGlyph, FontSize = 11 },
         };
         AutomationProperties.SetAccessibilityView(tile, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);

@@ -99,6 +99,36 @@ public class HeroArtTests
         Assert.Equal(0xFF16161Au, HomeTrayInks.HeroButtonInk);
     }
 
+    /// <summary>
+    /// Outside high contrast every part of a hero is the Mac's literal
+    /// (GlassTokens.swift:405-409, HeroCard.swift:186-200 under the flat
+    /// theme). Under a high contrast theme each takes a theme key instead,
+    /// the same two the Home tiles beside it take, which GlassTokens.xaml's
+    /// HighContrast dictionary maps to the system's colours; and the art,
+    /// which is decoration in the Mac's blues, is not drawn. The Mac has no
+    /// high contrast theme to pin the second half to: these keys are the
+    /// Windows app's contract for it (checklist D2).
+    /// </summary>
+    [Fact]
+    public void AHeroTakesTheMacsInksAndTheSystemsUnderHighContrast()
+    {
+        foreach ((HeroGround ground, uint mac) in new[] { (HeroGround.Campaign, 0xFF081538u), (HeroGround.Missions, 0xFF07152Fu), (HeroGround.Insights, 0xFF0A2546u) })
+        {
+            Assert.Equal(new HeroInk(mac, null), HeroCard.Ink(HeroPart.Ground, ground, highContrast: false));
+            Assert.Equal(new HeroInk(0xFFFFFFFFu, null), HeroCard.Ink(HeroPart.Ink, ground, highContrast: false));
+            Assert.Equal(new HeroInk(0xFFFFFFFFu, null), HeroCard.Ink(HeroPart.PillFill, ground, highContrast: false));
+            Assert.Equal(new HeroInk(0xFF16161Au, null), HeroCard.Ink(HeroPart.PillInk, ground, highContrast: false));
+
+            Assert.Equal("TcSurfaceCardBrush", HeroCard.Ink(HeroPart.Ground, ground, highContrast: true).ThemeKey);
+            Assert.Equal("TcInkPrimaryBrush", HeroCard.Ink(HeroPart.Ink, ground, highContrast: true).ThemeKey);
+            Assert.Equal("TcSurfaceCardBrush", HeroCard.Ink(HeroPart.PillFill, ground, highContrast: true).ThemeKey);
+            Assert.Equal("TcInkPrimaryBrush", HeroCard.Ink(HeroPart.PillInk, ground, highContrast: true).ThemeKey);
+        }
+
+        Assert.True(HeroCard.DrawsArt(highContrast: false));
+        Assert.False(HeroCard.DrawsArt(highContrast: true));
+    }
+
     [Fact]
     public void TheCpuGlyphIsTheMacsCellForCell() => AssertMask("cpu", CpuRows, covered: 496, lit: 466);
 

@@ -11,6 +11,7 @@ using TraceCommons.Interop;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -50,10 +51,51 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         var find = new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control };
         find.Invoked += OnFindInvoked;
         KeyboardAccelerators.Add(find);
+
+        // Escape closes, as Close does: the Mac binds its Close to the
+        // cancel action, and hangs it from an unseen control when the core
+        // has no Close word (PreviewSheet.swift:234-243, :543-549). An open
+        // dialog or list takes its own Escape first.
+        var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
+        escape.Invoked += (_, args) =>
+        {
+            args.Handled = true;
+            CloseRequested?.Invoke();
+        };
+        KeyboardAccelerators.Add(escape);
         KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
 
         Loaded += OnFirstLoaded;
+        SizeChanged += (_, _) => FitFooter();
+        SheetHeader.SizeChanged += (_, _) => FitFooter();
+        SheetTabs.SizeChanged += (_, _) => FitFooter();
+        ActionRow.SizeChanged += (_, _) => FitFooter();
     }
+
+    /// <summary>
+    /// The footer's row: its own height while that fits in half the room
+    /// under the header rows, else a star share beside the page, so the
+    /// footer is bounded and its scrolling keeps a focused control on screen
+    /// (an Auto row took the whole footer and the window cut it off).
+    /// </summary>
+    private void FitFooter()
+    {
+        double room = ActualHeight - SheetHeader.ActualHeight - SheetTabs.ActualHeight - ActionRow.ActualHeight;
+        if (room <= 0 || FooterScroller.Content is not FrameworkElement footer)
+        {
+            return;
+        }
+
+        double width = FooterScroller.ActualWidth > 0 ? FooterScroller.ActualWidth : ActualWidth;
+        footer.Measure(new Windows.Foundation.Size(width, double.PositiveInfinity));
+        GridLength want = footer.DesiredSize.Height > room / 2 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+        if (!FooterRow.Height.Equals(want))
+        {
+            FooterRow.Height = want;
+        }
+    }
+
+
 
     /// <summary>Ctrl+F: the Search tab, focused, wherever the sheet was.</summary>
     private void OnFindInvoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
@@ -414,7 +456,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
         {
             FontFamily = (FontFamily)Application.Current.Resources["TcMonoFontFamily"],
             FontSize = (double)Application.Current.Resources["TcMonoTranscriptFontSize"],
-            Foreground = (Brush)Application.Current.Resources["TcInkPrimaryBrush"],
+            Foreground = ThemeBrushes.Get("TcInkPrimaryBrush"),
             IsTextSelectionEnabled = true,
         };
 
@@ -428,7 +470,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             return block;
         }
 
-        var markerBrush = (Brush)Application.Current.Resources["TcGoldTextBrush"];
+        var markerBrush = ThemeBrushes.Get("TcGoldTextBrush");
 
         foreach (TranscriptRun run in TranscriptMarkers.Split(text))
         {

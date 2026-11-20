@@ -12,6 +12,7 @@ using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop.Map;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
+using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
 
@@ -47,6 +48,8 @@ internal sealed class ToolTileView : UserControl
         Content = _canvas;
         AutomationProperties.SetAccessibilityView(this, AccessibilityView.Raw);
         ActualThemeChanged += (_, _) => _canvas.Invalidate();
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { _canvas.Invalidate(); });
         Unloaded += (_, _) => _canvas.RemoveFromVisualTree();
     }
 
@@ -76,7 +79,7 @@ internal sealed class ToolTileView : UserControl
             return new UISettings().UIElementColor(ground ? UIElementType.Window : UIElementType.WindowText);
         }
 
-        IReadOnlyDictionary<string, MapRgba> inks = ActualTheme == ElementTheme.Dark ? MapArt.Dark : MapArt.Light;
+        IReadOnlyDictionary<string, MapRgba> inks = ThemeBrushes.Dark ? MapArt.Dark : MapArt.Light;
         if (!inks.TryGetValue(token, out MapRgba c))
         {
             c = inks["textPrimary"];
