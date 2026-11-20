@@ -34,8 +34,8 @@ public sealed class FirstRunStagePainter : IDisposable
     private CanvasDevice? _device;
     private CanvasGeometry? _unitMark;
     private CanvasRenderTarget? _sweep;
-    private CanvasRenderTarget? _backdrop;
-    private readonly FirstRunBackdropCache _backdropCache = new();
+    private CanvasRenderTarget? _ground;
+    private readonly FirstRunGroundCache _groundCache = new();
 
     /// <param name="names">Each tool's display name, by source; the tile draws the initials when it has no logo.</param>
     public FirstRunStagePainter(Dictionary<string, string> names) => _names = names;
@@ -51,9 +51,9 @@ public sealed class FirstRunStagePainter : IDisposable
     {
         _unitMark?.Dispose();
         _sweep?.Dispose();
-        _backdrop?.Dispose();
-        _backdrop = null;
-        _backdropCache.Forget();
+        _ground?.Dispose();
+        _ground = null;
+        _groundCache.Forget();
     }
 
     /// <summary>
@@ -93,36 +93,39 @@ public sealed class FirstRunStagePainter : IDisposable
         Matrix3x2 fit = scale < 1
             ? Matrix3x2.CreateScale((float)scale) * Matrix3x2.CreateTranslation((float)((width - stageWidth * scale) / 2), (float)((height - stageHeight * scale) / 2))
             : Matrix3x2.Identity;
-        // The backdrop, drawn once per phase of its 30-a-second timeline into
-        // a bitmap the canvas's size and DPI, and copied on the frames in
-        // between (FirstRunBackdropCache): the same pixels, at a copy's cost.
-        float dpi = rc is ICanvasResourceCreatorWithDpi withDpi ? withDpi.Dpi : 96;
-        if (_backdrop is null || _backdrop.Size.Width != width || _backdrop.Size.Height != height || _backdrop.Dpi != dpi)
+        if (scale < 1)
         {
-            _backdrop?.Dispose();
-            _backdrop = new CanvasRenderTarget(rc, (float)width, (float)height, dpi);
-            _backdropCache.Forget();
+            // The scene at the window's size behind the scaled stage, as the
+            // Mac's window draws FirstRunBackdrop under FirstRunStageFit
+            // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
+            ds.Transform = Matrix3x2.Identity;
+            Backdrop(ds, rc, width, height, now, reduce);
+            ds.Transform = fit;
+            Backdrop(ds, rc, stageWidth, stageHeight, now, reduce);
         }
-
-        if (_backdropCache.Redraw(width, height, scale, dpi, FirstRunBackdropCache.Phase(now, reduce)))
+        else
         {
-            using CanvasDrawingSession layer = _backdrop.CreateDrawingSession();
-            layer.Clear(Color.FromArgb(0, 0, 0, 0));
-            if (scale < 1)
+            // The stage is the canvas: its ground never moves, so it is drawn
+            // once per size and DPI into a bitmap and copied (FirstRunGroundCache),
+            // and only the breath is drawn each frame.
+            float dpi = rc is ICanvasResourceCreatorWithDpi withDpi ? withDpi.Dpi : 96;
+            if (_ground is null || _groundCache.Redraw(width, height, dpi))
             {
-                // The scene at the window's size behind the scaled stage, as the
-                // Mac's window draws FirstRunBackdrop under FirstRunStageFit
-                // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
-                layer.Transform = Matrix3x2.Identity;
-                Backdrop(layer, rc, width, height, now, reduce);
+                _ground?.Dispose();
+                _ground = new CanvasRenderTarget(rc, (float)width, (float)height, dpi);
+                _groundCache.Forget();
+                _groundCache.Redraw(width, height, dpi);
+                using CanvasDrawingSession layer = _ground.CreateDrawingSession();
+                layer.Clear(Color.FromArgb(0, 0, 0, 0));
+                Ground(layer, rc, width, height);
             }
 
-            layer.Transform = fit;
-            Backdrop(layer, rc, stageWidth, stageHeight, now, reduce);
+            ds.Transform = Matrix3x2.Identity;
+            ds.DrawImage(_ground, 0, 0);
+            ds.Transform = fit;
+            Breath(ds, rc, now, reduce);
         }
 
-        ds.Transform = Matrix3x2.Identity;
-        ds.DrawImage(_backdrop, 0, 0);
         ds.Transform = fit;
         Matrix3x2 graphic = Matrix3x2.CreateTranslation((float)left, 0) * fit;
         ds.Transform = graphic;
@@ -211,8 +214,15 @@ public sealed class FirstRunStagePainter : IDisposable
 
     // ---- The scene ---------------------------------------------------------
 
-    /// <summary>FirstRunBackdrop (FirstRunStage.swift:109-149), dark only.</summary>
+    /// <summary>FirstRunBackdrop (FirstRunStage.swift:109-149), dark only: the ground, then the breath.</summary>
     private static void Backdrop(CanvasDrawingSession ds, ICanvasResourceCreator rc, double w, double h, double now, bool reduce)
+    {
+        Ground(ds, rc, w, h);
+        Breath(ds, rc, now, reduce);
+    }
+
+    /// <summary>The backdrop's two gradients (FirstRunStage.swift:109-128): they never move.</summary>
+    private static void Ground(CanvasDrawingSession ds, ICanvasResourceCreator rc, double w, double h)
     {
         var rect = new Rect(0, 0, w, h);
         using (var ground = new CanvasRadialGradientBrush(rc, Argb(FirstRunTokens.SceneWarm), Argb(FirstRunTokens.SceneBase)))
@@ -236,8 +246,12 @@ public sealed class FirstRunStagePainter : IDisposable
             corner.RadiusY = (float)(h * 0.95);
             ds.FillRectangle(rect, corner);
         }
+    }
 
-        // The breath, at the backdrop timeline's 30 a second (:131-142).
+    /// <summary>The breath, at the backdrop timeline's 30 a second (FirstRunStage.swift:131-142).</summary>
+    private static void Breath(CanvasDrawingSession ds, ICanvasResourceCreator rc, double now, bool reduce)
+    {
+        uint glow = FirstRunTokens.FirstRunGlow;
         double phase = SceneMotion.BackdropPhase(FirstRunStageLayout.AtRate(now, FirstRunMotion.Thirty), reduce);
         double k = SceneMotion.BreathScale(phase);
         using var list = new CanvasCommandList(rc);
