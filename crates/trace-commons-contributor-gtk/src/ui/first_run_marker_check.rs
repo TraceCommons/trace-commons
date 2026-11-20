@@ -160,8 +160,11 @@ impl MarkerCheck {
             return;
         }
         let (since, check, tick) = (self.since.clone(), self.check.clone(), self.tick.clone());
-        let id = self.area.add_tick_callback(move |area, _| {
-            area.queue_draw();
+        let pace = super::glass_motion::Pace::default();
+        let id = self.area.add_tick_callback(move |area, clock| {
+            if pace.due(area, clock.frame_time(), 0.0) {
+                area.queue_draw();
+            }
             let elapsed = since.get().map(|s| now() - s);
             if m::moving(check.is_active(), elapsed, !animations()) {
                 glib::ControlFlow::Continue

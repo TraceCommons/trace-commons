@@ -13,7 +13,10 @@
 //! part-way; `keep_ticking` runs a repeating one. All three run on the
 //! widget's frame clock, which GTK ticks only while the widget is mapped,
 //! and none runs while its window is minimised or suspended (`hides`), the
-//! Mac's `GlassAnimationGate`. With `gtk-enable-animations` off they draw
+//! Mac's `GlassAnimationGate`. In a window that can be seen but is not
+//! focused they draw at most `UNFOCUSED_FPS` frames a second, and every
+//! other animation in the shell passes its frames through the same `Pace`.
+//! With `gtk-enable-animations` off they draw
 //! the last (or resting) frame, and they follow that setting while they
 //! run, not only when they start.
 
@@ -229,6 +232,147 @@ pub fn hidden_changed(seen: &std::cell::Cell<bool>, hidden: bool) -> Option<bool
     (seen.replace(hidden) != hidden).then_some(hidden)
 }
 
+/// The most frames a second any animation draws in a window that can be
+/// seen but is not focused: the same rule on every platform's app.
+pub const UNFOCUSED_FPS: f64 = 15.0;
+
+/// How the window an animation is in can be seen, for its frame rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seen {
+    /// Shown, and this app's window is the active one.
+    Focused,
+    /// Shown, while another app has the focus.
+    Unfocused,
+    /// Minimised or suspended ([`hides`]).
+    Hidden,
+}
+
+/// The least time between two frames of an animation that wants one
+/// every `wanted` seconds (0: every frame the display draws), in a window
+/// `seen` so: its own rate while focused; at most [`UNFOCUSED_FPS`] while
+/// unfocused (a slower animation keeps its own rate); `None`, no frames,
+/// while hidden.
+pub fn paced(seen: Seen, wanted: f64) -> Option<f64> {
+    match seen {
+        Seen::Focused => Some(wanted),
+        Seen::Unfocused => Some(wanted.max(1.0 / UNFOCUSED_FPS)),
+        Seen::Hidden => None,
+    }
+}
+
+/// Whether a frame at `now` (seconds) is drawn, given when the last one
+/// was due (`last`) and the least `interval` between them: `Some` with
+/// the time the next interval counts from when it is. That is a whole
+/// interval after the last, not `now`, so frames that land part-way
+/// through a display's refresh still average exactly one per interval on
+/// any display; a frame more than an interval late (a stall, or the
+/// first) counts from itself. A millisecond's slack keeps a frame that
+/// rounding puts a hair early.
+pub fn frame_due(last: Option<f64>, now: f64, interval: f64) -> Option<f64> {
+    const SLACK: f64 = 0.001;
+    let Some(last) = last else {
+        return Some(now);
+    };
+    let since = now - last;
+    if interval <= 0.0 || since >= 2.0 * interval {
+        return Some(now);
+    }
+    (since >= interval - SLACK).then_some(last + interval)
+}
+
+/// Whether this app has the focus: `widget`'s own window is active, or
+/// another of the app's windows is (a dialog over it, the rail beside it),
+/// so a dialog the person is using never slows the window under it.
+#[cfg(not(test))]
+fn app_active(widget: &gtk::Widget) -> bool {
+    let own = widget
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok())
+        .is_some_and(|window| window.is_active());
+    own || gtk::Window::list_toplevels().iter().any(|toplevel| {
+        toplevel
+            .downcast_ref::<gtk::Window>()
+            .is_some_and(|window| window.is_active())
+    })
+}
+
+/// In tests a window is active until a test says otherwise
+/// ([`unfocus_for_test`]): which window a test compositor gives the focus
+/// to is not the test's to choose, and the mounted tests before this rule
+/// assumed every frame.
+#[cfg(test)]
+fn app_active(widget: &gtk::Widget) -> bool {
+    let window = widget
+        .root()
+        .and_then(|root| root.downcast::<gtk::Window>().ok());
+    !UNFOCUSED.with(|list| window.is_some_and(|window| list.borrow().iter().any(|w| w == &window)))
+}
+
+#[cfg(test)]
+thread_local! {
+    static UNFOCUSED: RefCell<Vec<gtk::Window>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Takes the focus from `window` (or gives it back), as another app
+/// taking it would, for [`app_active`].
+#[cfg(test)]
+pub fn unfocus_for_test(window: &gtk::Window, unfocused: bool) {
+    UNFOCUSED.with(|list| {
+        let mut list = list.borrow_mut();
+        list.retain(|w| w != window);
+        if unfocused {
+            list.push(window.clone());
+        }
+    });
+}
+
+/// How `widget`'s window can be seen now. A widget in no window yet is
+/// focused by this: its frame clock does not run anyway.
+pub fn seen(widget: &impl IsA<gtk::Widget>) -> Seen {
+    let widget = widget.upcast_ref();
+    if window_hidden(widget) {
+        Seen::Hidden
+    } else if widget.root().is_none() || app_active(widget) {
+        Seen::Focused
+    } else {
+        Seen::Unfocused
+    }
+}
+
+/// The frame-rate gate every animation's frames pass through: the
+/// window's focus rule ([`paced`]) over the animation's own rate, read
+/// each frame, so taking the focus back restores the full rate at the
+/// next frame.
+#[derive(Default)]
+pub struct Pace {
+    last: std::cell::Cell<Option<f64>>,
+}
+
+impl Pace {
+    /// Whether to draw the frame at `frame_time` (the frame clock's
+    /// microseconds, or `glib::monotonic_time` for a timer) of an
+    /// animation that wants one every `wanted` seconds, in `widget`'s
+    /// window. Never in a hidden window.
+    pub fn due(&self, widget: &impl IsA<gtk::Widget>, frame_time: i64, wanted: f64) -> bool {
+        let Some(interval) = paced(seen(widget), wanted) else {
+            return false;
+        };
+        match frame_due(self.last.get(), frame_time as f64 / 1e6, interval) {
+            Some(next) => {
+                self.last.set(Some(next));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forgets the last frame, so the next one draws: for an animation
+    /// starting again.
+    pub fn reset(&self) {
+        self.last.set(None);
+    }
+}
+
 /// A tween's value `progress` (eased, 0 to 1) of the way from `from` to `to`.
 pub fn tween_value(from: f64, to: f64, progress: f64) -> f64 {
     from + (to - from) * progress
@@ -239,7 +383,20 @@ pub fn tween_value(from: f64, to: f64, progress: f64) -> f64 {
 /// the one before at its last frame.
 #[derive(Default)]
 pub struct Driver {
-    running: Rc<RefCell<Option<(gtk::TickCallbackId, f64, Rc<dyn Fn(f64)>)>>>,
+    running: Rc<RefCell<Option<Running>>>,
+}
+
+/// One frame of a tick: given the widget and the frame clock's time in
+/// microseconds, whether to keep ticking.
+type Frame = Rc<dyn Fn(&gtk::Widget, i64) -> gtk::glib::ControlFlow>;
+
+/// A [`Driver`]'s movement under way.
+struct Running {
+    tick: gtk::TickCallbackId,
+    duration: f64,
+    step: Rc<dyn Fn(f64)>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    frame: Frame,
 }
 
 impl Driver {
@@ -247,7 +404,8 @@ impl Driver {
     /// suspended window, `step(duration)` runs at once and so does `done`;
     /// either turning true part-way ends it the same way at the next
     /// frame. `min_interval` caps the frame rate (the Mac's 30 fps
-    /// timelines pass 1/30); 0 draws every frame.
+    /// timelines pass 1/30); 0 draws every frame. In a window that is not
+    /// focused it draws at most [`UNFOCUSED_FPS`] ([`Pace`]).
     pub fn start(
         &self,
         widget: &impl IsA<gtk::Widget>,
@@ -264,12 +422,11 @@ impl Driver {
             return;
         }
         let began = Rc::new(std::cell::Cell::new(None::<i64>));
-        let last = std::cell::Cell::new(f64::NEG_INFINITY);
+        let pace = Pace::default();
         let done = RefCell::new(Some(done));
         let running = Rc::clone(&self.running);
         let ticking = Rc::clone(&step);
-        let id = widget.add_tick_callback(move |widget, clock| {
-            let now = clock.frame_time();
+        let frame: Frame = Rc::new(move |widget, now| {
             let start = *began.get().get_or_insert(now);
             began.set(Some(start));
             let elapsed = (now - start) as f64 / 1_000_000.0;
@@ -283,28 +440,38 @@ impl Driver {
                 }
                 return gtk::glib::ControlFlow::Break;
             }
-            if elapsed - last.get() >= min_interval {
-                last.set(elapsed);
+            if pace.due(widget, now, min_interval) {
                 ticking(elapsed);
             }
             gtk::glib::ControlFlow::Continue
         });
-        *self.running.borrow_mut() = Some((id, duration, step));
+        let id = {
+            let frame = Rc::clone(&frame);
+            widget.add_tick_callback(move |widget, clock| {
+                frame(widget.upcast_ref(), clock.frame_time())
+            })
+        };
+        *self.running.borrow_mut() = Some(Running {
+            tick: id,
+            duration,
+            step,
+            frame,
+        });
     }
 
     /// Ends a running movement at its last frame, without its `done`.
     pub fn finish(&self) {
-        if let Some((id, duration, step)) = self.running.borrow_mut().take() {
-            id.remove();
-            step(duration);
+        if let Some(running) = self.running.borrow_mut().take() {
+            running.tick.remove();
+            (running.step)(running.duration);
         }
     }
 
     /// Stops a running movement where it is, without its last frame or
     /// its `done`: for a `Tween` that turns back from there.
     pub fn stop(&self) {
-        if let Some((id, _, _)) = self.running.borrow_mut().take() {
-            id.remove();
+        if let Some(running) = self.running.borrow_mut().take() {
+            running.tick.remove();
         }
     }
 
@@ -322,8 +489,24 @@ impl Driver {
             .running
             .borrow()
             .as_ref()
-            .map(|(_, _, step)| Rc::clone(step));
+            .map(|running| Rc::clone(&running.step));
         step.map(|step| step(t)).is_some()
+    }
+
+    /// The running movement's tick for a frame at `frame_time` (frame
+    /// clock microseconds), through the same pacing and ending a real
+    /// frame takes: a fake frame clock for counting frames. Returns
+    /// whether a movement was running.
+    #[cfg(test)]
+    pub fn tick_at(&self, widget: &impl IsA<gtk::Widget>, frame_time: i64) -> bool {
+        let frame = self
+            .running
+            .borrow()
+            .as_ref()
+            .map(|running| Rc::clone(&running.frame));
+        frame
+            .map(|frame| frame(widget.upcast_ref(), frame_time))
+            .is_some()
     }
 }
 
@@ -459,16 +642,14 @@ pub const DISCLOSURE_CLASS: &str = "tc-disclosure-standard";
 /// count from its first frame and keep counting while it is held, so it
 /// picks up where it would have been, as the Mac's timelines take their
 /// phase from the clock. With motion off it draws `frame(0.0)`, the
-/// resting frame, and it follows the setting and the window live.
-pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + 'static) {
-    struct Loop {
-        tick: Option<gtk::TickCallbackId>,
-        began: Option<i64>,
-    }
+/// resting frame, and it follows the setting and the window live. In a
+/// window that is not focused it draws at most [`UNFOCUSED_FPS`].
+pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + 'static) -> Ticking {
     let frame: Rc<dyn Fn(f64)> = Rc::new(frame);
     let state = Rc::new(RefCell::new(Loop {
         tick: None,
         began: None,
+        step: None,
     }));
     // Starts or stops the tick to match the widget, its window and the
     // setting. Called on every change of any of them.
@@ -494,8 +675,8 @@ pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + '
             }
             let frame = Rc::clone(&frame);
             let ticking = Rc::clone(&state);
-            let last = std::cell::Cell::new(f64::NEG_INFINITY);
-            s.tick = Some(widget.add_tick_callback(move |widget, clock| {
+            let pace = Pace::default();
+            let step: Frame = Rc::new(move |widget, now| {
                 if window_hidden(widget) || !animations_enabled() {
                     ticking.borrow_mut().tick = None;
                     if !animations_enabled() {
@@ -503,14 +684,16 @@ pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + '
                     }
                     return gtk::glib::ControlFlow::Break;
                 }
-                let now = clock.frame_time();
                 let start = *ticking.borrow_mut().began.get_or_insert(now);
                 let seconds = (now - start) as f64 / 1_000_000.0;
-                if seconds - last.get() >= interval {
-                    last.set(seconds);
+                if pace.due(widget, now, interval) {
                     frame(seconds);
                 }
                 gtk::glib::ControlFlow::Continue
+            });
+            s.step = Some(Rc::clone(&step));
+            s.tick = Some(widget.add_tick_callback(move |widget, clock| {
+                step(widget.upcast_ref(), clock.frame_time())
             }));
         })
     };
@@ -532,6 +715,37 @@ pub fn keep_ticking(widget: &gtk::Widget, interval: f64, frame: impl Fn(f64) + '
             sync(&widget);
         }
     });
+    Ticking(state)
+}
+
+/// A [`keep_ticking`] loop's state.
+struct Loop {
+    tick: Option<gtk::TickCallbackId>,
+    began: Option<i64>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    step: Option<Frame>,
+}
+
+/// A handle on a [`keep_ticking`] loop. Dropping it leaves the loop
+/// running; it is there for tests to drive the loop's frames.
+pub struct Ticking(#[cfg_attr(not(test), allow(dead_code))] Rc<RefCell<Loop>>);
+
+impl Ticking {
+    /// The loop's tick for a frame at `frame_time` (frame clock
+    /// microseconds), through the same pacing a real frame takes. Returns
+    /// whether the loop was ticking.
+    #[cfg(test)]
+    pub fn tick_at(&self, widget: &impl IsA<gtk::Widget>, frame_time: i64) -> bool {
+        let step = self.0.borrow().step.clone();
+        let ticking = self.0.borrow().tick.is_some();
+        match step {
+            Some(step) if ticking => {
+                step(widget.upcast_ref(), frame_time);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -703,6 +917,57 @@ mod tests {
         assert!(hides(S::FOCUSED | S::from_bits_retain(1 << 16)));
     }
 
+    /// A focused window animates at the rate each animation asks for; a
+    /// visible window that is not focused at 15 fps at most, or slower if
+    /// the animation asks for slower; a hidden one not at all.
+    #[test]
+    fn an_unfocused_window_animates_at_fifteen_frames_a_second() {
+        let fifteen = 1.0 / 15.0;
+        assert_eq!(paced(Seen::Focused, 0.0), Some(0.0));
+        assert_eq!(paced(Seen::Focused, 1.0 / 30.0), Some(1.0 / 30.0));
+        assert_eq!(paced(Seen::Unfocused, 0.0), Some(fifteen));
+        assert_eq!(paced(Seen::Unfocused, 1.0 / 30.0), Some(fifteen));
+        assert_eq!(paced(Seen::Unfocused, 0.1), Some(0.1), "10 fps stays 10");
+        assert_eq!(paced(Seen::Hidden, 0.0), None);
+        assert_eq!(paced(Seen::Hidden, 0.1), None);
+    }
+
+    /// Frames offered at a display's rate draw at most once per interval,
+    /// on average exactly that often whatever the display's rate: 15 of
+    /// 60, 15 of 144, every one at interval 0. A frame that lands a
+    /// microsecond early by rounding still draws.
+    #[test]
+    fn frames_are_drawn_once_per_interval_at_any_display_rate() {
+        fn drawn(display_hz: u32, seconds: u32, interval: f64) -> usize {
+            let mut last = None;
+            (0..display_hz * seconds)
+                .filter(|k| {
+                    let now = (u64::from(*k) * 1_000_000 / u64::from(display_hz)) as f64 / 1e6;
+                    match frame_due(last, now, interval) {
+                        Some(next) => {
+                            last = Some(next);
+                            true
+                        }
+                        None => false,
+                    }
+                })
+                .count()
+        }
+        let fifteen = 1.0 / 15.0;
+        assert_eq!(drawn(60, 1, fifteen), 15);
+        assert_eq!(drawn(60, 4, fifteen), 60);
+        assert_eq!(drawn(144, 4, fifteen), 60);
+        assert_eq!(drawn(120, 2, fifteen), 30);
+        assert_eq!(drawn(60, 1, 0.0), 60);
+        assert_eq!(drawn(60, 1, 1.0 / 30.0), 30);
+        // A frame long after the last (a stall) draws, and the next one
+        // waits a whole interval from it, not from the stale schedule.
+        assert_eq!(frame_due(Some(0.0), 5.0, fifteen), Some(5.0));
+        assert_eq!(frame_due(Some(5.0), 5.05, fifteen), None);
+        // The first frame always draws.
+        assert_eq!(frame_due(None, 3.0, fifteen), Some(3.0));
+    }
+
     /// A tween reversed part-way runs from where it is, not from its old
     /// start: a hover that leaves halfway through its fade fades back
     /// from there.
@@ -799,6 +1064,318 @@ mod tests {
         pump_until(&|| frames.borrow().len() > count + 1);
         assert!(frames.borrow().len() > count + 1, "it did not start again");
         window.destroy();
+    }
+
+    /// Shows `area` in a window and waits until it is laid out and on its
+    /// frame clock; returns the window and that clock's time now, in
+    /// microseconds.
+    fn show(area: &gtk::DrawingArea) -> (gtk::Window, i64) {
+        area.set_content_width(40);
+        area.set_content_height(40);
+        let window = gtk::Window::new();
+        window.set_child(Some(area));
+        window.present();
+        pump_until(&|| area.is_mapped() && area.frame_clock().is_some());
+        assert!(area.is_mapped(), "the area was never shown");
+        let now = area.frame_clock().unwrap().frame_time();
+        (window, now)
+    }
+
+    /// Frame `k` of a 60 Hz display from `base`, in microseconds.
+    fn at_60hz(base: i64, k: i64) -> i64 {
+        base + k * 1_000_000 / 60
+    }
+
+    /// A movement draws every frame of a 60 Hz display while its window
+    /// is focused, 15 a second once another app takes the focus, every
+    /// frame again from the first frame after the focus comes back, and
+    /// ends at its last frame when the window is minimised. Frames come
+    /// from a fake clock fed through the movement's own tick, so the
+    /// counts are exact.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_a_movement_runs_at_fifteen_fps_while_its_window_is_unfocused() {
+        gtk::init().unwrap();
+        gtk::Settings::default()
+            .unwrap()
+            .set_gtk_enable_animations(true);
+        let area = gtk::DrawingArea::new();
+        let (window, base) = show(&area);
+        let steps = Rc::new(RefCell::new(Vec::<f64>::new()));
+        let finished = Rc::new(std::cell::Cell::new(false));
+        let driver = Driver::default();
+        {
+            let steps = Rc::clone(&steps);
+            let finished = Rc::clone(&finished);
+            driver.start(
+                &area,
+                100.0,
+                0.0,
+                move |t| steps.borrow_mut().push(t),
+                move || finished.set(true),
+            );
+        }
+        let feed = |from: i64, to: i64| {
+            let before = steps.borrow().len();
+            for k in from..to {
+                assert!(driver.tick_at(&area, at_60hz(base, k)), "frame {k}");
+            }
+            steps.borrow().len() - before
+        };
+        assert_eq!(seen(&area), Seen::Focused);
+        assert_eq!(feed(0, 60), 60, "focused: every frame");
+        unfocus_for_test(&window, true);
+        assert_eq!(seen(&area), Seen::Unfocused);
+        assert_eq!(feed(60, 120), 15, "unfocused: 15 a second");
+        assert_eq!(feed(120, 180), 15, "and still 15 the next second");
+        unfocus_for_test(&window, false);
+        assert_eq!(feed(180, 181), 1, "refocused: the very next frame");
+        assert_eq!(feed(181, 240), 59, "and every frame after it");
+        assert!(!finished.get());
+        minimise_for_test(&window, true);
+        assert_eq!(seen(&area), Seen::Hidden);
+        assert!(driver.tick_at(&area, at_60hz(base, 240)));
+        assert!(finished.get(), "a minimised window ends the movement");
+        assert_eq!(steps.borrow().last(), Some(&100.0), "at its last frame");
+        assert!(!driver.is_running());
+        minimise_for_test(&window, false);
+        window.destroy();
+    }
+
+    /// A repeating animation does the same: every frame focused, 15 a
+    /// second unfocused, a whole fifteenth of a second apart on the
+    /// clock's seconds, every frame again on refocus, nothing minimised.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_a_loop_runs_at_fifteen_fps_while_its_window_is_unfocused() {
+        gtk::init().unwrap();
+        gtk::Settings::default()
+            .unwrap()
+            .set_gtk_enable_animations(true);
+        let area = gtk::DrawingArea::new();
+        let frames = Rc::new(RefCell::new(Vec::<f64>::new()));
+        let ticking = {
+            let frames = Rc::clone(&frames);
+            keep_ticking(area.upcast_ref(), 0.0, move |t| frames.borrow_mut().push(t))
+        };
+        let (window, base) = show(&area);
+        // Well after any frame the real clock drew while it was shown.
+        let base = base + 10_000_000;
+        let feed = |from: i64, to: i64| {
+            let before = frames.borrow().len();
+            for k in from..to {
+                assert!(ticking.tick_at(&area, at_60hz(base, k)), "frame {k}");
+            }
+            frames.borrow().len() - before
+        };
+        assert_eq!(feed(0, 60), 60, "focused: every frame");
+        unfocus_for_test(&window, true);
+        assert_eq!(feed(60, 120), 15, "unfocused: 15 a second");
+        {
+            let frames = frames.borrow();
+            let gaps: Vec<f64> = frames[frames.len() - 15..]
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .collect();
+            assert!(
+                gaps.iter().all(|gap| (gap - 1.0 / 15.0).abs() < 0.01),
+                "unfocused frames a fifteenth of a second apart: {gaps:?}"
+            );
+        }
+        unfocus_for_test(&window, false);
+        assert_eq!(feed(120, 180), 60, "refocused: every frame");
+        minimise_for_test(&window, true);
+        let before = frames.borrow().len();
+        ticking.tick_at(&area, at_60hz(base, 180));
+        assert_eq!(
+            frames.borrow().len(),
+            before,
+            "a minimised window draws nothing"
+        );
+        assert!(!ticking.tick_at(&area, at_60hz(base, 181)), "and stops");
+        minimise_for_test(&window, false);
+        window.destroy();
+    }
+
+    /// Twelve of the shell's spinners on the real frame clock, three
+    /// seconds focused then three unfocused: the unfocused window draws
+    /// 15 frames a second at most. Logs the frames and the process's CPU
+    /// time for each half (`fps-cpu:` lines in the weston job's log); the
+    /// CPU is logged, not asserted, as a shared runner's load varies.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_an_unfocused_window_draws_at_most_fifteen_frames_a_second() {
+        /// The process's user and system CPU time, in milliseconds, where
+        /// `/proc` has it.
+        fn cpu_ms() -> Option<f64> {
+            let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+            let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split(' ').collect();
+            let ticks: f64 =
+                fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+            Some(ticks * 10.0)
+        }
+        gtk::init().unwrap();
+        gtk::Settings::default()
+            .unwrap()
+            .set_gtk_enable_animations(true);
+        let grid = gtk::Grid::new();
+        for i in 0..12 {
+            grid.attach(
+                &super::super::glass_feedback::spinner_sized(96.0),
+                i % 4,
+                i / 4,
+                1,
+                1,
+            );
+        }
+        let counter = gtk::DrawingArea::new();
+        counter.set_content_width(4);
+        counter.set_content_height(4);
+        let frames = Rc::new(std::cell::Cell::new(0u32));
+        let _ticking = {
+            let frames = Rc::clone(&frames);
+            keep_ticking(counter.upcast_ref(), 0.0, move |_| {
+                frames.set(frames.get() + 1)
+            })
+        };
+        grid.attach(&counter, 0, 3, 1, 1);
+        let window = gtk::Window::new();
+        window.set_child(Some(&grid));
+        window.present();
+        pump_until(&|| counter.is_mapped());
+        assert!(counter.is_mapped(), "never shown");
+        // Wake the loop at least every 20 ms, so a blocking iteration
+        // cannot outlast a half.
+        let wake = gtk::glib::timeout_add_local(std::time::Duration::from_millis(20), || {
+            gtk::glib::ControlFlow::Continue
+        });
+        let context = gtk::glib::MainContext::default();
+        let run = |seconds: u64| {
+            let (drawn, cpu) = (frames.get(), cpu_ms());
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+            while std::time::Instant::now() < end {
+                context.iteration(true);
+            }
+            let cpu = cpu.zip(cpu_ms()).map(|(a, b)| b - a);
+            (frames.get() - drawn, cpu)
+        };
+        // Settle first, so the first half is not the window's first frames.
+        run(1);
+        let (focused, focused_cpu) = run(3);
+        unfocus_for_test(&window, true);
+        let (unfocused, unfocused_cpu) = run(3);
+        unfocus_for_test(&window, false);
+        wake.remove();
+        println!(
+            "fps-cpu: focused {focused} frames in 3 s, cpu {focused_cpu:?} ms; \
+             unfocused {unfocused} frames in 3 s, cpu {unfocused_cpu:?} ms"
+        );
+        assert!(focused > 0, "the clock never ran");
+        assert!(
+            unfocused <= 3 * 15 + 1,
+            "{unfocused} frames in 3 s while unfocused"
+        );
+        assert!(unfocused > 0, "an unfocused window still moves");
+        window.destroy();
+    }
+
+    /// Every animation in the shell passes its frames through the focus
+    /// rule: each frame-clock tick outside this file calls a [`Pace`]
+    /// within its first lines (`Driver`, `Tween` and `keep_ticking` do in
+    /// here), save the few ticks that draw nothing and are named below,
+    /// and so does each timer that steps an animation. Read from the
+    /// source, file by file, so a new tick that skips the rule fails here.
+    #[test]
+    fn every_animation_passes_the_focus_rule() {
+        // (file, ticks in it that are not animations, why).
+        let not_motion: [(&str, usize, &str); 3] = [
+            (
+                "ui/first_run_fade.rs",
+                1,
+                "restyle_after_drawn waits two frames for a layout, then restyles once",
+            ),
+            (
+                "ui/monitor/traces_list.rs",
+                1,
+                "scroll_into_view waits for the rows' layout, then moves on a Driver",
+            ),
+            (
+                "ui/settings_navigation.rs",
+                1,
+                "the layout check reads the width each frame and draws nothing",
+            ),
+        ];
+        // How far into a tick's body its gate must be.
+        const WITHIN: usize = 40;
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let mut ticks = 0;
+        let mut wrong = Vec::new();
+        for path in &files {
+            let name = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if name == "ui/glass_motion.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(path).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            let mut ungated = 0;
+            for (at, line) in lines.iter().enumerate() {
+                if !line.contains("add_tick_callback(") || line.trim_start().starts_with("//") {
+                    continue;
+                }
+                ticks += 1;
+                let body = &lines[at..(at + WITHIN).min(lines.len())];
+                if !body.iter().any(|l| l.contains("pace.due(")) {
+                    ungated += 1;
+                }
+            }
+            let allowed = not_motion
+                .iter()
+                .find(|(file, _, _)| *file == name)
+                .map_or(0, |(_, n, _)| *n);
+            if ungated != allowed {
+                wrong.push(format!(
+                    "{name}: {ungated} ungated ticks, {allowed} allowed"
+                ));
+            }
+        }
+        assert!(
+            ticks >= 13,
+            "found only {ticks} ticks: is the walk reading src?"
+        );
+        assert!(wrong.is_empty(), "ticks outside the focus rule: {wrong:#?}");
+        // The timers that step an animation (rather than the frame clock).
+        for (file, from) in [
+            ("ui/home.rs", "fn count_up("),
+            ("ui/hero_card.rs", "hero_art::field::FRAMES_PER_SECOND);"),
+        ] {
+            let text = std::fs::read_to_string(root.join(file)).unwrap();
+            let at = text.find(from).unwrap_or_else(|| panic!("{file}: {from}"));
+            let body: String = text[at..]
+                .lines()
+                .take(WITHIN)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                body.contains("pace.due("),
+                "{file}'s timer skips the focus rule"
+            );
+        }
     }
 
     /// A window's focus change is not a change in hidden; only going

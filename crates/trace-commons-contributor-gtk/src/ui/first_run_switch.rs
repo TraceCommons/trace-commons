@@ -121,8 +121,11 @@ fn animate(
             return;
         }
         let (since, tick_slot) = (since.clone(), tick.clone());
-        let id = area.add_tick_callback(move |area, _| {
-            area.queue_draw();
+        let pace = super::glass_motion::Pace::default();
+        let id = area.add_tick_callback(move |area, clock| {
+            if pace.due(area, clock.frame_time(), 0.0) {
+                area.queue_draw();
+            }
             let elapsed = since.get().map(|s| now() - s);
             if motion::switch_moving(elapsed, !animations()) {
                 glib::ControlFlow::Continue

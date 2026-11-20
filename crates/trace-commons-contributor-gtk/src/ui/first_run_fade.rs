@@ -125,6 +125,7 @@ impl StepFade {
         ghost.set_size_request(widget.width(), widget.height());
         self.root.add_overlay(&ghost);
         let began = std::cell::Cell::new(None::<i64>);
+        let pace = super::glass_motion::Pace::default();
         let root = self.root.downgrade();
         ghost.add_tick_callback(move |ghost, clock| {
             let now = clock.frame_time();
@@ -137,7 +138,9 @@ impl StepFade {
                 }
                 return glib::ControlFlow::Break;
             }
-            ghost.set_opacity(opacity(since));
+            if pace.due(ghost, now, 0.0) {
+                ghost.set_opacity(opacity(since));
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -174,8 +177,9 @@ impl StepFade {
         self.ghost.set_visible(true);
         after.set_opacity(0.0);
         let began = std::cell::Cell::new(None::<i64>);
+        let pace = super::glass_motion::Pace::default();
         let weak = Rc::downgrade(self);
-        let id = self.root.add_tick_callback(move |_, clock| {
+        let id = self.root.add_tick_callback(move |root, clock| {
             let Some(fade) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
@@ -187,6 +191,9 @@ impl StepFade {
                 // The tick ends itself by returning Break.
                 fade.settle(false);
                 return glib::ControlFlow::Break;
+            }
+            if !pace.due(root, now, 0.0) {
+                return glib::ControlFlow::Continue;
             }
             let shown = motion::crossfade(since, false);
             if let Some((_, after)) = fade.running.borrow().as_ref() {
