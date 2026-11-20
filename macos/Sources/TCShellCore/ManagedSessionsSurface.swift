@@ -137,6 +137,7 @@ public struct ManagedToolAvailability: Decodable, Equatable, Identifiable, Senda
 /// Red Team sandbox settings sent on `managed_launch_prepare`.
 public struct ManagedSandboxSettings: Codable, Equatable, Sendable {
     public var inputs: [String]
+    public var outputDir: String?
     public var allowHosts: [String]
     public var packages: Bool
     public var cpus: UInt32?
@@ -144,12 +145,14 @@ public struct ManagedSandboxSettings: Codable, Equatable, Sendable {
 
     public init(
         inputs: [String] = [],
+        outputDir: String? = nil,
         allowHosts: [String] = [],
         packages: Bool = false,
         cpus: UInt32? = nil,
         memoryMiB: UInt32? = nil
     ) {
         self.inputs = inputs
+        self.outputDir = outputDir
         self.allowHosts = allowHosts
         self.packages = packages
         self.cpus = cpus
@@ -158,6 +161,7 @@ public struct ManagedSandboxSettings: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case inputs, packages, cpus
+        case outputDir = "output_dir"
         case allowHosts = "allow_hosts"
         case memoryMiB = "memory_mib"
     }
@@ -168,27 +172,31 @@ public struct ManagedSandboxSettings: Codable, Equatable, Sendable {
             "allow_hosts": allowHosts,
             "packages": packages,
         ]
+        if let outputDir, !outputDir.isEmpty { out["output_dir"] = outputDir }
         if let cpus { out["cpus"] = cpus }
         if let memoryMiB { out["memory_mib"] = memoryMiB }
         return out
     }
 }
 
-/// Launch-sheet state for Red Team sandbox files and network allowlist.
+/// Launch-sheet state for Red Team sandbox files, output folder, and firewall.
 /// Network access is off by default.
 public struct RedTeamSandboxDraft: Equatable, Sendable {
     public var inputs: [String] = []
+    public var outputDir: String? = nil
     public var networkEnabled: Bool = false
     public var allowHosts: [String] = []
     public var packages: Bool = false
 
     public init(
         inputs: [String] = [],
+        outputDir: String? = nil,
         networkEnabled: Bool = false,
         allowHosts: [String] = [],
         packages: Bool = false
     ) {
         self.inputs = inputs
+        self.outputDir = outputDir
         self.networkEnabled = networkEnabled
         self.allowHosts = allowHosts
         self.packages = packages
@@ -197,6 +205,7 @@ public struct RedTeamSandboxDraft: Equatable, Sendable {
     public func sandboxSettings() -> ManagedSandboxSettings {
         ManagedSandboxSettings(
             inputs: inputs,
+            outputDir: outputDir,
             allowHosts: networkEnabled ? allowHosts : [],
             packages: networkEnabled && packages
         )
@@ -574,6 +583,10 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
     public let background: [String: ManagedBackgroundEntry]
     /// Each distinct list of allowed background ids (`background_sets`).
     public let backgroundSets: [[String]]
+    /// Extra model metadata referenced by `backgroundSets` when the tool's
+    /// selectable `models` list is a filtered subset (e.g. Red Team's
+    /// abliterated main models paired with Flash background models).
+    public let backgroundModels: [ManagedModel]
 
     private enum CodingKeys: String, CodingKey {
         case models, `default`, favorites
@@ -581,6 +594,7 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         case tierOrder = "tier_order"
         case background
         case backgroundSets = "background_sets"
+        case backgroundModels = "background_models"
     }
 
     public init(from decoder: Decoder) throws {
@@ -592,10 +606,12 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         tierOrder = try container.decodeIfPresent([String].self, forKey: .tierOrder) ?? []
         background = try container.decodeIfPresent([String: ManagedBackgroundEntry].self, forKey: .background) ?? [:]
         backgroundSets = try container.decodeIfPresent([[String]].self, forKey: .backgroundSets) ?? []
+        backgroundModels = try container.decodeIfPresent([ManagedModel].self, forKey: .backgroundModels) ?? []
     }
 
     private init(models: [ManagedModel], default: String?, favorites: [String], unavailableFavorites: [String],
-                 tierOrder: [String], background: [String: ManagedBackgroundEntry], backgroundSets: [[String]]) {
+                 tierOrder: [String], background: [String: ManagedBackgroundEntry], backgroundSets: [[String]],
+                 backgroundModels: [ManagedModel] = []) {
         self.models = models
         self.default = `default`
         self.favorites = favorites
@@ -603,15 +619,22 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
         self.tierOrder = tierOrder
         self.background = background
         self.backgroundSets = backgroundSets
+        self.backgroundModels = backgroundModels
     }
 
     /// This catalogue cut to `allowed`, its default replaced: the shape the
     /// background picker lists, through the model picker's own options.
     func restricted(to allowed: Set<String>, default: String?) -> ManagedModelCatalogue {
-        ManagedModelCatalogue(
-            models: models.filter { allowed.contains($0.id) }, default: `default`,
+        var seen = Set<String>()
+        var pool: [ManagedModel] = []
+        for model in models + backgroundModels where allowed.contains(model.id) && seen.insert(model.id).inserted {
+            pool.append(model)
+        }
+        return ManagedModelCatalogue(
+            models: pool, default: `default`,
             favorites: favorites.filter(allowed.contains), unavailableFavorites: [],
-            tierOrder: tierOrder, background: background, backgroundSets: backgroundSets)
+            tierOrder: tierOrder, background: background, backgroundSets: backgroundSets,
+            backgroundModels: backgroundModels)
     }
 
     /// This catalogue with `managed_model_favorite_set`'s answer, the
@@ -625,7 +648,8 @@ public struct ManagedModelCatalogue: Decodable, Equatable, Sendable {
             models: models, default: `default`,
             favorites: models.map(\.id).filter(held.contains),
             unavailableFavorites: unavailableFavorites.filter(held.contains),
-            tierOrder: tierOrder, background: background, backgroundSets: backgroundSets)
+            tierOrder: tierOrder, background: background, backgroundSets: backgroundSets,
+            backgroundModels: backgroundModels)
     }
 }
 
@@ -1109,7 +1133,8 @@ public extension ManagedSnapshot {
     /// button. It names no model: the session's proxy pins one. A nil `cwd`
     /// names no folder, and the daemon starts the session in the person's
     /// home folder (owner, 2026-10-29).
-    func signInLaunchParams(tool: String, cwd: String?, requestID: String) -> [String: Any]? {
+    func signInLaunchParams(tool: String, cwd: String?, requestID: String,
+                            sandbox: ManagedSandboxSettings? = nil) -> [String: Any]? {
         guard signInStartTools.contains(tool), let entry = signInEntry(tool) else { return nil }
         var params: [String: Any] = [
             "request_id": requestID, "purpose": "coding", "tool": entry.tool,
@@ -1117,6 +1142,7 @@ public extension ManagedSnapshot {
             "expected_generation": generations[entry.tool] ?? 0, "save_default": false,
         ]
         if let cwd { params["cwd"] = cwd }
+        if let sandbox { params["sandbox"] = sandbox.toParams() }
         return params
     }
 }
