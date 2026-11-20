@@ -1,0 +1,32 @@
+{
+  "candidate_id": "11111111-1111-4111-8111-111111111111",
+  "family": "generated-source-repair",
+  "source_submission_id": "644587ac-f321-57d9-9b27-2c280db3de77",
+  "source_correction": "Change the source schema and regenerate the generated file.",
+  "source_evidence": [
+    {
+      "event_id": "33333333-3333-4333-8333-333333333333",
+      "kind": "feedback",
+      "excerpt": "The source schema owns this generated output."
+    }
+  ],
+  "draft": {
+    "name": "repair-generated-sources",
+    "description": "Use when a generated file has an authoritative source.",
+    "procedure": "# Procedure\n\nEdit the source, regenerate, and verify drift."
+  },
+  "manual_control_instruction": "Edit the source and regenerate generated files.",
+  "evaluation_contract": {
+    "task_count": 8,
+    "plan_task_count": 6,
+    "fixture_pool_count": 7,
+    "cluster_count": 7,
+    "arm_count": 3,
+    "total_requests": 24,
+    "output_token_limit": 900,
+    "request_timeout_seconds": 90,
+    "required_model_owner": "nearai",
+    "fixture_scope": "Six source-excluded client-shipped public repository incidents plus two metadata-only applicability probes; no session task, correction, or evidence is sent.",
+    "selection_policy": "Select six incidents from the fixed public fixture pool after excluding source-task overlap."
+  }
+}

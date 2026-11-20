@@ -51,6 +51,7 @@ fn test_context(cwd: &Path, inputs: Vec<PathBuf>, key: &str) -> LaunchContext {
         resume_of: None,
         sandbox: Some(SandboxSettings {
             inputs,
+            output_dir: None,
             allow_hosts: vec![],
             packages: false,
             cpus: None,

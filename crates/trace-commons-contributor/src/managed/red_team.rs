@@ -371,6 +371,29 @@ pub(crate) fn finalize_outcome(
     }
 }
 
+/// Copy exported files from `<session_dir>/out` into the operator's chosen
+/// output folder. Symlinks are skipped rather than followed. Only `run`
+/// calls it, so it is built where `run` is.
+#[cfg(target_os = "macos")]
+pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::Result<()> {
+    let out_dir = session_dir.join("out");
+    if !out_dir.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(output_dir)?;
+    for entry in std::fs::read_dir(&out_dir)? {
+        let entry = entry?;
+        let src = entry.path();
+        let meta = std::fs::symlink_metadata(&src)?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let dst = output_dir.join(entry.file_name());
+        copy_no_symlinks(&src, &dst)?;
+    }
+    Ok(())
+}
+
 /// Run a Red Team managed session through `rts::launch::run`.
 #[cfg(target_os = "macos")]
 pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<RunOutcome> {
@@ -379,6 +402,13 @@ pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result
         .await
         .map_err(|e| anyhow::anyhow!("red-team session task failed: {e}"))?
         .map_err(anyhow::Error::msg)?;
+    if let Some(output_dir) = context
+        .sandbox
+        .as_ref()
+        .and_then(|s| s.output_dir.as_deref())
+    {
+        export_outputs(&outcome.session_dir, output_dir)?;
+    }
     Ok(finalize_outcome(
         store,
         context,

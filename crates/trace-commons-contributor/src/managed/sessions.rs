@@ -471,8 +471,12 @@ impl SessionRegistry {
                 {
                     return Err(ManagedError::InvalidRequest);
                 }
-                self.report(report)?;
-                let _ = std::fs::remove_file(self.store.dir().join(name));
+                match self.report(report) {
+                    Ok(()) | Err(ManagedError::Conflict) => {
+                        let _ = std::fs::remove_file(self.store.dir().join(name));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         Ok(())

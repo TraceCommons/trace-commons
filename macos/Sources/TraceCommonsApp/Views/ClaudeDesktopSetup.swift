@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TCDesign
 import TCShellCore
@@ -162,18 +163,38 @@ struct ClaudeDesktopSetupSheet: View {
             Text(status.statusLine)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
+            if !status.text("sheet_intro").isEmpty {
+                Text(status.text("sheet_intro"))
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !status.sheetSteps.isEmpty {
+                steps(status.sheetSteps)
+            }
             modelPicker(status)
             backgroundPicker(status)
-            Text(status.text("instructions"))
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if status.sheetSteps.isEmpty {
+                Text(status.text("instructions"))
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let environment = setup.environment {
                 Text(verbatim: environment)
                     .glassType(GlassTokens.TypeScale.mono)
                     .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+                // Once there are variables to paste: open Claude Desktop on a
+                // new Code session, where the saved environment is made.
+                if ClaudeDesktopSetupPrompt.desktopInstalled, !status.text("open_desktop").isEmpty {
+                    Button(status.text("open_desktop")) {
+                        NSWorkspace.shared.open(ClaudeDesktopPrompt.newCodeSessionURL)
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .fixedSize()
+                }
             }
             if setup.failed {
                 Text(status.text("error"))
@@ -183,6 +204,24 @@ struct ClaudeDesktopSetupSheet: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The setup steps, numbered, each a line of the daemon's copy.
+    private func steps(_ lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    Text(verbatim: "\(index + 1).")
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .monospacedDigit()
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 
     private func modelPicker(_ status: ClaudeDesktopStatus) -> some View {

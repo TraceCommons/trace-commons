@@ -21,15 +21,17 @@ struct ManagedFolderExplainerSheet: View {
     let onCancel: () -> Void
     /// Open, with the chosen folder's path, or nil for the home folder.
     let onOpen: (String?) -> Void
-    let onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)?
+    let onOpenWithSettings: ((String?, ManagedFolderDraft, ManagedSandboxSettings?) -> Void)?
     /// The terminal picked in the dialog while it asks for one
     /// (`ManagedSnapshot.asksForTerminal`); nil otherwise.
     @Binding var terminal: String?
     @EnvironmentObject private var model: AppModel
     @State private var path: String?
     @State private var draft = ManagedFolderDraft()
+    @State private var sandboxDraft = RedTeamSandboxDraft()
     /// The catalogue read; a failed one does not hold Open (#1754 review).
     @State private var catalogueReads = ManagedCatalogueReads()
+    private var isRedTeam: Bool { ManagedSurface.showsSandboxSection(for: tool) }
     private var supportsFolderSettings: Bool { model.managedSnapshot?.capabilities.folderSettings == true }
     private var canOpen: Bool {
         guard !model.managedBusy else { return false }
@@ -39,7 +41,7 @@ struct ManagedFolderExplainerSheet: View {
     }
 
     init(tool: String, onCancel: @escaping () -> Void, onOpen: @escaping (String?) -> Void,
-         onOpenWithSettings: ((String?, ManagedFolderDraft) -> Void)? = nil,
+         onOpenWithSettings: ((String?, ManagedFolderDraft, ManagedSandboxSettings?) -> Void)? = nil,
          terminal: Binding<String?> = .constant(nil)) {
         self.tool = tool
         self.onCancel = onCancel
@@ -67,34 +69,36 @@ struct ManagedFolderExplainerSheet: View {
             GlassModalBody {
                 ManagedFolderHandoff(tool: ManagedWords.glassTool(tool))
                     .frame(maxWidth: .infinity)
-                // The folder, once picked (else the home default), the button
-                // that picks it and, once picked, the one that clears it.
-                HStack(spacing: GlassTokens.Space.s4) {
-                    GlassToolTile(.folder)
-                    if let path {
-                        Text(path)
-                            .glassType(GlassTokens.TypeScale.mono)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .help(path)
-                    } else {
-                        Text(model.managedText("home_folder"))
-                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .lineLimit(1)
+                if !isRedTeam {
+                    // The folder, once picked (else the home default), the button
+                    // that picks it and, once picked, the one that clears it.
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        GlassToolTile(.folder)
+                        if let path {
+                            Text(path)
+                                .glassType(GlassTokens.TypeScale.mono)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                                .help(path)
+                        } else {
+                            Text(model.managedText("home_folder"))
+                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                                .foregroundStyle(GlassColor.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: GlassTokens.Space.s4)
+                        if path != nil {
+                            Button(model.managedText("clear_folder")) { path = nil }
+                                .buttonStyle(GlassButtonStyle(.glass, small: true))
+                                .fixedSize()
+                        }
+                        Button(model.managedText("pick_folder")) {
+                            if let chosen = FolderPanel.choose() { path = chosen }
+                        }
+                        .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .fixedSize()
                     }
-                    Spacer(minLength: GlassTokens.Space.s4)
-                    if path != nil {
-                        Button(model.managedText("clear_folder")) { path = nil }
-                            .buttonStyle(GlassButtonStyle(.glass, small: true))
-                            .fixedSize()
-                    }
-                    Button(model.managedText("pick_folder")) {
-                        if let chosen = FolderPanel.choose() { path = chosen }
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    .fixedSize()
                 }
                 // Every launch asks which terminal to open in.
                 if let snapshot = model.managedSnapshot, snapshot.asksForTerminal {
@@ -105,6 +109,9 @@ struct ManagedFolderExplainerSheet: View {
                         catalogue: $catalogueReads.catalogue, refreshCatalogue: refreshCatalogue,
                         supportsFolderSettings: true,
                         retry: { loadFolderSettings() }, reset: { loadFolderSettings(reset: true) })
+                }
+                if isRedTeam {
+                    RedTeamSandboxSection(draft: $sandboxDraft)
                 }
             }
         }
@@ -119,7 +126,8 @@ struct ManagedFolderExplainerSheet: View {
 
     private func open() {
         guard canOpen else { return }
-        if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft) }
+        let sandbox: ManagedSandboxSettings? = isRedTeam ? sandboxDraft.sandboxSettings() : nil
+        if supportsFolderSettings, let onOpenWithSettings { onOpenWithSettings(path, draft, sandbox) }
         else { onOpen(path) }
     }
 

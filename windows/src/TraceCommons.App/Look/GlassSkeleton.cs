@@ -18,6 +18,7 @@ public sealed class GlassSkeleton : ContentControl
 {
     private readonly GlassClockCore<XamlRoot> _core;
     private readonly AncestorVisibility _shown;
+    private readonly HeldSubscription _motion;
 
     public GlassSkeleton()
     {
@@ -29,9 +30,10 @@ public sealed class GlassSkeleton : ContentControl
         // the bar at rest.
         _core = new GlassClockCore<XamlRoot>(WindowClocks.Windows, 0, Start, Stop, _ => { }, () => GlassClock.Now);
         _shown = new AncestorVisibility(this, shown => _core.Shown = shown);
+        _motion = new HeldSubscription(() => GlassMotionSettings.Changed += Update, () => GlassMotionSettings.Changed -= Update);
         Loaded += (_, _) =>
         {
-            GlassMotionSettings.Changed += Update;
+            _motion.Hold();
             _core.Window = XamlRoot;
             _core.AnimationsEnabled = GlassMotionSettings.AnimationsEnabled;
             _shown.Attach();
@@ -39,7 +41,7 @@ public sealed class GlassSkeleton : ContentControl
         };
         Unloaded += (_, _) =>
         {
-            GlassMotionSettings.Changed -= Update;
+            _motion.Release();
             _shown.Detach();
             _core.Loaded = false;
         };

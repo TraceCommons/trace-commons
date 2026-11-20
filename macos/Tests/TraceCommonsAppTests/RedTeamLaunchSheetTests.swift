@@ -94,4 +94,78 @@ final class RedTeamLaunchSheetTests: XCTestCase {
         XCTAssertEqual(sandbox["allow_hosts"] as? [String], ["example.com:443"])
         XCTAssertEqual(sandbox["packages"] as? Bool, true)
     }
+
+    func testSignInLaunchCarriesSandboxOutputDirAndFirewall() throws {
+        let snap = try decodeSnapshot("""
+        {
+            "tools": [
+                {"tool": "red_team", "installed": true, "install_url": null}
+            ],
+            "copy": {},
+            "revision": 1,
+            "accounts": [],
+            "sign_in_accounts": [
+                {"id": "rt-signin", "tool": "red_team", "connection": "near_ai_signin", "label": "NEAR AI", "auth_state": "ready"}
+            ],
+            "defaults": [],
+            "generations": {"red_team": 0},
+            "sessions": [],
+            "capabilities": {
+                "managed_launch": true,
+                "terminal_launch": true,
+                "near_ai_signin": true
+            }
+        }
+        """)
+        let draft = RedTeamSandboxDraft(
+            inputs: ["/tmp/in-dir"],
+            outputDir: "/tmp/out-dir",
+            networkEnabled: true,
+            allowHosts: ["api.example.com:443"],
+            packages: true
+        )
+        let params = try XCTUnwrap(snap.signInLaunchParams(
+            tool: "red_team", cwd: nil, requestID: "req-2", sandbox: draft.sandboxSettings()))
+        let sandbox = try XCTUnwrap(params["sandbox"] as? [String: Any])
+        XCTAssertEqual(sandbox["inputs"] as? [String], ["/tmp/in-dir"])
+        XCTAssertEqual(sandbox["output_dir"] as? String, "/tmp/out-dir")
+        XCTAssertEqual(sandbox["allow_hosts"] as? [String], ["api.example.com:443"])
+        XCTAssertEqual(sandbox["packages"] as? Bool, true)
+    }
+
+    func testRedTeamCatalogueResolvesFlashBackgroundFromBackgroundModels() throws {
+        let catalogue = try JSONDecoder().decode(ManagedModelCatalogue.self, from: Data("""
+        {
+            "models": [
+                {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated", "name": "DeepSeek V4.1 Flash 1017 Abliterated", "tier": "near_ai_private"}
+            ],
+            "default": "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+            "tier_order": ["near_ai_private"],
+            "background_sets": [["z-ai/glm-5.3-flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"]],
+            "background": {
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated": {
+                    "default": "z-ai/glm-5.3-flash",
+                    "set": 0
+                }
+            },
+            "background_models": [
+                {"id": "z-ai/glm-5.3-flash", "name": "GLM 5.3 Flash", "tier": "near_ai_private"},
+                {"id": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "name": "DeepSeek V4.1 Flash 1017", "tier": "near_ai_private"}
+            ]
+        }
+        """.utf8))
+        let copy: (String) -> String = { key in
+            switch key {
+            case "model_default": "Default: {model}"
+            case "model_default_unknown": "Default"
+            case "model_tier_near_ai_private": "NEAR AI private"
+            default: ""
+            }
+        }
+        let main = ManagedSurface.modelOptions(catalogue, copy: copy)
+        XCTAssertEqual(main.map(\.value), ["", "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated"])
+        let bg = ManagedSurface.backgroundOptions(catalogue, main: nil, copy: copy)
+        XCTAssertEqual(bg.first?.title, "Default: GLM 5.3 Flash")
+        XCTAssertEqual(bg.map(\.value), ["", "z-ai/glm-5.3-flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"])
+    }
 }

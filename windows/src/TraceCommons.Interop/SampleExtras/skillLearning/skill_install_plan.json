@@ -1,0 +1,14 @@
+{
+  "plan_id": "66666666-6666-4666-8666-666666666666",
+  "evaluation_id": "55555555-5555-4555-8555-555555555555",
+  "tool": "Codex",
+  "target_location": "$CODEX_HOME/skills/repair-generated-sources",
+  "skill_location": "$CODEX_HOME/skills/repair-generated-sources/SKILL.md",
+  "marker_location": "$CODEX_HOME/skills/repair-generated-sources/.trace-commons-install.json",
+  "occupied": false,
+  "can_install": true,
+  "skill_md": "---\nname: repair-generated-sources\ndescription: test\n---\n\nEdit the source.",
+  "skill_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "marker_json": "{\n  \u0022schema_version\u0022: 2,\n  \u0022install_id\u0022: \u002277777777-7777-4777-8777-777777777777\u0022,\n  \u0022evaluation_id\u0022: \u002255555555-5555-4555-8555-555555555555\u0022,\n  \u0022tool\u0022: \u0022Codex\u0022,\n  \u0022name\u0022: \u0022repair-generated-sources\u0022,\n  \u0022skill_sha256\u0022: \u0022aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0022,\n  \u0022source_submission_id\u0022: \u0022644587ac-f321-57d9-9b27-2c280db3de77\u0022,\n  \u0022source_evidence_ids\u0022: [\n    \u002233333333-3333-4333-8333-333333333333\u0022\n  ],\n  \u0022owner_scope_sha256\u0022: \u0022sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\u0022,\n  \u0022device_key_id\u0022: \u0022device-key-test\u0022,\n  \u0022installed_at\u0022: \u00222026-09-11T05:00:00Z\u0022,\n  \u0022marker_sha256\u0022: \u0022cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\u0022,\n  \u0022device_signature_b64\u0022: \u0022synthetic-signature\u0022\n}",
+  "marker_file_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

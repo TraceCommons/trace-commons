@@ -196,6 +196,9 @@ public sealed partial class MainWindow : Window
         // The Monitor window's shell: toolbar row, tabs, panes, notices,
         // keyboard map and clocks (MainWindow.Shell.cs).
         InitializeShell();
+
+        // Last, once every handler on the host's events is in place.
+        StartDaemonAtLaunch();
     }
 
     /// <summary>
@@ -406,16 +409,30 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        // The Mac starts its daemon at launch and reads its feature flags
-        // then (AppModel.swift:1782, :2085), whichever screen is open, so
-        // this starts one too: Insights needs none, but the flags it gates
-        // Skills on come from it. Quietly: a refusal leaves no daemon and
-        // every flag off, as on the Mac, and nothing on screen; the
-        // contribution start still asks for the sources and reports its own
-        // failure. This also means the watcher now starts at launch, as on
-        // the Mac, rather than at the first contribution screen.
-        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
         ShowInsightsPane();
+    }
+
+    /// <summary>
+    /// The Mac starts its daemon at launch and reads its feature flags then
+    /// (AppModel.swift:1782, :2085), whichever screen is open and whether or
+    /// not a window ever shows, so this starts one from the constructor:
+    /// a launch whose window is never activated (to the tray, at login)
+    /// still reads the flags, on the host's Started. Insights needs no
+    /// daemon, but the flags it gates Skills on come from it. Quietly: a
+    /// refusal leaves no daemon and every flag off, as on the Mac, and
+    /// nothing on screen; the contribution start still asks for the sources
+    /// and reports its own failure. The watcher starts at launch too, as on
+    /// the Mac. A recorded sample starts from its landing instead.
+    /// </summary>
+    private void StartDaemonAtLaunch()
+    {
+#if DEBUG
+        if (_host.IsSample)
+        {
+            return;
+        }
+#endif
+        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
     }
 
 #if DEBUG
@@ -1278,11 +1295,17 @@ public sealed partial class MainWindow : Window
 #if DEBUG
         if (_host.IsSample)
         {
-            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word));
+            // The Mac's sample week (feed T) on Overview and Breakdown, as its
+            // sample windows draw it (InsightsSampleModels, InsightsSample.swift:208-232).
+            return new InsightsViewModel(new SampleInsights(), word => new InsightsBenchmarksModel(InsightsSample.Benchmarks, word),
+                weekReader: InsightsViewModel.SampleWeekReader);
         }
 #endif
+        // Feed T through the daemon's insights_week, as the Mac reads it (W20-D1).
         return new InsightsViewModel(null, word => new InsightsBenchmarksModel((method, parameters) => _host.CallAsync(method, parameters), word),
-            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy));
+            copy => InsightsSkillsModel.ForDaemon((method, parameters) => _host.CallAsync(method, parameters), copy),
+            iso => _host.CallAsync(InsightsCounterWeek.Method,
+                InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)
@@ -1536,11 +1559,12 @@ public sealed partial class MainWindow : Window
     /// it calls into; this handler only routes the click to the entry it
     /// came from, the same pattern <see cref="OnNotThisOne"/> follows.
     /// </remarks>
-    private async void OnSubmitEntry(object sender, RoutedEventArgs e)
+    /// <summary>An inspector trace card's Submit: the tree's, asked again at the press.</summary>
+    private void OnSubmitEntry(object sender, RoutedEventArgs e)
     {
         if (EntryOf(sender) is QueueEntryViewModel entry)
         {
-            await ViewModel.SubmitEntryAsync(entry);
+            ((ITracesTreeHost)this).SubmitTrace(entry);
         }
     }
 

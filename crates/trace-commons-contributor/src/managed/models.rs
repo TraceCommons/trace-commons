@@ -267,6 +267,32 @@ pub const PRIVATE_PREFERRED: &[&str] = &[
     "deepseek/deepseek-v3.2",
 ];
 
+/// Whether `id` names an abliterated model variant (the only main models
+/// offered for Red Team sandbox sessions).
+pub fn is_abliterated(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("abliterated")
+}
+
+/// Whether `id` names a Flash model variant (the background models offered
+/// for Red Team sandbox sessions).
+pub fn is_flash(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("flash")
+}
+
+/// The main models `tool` may select from NEAR AI's catalogue: abliterated
+/// models only for Red Team, every chat model for other tools.
+pub fn main_models(tool: ToolId, models: &[ChatModel]) -> Vec<ChatModel> {
+    if tool == ToolId::RedTeam {
+        models
+            .iter()
+            .filter(|m| is_abliterated(&m.id))
+            .cloned()
+            .collect()
+    } else {
+        models.to_vec()
+    }
+}
+
 /// The model a tool starts on when none was chosen.
 ///
 /// Claude Code and OpenCode never start on an Incognito model while the
@@ -277,19 +303,25 @@ pub const PRIVATE_PREFERRED: &[&str] = &[
 /// [`PRIVATE_PREFERRED`] that is listed, then the tool's own preference:
 /// its family, then vendor, then first listed. Codex starts with the first
 /// listed model in [`CODEX_PREFERRED`], from every tier, then the newest GPT.
+/// Red Team considers only abliterated models.
 /// A model the person chose is never replaced ([`select`]).
 pub fn default_for(tool: ToolId, models: &[ChatModel]) -> Option<&ChatModel> {
+    let eligible = |m: &&ChatModel| tool != ToolId::RedTeam || is_abliterated(&m.id);
     let best = models
         .iter()
+        .filter(eligible)
         .filter_map(|m| m.tier)
         .filter(|tier| *tier < ModelTier::Incognito)
         .min();
     match best {
         Some(best) if tool != ToolId::Codex => {
-            let pool = models.iter().filter(move |m| m.tier == Some(best));
+            let pool = models
+                .iter()
+                .filter(eligible)
+                .filter(move |m| m.tier == Some(best));
             listed(PRIVATE_PREFERRED, pool.clone()).or_else(|| preferred(tool, pool))
         }
-        _ => preferred(tool, models.iter()),
+        _ => preferred(tool, models.iter().filter(eligible)),
     }
 }
 
@@ -370,6 +402,22 @@ pub fn background_options<'a>(main: &ChatModel, models: &'a [ChatModel]) -> Vec<
         .collect()
 }
 
+/// The models that may serve `main`'s background work for `tool`: for Red
+/// Team, only Flash models within `main`'s privacy tier (falling back to
+/// `main` itself if none exist); for other tools, [`background_options`].
+pub fn background_options_for<'a>(
+    tool: ToolId,
+    main: &'a ChatModel,
+    models: &'a [ChatModel],
+) -> Vec<&'a ChatModel> {
+    let allowed = background_options(main, models);
+    if tool != ToolId::RedTeam {
+        return allowed;
+    }
+    let flash: Vec<&ChatModel> = allowed.into_iter().filter(|m| is_flash(&m.id)).collect();
+    if flash.is_empty() { vec![main] } else { flash }
+}
+
 /// `tool`'s background model for `main` when none was chosen: from
 /// `main`'s own known tier, Claude Code's newest Haiku, else the first
 /// listed of [`BACKGROUND_PREFERRED`], else `main` itself. A main model
@@ -386,9 +434,14 @@ pub fn background_default<'a>(
 
 /// The background default every main model of `tier` shares, when the
 /// tier holds one: Claude Code's newest Haiku, else the first listed of
-/// [`BACKGROUND_PREFERRED`]. None leaves each main model its own.
+/// [`BACKGROUND_PREFERRED`]. For Red Team, only Flash models qualify.
+/// None leaves each main model its own.
 fn tier_background(tool: ToolId, tier: ModelTier, models: &[ChatModel]) -> Option<&ChatModel> {
     let same = models.iter().filter(move |m| m.tier == Some(tier));
+    if tool == ToolId::RedTeam {
+        let mut flash = same.filter(|m| is_flash(&m.id));
+        return listed(BACKGROUND_PREFERRED, flash.clone()).or_else(|| flash.next());
+    }
     let haiku = match tool {
         ToolId::Claude => newest_in("anthropic/claude-haiku-", same.clone()),
         ToolId::Codex | ToolId::Opencode | ToolId::RedTeam => None,
@@ -399,27 +452,38 @@ fn tier_background(tool: ToolId, tier: ModelTier, models: &[ChatModel]) -> Optio
 /// What a background picker needs for every main model in `models`, from
 /// the core so a shell keeps no privacy rule of its own (#1798 review):
 /// `sets` holds each distinct list of allowed background ids
-/// ([`background_options`]), and `models` maps each main model's id to its
+/// ([`background_options_for`]), and `models` maps each main model's id to its
 /// background default ([`background_default`]) and the index of its set.
 /// Worked out once per tier, not once per model. Empty for Codex, which
 /// has no background slot.
 pub fn background_table(tool: ToolId, models: &[ChatModel]) -> serde_json::Value {
+    background_table_for(tool, models, models)
+}
+
+/// Like [`background_table`], when the selectable `main_models` are a subset
+/// of the full `all_models` catalogue (e.g. Red Team's abliterated main
+/// models paired with Flash background models from `all_models`).
+pub fn background_table_for(
+    tool: ToolId,
+    main_models: &[ChatModel],
+    all_models: &[ChatModel],
+) -> serde_json::Value {
     let mut sets: Vec<Vec<&str>> = vec![];
     let mut table = serde_json::Map::new();
     if tool != ToolId::Codex {
         let mut tiers: Vec<(ModelTier, usize, Option<&str>)> = vec![];
-        for main in models {
+        for main in main_models {
             let (set, shared) = match known_tier(main) {
                 Some(tier) => match tiers.iter().find(|(t, _, _)| *t == tier) {
                     Some((_, set, shared)) => (*set, *shared),
                     None => {
                         sets.push(
-                            background_options(main, models)
+                            background_options_for(tool, main, all_models)
                                 .iter()
                                 .map(|m| m.id.as_str())
                                 .collect(),
                         );
-                        let shared = tier_background(tool, tier, models).map(|m| m.id.as_str());
+                        let shared = tier_background(tool, tier, all_models).map(|m| m.id.as_str());
                         tiers.push((tier, sets.len() - 1, shared));
                         (sets.len() - 1, shared)
                     }
@@ -440,7 +504,7 @@ pub fn background_table(tool: ToolId, models: &[ChatModel]) -> serde_json::Value
 }
 
 /// The background model a session of `tool` on `main` runs: `requested`
-/// when it is one of [`background_options`], otherwise
+/// when it is one of [`background_options_for`], otherwise
 /// [`background_default`], so a stale or hand-edited choice can never send
 /// background work somewhere less private than the main model. None only
 /// when `main` is not listed.
@@ -451,7 +515,7 @@ pub fn background_for<'a>(
     models: &'a [ChatModel],
 ) -> Option<&'a ChatModel> {
     let main = models.iter().find(|m| m.id == main)?;
-    let allowed = background_options(main, models);
+    let allowed = background_options_for(tool, main, models);
     Some(
         requested
             .and_then(|id| allowed.iter().copied().find(|m| m.id == id))
@@ -1690,6 +1754,63 @@ mod tests {
         assert_eq!(
             env["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"],
             Some("anthropic/claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn red_team_main_models_are_abliterated_only_and_background_models_are_flash() {
+        let model = |id: &str, tier: ModelTier| ChatModel {
+            id: id.into(),
+            name: None,
+            tier: Some(tier),
+            context_length: None,
+            max_output_length: None,
+        };
+        let all = vec![
+            model("Qwen/Qwen3.8-27B", ModelTier::NearAi),
+            model("z-ai/glm-5.3-flash", ModelTier::NearAi),
+            model("deepseek-ai/DeepSeek-V4.1-Flash-1017", ModelTier::NearAi),
+            model(
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+                ModelTier::NearAi,
+            ),
+            model("Qwen/Qwen3.8-27B-abliterated", ModelTier::NearAi),
+            model("openai/gpt-5.4", ModelTier::Incognito),
+        ];
+        let main = main_models(ToolId::RedTeam, &all);
+        let main_ids: Vec<&str> = main.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            main_ids,
+            vec![
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+                "Qwen/Qwen3.8-27B-abliterated",
+            ]
+        );
+        assert_eq!(
+            default_for(ToolId::RedTeam, &all).map(|m| m.id.as_str()),
+            Some("deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated")
+        );
+        let bg = background_table_for(ToolId::RedTeam, &main, &all);
+        assert_eq!(
+            bg["models"]["Qwen/Qwen3.8-27B-abliterated"]["default"],
+            "z-ai/glm-5.3-flash"
+        );
+        let set_index = bg["models"]["Qwen/Qwen3.8-27B-abliterated"]["set"]
+            .as_u64()
+            .unwrap() as usize;
+        let allowed: Vec<&str> = bg["sets"][set_index]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            allowed,
+            vec![
+                "z-ai/glm-5.3-flash",
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated",
+            ]
         );
     }
 }
