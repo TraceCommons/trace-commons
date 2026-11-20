@@ -29,7 +29,12 @@ internal static class SystemSettingWatch
     private static readonly UISettings Ui = new();
     private static readonly CachedReading<bool> Animations = new(() => Ui.AnimationsEnabled);
     private static readonly CachedReading<bool> Taskbar = new(TrayIcon.ReadTaskbarLight);
-    private static readonly CachedReading<bool> Contrast = new(() => new AccessibilitySettings().HighContrast);
+    // Kept alive for its HighContrastChanged: the setting message can arrive
+    // before the reading turns, which left the rail's card in high contrast
+    // colours after it went off (box live switch, 2026-11-19).
+    private static readonly AccessibilitySettings Accessibility = new();
+    private static readonly CachedReading<bool> Contrast = new(() => Accessibility.HighContrast);
+    private static Microsoft.UI.Dispatching.DispatcherQueue? _ui;
     private static readonly SubclassProc Proc = WndProc;
     private static readonly HashSet<IntPtr> Installed = new();
 
@@ -60,6 +65,12 @@ internal static class SystemSettingWatch
     /// <summary>Watches <paramref name="hwnd"/>'s setting changes; once per window.</summary>
     public static void Install(IntPtr hwnd)
     {
+        if (_ui is null && Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread() is { } queue)
+        {
+            _ui = queue;
+            Accessibility.HighContrastChanged += (_, _) => _ui.TryEnqueue(Refresh);
+        }
+
         if (hwnd != IntPtr.Zero && Installed.Add(hwnd))
         {
             // Id 3: WindowMinimumSize holds id 1, the W5 look track's watch id 2.
