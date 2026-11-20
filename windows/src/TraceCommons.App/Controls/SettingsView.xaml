@@ -590,6 +590,8 @@
                         <DataTemplate x:DataType="vm:ConsentScopeViewModel">
                             <CheckBox IsChecked="{x:Bind IsSelected, Mode=OneWay}"
                                       IsEnabled="False"
+                                      AutomationProperties.Name="{x:Bind Title}"
+                                      AutomationProperties.HelpText="{x:Bind Description}"
                                       Margin="0,2">
                                 <StackPanel Spacing="2">
                                     <TextBlock Text="{x:Bind Title}"
@@ -610,6 +612,8 @@
                         <DataTemplate x:DataType="vm:ConsentScopeViewModel">
                             <CheckBox IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
                                       IsEnabled="{x:Bind IsEnabled}"
+                                      AutomationProperties.Name="{x:Bind Title}"
+                                      AutomationProperties.HelpText="{x:Bind Description}"
                                       Click="OnConsentChanged"
                                       Margin="0,2">
                                 <StackPanel Spacing="2">
