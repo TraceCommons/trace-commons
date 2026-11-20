@@ -1490,10 +1490,15 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
         chat_models(shared).await
     };
     let result = match listed {
-        Some(models) if !models.is_empty() => {
-            let default = models::default_for(p.tool, &models).map(|m| m.id.clone());
+        Some(all_models) if !all_models.is_empty() => {
+            let main = if p.cache_only {
+                all_models.clone()
+            } else {
+                models::main_models(p.tool, &all_models)
+            };
+            let default = models::default_for(p.tool, &main).map(|m| m.id.clone());
             let starred = favorite_models(shared);
-            let favorites: Vec<&str> = models
+            let favorites: Vec<&str> = main
                 .iter()
                 .map(|m| m.id.as_str())
                 .filter(|id| starred.iter().any(|s| s == id))
@@ -1501,15 +1506,34 @@ async fn model_catalogue(shared: &DaemonShared, request: &Request) -> Response {
             let unavailable: Vec<&str> = starred
                 .iter()
                 .map(String::as_str)
-                .filter(|id| !models.iter().any(|m| m.id == *id))
+                .filter(|id| !all_models.iter().any(|m| m.id == *id))
                 .collect();
-            let background = models::background_table(p.tool, &models);
+            let background = models::background_table_for(p.tool, &main, &all_models);
+            let bg_ids: std::collections::HashSet<&str> = background["sets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|set| set.as_array())
+                .flatten()
+                .filter_map(|id| id.as_str())
+                .collect();
+            let main_ids: std::collections::HashSet<&str> =
+                main.iter().map(|m| m.id.as_str()).collect();
+            let background_models: Vec<&models::ChatModel> = all_models
+                .iter()
+                .filter(|m| bg_ids.contains(m.id.as_str()) && !main_ids.contains(m.id.as_str()))
+                .collect();
+            // Claude Desktop's sheet lists only the models its route accepts.
+            let desktop_models =
+                (p.tool == ToolId::Claude).then(|| super::claude_desktop::desktop_models(&main));
             Ok(json!({
-                "models":models,"default":default,"favorites":favorites,
+                "desktop_models":desktop_models,
+                "models":main,"default":default,"favorites":favorites,
                 "unavailable_favorites":unavailable,
                 "tier_order":models::ModelTier::ORDER,
                 "background_sets":background["sets"],
                 "background":background["models"],
+                "background_models":background_models,
             }))
         }
         _ => Err(ManagedError::ModelUnavailable.into()),

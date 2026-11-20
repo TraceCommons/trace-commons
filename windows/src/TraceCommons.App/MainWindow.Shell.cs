@@ -929,6 +929,8 @@ public sealed partial class MainWindow
             };
             settings.AboutRequested += (_, _) => ShowAboutWindow();
             AttachSpendOrganizations(settings);
+            settings.Settings.ConsentScopesConfirmed += (before, confirmed) =>
+                OnConsentScopesConfirmed(before, confirmed, _settingsWindow?.Content?.XamlRoot);
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }

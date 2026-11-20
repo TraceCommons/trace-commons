@@ -74,16 +74,24 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     /// no daemon. The tab is shown only while <see cref="SetSkillsEnabled"/>
     /// says the daemon's <c>insights_skills</c> flag is on.
     /// </param>
+    /// <param name="weekReader">
+    /// Reads <c>insights_week</c> through the daemon for an ISO week (null is
+    /// the current one): Insights feed T, as the Mac's <c>InsightsModel</c>
+    /// reads it (InsightsModel.swift:57-80). With none, the saved feed only.
+    /// </param>
     public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null,
-        Func<Func<string, string?>, InsightsSkillsModel>? skills = null)
+        Func<Func<string, string?>, InsightsSkillsModel>? skills = null, Func<string?, Task<DaemonResponse>>? weekReader = null)
     {
         _service = service ?? new LocalInsights();
+        _weekReader = weekReader;
         // The tab headers bind while the control is built, before any read:
         // the core's table is there from the start, as on the Mac.
         foreach (var pair in LocalInsights.CoreCopy()) _copy[pair.Key] = pair.Value;
         Func<string, string?> copy = key => _copy.TryGetValue(key, out var text) ? text : null;
         Overview = new InsightsOverviewViewModel(_service, copy);
         Patterns = new InsightsPatternsViewModel(_service, copy);
+        Overview.CounterWeekRequested = SelectCounterWeekAsync;
+        Patterns.CounterWeekRequested = SelectCounterWeekAsync;
         Sessions = new InsightsSessionsViewModel(_service, copy);
         Func<string, string> word = key => _copy.TryGetValue(key, out var text) ? text : string.Empty;
         Benchmarks = benchmarks?.Invoke(word) ?? new InsightsBenchmarksModel((Func<string, string, Task<DaemonResponse>>?)null, word);
@@ -276,8 +284,85 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
                 _copy[pair.Name] = pair.Value.GetString() ?? pair.Name;
             await RefreshCoreAsync(token);
         });
+        await LoadWeekAsync();
     }
     public Task RefreshAsync() => Run(RefreshCoreAsync);
+
+    // ---- Feed T (W20-D1) ---------------------------------------------------
+
+    private readonly Func<string?, Task<DaemonResponse>>? _weekReader;
+    private long _weekGeneration;
+
+    /// <summary>The sample window's reader: the Mac's sample week, whatever week is asked (InsightsSample.swift:105-140).</summary>
+    public static Task<DaemonResponse> SampleWeekReader(string? isoWeek) =>
+        Task.FromResult(DaemonResponse.Parse("{\"id\":0,\"result\":" + InsightsSample.Week.GetRawText() + "}"));
+
+    /// <summary>Whether the week on screen is the daemon's (feed T); the saved week (feed S) otherwise. Never both.</summary>
+    public bool CounterFeed => CounterWeek is not null;
+
+    /// <summary>The daemon's week, held only while it is the feed shown.</summary>
+    public InsightsCounterWeek? CounterWeek { get; private set; }
+
+    /// <summary>
+    /// The core's "can't count watched folders" line when feed T is on but
+    /// could not be read; empty when it is off or the daemon predates it
+    /// (<c>counterPassNoticeKey</c>, InsightsModel.swift:30-33, :77-80).
+    /// </summary>
+    public string CounterNotice { get; private set; } = "";
+
+    /// <summary>
+    /// Ask the daemon for one week of feed T (null is the current week). It is
+    /// shown only when it is on and readable; otherwise the saved week, with a
+    /// notice only when it is on but unreadable. A later failure drops an
+    /// earlier feed T week whole (<c>InsightsModel.loadWeek</c>, InsightsModel.swift:57-76).
+    /// </summary>
+    public async Task LoadWeekAsync(string? isoWeek = null)
+    {
+        if (_closed) return;
+        long generation = ++_weekGeneration;
+        if (_weekReader is null)
+        {
+            ShowWeek(null, notice: false);
+            return;
+        }
+
+        DaemonResponse? response = null;
+        try { response = await _weekReader(isoWeek); }
+        catch (Exception) { }
+        if (_closed || generation != _weekGeneration) return;
+
+        InsightsCounterWeek? week = response?.Result is JsonElement result && !response.IsError ? InsightsCounterWeek.Parse(result) : null;
+        if (week is { ShowsCounterPass: true })
+        {
+            ShowWeek(week, notice: false);
+        }
+        else if (week is not null)
+        {
+            ShowWeek(null, notice: week.Enabled);
+        }
+        else
+        {
+            // An older daemon that does not serve the method says nothing.
+            ShowWeek(null, notice: response?.Error?.Code != "unknown_method");
+        }
+    }
+
+    /// <summary>Put the week on both tabs: the daemon's, or the saved one again (<c>showCounterWeek</c>, InsightsView.swift:384-389).</summary>
+    private void ShowWeek(InsightsCounterWeek? week, bool notice)
+    {
+        CounterWeek = week;
+        CounterNotice = notice ? this["insights_feed_counter_pass_unavailable"] : "";
+        Overview.ShowCounter(week?.Overview, week?.Sessions, CounterNotice);
+        Patterns.ShowCounter(week?.Patterns);
+        Changed();
+    }
+
+    /// <summary>
+    /// The week picker under feed T asks the daemon for that ISO week; under
+    /// the saved feed each tab reads the store (<c>selectWeek</c>, InsightsView.swift:371-378).
+    /// </summary>
+    private Task SelectCounterWeekAsync(string weekStart) =>
+        InsightsCounterWeek.IsoWeekOf(weekStart) is { } iso ? LoadWeekAsync(iso) : Task.CompletedTask;
     private async Task RefreshCoreAsync(CancellationToken token)
     {
         ClearQuestionCards();
@@ -1053,6 +1138,31 @@ public abstract class AnalyticsTabViewModel : INotifyPropertyChanged
 
     protected void DropDetail() { ++_detail.Generation; _detail.Pending?.Cancel(); _detail.Pending = null; }
 
+    /// <summary>Drop a store read in flight, so a late answer never replaces the daemon's week.</summary>
+    protected void DropRead()
+    {
+        ++_read.Generation;
+        _read.Pending?.Cancel();
+        _read.Pending = null;
+        DropDetail();
+        Busy = false;
+        Failed = false;
+        Empty = false;
+    }
+
+    /// <summary>The daemon's week as the core's own response, so one reader draws either feed.</summary>
+    protected static JsonElement Response(string type, string field, JsonElement body)
+    {
+        using JsonDocument document = JsonDocument.Parse("{\"type\":\"" + type + "\",\"" + field + "\":" + body.GetRawText() + "}");
+        return document.RootElement.Clone();
+    }
+
+    /// <summary>
+    /// Under feed T the week picker asks the daemon (set by the window's model);
+    /// null leaves every week to the store.
+    /// </summary>
+    public Func<string, Task>? CounterWeekRequested { get; set; }
+
     private async Task RunAsync(Flight flight, object operation, Action<JsonElement> present, Action fail)
     {
         if (_closed) return;
@@ -1095,6 +1205,31 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
 {
     private string? _requestedWeek;
     private string? _shownWeek;
+    // Feed T: the daemon's week and its counted sessions. While set it is the
+    // only week shown; the saved week is never mixed in (InsightsModel.swift:142-171).
+    private JsonElement? _counter;
+    private IReadOnlyList<InsightsCounterSession>? _counterSessions;
+    private string _notice = "";
+
+    /// <summary>
+    /// Show the daemon's week and its counted sessions, or null to go back to
+    /// the saved week (<c>showCounter</c>), with the feed notice, if any.
+    /// </summary>
+    public void ShowCounter(JsonElement? week, IReadOnlyList<InsightsCounterSession>? sessions, string notice)
+    {
+        _counter = week;
+        _counterSessions = week is null ? null : sessions;
+        _notice = notice;
+        if (week is { } shown)
+        {
+            DropRead();
+            Present(Response("week_overview", "overview", shown));
+        }
+        else if (_shownWeek is not null || Failed)
+        {
+            _ = LoadAsync();
+        }
+    }
     public InsightsOverviewViewModel(ILocalInsights service, Func<string, string?> copy) : base(service, copy) { }
     public ObservableCollection<AnalyticsChoice> Weeks { get; } = new();
     public int SelectedWeekIndex { get; private set; } = -1;
@@ -1125,11 +1260,21 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
     public ObservableCollection<string> InputsSources { get; } = new();
     public ObservableCollection<AnalyticsTableRow> Inputs { get; } = new();
 
-    public Task LoadAsync() => ReadAsync(new { type = "week_overview", week_start = _requestedWeek, tz = Offset }, Present, Clear);
+    public Task LoadAsync()
+    {
+        if (_counter is { } counter)
+        {
+            Present(Response("week_overview", "overview", counter));
+            return Task.CompletedTask;
+        }
+
+        return ReadAsync(new { type = "week_overview", week_start = _requestedWeek, tz = Offset }, Present, Clear);
+    }
 
     public Task SelectWeekAsync(int index)
     {
         if (index < 0 || index >= Weeks.Count) return Task.CompletedTask;
+        if (_counter is not null && CounterWeekRequested is { } ask) return ask(Weeks[index].Value);
         _requestedWeek = Weeks[index].Value;
         return LoadAsync();
     }
@@ -1141,6 +1286,7 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
         var weeks = InsightsAnalyticsWords.WeekChoices(week.Weeks, week.WeekStart)
             .Select(start => new AnalyticsChoice(start, InsightsAnalyticsWords.WeekRange(start))).ToArray();
         var notes = new List<string>();
+        if (_notice.Length > 0) notes.Add(_notice);
         if (InsightsAnalyticsWords.CoverageInfo(copy, week.Coverage) is { } coverageInfo) notes.Add(coverageInfo);
         if (week.UndatedSessions > 0)
             notes.Add(InsightsAnalyticsWords.Fill(Text("analytics_coverage_undated"), ("d", Figure(week.UndatedSessions))));
@@ -1152,7 +1298,7 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
         // A bar, not a ring (owner decision D1, open). No share: an empty bar and the dash.
         var cache = week.Sources.Select(source => new AnalyticsShareLine(
             source.CacheShare is { } share ? BarLength * Math.Min(share.Permille, 1000) / 1000 : 0,
-            InsightsAnalyticsWords.CacheShareLine(copy, source), InsightsAnalyticsWords.Change(copy, source))).ToArray();
+            InsightsAnalyticsWords.CacheShareLine(copy, source), InsightsAnalyticsWords.BestWeek(copy, source))).ToArray();
         var largest = week.Sources.Select(source => InsightsAnalyticsWords.LargestLine(copy, source))
             .OfType<string>().ToArray();
         string[] series = { "analytics_series_uncached", "analytics_series_cache_read", "analytics_series_cache_write", "analytics_series_output" };
@@ -1227,10 +1373,29 @@ public sealed class InsightsOverviewViewModel : AnalyticsTabViewModel
     public Task ToggleInputsAsync(string card)
     {
         if (_shownWeek is not { } week) return Task.CompletedTask;
+        // Under feed T only the Sessions figure breaks down, into the daemon's
+        // counted sessions: the store's card_inputs would put saved figures
+        // under the daemon's (the Mac reads none, InsightsModel.swift:151-155).
+        if (_counter is not null && card != "sessions") return Task.CompletedTask;
         DropDetail();
         if (OpenCard == card) { CloseInputs(); Changed(); return Task.CompletedTask; }
         CloseInputs();
         OpenCard = card;
+        if (card == "sessions" && _counterSessions is { } counted)
+        {
+            // Feed T's breakdown is the daemon's counted sessions, not the
+            // core's: they carry no reference the core could look up
+            // (InsightsModel.swift:151-155, InsightsCounterSessionsView).
+            var copy = Copy;
+            InputsTitle = Text("analytics_drill_title");
+            InputsHeader = TableHeader();
+            Replace(Inputs, counted.Select(row => new AnalyticsTableRow(
+                InsightsCounterWeek.Title(row, copy) + "\n" + InsightsAnalyticsWords.Harness(copy, row.Source),
+                Figure(row.Tokens), InsightsAnalyticsWords.State(copy, row.State), InsightsAnalyticsWords.Reasons(copy, row.Reasons))));
+            Changed();
+            return Task.CompletedTask;
+        }
+
         Changed();
         return ReadDetailAsync(new { type = "card_inputs", card, week_start = week, tz = Offset }, response =>
         {
@@ -1259,6 +1424,22 @@ public sealed class InsightsPatternsViewModel : AnalyticsTabViewModel
 {
     private string? _requestedWeek;
     private string? _shownWeek;
+    private JsonElement? _counter;
+
+    /// <summary>Show the daemon's Patterns, or null to go back to the saved week (<c>showCounter</c>).</summary>
+    public void ShowCounter(JsonElement? week)
+    {
+        _counter = week;
+        if (week is { } shown)
+        {
+            DropRead();
+            Present(Response("patterns", "patterns", shown));
+        }
+        else if (_shownWeek is not null || Failed)
+        {
+            _ = LoadAsync();
+        }
+    }
     public InsightsPatternsViewModel(ILocalInsights service, Func<string, string?> copy) : base(service, copy) { }
     public ObservableCollection<AnalyticsChoice> Weeks { get; } = new();
     public int SelectedWeekIndex { get; private set; } = -1;
@@ -1277,11 +1458,21 @@ public sealed class InsightsPatternsViewModel : AnalyticsTabViewModel
     /// <summary>File | Reads | After context shrank | Tokens; <c>null</c> when no file was read again.</summary>
     public AnalyticsRereadView? RereadHeader { get; private set; }
 
-    public Task LoadAsync() => ReadAsync(new { type = "patterns", week_start = _requestedWeek, tz = Offset }, Present, Clear);
+    public Task LoadAsync()
+    {
+        if (_counter is { } counter)
+        {
+            Present(Response("patterns", "patterns", counter));
+            return Task.CompletedTask;
+        }
+
+        return ReadAsync(new { type = "patterns", week_start = _requestedWeek, tz = Offset }, Present, Clear);
+    }
 
     public Task SelectWeekAsync(int index)
     {
         if (index < 0 || index >= Weeks.Count) return Task.CompletedTask;
+        if (_counter is not null && CounterWeekRequested is { } ask) return ask(Weeks[index].Value);
         _requestedWeek = Weeks[index].Value;
         return LoadAsync();
     }

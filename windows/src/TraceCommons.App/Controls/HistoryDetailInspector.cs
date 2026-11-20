@@ -70,9 +70,27 @@ public sealed class HistoryDetailInspector : UserControl
     private readonly Dictionary<TextBox, (TextBlock Counter, int Limit)> _counters = new();
     private readonly List<CheckBox> _evidenceBoxes = new();
 
-    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record)
+    private readonly SentTracesTrainingModel? _training;
+    private readonly SkillLearningModel? _skills;
+
+    public HistoryDetailInspector(DaemonHost host, HistoryRecordViewModel record, SentTracesTrainingModel? training = null,
+        SkillLearningModel? skills = null)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        _training = training;
+        _skills = skills;
+        if (skills is not null)
+        {
+            // The skill surfaces come and go as the session's state settles
+            // (an install, a rollback); the panel itself is kept, so a draft
+            // being typed survives the redraw.
+            Loaded += (_, _) =>
+            {
+                skills.SessionChanged -= OnSkillSessionChanged;
+                skills.SessionChanged += OnSkillSessionChanged;
+            };
+            Unloaded += (_, _) => skills.SessionChanged -= OnSkillSessionChanged;
+        }
         Record = record ?? throw new ArgumentNullException(nameof(record));
         Content = new ScrollViewer
         {
@@ -96,7 +114,54 @@ public sealed class HistoryDetailInspector : UserControl
     {
         Loaded -= OnLoaded;
         Render();
+        // The eligible traces, read once if nothing has asked yet
+        // (SentTraceTrainingSection's task, SentTracesTrainingViews.swift:159-163).
+        if (_training is { } training && training.State.Eligibility == SentTracesTrainingEligibility.Unknown)
+        {
+            await training.RefreshAsync();
+            RefreshTraining();
+        }
+
         await LoadAsync();
+        EnsureInstalledSkillStatus();
+    }
+
+    /// <summary>
+    /// The installed skill is read for a closed record or an unaccepted
+    /// detail (SessionDetailView.swift:35-50); an open, accepted one reads it
+    /// from the learning flow.
+    /// </summary>
+    private void EnsureInstalledSkillStatus()
+    {
+        if (_skills is { } skills
+            && (ContributionGate.IsTerminal(Record.Status) || CurrentDetail?.Accepted == false))
+        {
+            _ = skills.EnsureLocalInstalledSkillStatusAsync(Record.SubmissionId);
+        }
+    }
+
+    private SkillLearningPanel? _skillPanel;
+
+    private void OnSkillSessionChanged(string submissionId)
+    {
+        if (submissionId == Record.SubmissionId)
+        {
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _skillPanel?.Refresh();
+                Render();
+            });
+        }
+    }
+    private ContentControl? _trainingSlot;
+
+    /// <summary>Redraws the sent-traces training section in place.</summary>
+    public void RefreshTraining()
+    {
+        if (_trainingSlot is { } slot && _training is { } training)
+        {
+            slot.Content = SentTracesTrainingViews.TraceSection(training, Record.SubmissionId, Record.CreditFinal, RefreshTraining);
+        }
     }
 
     /// <summary>
@@ -107,6 +172,7 @@ public sealed class HistoryDetailInspector : UserControl
     {
         Record = record;
         Render();
+        EnsureInstalledSkillStatus();
     }
 
     /// <summary>
@@ -255,6 +321,12 @@ public sealed class HistoryDetailInspector : UserControl
 
         PublicRunCopy? copy = Copy;
         _root.Children.Add(Summary(copy));
+
+        // Train coding models on this sent trace: offered while it lacks the
+        // use, then Credit pending until its credit shows (HistoryInspector.swift:37-40).
+        _trainingSlot = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false };
+        _root.Children.Add(_trainingSlot);
+        RefreshTraining();
         foreach (string line in Explanations())
         {
             _root.Children.Add(Caption(line, "TcInkSecondaryBrush"));
@@ -276,10 +348,19 @@ public sealed class HistoryDetailInspector : UserControl
         _root.Children.Add(_statusSlot);
         RefreshStatus();
 
+        bool withdrawn = ContributionGate.WithdrawalCompleted(Record.Status, Record.WithdrawnHere);
         if (CurrentDetail is { } detail)
         {
             Overview(copy, detail);
-            bool completed = ContributionGate.WithdrawalCompleted(Record.Status, Record.WithdrawnHere);
+            bool completed = withdrawn;
+
+            // Learn, review, test and install, on an active corrected
+            // contribution (SessionDetailView.swift:145-149).
+            if (SkillLearningGate.OffersLearning(detail, Record.Status, completed) && SkillPanel() is { } learning)
+            {
+                _root.Children.Add(learning);
+            }
+
             if (ContributionGate.IsActive(detail, Record.Status, completed))
             {
                 _root.Children.Add(Editor(copy, detail));
@@ -288,6 +369,62 @@ public sealed class HistoryDetailInspector : UserControl
             {
                 _root.Children.Add(Caption(copy["publication_after_acceptance"], "TcInkSecondaryBrush"));
             }
+        }
+
+        InstalledSkillSurface(copy, withdrawn);
+    }
+
+    /// <summary>The skill panel for this record, or null without the core's words or a daemon.</summary>
+    private SkillLearningPanel? SkillPanel()
+    {
+        if (_skills is not { Copy: { } words } skills)
+        {
+            return null;
+        }
+
+        // One panel per record, kept across redraws (the Mac keys its state
+        // by the record, SessionDetailView.swift:113-116).
+        if (_skillPanel is not { } kept || kept.SubmissionId != Record.SubmissionId)
+        {
+            _skillPanel = new SkillLearningPanel(skills, Record.SubmissionId, words);
+        }
+
+        return _skillPanel;
+    }
+
+    /// <summary>
+    /// An installed skill (its rollback) shows outside the learning rule, and
+    /// a failed status read on a closed or unaccepted record offers Retry
+    /// (<c>localInstalledSkillSurface</c>, SessionDetailView.swift:108-133).
+    /// </summary>
+    private void InstalledSkillSurface(PublicRunCopy copy, bool withdrawalCompleted)
+    {
+        if (_skills is not { } skills || !SkillLearningGate.ShowsInstalledSurface(CurrentDetail, withdrawalCompleted))
+        {
+            return;
+        }
+
+        SkillLearningSessionState state = skills.State(Record.SubmissionId);
+        if (state.SkillLearningInstall is not null)
+        {
+            if (SkillPanel() is { } panel)
+            {
+                _root.Children.Add(panel);
+            }
+        }
+        else if (SkillLearningGate.OffersInstallStatusRetry(state, CurrentDetail, Record.Status))
+        {
+            var inner = new StackPanel { Spacing = 8 };
+            Button retry = ActionButton(copy["retry_read"], primary: false);
+            retry.IsEnabled = !state.IsWorking;
+            retry.Click += async (_, _) => await skills.EnsureLocalInstalledSkillStatusAsync(Record.SubmissionId);
+            inner.Children.Add(retry);
+            if (state.Failure is { } message)
+            {
+                inner.Children.Add(Text(message, "TcBodyTextStyle", "TcStatusOutsideTextBrush"));
+            }
+
+            _root.Children.Add(Wrap(inner));
         }
     }
 
@@ -886,13 +1023,15 @@ public sealed class HistoryDetailInspector : UserControl
         Grid.SetColumn(counter, 1);
         header.Children.Add(counter);
         panel.Children.Add(header);
+        // AcceptsReturn before Text: a single-line box keeps only the first
+        // line of a restored multi-line value.
         var box = new TextBox
         {
-            Text = value,
             AcceptsReturn = multiline,
             TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
             MinHeight = multiline ? (limit > PublicRunEditor.OutcomeLimit ? 128 : 88) : 0,
         };
+        box.Text = value;
         AutomationProperties.SetName(box, label);
         _counters[box] = (counter, limit);
         box.TextChanged += (_, _) =>

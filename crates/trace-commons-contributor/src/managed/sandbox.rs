@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 pub struct SandboxSettings {
     #[serde(default)]
     pub inputs: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_dir: Option<PathBuf>,
     #[serde(default)]
     pub allow_hosts: Vec<String>,
     #[serde(default)]
@@ -86,6 +88,48 @@ pub(crate) fn validate_with_home(
         inputs.push(canonical);
     }
 
+    let output_dir = if let Some(output) = s.output_dir.as_deref() {
+        let meta = std::fs::symlink_metadata(output).map_err(|_| {
+            ManagedError::SandboxInputRefused(format!(
+                "output folder does not exist: {}",
+                output.display()
+            ))
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(ManagedError::SandboxInputRefused(format!(
+                "output folder must not be a symlink: {}",
+                output.display()
+            )));
+        }
+        if !meta.is_dir() {
+            return Err(ManagedError::SandboxInputRefused(format!(
+                "output folder must be a directory: {}",
+                output.display()
+            )));
+        }
+        let canonical = std::fs::canonicalize(output).map_err(|_| {
+            ManagedError::SandboxInputRefused(format!(
+                "output folder cannot be resolved: {}",
+                output.display()
+            ))
+        })?;
+        if canonical.parent().is_none() {
+            return Err(ManagedError::SandboxInputRefused(format!(
+                "output folder must not be the filesystem root: {}",
+                output.display()
+            )));
+        }
+        if canonical_home.as_ref().is_some_and(|h| *h == canonical) {
+            return Err(ManagedError::SandboxInputRefused(format!(
+                "output folder must not be the home directory: {}",
+                output.display()
+            )));
+        }
+        Some(canonical)
+    } else {
+        None
+    };
+
     let mut written = s.allow_hosts.clone();
     if s.packages && !written.iter().any(|h| h.eq_ignore_ascii_case("packages")) {
         written.push("packages".to_owned());
@@ -95,6 +139,7 @@ pub(crate) fn validate_with_home(
 
     Ok(Some(SandboxSettings {
         inputs,
+        output_dir,
         allow_hosts,
         packages: s.packages,
         cpus: s.cpus,

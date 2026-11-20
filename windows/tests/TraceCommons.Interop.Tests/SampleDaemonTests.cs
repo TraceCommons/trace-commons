@@ -551,4 +551,38 @@ public class SampleDaemonTests
         DaemonResponse down = Answer(WithExtra(SampleDaemon.CoreDown, SampleDaemon.SpendOrganizationsExtra), SpendOrganizationModel.ListMethod);
         Assert.Equal(SampleDaemon.NotRunningLabel, down.Error!.Message);
     }
+
+    // ---- The skill-learning extra (W20-D2, W20-D3) ----
+
+    // Named, the offer, the detail and every skill read up to the install
+    // preview answer, and decode; a grant, commit or rollback stays unrecorded.
+    [Fact]
+    public void TheSkillLearningExtraAnswersTheReadsAndRecordsNoWrite()
+    {
+        SampleDaemon sample = WithExtra("normalDay", SampleDaemon.SkillLearningExtra);
+        DaemonResponse status = Answer(sample, SentTracesTrainingClient.StatusMethod);
+        Assert.False(status.IsError);
+        Assert.Equal(2UL, status.Result!.Value.GetProperty("eligible_count").GetUInt64());
+        Assert.NotNull(SessionDetail.Parse(Answer(sample, "history_detail").Result!.Value));
+        // One lineage from the candidate to the plan, on a sample record that
+        // History lists accepted, so the model takes each step.
+        SkillCandidate candidate = SkillCandidate.Parse(Answer(sample, SkillLearningClient.CandidateMethod).Result!.Value)!;
+        SkillReview review = SkillReview.Parse(Answer(sample, SkillLearningClient.ReviewMethod).Result!.Value)!;
+        SkillEvaluationReport report = SkillEvaluationReport.Parse(Answer(sample, SkillLearningClient.EvaluateMethod).Result!.Value)!;
+        SkillInstallPlan plan = SkillInstallPlan.Parse(Answer(sample, SkillLearningClient.InstallPlanMethod).Result!.Value)!;
+        Assert.Equal("644587ac-f321-57d9-9b27-2c280db3de77", candidate.SourceSubmissionId);
+        Assert.Equal(candidate.SourceSubmissionId, review.SourceSubmissionId);
+        Assert.Equal(candidate.CandidateId, review.CandidateId);
+        Assert.Equal(review.ReviewId, report.ReviewId);
+        Assert.Equal(review.SkillSha256, report.SkillSha256);
+        Assert.Equal(report.EvaluationId, plan.EvaluationId);
+        Assert.True(report.InstallAllowed);
+        Assert.NotNull(SkillInstallStatus.Parse(Answer(sample, SkillLearningClient.InstallStatusMethod).Result!.Value));
+        foreach (string write in new[] { SentTracesTrainingClient.GrantMethod, SkillLearningClient.InstallCommitMethod, SkillLearningClient.RollbackMethod })
+        {
+            Assert.Equal(SampleDaemon.UnrecordedLabel, Answer(sample, write).Error!.Message);
+        }
+
+        Assert.True(Answer(WithExtra("normalDay", null), SentTracesTrainingClient.StatusMethod).IsError);
+    }
 }
