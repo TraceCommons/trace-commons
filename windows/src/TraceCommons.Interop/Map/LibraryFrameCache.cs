@@ -5,11 +5,10 @@ namespace TraceCommons.Interop.Map;
 
 /// <summary>
 /// The station's (or the orb's) drawn frames, one per frame of the turn,
-/// for one look: style, size and theme (checklist O3). A frame is drawn
-/// once and reused on every later turn. The lit state flips as transfers
-/// run; it is not part of a frame (the caller composes it at draw time), so
-/// a flip keeps every frame and only a new look throws them away. The
-/// caller owns nothing it has put here.
+/// for one look: style, lit state, size and theme. A frame is drawn once
+/// and reused on every later turn; a new look disposes them all, and so
+/// does a lost device (<see cref="Clear"/>). The caller owns nothing it has
+/// put here.
 /// </summary>
 public sealed class LibraryFrameCache<TFrame> where TFrame : class, IDisposable
 {
