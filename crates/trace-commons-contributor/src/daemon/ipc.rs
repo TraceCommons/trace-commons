@@ -16693,7 +16693,9 @@ mod tests {
         let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
         let body = r.result.expect("snapshot");
         assert_eq!(body["capabilities"]["near_ai_signin"], true);
-        assert_eq!(body["sign_in_accounts"].as_array().unwrap().len(), 3);
+        // The three coding tools, plus Red Team on macOS.
+        let tools = if cfg!(target_os = "macos") { 4 } else { 3 };
+        assert_eq!(body["sign_in_accounts"].as_array().unwrap().len(), tools);
         let text = serde_json::to_string(&body).unwrap();
         assert!(!text.contains("sk-super-secret-key"), "{text}");
         let r = handle_request_async(&s, &req("managed_launch_prepare", launch())).await;

@@ -24,8 +24,17 @@ pub fn runtime_prefix(store: &ConfigStore) -> PathBuf {
 }
 
 /// Check whether Red Team prerequisites are installed inside `<config>/red-team/runtime`.
+///
+/// The check builds a blocking HTTP client, which panics when it is built or
+/// dropped on an async worker thread (the daemon answers the managed snapshot
+/// from one), so it always runs on its own short-lived thread.
 pub fn setup_state(store: &ConfigStore) -> super::tool_setup::ToolSetupState {
-    setup_state_with(store, run_setup_check)
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| setup_state_with(store, run_setup_check))
+            .join()
+            .unwrap_or(super::tool_setup::ToolSetupState::NeedsSetup)
+    })
 }
 
 pub(crate) fn setup_state_with<F>(

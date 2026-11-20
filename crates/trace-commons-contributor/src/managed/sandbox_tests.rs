@@ -6,7 +6,7 @@ use crate::config::ConfigStore;
 use crate::daemon::ipc::Request;
 use crate::daemon::managed::{handle, red_team_available};
 use crate::managed::sessions::{LaunchPurpose, LaunchRequest};
-use crate::managed::{AccountView, ConnectionKind, Generation, RED_TEAM_FLAG, ToolId, folder};
+use crate::managed::{AccountView, ConnectionKind, Generation, ToolId, folder};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -143,30 +143,7 @@ fn inputs_are_remembered_per_folder_and_hosts_are_not() {
     let canonical_input = std::fs::canonicalize(&input_file).unwrap();
 
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
-    let mut shared = crate::daemon::ipc::DaemonShared::load(store).unwrap();
-    shared.feature_flags = crate::feature_flags::Runtime::open(
-        crate::feature_flags::registry().unwrap(),
-        crate::feature_flags::test_signing::testing_profile(),
-        shared.store.dir(),
-        chrono::Utc::now(),
-    )
-    .unwrap();
-    let now = chrono::Utc::now();
-    let manifest = json!({
-        "schema_version": 1,
-        "environment": shared.feature_flags.snapshot().environment,
-        "revision": 999,
-        "issued_at": now,
-        "expires_at": now + chrono::Duration::hours(1),
-        "flags": { RED_TEAM_FLAG: true }
-    });
-    shared
-        .feature_flags
-        .accept(
-            &crate::feature_flags::test_signing::sign(&serde_json::to_vec(&manifest).unwrap()),
-            now,
-        )
-        .unwrap();
+    let shared = crate::daemon::ipc::DaemonShared::load(store).unwrap();
     assert!(red_team_available(&shared));
 
     let added = handle(
