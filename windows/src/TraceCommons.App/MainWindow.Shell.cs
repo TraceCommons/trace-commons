@@ -251,6 +251,23 @@ public sealed partial class MainWindow
         };
         WindowRoot.KeyboardAccelerators.Add(escape);
 
+        // Return undoes the last approval while its card offers the undo:
+        // the Mac's one Return binding (MonitorKeys.ReturnUndoes). A focused
+        // button, field or list keeps its own Return.
+        var undo = new KeyboardAccelerator { Key = VirtualKey.Enter };
+        undo.Invoked += async (_, args) =>
+        {
+            bool undoOffered = ViewModel.HasUndo && UndoCard.Visibility == Visibility.Visible;
+            object? focused = WindowRoot.XamlRoot is XamlRoot root ? FocusManager.GetFocusedElement(root) : null;
+            bool focusTakesReturn = focused is ButtonBase or TextBox or PasswordBox or AutoSuggestBox or RichEditBox or Selector or SelectorItem or ToggleSwitch;
+            if (MonitorKeys.ReturnUndoes(undoOffered, focusTakesReturn))
+            {
+                args.Handled = true;
+                await ViewModel.UndoAsync();
+            }
+        };
+        WindowRoot.KeyboardAccelerators.Add(undo);
+
         // The accelerators belong to the window, not to any control: no
         // tooltip announces them, and no control's name is derived from one.
         WindowRoot.KeyboardAcceleratorPlacementMode = KeyboardAcceleratorPlacementMode.Hidden;
