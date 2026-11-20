@@ -22,7 +22,7 @@ public sealed partial class SettingsView
         ShellPreferences prefs = ShellPreferences.Shared;
         _settingSwitches = true;
         Card(
-            CreditAnimationTitle, CreditAnimationSwitch, CreditAnimationCaption,
+            CreditAnimationCard, CreditAnimationTitle, CreditAnimationSwitch, CreditAnimationCaption,
             MonitorShellCopy.Section("home_history", "credit_icon_animation_title"),
             WindowsWords.CreditIconAnimationToggle,
             WindowsWords.CreditIconAnimationCaption,
@@ -32,7 +32,7 @@ public sealed partial class SettingsView
         // its own words and the rail's name as the title; this shell shows
         // the core's name alone (the eyebrow is not in the core's table).
         Card(
-            EdgeRailTitle, EdgeRailSwitch, EdgeRailCaption,
+            EdgeRailCard, EdgeRailTitle, EdgeRailSwitch, EdgeRailCaption,
             MonitorShellCopy.Section("edge_rail", "rail_label"),
             MonitorShellCopy.Section("edge_rail", "setting_toggle"),
             MonitorShellCopy.Section("edge_rail", "setting_caption"),
@@ -40,7 +40,7 @@ public sealed partial class SettingsView
 
         // Whether Home shows promotions (GeneralSection.swift:53-67).
         Card(
-            PromotionsTitle, PromotionsSwitch, PromotionsCaption,
+            PromotionsCard, PromotionsTitle, PromotionsSwitch, PromotionsCaption,
             MonitorShellCopy.Section("home_history", "promotions_title"),
             MonitorShellCopy.Section("home_history", "promotions_toggle"),
             MonitorShellCopy.Section("home_history", "promotions_caption"),
@@ -49,6 +49,7 @@ public sealed partial class SettingsView
     }
 
     private static void Card(
+        Microsoft.UI.Xaml.Controls.Border card,
         Microsoft.UI.Xaml.Controls.TextBlock title,
         Microsoft.UI.Xaml.Controls.ToggleSwitch toggle,
         Microsoft.UI.Xaml.Controls.TextBlock caption,
@@ -59,6 +60,7 @@ public sealed partial class SettingsView
     {
         bool shown = heading.Length > 0 && label.Length > 0;
         Visibility visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        card.Visibility = visibility;
         title.Text = heading;
         title.Visibility = visibility;
         toggle.Header = label;

@@ -18,7 +18,7 @@ public class GeneralSectionCardsTests
     {
         string xaml = Source("Controls/SettingsView.xaml");
         int body = xaml.IndexOf("x:Name=\"BodyGeneral\"", StringComparison.Ordinal);
-        int end = xaml.IndexOf("</StackPanel>", body, StringComparison.Ordinal);
+        int end = xaml.IndexOf("x:Name=\"RuleStartup\"", body, StringComparison.Ordinal);
         Assert.True(body > 0 && end > body);
         string general = xaml[body..end];
         int appearance = general.IndexOf("x:Name=\"GeneralHost\"", StringComparison.Ordinal);
@@ -27,6 +27,12 @@ public class GeneralSectionCardsTests
         int credit = general.IndexOf("x:Name=\"CreditAnimationSwitch\"", StringComparison.Ordinal);
         Assert.True(appearance >= 0 && appearance < rail && rail < promotions && promotions < credit,
             $"appearance {appearance}, rail {rail}, promotions {promotions}, credit {credit}");
+
+        // Each a card, as the Mac's GlassEyebrowCard.
+        foreach (string card in new[] { "EdgeRailCard", "PromotionsCard", "CreditAnimationCard" })
+        {
+            Assert.Contains($"<Border x:Name=\"{card}\" Style=\"{{StaticResource SettingsCardStyle}}\">", general);
+        }
     }
 
     [Fact]
