@@ -26,8 +26,8 @@ public static class SentTracesTrainingViews
     /// Shows the model's sheet in <paramref name="xamlRoot"/> while it is up
     /// for <paramref name="site"/> (<c>SentTracesTrainingSheetLayer</c>,
     /// :68-88). Not now and Allow carry equal weight: the same style, neither
-    /// the default, neither on Enter. Escape and a dialog that cannot be shown
-    /// are Not now: nothing is sent.
+    /// the default, neither on Enter (the sheet opens with focus on its body).
+    /// Escape and a dialog that cannot be shown are Not now: nothing is sent.
     /// </summary>
     public static async Task ShowSheetAsync(XamlRoot xamlRoot, SentTracesTrainingModel model, SentTracesTrainingSite site)
     {
@@ -47,12 +47,25 @@ public static class SentTracesTrainingViews
             AutomationProperties.SetLiveSetting(failed, AutomationLiveSetting.Assertive);
             body.Children.Add(failed);
 
+            // Opened with focus on the body, not a button: the Mac binds
+            // neither choice to Return, but a WinUI dialog with no default
+            // button still focuses its first button, and Enter would press it.
+            // The body is named with the core's sentence, so it is read first.
+            var opening = new ContentControl
+            {
+                Content = body,
+                IsTabStop = true,
+                UseSystemFocusVisuals = false,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            };
+            AutomationProperties.SetName(opening, copy.Body(sheet.Count));
+
             var actions = SentTracesTrainingModel.Actions(copy, sheet.Count, busy: false);
             var dialog = new ContentDialog
             {
                 XamlRoot = xamlRoot,
                 Title = copy.Title,
-                Content = body,
+                Content = opening,
                 PrimaryButtonText = actions[0].Title,
                 SecondaryButtonText = actions[1].Title,
                 DefaultButton = ContentDialogButton.None,
@@ -65,6 +78,7 @@ public static class SentTracesTrainingViews
             void NameButtons() => Name(dialog, actions[0].AccessibilityName, actions[1].AccessibilityName);
             dialog.Opened += (_, _) =>
             {
+                opening.Focus(FocusState.Programmatic);
                 NameButtons();
                 dialog.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, NameButtons);
             };

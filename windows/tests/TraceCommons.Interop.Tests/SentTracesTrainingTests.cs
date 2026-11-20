@@ -299,6 +299,27 @@ public class SentTracesTrainingTests
         Assert.Equal("T:allow_accessibility_name 4", actions[1].AccessibilityName);
     }
 
+    /// <summary>
+    /// The Mac binds neither choice to Return. A WinUI dialog with no default
+    /// button still focuses its first button, and Enter presses the focused
+    /// button, so Enter would decline. The sheet opens with focus on its body
+    /// instead, which is no button: Enter there takes neither choice.
+    /// </summary>
+    [Fact]
+    public void TheSheetOpensWithFocusOnNeitherChoice()
+    {
+        string views = Shell("TraceCommons.App/Controls/SentTracesTrainingViews.cs");
+        int open = views.IndexOf("public static async Task ShowSheetAsync(", StringComparison.Ordinal);
+        string sheet = views.Substring(open, views.IndexOf("private static void Name(", open, StringComparison.Ordinal) - open);
+        Assert.Contains("var opening = new ContentControl", sheet);
+        Assert.Contains("IsTabStop = true,", sheet);
+        Assert.Contains("Content = opening,", sheet);
+        Assert.Contains("opening.Focus(FocusState.Programmatic);", sheet);
+        Assert.Contains("DefaultButton = ContentDialogButton.None,", sheet);
+        // Its name is the core's body, so a screen reader reads the offer first.
+        Assert.Contains("AutomationProperties.SetName(opening, copy.Body(sheet.Count));", sheet);
+    }
+
     [Fact]
     public void BothChoicesWaitForAGrantInFlight()
     {
