@@ -164,7 +164,7 @@ final class AnimationFocusTests: XCTestCase {
     func test_namedSurfacesUseTheSharedClock() throws {
         let sources = Dictionary(try allSources(), uniquingKeysWith: { first, _ in first })
         let surfaces: [(String, Int)] = [
-            ("TraceCommonsApp/Views/Monitor/FlowMapView.swift", 3),
+            ("TraceCommonsApp/Views/Monitor/FlowMapView.swift", 4),
             ("TCDesign/Components/LibraryStation.swift", 1),
             ("TCDesign/Components/LibraryOrb.swift", 1),
             ("TCDesign/Components/PixelGlyph.swift", 1),
@@ -178,6 +178,31 @@ final class AnimationFocusTests: XCTestCase {
             let uses = text.components(separatedBy: "GlassAnimationTimeline(").count - 1
             XCTAssertGreaterThanOrEqual(uses, atLeast, path)
         }
+    }
+
+    /// The Traces map's dashes and library run on timelines of their own
+    /// (#2268), each through the shared clock, so focus applies to each:
+    /// focused, dashes at 30 and the library at 15 frames a second; seen
+    /// but not focused, both at 15; hidden, both stopped.
+    func test_mapDashAndLibraryTimelinesFollowFocus() throws {
+        let sources = Dictionary(try allSources(), uniquingKeysWith: { first, _ in first })
+        let map = try XCTUnwrap(sources["TraceCommonsApp/Views/Monitor/FlowMapView.swift"])
+        XCTAssertTrue(map.contains("GlassAnimationTimeline(minimumInterval: FlowMapView.dashInterval, paused: !resting.dashes)"))
+        XCTAssertTrue(map.contains("GlassAnimationTimeline(minimumInterval: GlassLibraryStation.frameInterval, paused: !resting.turns)"))
+        XCTAssertTrue(map.contains("static let dashInterval: Double = 1 / 30"))
+
+        let dashes = 1.0 / 30
+        let library = GlassLibraryStation.frameInterval
+        XCTAssertEqual(library, 1.0 / 15, accuracy: 1e-12)
+        func interval(_ requested: Double, _ presence: GlassWindowPresence) -> GlassAnimationSchedule {
+            GlassAnimationGate.schedule(minimumInterval: requested, paused: false, presence: presence)
+        }
+        XCTAssertEqual(interval(dashes, .focused), GlassAnimationSchedule(minimumInterval: dashes, paused: false))
+        XCTAssertEqual(interval(library, .focused), GlassAnimationSchedule(minimumInterval: library, paused: false))
+        XCTAssertEqual(interval(dashes, .unfocused).minimumInterval, GlassAnimationGate.unfocusedInterval)
+        XCTAssertEqual(interval(library, .unfocused).minimumInterval, GlassAnimationGate.unfocusedInterval)
+        XCTAssertTrue(interval(dashes, .hidden).paused)
+        XCTAssertTrue(interval(library, .hidden).paused)
     }
 
     /// The clock reads the window's presence and applies the rule to it,
