@@ -14,6 +14,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
 using TraceCommons.Interop.Map;
+using TraceCommons.Interop.Shell;
 using Windows.System;
 using Windows.UI.ViewManagement;
 using Color = Windows.UI.Color;
@@ -56,6 +57,19 @@ internal interface ITracesTreeHost
 
     /// <summary>The person's folder order changed: keep it.</summary>
     void OrderChanged(IReadOnlyList<string> order, bool arranged);
+
+    /// <summary>
+    /// Automatic for every folder (SharingChoiceCard.swift:144-163): what is
+    /// in force, or null while the grant or its words are unknown, when the
+    /// eye is not drawn.
+    /// </summary>
+    TraceCommons.Interop.FirstRun.SharingPath? AutomaticForEveryFolder { get; }
+
+    /// <summary>Whether a press of the eye is still running; the eye is off meanwhile.</summary>
+    bool SharingChoiceWorking { get; }
+
+    /// <summary>The eye pressed: the Mac's steps; the refusal to show under it, or null.</summary>
+    System.Threading.Tasks.Task<string?> PressAutomaticForEveryFolderAsync();
 }
 
 /// <summary>
@@ -81,6 +95,7 @@ internal sealed class TracesTreeView : UserControl
     private readonly StackPanel _footer = new() { Margin = new Thickness(-14, 12, -14, 0) };
     private readonly TextBlock _empty = new();
     private readonly Button _searchButton = new();
+    private readonly Grid _eyeSlot = new();
     private readonly Grid _searchField = new();
     private readonly TextBox _searchBox = new();
     private readonly TranslateTransform _searchShift = new();
@@ -119,8 +134,14 @@ internal sealed class TracesTreeView : UserControl
         AutomationProperties.SetName(this, _words["tree_label"]);
 
         _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _root.Children.Add(Heading());
+        if (ColumnTitles() is { } titles)
+        {
+            Grid.SetRow(titles, 1);
+            _root.Children.Add(titles);
+        }
 
         _content.Children.Add(_rows);
         _content.Children.Add(_footer);
@@ -129,7 +150,7 @@ internal sealed class TracesTreeView : UserControl
         _scroller.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
         _scroller.IsTabStop = false;
         _scroller.Padding = new Thickness(14, 0, 14, 12);
-        Grid.SetRow(_scroller, 1);
+        Grid.SetRow(_scroller, 2);
         _root.Children.Add(_scroller);
 
         _empty.TextWrapping = TextWrapping.Wrap;
@@ -193,6 +214,7 @@ internal sealed class TracesTreeView : UserControl
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var title = new TextBlock
         {
@@ -246,6 +268,13 @@ internal sealed class TracesTreeView : UserControl
         search.Children.Add(_searchField);
         heading.Children.Add(search);
 
+        // Automatic for every folder, an eye left of the order control
+        // (owner, 2026-11-02; NudgeViews.swift:69-71, :147-150). Drawn by
+        // DrawEye once the grant is known.
+        Grid.SetColumn(_eyeSlot, 2);
+        _eyeSlot.VerticalAlignment = VerticalAlignment.Center;
+        heading.Children.Add(_eyeSlot);
+
         if (TreeOrderWords.Label.Length > 0)
         {
             var order = new Button
@@ -258,11 +287,112 @@ internal sealed class TracesTreeView : UserControl
             var menu = new MenuFlyout();
             menu.Opening += (_, _) => FillOrderMenu(menu);
             order.Flyout = menu;
-            Grid.SetColumn(order, 2);
+            Grid.SetColumn(order, 3);
             heading.Children.Add(order);
         }
 
         return heading;
+    }
+
+    /// <summary>
+    /// The eye (SharingChoiceCard.swift:144-163): on while Automatic is in
+    /// force; its tooltip is its name over the count line; off while a press
+    /// runs. Pressing it takes the window's steps, and a refusal opens under
+    /// it in the core's words. Not drawn without the grant or the words.
+    /// </summary>
+    private void DrawEye()
+    {
+        _eyeSlot.Children.Clear();
+        string name = _words["automatic_all"];
+        if (name.Length == 0 || _words["automatic_count"].Length == 0
+            || _host.AutomaticForEveryFolder is not TraceCommons.Interop.FirstRun.SharingPath current)
+        {
+            return;
+        }
+
+        bool on = current == TraceCommons.Interop.FirstRun.SharingPath.Automatic;
+        string line = SharingChoice.AutomaticCount(_state.Tree.Folders, _words["automatic_count"]);
+        var eye = new ToggleButton
+        {
+            Content = new FontIcon { Glyph = SharingChoice.ToolbarGlyph, FontSize = 12 },
+            IsChecked = on,
+            IsEnabled = !_host.SharingChoiceWorking,
+            Padding = new Thickness(11, 4, 11, 4),
+            CornerRadius = (CornerRadius)Application.Current.Resources["TcControlCornerRadius"],
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetName(eye, name);
+        AutomationProperties.SetHelpText(eye, line);
+        ToolTipService.SetToolTip(eye, SharingChoice.ToolbarHelp(name, line));
+        eye.Click += async (_, _) =>
+        {
+            // The core's answer draws it; the press itself changes nothing.
+            eye.IsChecked = on;
+            eye.IsEnabled = false;
+            string? refusal = await _host.PressAutomaticForEveryFolderAsync();
+            Render();
+            if (refusal is { Length: > 0 })
+            {
+                new Flyout
+                {
+                    Content = new TextBlock { Text = refusal, TextWrapping = TextWrapping.Wrap, MaxWidth = 280 },
+                    Placement = FlyoutPlacementMode.Bottom,
+                }.ShowAt(_eyeSlot);
+            }
+        };
+        _eyeSlot.Children.Add(eye);
+    }
+
+    /// <summary>
+    /// The titles over the tree's columns while the Automatic switches show
+    /// (TracesViews.swift:193-198, :1537-1566): the folders, Submit centred
+    /// over the row's split button, and Auto over its switch, before the row
+    /// menu's 22 px column. Eyebrow type, tertiary ink, one line; the rows
+    /// already name their controls, so screen readers skip the titles.
+    /// </summary>
+    private Grid? ColumnTitles()
+    {
+        if (SharingChoice.ColumnTitles(_words) is not { } titles)
+        {
+            return null;
+        }
+
+        var grid = new Grid
+        {
+            // The scroller's 14 px, then the row's own insets (8 leading, 6 trailing).
+            Margin = new Thickness(14 + 8, 0, 14 + 6, 4),
+            ColumnSpacing = 8,
+        };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
+        TextBlock Title(string text, int column, double? width, double minWidth, TextAlignment alignment)
+        {
+            var block = new TextBlock
+            {
+                Text = text,
+                Style = (Style)Application.Current.Resources["TcEyebrowTextStyle"],
+                TextAlignment = alignment,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxLines = 1,
+                MinWidth = minWidth,
+            };
+            if (width is double w)
+            {
+                block.Width = w;
+            }
+
+            Grid.SetColumn(block, column);
+            grid.Children.Add(block);
+            return block;
+        }
+
+        Title(titles.Folders, 0, null, 0, TextAlignment.Left);
+        Title(titles.Submit, 1, null, SharingChoice.SubmitColumnMinWidth, TextAlignment.Center);
+        Title(titles.Automatic, 2, GlassTokens.Size.WatchSwitchWidth, 0, TextAlignment.Center);
+        AutomationProperties.SetAccessibilityView(grid, AccessibilityView.Raw);
+        return grid;
     }
 
     /// <summary>The order menu (NudgeViews.swift:104-130): Oldest first, Your order, and Show ignored folders.</summary>
@@ -367,6 +497,7 @@ internal sealed class TracesTreeView : UserControl
 
     private void Render()
     {
+        DrawEye();
         _rows.Children.Clear();
         _rowById.Clear();
         IReadOnlyList<TreeRow> rows = _state.Rows;

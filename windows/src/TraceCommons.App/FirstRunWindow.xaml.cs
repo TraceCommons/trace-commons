@@ -17,6 +17,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
+using TraceCommons.App.Controls;
 using TraceCommons.App.FirstRun;
 using TraceCommons.Interop;
 using TraceCommons.Interop.FirstRun;
@@ -782,66 +783,10 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         return element;
     }
 
-    /// <summary>
-    /// The two sheets, one at a time (SharingDisclosureSheet,
-    /// SharingDisclosures.swift:104-205): the scrub lines, then the route
-    /// disclosure. Continue is never the default button, so a stray Enter
-    /// passes no disclosure; a disclosure that cannot be read keeps Continue
-    /// off. False when the person cancelled.
-    /// </summary>
-    private async Task<bool> ShowDisclosuresAsync(SharingDisclosureFlow flow, AutomaticGrantCopy grant)
-    {
-        var scrub = new StackPanel { Spacing = 10 };
-        foreach (string line in grant.Lines)
-        {
-            scrub.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
-        }
-
-        if (await Sheet(WatchCopy.Armed, scrub, true) != ContentDialogResult.Primary || _closed)
-        {
-            return false;
-        }
-
-        flow.AcknowledgeScrub();
-        DaemonResponse facts = await _host.CallAsync(DaemonProtocol.Methods.RouteDisclosure).ConfigureAwait(true);
-        RouteDisclosure? disclosure = facts.IsError || facts.Result is null ? null : RouteDisclosureSurface.ForFacts(facts.Result.Value.GetRawText());
-        RouteDisclosureUnreadable? unreadable = disclosure is null ? RouteDisclosureSurface.Unreadable() : null;
-        var body = new StackPanel { Spacing = 8 };
-        foreach (DisclosureRow row in RouteDisclosureSurface.PanelRows(disclosure, unreadable))
-        {
-            body.Children.Add(new TextBlock
-            {
-                Text = row.Value.Length > 0 ? row.Text + " " + row.Value : row.Text,
-                TextWrapping = TextWrapping.Wrap,
-                FontWeight = row.IsHeading ? FontWeights.SemiBold : FontWeights.Normal,
-            });
-        }
-
-        string title = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
-        if (await Sheet(title.Length > 0 ? title : WatchCopy.Armed, body, disclosure is not null) != ContentDialogResult.Primary || _closed)
-        {
-            return false;
-        }
-
-        flow.AcknowledgeWitness(disclosure?.Facts.Witness?.SigningAddress);
-        return flow.Step == DisclosureStep.Done;
-    }
-
-    private async Task<ContentDialogResult> Sheet(string title, UIElement body, bool canContinue)
-    {
-        var dialog = new ContentDialog
-        {
-            Title = title,
-            Content = new ScrollViewer { Content = body, MaxHeight = 420 },
-            PrimaryButtonText = Copy.Frame.ContinueButton,
-            CloseButtonText = Copy.Frame.Cancel,
-            DefaultButton = ContentDialogButton.None,
-            IsPrimaryButtonEnabled = canContinue,
-            XamlRoot = Root.XamlRoot,
-            RequestedTheme = ElementTheme.Dark,
-        };
-        return await dialog.ShowAsync();
-    }
+    /// <summary>The two disclosure sheets, shared with the Traces toolbar's eye (<see cref="SharingDisclosureSheets"/>).</summary>
+    private Task<bool> ShowDisclosuresAsync(SharingDisclosureFlow flow, AutomaticGrantCopy grant) =>
+        SharingDisclosureSheets.ShowAsync(
+            Root.XamlRoot, flow, grant, Copy, () => _host.CallAsync(DaemonProtocol.Methods.RouteDisclosure), () => _closed, ElementTheme.Dark);
 
     private async void OnBack(object sender, RoutedEventArgs e)
     {

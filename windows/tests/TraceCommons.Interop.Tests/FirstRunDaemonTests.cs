@@ -257,6 +257,21 @@ public sealed class FirstRunDaemonTests
     }
 
     [Fact]
+    public async Task TheToolbarGrantSendsItsAnswerAboutAskFolders()
+    {
+        // Settings' and the Traces eye's grant (AppModel.swift:5108-5113,
+        // DaemonClient+FirstRun.swift:48-53): "Make all Automatic" sends
+        // keep_folder_asks false; the first run keeps sending true.
+        var (daemon, wire, _) = Make();
+        Assert.Equal(new GrantAnswer(true, null), await daemon.GrantAutomatic("w", keepFolderAsks: false));
+        Assert.False((bool)Assert.Single(wire.Sent).Params!["keep_folder_asks"]!);
+
+        (daemon, wire, _) = Make();
+        Assert.Equal(new GrantAnswer(true, null), await daemon.GrantAutomatic("w"));
+        Assert.True((bool)Assert.Single(wire.Sent).Params!["keep_folder_asks"]!);
+    }
+
+    [Fact]
     public async Task AGrantChangeWaitsForASettledAccount()
     {
         // AppModel.swift:4701-4704, :4994-5000, :5062-5070: no settled
