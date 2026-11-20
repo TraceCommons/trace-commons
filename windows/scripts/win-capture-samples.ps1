@@ -28,9 +28,10 @@
 # only, by its handle (win-capture.ps1), sized with -Width and -Height.
 #
 # THE STATE CHECK. Before the first launch and after every launch, the URL
-# scheme key, the Run values, the app's state directory and the throwaway
-# sample directories under %TEMP% are read. Any change fails the run and is
-# written to state-check.txt. A sample set is then launched twice at once:
+# scheme key, the Run values and the app's state directory are read. Any
+# change fails the run and is written to state-check.txt. The throwaway
+# sample directories under %TEMP% are counted once, at the end: each launch
+# removes those of stopped launches, so no more than the last two may stay. A sample set is then launched twice at once:
 # two windows must result, because a sample launch never takes part in
 # single-instancing (it would otherwise hand itself to a running app).
 #
@@ -145,9 +146,9 @@ function Get-MachineState {
     } else {
         $lines.Add('state absent')
     }
-    foreach ($item in Get-ChildItem $env:TEMP -Directory -Filter 'tracecommons-sample-*' -ErrorAction SilentlyContinue) {
-        $lines.Add("sample-temp $($item.Name)")
-    }
+    # The sample launches' throwaway folders are not compared here: a
+    # force-stopped launch leaves its own, and the next launch removes it
+    # (SampleDaemon.SweepThrowawayDirs). The end of the run counts them.
     return , $lines.ToArray()
 }
 
@@ -235,6 +236,16 @@ finally {
     } else {
         Remove-ItemProperty -Path $themeKey -Name AppsUseLightTheme -ErrorAction SilentlyContinue
     }
+}
+
+# Every launch above was force-stopped, so its exit never removed its
+# throwaway folder; each launch removes those of the launches before it.
+# Only the last two (the single-instance pair) may remain.
+$leftover = @(Get-ChildItem $env:TEMP -Directory -Filter 'tracecommons-sample-*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^tracecommons-sample-(\d+)$' -and -not (Get-Process -Id ([int] $matches[1]) -ErrorAction SilentlyContinue) })
+Add-Content -Path $stateLog -Value "sample-temp: $($leftover.Count) folder(s) of stopped launches left"
+if ($leftover.Count -gt 2) {
+    $failures.Add('sample-temp')
 }
 
 Write-Host "captures in $OutDir"
