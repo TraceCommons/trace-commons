@@ -65,8 +65,16 @@ public sealed partial class InsightsView
         IReadOnlyList<InsightsWorkWords.Tile> tiles = InsightsWorkWords.Tiles(week?.Work, copy);
         if (tiles.Count > 0)
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-            foreach (InsightsWorkWords.Tile tile in tiles) row.Children.Add(TileCard(tile));
+            // One row, the tiles sharing it, so neither runs off a narrow pane.
+            var row = new Grid { ColumnSpacing = 12 };
+            for (int i = 0; i < tiles.Count; i++)
+            {
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                UIElement card = TileCard(tiles[i]);
+                Grid.SetColumn((FrameworkElement)card, i);
+                row.Children.Add(card);
+            }
+
             OverviewExtras.Children.Add(row);
         }
 
@@ -138,7 +146,6 @@ public sealed partial class InsightsView
         panel.Children.Add(Figure(tile.Value));
         panel.Children.Add(Caption(tile.Note));
         Border card = Card(panel);
-        card.Width = 240;
         AutomationProperties.SetName(card, string.Join(", ", tile.Label, tile.Value, tile.Note));
         return card;
     }
@@ -235,10 +242,11 @@ public sealed partial class InsightsView
         foreach (InsightsWorkWords.ModelRow row in rows)
         {
             var grid = new Grid { ColumnSpacing = 12 };
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(160) });
+            // The Mac's minimums: 110 for the name, 64 for the amount, 36 for the share.
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(110) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(64) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
             var name = new StackPanel();
             TextBlock label = Body(row.Label);
             label.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
@@ -247,12 +255,14 @@ public sealed partial class InsightsView
             name.Children.Add(label);
             if (tools) name.Children.Add(Caption(row.Tool));
             grid.Children.Add(name);
+            // The share as two star columns, so the fill follows the track's width.
             var track = new Grid { Height = 8, VerticalAlignment = VerticalAlignment.Center };
-            track.Children.Add(new Rectangle { Fill = ThemeBrushes.Get("TcSurfaceInsetBrush"), RadiusX = 4, RadiusY = 4 });
-            var fill = new Rectangle { Fill = ThemeBrushes.Get("TcAccentBrush"), RadiusX = 4, RadiusY = 4, HorizontalAlignment = HorizontalAlignment.Left };
-            track.Children.Add(fill);
-            // After the bar is in its track: the width follows the track's.
-            SetFraction(fill, row.Share);
+            track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(row.Share, 0.01), GridUnitType.Star) });
+            track.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(1 - row.Share, 0), GridUnitType.Star) });
+            var ground = new Rectangle { Fill = ThemeBrushes.Get("TcSurfaceInsetBrush"), RadiusX = 4, RadiusY = 4 };
+            Grid.SetColumnSpan(ground, 2);
+            track.Children.Add(ground);
+            track.Children.Add(new Rectangle { Fill = ThemeBrushes.Get("TcAccentBrush"), RadiusX = 4, RadiusY = 4, MinWidth = 4 });
             Grid.SetColumn(track, 1);
             grid.Children.Add(track);
             TextBlock amount = Mono(row.Amount);
@@ -282,9 +292,11 @@ public sealed partial class InsightsView
         string thisWeek = Text(copy, "analytics_this_week"), before = Text(copy, "analytics_trends_week_before");
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(Heading(Text(copy, "analytics_trends_title"), 18));
-        var body = new Grid { ColumnSpacing = 24 };
+        var body = new Grid { ColumnSpacing = 24, RowSpacing = 16 };
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = changes.Count > 0 ? new GridLength(260) : new GridLength(0) });
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0) });
+        body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
         var chart = new StackPanel { Spacing = 4 };
         chart.Children.Add(Caption(Text(copy, "analytics_trends_spend_per_day")));
@@ -318,8 +330,18 @@ public sealed partial class InsightsView
         {
             var list = new StackPanel { Spacing = 6 };
             foreach (InsightsWorkWords.ChangeLine change in changes) list.Children.Add(UsageRow(change.Label, change.Words));
-            Grid.SetColumn(list, 1);
             body.Children.Add(list);
+            // Side by side when the chart's 320 and the list's 200 fit, else
+            // the list under the chart (ViewThatFits, InsightsWorkViews.swift:285-294).
+            body.SizeChanged += (_, args) =>
+            {
+                bool beside = args.NewSize.Width >= 320 + 200 + 24;
+                body.ColumnDefinitions[1].Width = beside ? new GridLength(260) : new GridLength(0);
+                body.ColumnSpacing = beside ? 24 : 0;
+                Grid.SetColumn(list, beside ? 1 : 0);
+                Grid.SetRow(list, beside ? 0 : 1);
+            };
+            Grid.SetRow(list, 1);
         }
 
         panel.Children.Add(body);

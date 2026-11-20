@@ -608,6 +608,13 @@ public class SampleDaemonTests
         IReadOnlyList<string> before = Answer(sample, DaemonProtocol.Methods.Status).ResultAs<DaemonStatus>()!.ConsentScopes;
         Assert.True(SentTracesTrainingState.TurnsOn(before, confirmed));
         Assert.True(Answer(WithExtra("normalDay", null), DaemonProtocol.Methods.SetConsentScopes).IsError);
+        // Settings draws the rows the turn-on is made from: the daemon's own
+        // consent_options (pinned by enroll.rs's
+        // the_windows_skill_learning_sample_consent_options_is_this_reply).
+        DaemonResponse options = Answer(sample, DaemonProtocol.Methods.ConsentOptions);
+        Assert.False(options.IsError);
+        Assert.Contains(options.Result!.Value.GetProperty("scopes").EnumerateArray(),
+            row => row.GetProperty("name").GetString() == SentTracesTrainingState.Scope && !row.GetProperty("always_on").GetBoolean());
     }
 
     /// <summary>
