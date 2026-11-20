@@ -4,35 +4,42 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// The flow map at rest: one timeline for what moves (the arcs' dashes
-/// and the library), and a still layer that is not drawn again on its
-/// ticks.
+/// The flow map at rest: the arcs' dashes and the library each on their
+/// own timeline, and a still layer that is not drawn again on their ticks.
 final class FlowMapMotionTests: XCTestCase {
-    /// Dashes run at 30 frames a second, as they always have; the library
-    /// alone at its own rate; nothing moves under Reduce Motion or when
-    /// there is nothing to move.
+    /// Dashes run while flows are live and healthy, the library turns
+    /// while there is one, each independently; nothing moves under Reduce
+    /// Motion or when there is nothing to move.
     @MainActor
     func test_restingMotion() {
         let dashes = FlowMapView.restingMotion(reduceMotion: false, flows: true, healthy: true, library: false)
-        XCTAssertEqual(dashes.interval, 1 / 30)
-        XCTAssertFalse(dashes.paused)
+        XCTAssertTrue(dashes.dashes)
+        XCTAssertFalse(dashes.turns)
 
         let both = FlowMapView.restingMotion(reduceMotion: false, flows: true, healthy: true, library: true)
-        XCTAssertEqual(both.interval, 1 / 30)
-        XCTAssertFalse(both.paused)
+        XCTAssertTrue(both.dashes)
+        XCTAssertTrue(both.turns)
 
         let library = FlowMapView.restingMotion(reduceMotion: false, flows: false, healthy: true, library: true)
-        XCTAssertEqual(library.interval, GlassLibraryStation.frameInterval)
-        XCTAssertFalse(library.paused)
+        XCTAssertFalse(library.dashes)
+        XCTAssertTrue(library.turns)
 
         // Unhealthy flows are drawn still: only the library turns.
         let unhealthy = FlowMapView.restingMotion(reduceMotion: false, flows: true, healthy: false, library: true)
-        XCTAssertEqual(unhealthy.interval, GlassLibraryStation.frameInterval)
-        XCTAssertFalse(unhealthy.paused)
+        XCTAssertFalse(unhealthy.dashes)
+        XCTAssertTrue(unhealthy.turns)
 
-        XCTAssertTrue(FlowMapView.restingMotion(reduceMotion: false, flows: false, healthy: true, library: false).paused)
-        XCTAssertTrue(FlowMapView.restingMotion(reduceMotion: false, flows: true, healthy: false, library: false).paused)
-        XCTAssertTrue(FlowMapView.restingMotion(reduceMotion: true, flows: true, healthy: true, library: true).paused)
+        let still = FlowMapView.restingMotion(reduceMotion: true, flows: true, healthy: true, library: true)
+        XCTAssertFalse(still.dashes)
+        XCTAssertFalse(still.turns)
+    }
+
+    /// The dashes keep their 30 frames a second; the library turns slower
+    /// than that, so it is no longer drawn at the dashes' rate.
+    @MainActor
+    func test_libraryTurnsSlowerThanTheDashes() {
+        XCTAssertEqual(FlowMapView.dashInterval, 1 / 30)
+        XCTAssertGreaterThan(GlassLibraryStation.frameInterval, FlowMapView.dashInterval)
     }
 
     /// The still layer compares by its key alone: a new drawing closure
