@@ -554,6 +554,28 @@ public sealed class SubscriptionUsageTests
         await observing;
     }
 
+    /// <summary>
+    /// The next polls read the figures again but never read a login silently
+    /// again until a reading would have gone stale.
+    /// </summary>
+    [Fact]
+    public async Task LaterPollsNeverRepeatASilentRead()
+    {
+        var calls = new ConcurrentQueue<(bool Refresh, string? Login)>();
+        var model = new SubscriptionUsageModel((refresh, _, _, login) =>
+        {
+            calls.Enqueue((refresh, login));
+            return Task.FromResult(ClaudeSnapshot());
+        }, idlePollInterval: TimeSpan.FromMilliseconds(1));
+        using var cancel = new CancellationTokenSource();
+        Task observing = model.ObserveAsync(true, cancel.Token);
+        await Settle(() => calls.Count(c => !c.Refresh) >= 10);
+        cancel.Cancel();
+        await observing;
+        Assert.True(calls.Count(c => !c.Refresh) >= 10, "the observer kept polling");
+        Assert.Equal(new[] { "claude-default", "claude-work" }, calls.Where(c => c.Refresh).Select(c => c.Login));
+    }
+
     [Fact]
     public async Task OpeningInsightsDoesNotReadLoginsThatHaveCurrentFigures()
     {

@@ -249,7 +249,7 @@ public sealed class SubscriptionUsageModel
     private readonly Reader? _reader;
     private readonly Writer? _writer;
     private readonly TimeSpan _activePollInterval;
-    private readonly TimeSpan _idlePollInterval = TimeSpan.FromSeconds(60);
+    private readonly TimeSpan _idlePollInterval;
     private readonly TimeSpan _silentReadInterval;
     private readonly Func<TimeSpan> _clock;
     private long _generation;
@@ -273,11 +273,12 @@ public sealed class SubscriptionUsageModel
     private readonly HashSet<string> _changingProviders = new(StringComparer.Ordinal);
 
     public SubscriptionUsageModel(Reader? reader = null, Writer? writer = null, TimeSpan? activePollInterval = null,
-        TimeSpan? silentReadInterval = null, Func<TimeSpan>? clock = null)
+        TimeSpan? silentReadInterval = null, Func<TimeSpan>? clock = null, TimeSpan? idlePollInterval = null)
     {
         _reader = reader;
         _writer = writer;
         _activePollInterval = activePollInterval ?? TimeSpan.FromSeconds(2);
+        _idlePollInterval = idlePollInterval ?? TimeSpan.FromSeconds(60);
         _silentReadInterval = silentReadInterval ?? TimeSpan.FromMinutes(20);
         if (clock is null)
         {
