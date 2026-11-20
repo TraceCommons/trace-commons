@@ -117,6 +117,8 @@ internal sealed class TransferCardView : UserControl
         _frame.Child = new StackPanel { Spacing = 8, Children = { head, summary, _details } };
         ApplyBrushes();
         ActualThemeChanged += (_, _) => ApplyBrushes();
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { ApplyBrushes(); });
     }
 
     private bool _tagOn;

@@ -148,6 +148,8 @@ internal sealed class TracesGraphFooter : UserControl
         Content = root;
 
         ActualThemeChanged += (_, _) => { Paint(); _canvas.Invalidate(); };
+        // A live theme or high contrast switch too (ThemeBrushes).
+        ThemeBrushes.RedrawOnChange(this, () => { Paint(); _canvas.Invalidate(); });
         Unloaded += (_, _) => StopTicking();
         Paint();
         Render();
@@ -399,7 +401,7 @@ internal sealed class TracesGraphFooter : UserControl
 
     private bool HighContrast => _accessibility.HighContrast;
 
-    private bool Dark => ActualTheme == ElementTheme.Dark;
+    private bool Dark => ThemeBrushes.Dark;
 
     /// <summary>A generated flat ink for the theme (MapArt); under High Contrast the system's text colour.</summary>
     private Color Ink(string token, double alpha = 1)

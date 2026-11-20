@@ -56,6 +56,34 @@ internal static class ThemeBrushes
     public static string Key =>
         ThemeDictionaryKey.For(SystemSettingWatch.HighContrast, (_root?.ActualTheme ?? ThemeOfApp()) == ElementTheme.Light);
 
+    /// <summary>
+    /// The dark half of a light/dark pair (MapArt.Dark, MapArt.Light) is in
+    /// force: the dark theme, or high contrast, whose own colours a view
+    /// handles apart. An element's own ActualTheme lagged a live switch on
+    /// the box: the tree's rows kept their dark inks on the light ground.
+    /// </summary>
+    public static bool Dark => Key != "Light";
+
+    /// <summary>
+    /// Calls <paramref name="redraw"/> after every change of theme or high
+    /// contrast while <paramref name="element"/> is loaded, for a view that
+    /// picks its colours when it draws.
+    /// </summary>
+    public static void RedrawOnChange(FrameworkElement element, Action redraw)
+    {
+        void OnChanged() => redraw();
+        element.Loaded += (_, _) =>
+        {
+            Changed -= OnChanged;
+            Changed += OnChanged;
+        };
+        element.Unloaded += (_, _) => Changed -= OnChanged;
+        if (element.IsLoaded)
+        {
+            Changed += OnChanged;
+        }
+    }
+
     /// <summary>The brush <paramref name="key"/> names in the theme in force now.</summary>
     public static Brush Get(string key)
     {
