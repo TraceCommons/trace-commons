@@ -7,6 +7,22 @@ namespace TraceCommons.Interop.Shell;
 /// </summary>
 public readonly record struct PaneVisibility(bool Map, bool Inspector);
 
+/// <summary>What a pane toggle asks for.</summary>
+public static class PaneToggles
+{
+    /// <summary>
+    /// Whether <paramref name="pane"/> is wanted after its toggle is
+    /// pressed: the opposite of where the panes are going
+    /// (<paramref name="movingTo"/>, while the window moves), else of where
+    /// they are. The Mac's toggle flips the wanted state, never the drawn one.
+    /// </summary>
+    public static bool Wanted(PaneToggle pane, PaneVisibility presented, PaneVisibility? movingTo)
+    {
+        PaneVisibility current = movingTo ?? presented;
+        return pane == PaneToggle.Map ? !current.Map : !current.Inspector;
+    }
+}
+
 /// <summary>
 /// A move from one composition to another while the window resizes
 /// (<c>GlassPaneLayout.Transition</c>, ThreePane.swift:236-254).

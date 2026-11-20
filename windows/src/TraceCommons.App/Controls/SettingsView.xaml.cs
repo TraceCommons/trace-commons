@@ -33,11 +33,56 @@ public sealed partial class SettingsView : UserControl
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
         InitializeShellSwitches();
+        QuiescenceMinutes.Loaded += (_, _) => AddMapStyleSwitch();
 
         ViewModel = new PublicProfileViewModel(host);
         Settings = new ContributorSettingsViewModel(host);
         Loaded += OnFirstLoaded;
     }
+
+    /// <summary>
+    /// The Traces map's style switch (W6-D1), as its own card after the
+    /// behaviour card: Settings has no General section on Windows yet (W17).
+    /// </summary>
+    private void AddMapStyleSwitch()
+    {
+        if (_mapStyleAdded)
+        {
+            return;
+        }
+
+        // The behaviour card is the nearest Border round the quiet-time box,
+        // and its section the nearest panel round that card, read from the
+        // live tree once it is loaded.
+        DependencyObject? node = QuiescenceMinutes;
+        Border? behaviour = null;
+        while (node is not null && behaviour is null)
+        {
+            node = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(node);
+            behaviour = node as Border;
+        }
+
+        if (behaviour is null
+            || Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(behaviour) is not Panel section
+            || MapStyleSwitch.Build() is not { } content)
+        {
+            return;
+        }
+
+        _mapStyleAdded = true;
+        var card = new Border
+        {
+            Background = behaviour.Background,
+            BorderBrush = behaviour.BorderBrush,
+            BorderThickness = behaviour.BorderThickness,
+            CornerRadius = behaviour.CornerRadius,
+            Padding = behaviour.Padding,
+            Child = content,
+        };
+        section.Children.Insert(section.Children.IndexOf(behaviour) + 1, card);
+    }
+
+    private bool _mapStyleAdded;
 
     public PublicProfileViewModel ViewModel { get; }
 

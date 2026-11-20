@@ -185,15 +185,15 @@ public class EligibilityShellWiringTests
     [Fact]
     public void TheGroupHeaderRemovesRatherThanDisables()
     {
-        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
-
-        // Both group controls are gated on VISIBILITY, and nothing on the
-        // header is greyed by eligibility.
-        Assert.Equal(
-            2, Regex.Matches(markup, @"Visibility=""\{x:Bind ShowSubmitAll\}""").Count);
-        Assert.DoesNotContain("CanSubmitAll", markup, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "IsEnabled=\"{x:Bind ShowSubmitAll}\"", markup, StringComparison.Ordinal);
+        // Read as text, with reason (checklist B2): the folder row is the
+        // Traces tree's (Controls/TracesTreeView.cs, W3), a WinUI control
+        // this Mac-run suite cannot mount, and the rule is a consent
+        // invariant no Interop object can witness: Submit all is drawn only
+        // when the shared table offers it, and never drawn greyed.
+        string tree = ShellSource("TraceCommons.App/Controls/TracesTreeView.cs");
+        Assert.Contains("if (group is { ShowSubmitAll: true } && !off)", tree, StringComparison.Ordinal);
+        Assert.DoesNotContain("CanSubmitAll", tree, StringComparison.Ordinal);
+        Assert.DoesNotMatch(new Regex(@"IsEnabled\s*=\s*group"), tree);
 
         // And that visibility is the shared branch table's answer, ASKED
         // rather than reproduced. A local `OfferedCount > 0` agrees with the
@@ -500,10 +500,11 @@ public class EligibilityShellWiringTests
             vm,
             StringComparison.Ordinal);
 
-        string markup = ShellSource("TraceCommons.App/MainWindow.xaml");
-        Assert.Contains("Text=\"{x:Bind WithheldText}\"", markup, StringComparison.Ordinal);
-        Assert.Contains(
-            "Visibility=\"{x:Bind HasWithheldText}\"", markup, StringComparison.Ordinal);
+        // The tree's folder row (text, as above): Submit counts what the
+        // daemon says it sends, and the withheld sentence is drawn under it.
+        string tree = ShellSource("TraceCommons.App/Controls/TracesTreeView.cs");
+        Assert.Contains("TracesTreeRows.SubmitTitle(group.OfferedCount, _words)", tree, StringComparison.Ordinal);
+        Assert.Contains("TracesTreeRows.WithheldNote(group.WithheldText, group.OfferedCount, _words)", tree, StringComparison.Ordinal);
     }
 
     private static string ShellSource(string relativePath)
