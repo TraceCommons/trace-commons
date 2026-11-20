@@ -272,6 +272,14 @@ public static class TracesTreeRows
     /// <summary>The menu open after a row's control for <paramref name="menu"/> is pressed (:120-122).</summary>
     public static TreeRowMenu? Toggled(TreeRowMenu menu, TreeRowMenu? current) => menu == current ? null : menu;
 
+    /// <summary>
+    /// A row kebab's ink token (Controls.swift <c>GlassKebab.ink</c>): on a
+    /// selected row, the row's own ink, as <c>GlassGround.selection.controlInk</c>;
+    /// otherwise null, the button's own. The button's dark ink on the
+    /// selection measured 2.72:1 (owner, 2026-11-20).
+    /// </summary>
+    public static string? KebabInk(bool selected) => selected ? "textOnAccent" : null;
+
     /// <summary>The folder holding a selection, or null when it is not in the tree (:545-552).</summary>
     public static string? FolderOf(TreeSelection selected, TracesTree tree) => selected switch
     {

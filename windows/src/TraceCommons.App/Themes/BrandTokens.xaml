@@ -76,7 +76,7 @@
             <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#8CA8690F" />
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#D0342C" />
             <SolidColorBrush x:Key="TcCoralTextBrush" Color="#771814" />
-            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#8A8A90" />
+            <SolidColorBrush x:Key="TcStatusOffBrush" Color="#78787F" />
             <SolidColorBrush x:Key="TcToolClaudeBrush" Color="#C2603E" />
             <SolidColorBrush x:Key="TcToolCodexBrush" Color="#3A3A3C" />
             <SolidColorBrush x:Key="TcToolOpenCodeBrush" Color="#1D9467" />

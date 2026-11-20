@@ -516,7 +516,8 @@ GLASS_MOTION = REPO / "macos" / "Sources" / "TCDesign" / "Styling" / "GlassMotio
 # tints. The Linux map reads them from `brand_tokens::map`.
 MAP_COLOURS = [
     "mapOrbShared", "mapOrbKept", "purpleSoft", "blue", "statusOff", "statusOn",
-    "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapCredentialOn",
+    "statusOnText", "statusAsk", "statusOutside", "mapNodeOff", "mapPadSlab", "mapPadTower",
+    "mapCredentialOn",
     "mapRuleAutoFill", "mapRuleAskFill", "mapRuleIgnoreFill", "mapRuleUnsetFill",
     "paneOpaque", "wellFill", "mapFieldInner", "mapFieldOuter",
     "textPrimary", "textSecondary", "textTertiary", "purpleText",
@@ -758,11 +759,12 @@ def switch_failures(palette: dict[str, str], off: dict) -> list[str]:
 def switch_off_track(tokens: dict, scheme: str) -> dict:
     """`toggleOff`, or the smallest lift of its alpha in 0.01 steps at which
     every switch state clears 3:1 on every switch ground. Dark holds at the
-    Mac's 38% white. Light's 24% black is about 1.8:1 on its grounds and the
+    Mac's 38% white. Light was 24% black, about 1.8:1 on its grounds and the
     white knob about 1.9:1 on it, under the floor the owner holds
-    (2026-10-07), so it is lifted: a deviation from the Mac kept as small as
-    the floor allows, as the blur's tint share is. The on track and both
-    knobs are the Mac's exactly; a token that breaks them fails here."""
+    (2026-10-07); the token now carries this lift's 43% itself (owner,
+    2026-11-20: "Raise to pass, both apps"), so the Mac, Windows and Linux
+    draw one track and this returns the token. The on track and both knobs
+    are the Mac's exactly; a token that breaks them fails here."""
     palette = glass_palette(tokens, scheme)
     base = flat_color(tokens, "toggleOff", scheme)
     step = round(float(base.get("alpha", 1)) * 100)
@@ -1886,10 +1888,12 @@ def windows_glass_palette(tokens: dict, scheme: str) -> dict[str, str]:
         ratio = contrast("#" + out[label][3:], "#" + out[fill][3:])
         if ratio < 4.5:
             raise TokenError(f"windows {scheme}: {label} on {fill} is {ratio:.2f}:1, under 4.5:1")
-    # A switch's knob on its track when on: 3:1. Off, the Mac's light knob
-    # is white on a 24% black track (about 2:1 on the light pane); that is
-    # the Mac's own value, kept and reported, not raised here.
-    for track, knob in (("TcGlassToggleOnBrush", "TcGlassToggleKnobOnBrush"),):
+    # A switch's knob on its track, on and off: 3:1. The light off track
+    # was 24% black, white knob at 1.96:1 measured; the token now carries
+    # `switch_off_track`'s lift (owner, 2026-11-20: "Raise to pass, both
+    # apps").
+    for track, knob in (("TcGlassToggleOnBrush", "TcGlassToggleKnobOnBrush"),
+                        ("TcGlassToggleOffBrush", "TcGlassToggleKnobOffBrush")):
         ratio = contrast("#" + out[knob][3:], "#" + out[track][3:])
         if ratio < 3.0:
             raise TokenError(f"windows {scheme}: {knob} on {track} is {ratio:.2f}:1, under 3:1")
