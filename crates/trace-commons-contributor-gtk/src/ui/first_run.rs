@@ -2506,12 +2506,57 @@ mod window_tests {
 
     #[cfg(target_os = "linux")]
     fn settle(context: &glib::MainContext) {
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        // DIAGNOSTIC (temporary).
+        let bounded = std::env::var_os("TC_DIAG_BOUNDED").is_some();
+        let start = std::time::Instant::now();
+        let end = start + std::time::Duration::from_millis(400);
+        let (mut n, mut longest) = (0u64, std::time::Duration::ZERO);
+        let mut reported = start;
         while std::time::Instant::now() < end {
             while context.pending() {
+                if bounded && std::time::Instant::now() >= end {
+                    break;
+                }
+                let t = std::time::Instant::now();
                 context.iteration(false);
+                let d = t.elapsed();
+                n += 1;
+                longest = longest.max(d);
+                if reported.elapsed() > std::time::Duration::from_secs(5) {
+                    reported = std::time::Instant::now();
+                    eprintln!(
+                        "DIAG settle still draining: {:?} in, {n} iterations, longest {longest:?}",
+                        start.elapsed()
+                    );
+                    diag_windows();
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!(
+            "DIAG settle: wall {:?}, {n} iterations, longest {longest:?}, bounded {bounded}",
+            start.elapsed()
+        );
+        diag_windows();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn diag_windows() {
+        for item in gtk::Window::toplevels().iter::<glib::Object>() {
+            let window = item.unwrap().downcast::<gtk::Window>().unwrap();
+            let clock = window.frame_clock();
+            eprintln!(
+                "DIAG   {} visible {} {}x{} frames {:?} fps {:?} covered {:?}",
+                window.type_().name(),
+                window.is_visible(),
+                window.width(),
+                window.height(),
+                clock.as_ref().map(|c| c.frame_counter()),
+                clock.as_ref().map(|c| c.fps()),
+                window
+                    .child()
+                    .map(|c| c.has_css_class(super::super::motion_css::MODAL_COVERED)),
+            );
         }
     }
 

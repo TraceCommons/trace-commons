@@ -66,6 +66,7 @@ env:
 
 jobs:
   macos-app-tests:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: macOS app tests
     # macos-26, not macos-14: macos/Package.swift declares
     # swift-tools-version:6.0 and the 14 image ships Swift 5.10. This is the
@@ -129,6 +130,7 @@ jobs:
   # (see there) so neither job runs up against its limit. Not a required
   # check, like every job in this workflow.
   macos-contributor-crates:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: macOS contributor crates and Tauri desktop
     runs-on: macos-26
     timeout-minutes: 45
@@ -189,6 +191,7 @@ jobs:
   # `NSGlassEffectView` only exists in the 26 SDK even though the code that
   # uses it is behind `#available(macOS 26.0, *)`.
   macos-15-fallback-tests:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: macOS 15 fallback tests
     runs-on: macos-15
     timeout-minutes: 45
@@ -246,6 +249,7 @@ jobs:
   # in Rust at all: the transport is a named pipe rather than a unix socket,
   # and session discovery resolves %USERPROFILE% rather than $HOME.
   windows-contributor-crates:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: windows contributor crates (tests, named-pipe ACL, update conformance)
     runs-on: windows-latest
     # 60: the three old jobs' work now runs back to back.
@@ -358,6 +362,7 @@ jobs:
         run: cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::' --ignored
 
   windows-install-script:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: install.ps1 against the real release
     runs-on: windows-latest
     timeout-minutes: 15
@@ -447,6 +452,7 @@ jobs:
           exit 0
 
   linux-shell-desktop-entry:
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     name: linux-shell desktop entry and metainfo
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -498,7 +504,7 @@ jobs:
     # mid-build. A cancellation reads as a red required check with no failing
     # assertion, which is the most confusing possible signal: it looks like the
     # PR broke desktop integration when nothing ever ran.
-    timeout-minutes: 40
+    timeout-minutes: 90  # DIAGNOSTIC (temporary)
     # crates/trace-commons-contributor-gtk is excluded from the root
     # workspace (it cannot build on macOS) and was previously verified only
     # under Xvfb with no portal/tray service on the bus at all -- see
@@ -634,7 +640,7 @@ jobs:
           TC_RENDER_DIR: ${{ runner.temp }}/tc-renders
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
       - name: Upload the captured frame
-        if: ${{ !cancelled() }}
+        if: ${{ false }}  # DIAGNOSTIC (temporary)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: weston-insights-frame
@@ -642,7 +648,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload the offscreen renders
-        if: ${{ !cancelled() }}
+        if: ${{ false }}  # DIAGNOSTIC (temporary)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gtk-offscreen-renders
@@ -658,7 +664,7 @@ jobs:
     # failing Rust test there does not also hide this job's .NET result; a
     # failed cdylib build shows up as a failed download step.
     needs: windows-contributor-crates
-    if: ${{ !cancelled() }}
+    if: ${{ false }}  # DIAGNOSTIC (temporary)
     steps:
       - uses: actions/checkout@v6
         with:
