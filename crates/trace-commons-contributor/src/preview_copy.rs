@@ -1958,13 +1958,18 @@ const CREDIT_ICON_ANIMATION_CAPTION_TASKBAR: &str =
 
 /// The Windows app's words where it cannot say what the Mac says: Settings'
 /// credit-arrival switch names the taskbar and tray, where the Mac names the
-/// Dock and menu bar. A table of its own, so the Mac's monitor export keeps
+/// Dock and menu bar; and the Look inside window's title, a window there and
+/// a sheet on the Mac. A table of its own, so the Mac's monitor export keeps
 /// exactly the fields that shell decodes, as the Linux words do
 /// (`credit_icon_animation_toggle_linux`).
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct WindowsWordsCopy {
     pub credit_icon_animation_toggle: &'static str,
     pub credit_icon_animation_caption: &'static str,
+    /// The Look inside window's title word, kept apart from the review's
+    /// Look inside button (docs/ui-copy-guide.md rule 4). Windows shows it
+    /// followed by the app's name in its switchers.
+    pub preview_window_title: &'static str,
 }
 
 /// The Windows app's own words (`WindowsWordsCopy`).
@@ -1972,6 +1977,7 @@ pub fn windows_words_copy() -> WindowsWordsCopy {
     WindowsWordsCopy {
         credit_icon_animation_toggle: CREDIT_ICON_ANIMATION_TOGGLE_TASKBAR,
         credit_icon_animation_caption: CREDIT_ICON_ANIMATION_CAPTION_TASKBAR,
+        preview_window_title: "Look inside",
     }
 }
 
@@ -2023,6 +2029,15 @@ mod tests {
             windows.credit_icon_animation_toggle,
             "Animate taskbar and tray icons"
         );
+    }
+
+    /// The Look inside window's title word is a key of its own, not the
+    /// review's Look inside button (docs/ui-copy-guide.md rule 4), with
+    /// the word the window was always titled; Windows appends the app's
+    /// name to it.
+    #[test]
+    fn the_preview_window_title_is_its_own_key() {
+        assert_eq!(windows_words_copy().preview_window_title, "Look inside");
     }
 
     /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy

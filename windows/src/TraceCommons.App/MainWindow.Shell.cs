@@ -106,7 +106,7 @@ public sealed partial class MainWindow
 
     private void InitializeShell()
     {
-        Title = MonitorWords.AppName;
+        Title = WindowTitles.Main;
 
         // The wake message is heard from the start, not from the first
         // showing: a window that starts in the tray at login may never be

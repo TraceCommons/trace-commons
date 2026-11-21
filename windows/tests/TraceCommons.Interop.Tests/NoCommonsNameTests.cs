@@ -27,19 +27,10 @@ namespace TraceCommons.Interop.Tests;
 public class NoCommonsNameTests
 {
     /// <summary>
-    /// Lines that keep the name, each with why.
+    /// Lines that keep the name, each with why. None since the run-at-login
+    /// value took the app's name (owner, 2026-11-20).
     /// </summary>
-    /// <remarks>
-    /// <c>AutostartCommand.ValueName</c> is the Run-key value's identity, not
-    /// only its label: renaming it would leave every existing install's entry
-    /// behind, so the app would start twice at login and turning the toggle
-    /// off would not remove the old one. Changing it needs a migration, which
-    /// is listed for the owner rather than done here.
-    /// </remarks>
-    private static readonly (string File, string Needle)[] Allowed =
-    {
-        ("TraceCommons.Interop/AutostartCommand.cs.txt", "public const string ValueName = \"Trace Commons\";"),
-    };
+    private static readonly (string File, string Needle)[] Allowed = Array.Empty<(string, string)>();
 
     [Fact]
     public void NothingThisShellShowsNamesTheCommons()
