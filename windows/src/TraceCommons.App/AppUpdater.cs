@@ -45,7 +45,7 @@ public sealed class AppUpdater
     /// whatever URI it is given.
     /// </summary>
     public static Uri FeedUri { get; } =
-        new Uri("https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller");
+        new Uri("https://storage.googleapis.com/tracecommons-flatpak/windows/NearAIGateway.appinstaller");
 
     /// <summary>
     /// Asks the deployment service whether the feed offers something newer.

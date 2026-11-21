@@ -47,9 +47,18 @@ public sealed record InsightsWeekGoals(IReadOnlyList<InsightsWeekGoal> Goals, in
 /// <summary>One local day's tokens per tool; null is unknown, a day without the tool a true 0.</summary>
 public sealed record InsightsUsageDay(string Date, long? ClaudeCode, long? Codex);
 
-/// <summary>One window's NEAR AI charge (<c>InsightsCreditWindow</c>); its groups are not drawn here.</summary>
+/// <summary>One window's NEAR AI charge (<c>InsightsCreditWindow</c>).</summary>
 public sealed record InsightsCreditWindow(
     string? Date, long? UsdMicros, int Sessions, int Calls, int CallsWithoutCharge, long? Tokens,
+    long? UsdMicrosKnown, bool? UsdPartial, long? TokensKnown, bool? TokensPartial)
+{
+    public IReadOnlyList<InsightsCreditGroup>? ByFolder { get; init; }
+
+    public IReadOnlyList<InsightsCreditGroup>? ByModel { get; init; }
+}
+
+public sealed record InsightsCreditGroup(
+    string? Key, long? UsdMicros, int Sessions, int Calls, int CallsWithoutCharge, long? Tokens,
     long? UsdMicrosKnown, bool? UsdPartial, long? TokensKnown, bool? TokensPartial);
 
 /// <summary><c>insights_week</c>'s <c>near_ai_credit</c>: the NEAR AI ledger's own charge, never a list price.</summary>
@@ -164,7 +173,20 @@ internal static class InsightsWeekParts
         Str(w, "to");
         return new InsightsCreditWindow(OptStr(w, "date"), OptLong(w, "usd_micros"), Int(w, "sessions"), Int(w, "calls"),
             Int(w, "calls_without_charge"), OptLong(w, "tokens"), OptLong(w, "usd_micros_known"), OptBool(w, "usd_partial"),
-            OptLong(w, "tokens_known"), OptBool(w, "tokens_partial"));
+            OptLong(w, "tokens_known"), OptBool(w, "tokens_partial"))
+        {
+            ByFolder = Part(w, "by_folder", groups => List(groups, Group)),
+            ByModel = Part(w, "by_model", groups => List(groups, Group)),
+        };
+    }
+
+    /// <summary>One group of a window's charge (<c>InsightsCreditGroup</c>, DaemonDataModels.swift:2481-2513).</summary>
+    internal static InsightsCreditGroup Group(JsonElement value)
+    {
+        JsonElement g = Obj(value);
+        return new InsightsCreditGroup(OptStr(g, "key"), OptLong(g, "usd_micros"), Int(g, "sessions"), Int(g, "calls"),
+            Int(g, "calls_without_charge"), OptLong(g, "tokens"), OptLong(g, "usd_micros_known"), OptBool(g, "usd_partial"),
+            OptLong(g, "tokens_known"), OptBool(g, "tokens_partial"));
     }
 
     internal static InsightsNearAiCredit Credit(JsonElement value)
@@ -308,9 +330,20 @@ public static class InsightsWorkWords
     }).ToList();
 
     /// <summary>
+    /// The row with Home's credit tile after the week's own, under either
+    /// feed (InsightsWorkViews.swift:188-190); null leaves it out.
+    /// </summary>
+    public static IReadOnlyList<Tile> Tiles(InsightsWork? work, (string Value, string Detail)? credit, Func<string, string?> copy)
+    {
+        var tiles = new List<Tile>(Tiles(work, copy));
+        if (credit is { } tile) tiles.Add(new Tile(Text(copy, "analytics_tile_credits"), tile.Value, tile.Detail));
+        return tiles;
+    }
+
+    /// <summary>
     /// The tiles that lead Overview from <c>work</c>, each left out when
     /// nothing is known (<c>InsightsWeekTiles</c>, InsightsWorkViews.swift:178-203).
-    /// Home's credit tile is not among them here.
+    /// Home's credit tile joins them in the overload above.
     /// </summary>
     public static IReadOnlyList<Tile> Tiles(InsightsWork? work, Func<string, string?> copy)
     {
@@ -368,15 +401,32 @@ public static class InsightsUsageWords
     public static IReadOnlyList<Day> Days(InsightsNearAiCredit credit, Func<string, string?> copy) =>
         (credit.ByDay ?? Array.Empty<InsightsCreditWindow>()).Select((window, index) =>
         {
-            string label = window.Date is { } date
-                && DateOnly.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly day)
-                    ? day.ToString("ddd", CultureInfo.GetCultureInfo("en-US"))[..1]
-                    : (index + 1).ToString(CultureInfo.InvariantCulture);
             long? micros = window.UsdMicros ?? (window.UsdPartial == true ? window.UsdMicrosKnown : null);
-            return new Day(window.Date ?? index.ToString(CultureInfo.InvariantCulture), label,
+            return new Day(window.Date ?? index.ToString(CultureInfo.InvariantCulture), Weekday(window.Date, index),
                 InsightsCreditWords.Spend(window.UsdMicros, window.UsdMicrosKnown, copy),
                 micros is { } m ? m / 1_000_000.0 : null);
         }).ToList();
+
+    /// <summary>
+    /// A tool's tokens on each of the last 7 days (<c>claude_code</c> or
+    /// <c>codex</c>, from <c>usage_by_day</c>; InsightsUsageCards.swift:331-344);
+    /// empty from a daemon that predates them. An unknown day draws no bar.
+    /// </summary>
+    public static IReadOnlyList<Day> TokenBars(IReadOnlyList<InsightsUsageDay>? days, string tool, Func<string, string?> copy) =>
+        (days ?? Array.Empty<InsightsUsageDay>()).Select((day, index) =>
+        {
+            long? tokens = tool == "codex" ? day.Codex : day.ClaudeCode;
+            return new Day(day.Date, Weekday(day.Date, index),
+                InsightsAnalyticsWords.Figure(copy, tokens is { } t ? (ulong)Math.Max(0, t) : null),
+                tokens is { } v ? v : null);
+        }).ToList();
+
+    /// <summary>The weekday's one-letter name, or the day's position when the date does not read.</summary>
+    private static string Weekday(string? date, int index) =>
+        date is not null
+        && DateOnly.TryParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly day)
+            ? day.ToString("ddd", CultureInfo.GetCultureInfo("en-US"))[..1]
+            : (index + 1).ToString(CultureInfo.InvariantCulture);
 }
 
 /// <summary>

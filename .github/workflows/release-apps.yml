@@ -329,7 +329,7 @@ jobs:
         run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/Near.ai.app
 
       - name: Verify the Gateway 1.0.11+ feature restrictions in the signed app
-        if: contains(fromJSON('["1.0.11", "1.0.12"]'), needs.version.outputs.short)
+        if: contains(fromJSON('["1.0.11", "1.0.12", "1.0.13", "1.0.14"]'), needs.version.outputs.short)
         run: |
           set -euo pipefail
           config_dir="$(mktemp -d)"
@@ -1087,7 +1087,8 @@ jobs:
             -ProcessorArchitecture x64 `
             -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
             -PackageFileName $env:PKG_NAME `
-            -OutputPath dist\TraceCommons.appinstaller
+            -FeedName NearAIGateway.appinstaller `
+            -OutputPath dist\NearAIGateway.appinstaller
           $hash = (Get-FileHash "dist\$env:PKG_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $env:PKG_NAME" | Out-File "dist\$env:PKG_NAME.sha256" -Encoding ascii -NoNewline
 
@@ -1155,7 +1156,7 @@ jobs:
           gcloud storage cp "dist\$env:PKG_NAME" "gs://$env:BUCKET/windows/$env:PKG_NAME" `
             --content-type=application/msix --cache-control="public, max-age=31536000, immutable"
           if ($LASTEXITCODE -ne 0) { throw "uploading the package failed" }
-          gcloud storage cp "dist\TraceCommons.appinstaller" "gs://$env:BUCKET/windows/TraceCommons.appinstaller" `
+          gcloud storage cp "dist\NearAIGateway.appinstaller" "gs://$env:BUCKET/windows/NearAIGateway.appinstaller" `
             --content-type=application/appinstaller --cache-control="no-cache, max-age=0"
           if ($LASTEXITCODE -ne 0) { throw "uploading the feed failed" }
 
@@ -1425,7 +1426,7 @@ jobs:
             NOTES="$NOTES
 
           Windows app: install the signed MSIX from
-          https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller
+          https://storage.googleapis.com/tracecommons-flatpak/windows/NearAIGateway.appinstaller
           Windows keeps it up to date from that same address afterwards."
           fi
           if [ "$LINUX_RESULT" = success ]; then

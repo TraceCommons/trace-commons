@@ -28,7 +28,7 @@ public sealed class AboutWindow : Window
 
     public AboutWindow()
     {
-        Title = AboutLines.Title;
+        Title = WindowTitles.About;
         Assembly assembly = typeof(AboutWindow).Assembly;
         // Packaged, the package's version is the release's (make-msix.ps1
         // -Version); unpackaged, the assembly's, which is the contributor

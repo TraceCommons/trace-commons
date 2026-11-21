@@ -51,6 +51,15 @@
   </ItemGroup>
 
   <!--
+    A subscription_usage reply from the daemon's own serializer, pinned by
+    the contributor crate's
+    the_windows_subscription_usage_fixture_is_the_daemons_reply.
+  -->
+  <ItemGroup>
+    <None Include="Fixtures/SubscriptionUsage/*.json" Link="Fixtures/SubscriptionUsage/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     The Insights analytics responses, shared with the GTK shell's tests and
     produced by the local service itself; see the README beside them.
   -->

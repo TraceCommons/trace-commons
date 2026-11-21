@@ -65,8 +65,8 @@ public class ManifestBrandTests
 
     /// <summary>
     /// The exe's version resource: <c>FileDescription</c> (from
-    /// <c>AssemblyTitle</c>) is what Task Manager and Settings &gt; Apps &gt;
-    /// Startup show for an unpackaged build, and <c>ProductName</c> (from
+    /// <c>AssemblyTitle</c>) is what Settings &gt; Apps &gt;
+    /// Startup shows for an unpackaged build, and <c>ProductName</c> (from
     /// <c>Product</c>) is beside it in the file's properties. Both are the
     /// core's name; without them the SDK writes the assembly name,
     /// "TraceCommons" (checklist J1).
@@ -81,5 +81,25 @@ public class ManifestBrandTests
 
         Assert.Equal(MonitorWords.AppName, Property("AssemblyTitle"));
         Assert.Equal(MonitorWords.AppName, Property("Product"));
+    }
+
+    /// <summary>
+    /// The exe's <c>CompanyName</c>, which Settings &gt; Apps &gt; Startup
+    /// shows as the publisher beside the name. Unset, the SDK writes the
+    /// assembly name, and it showed "TraceCommons" under "Near AI Gateway"
+    /// (tc-win-az11, 2026-11-21). It is the publisher the packaged build
+    /// shows, the manifest's <c>PublisherDisplayName</c>.
+    /// </summary>
+    [Fact]
+    public void TheExesPublisherIsThePackagesNotTheAssemblyName()
+    {
+        XDocument project = XDocument.Load(
+            Path.Combine(AppContext.BaseDirectory, "manifest-source", "TraceCommons.App.csproj.txt"));
+        string? company = project.Descendants().SingleOrDefault(e => e.Name.LocalName == "Company")?.Value;
+        string? publisher = Manifest().Descendants().Single(e => e.Name.LocalName == "PublisherDisplayName").Value;
+
+        Assert.False(string.IsNullOrWhiteSpace(publisher));
+        Assert.Equal(publisher, company);
+        Assert.NotEqual("TraceCommons", company);
     }
 }

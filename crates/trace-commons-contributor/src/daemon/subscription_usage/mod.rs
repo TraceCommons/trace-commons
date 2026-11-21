@@ -1193,6 +1193,40 @@ mod tests {
         );
     }
 
+    /// The Windows interop tests read a `subscription_usage` reply from a
+    /// file: a measured Codex login and a Claude login not read yet. The file
+    /// is this serializer's reply, not one written by hand.
+    #[test]
+    fn the_windows_subscription_usage_fixture_is_the_daemons_reply() {
+        let mut state = State::default();
+        let mut claude = login("claude-default");
+        claude.provider = Provider::Claude;
+        claude.label = "Claude".into();
+        state.synchronize([true, true], vec![login("default"), claude]);
+        let claim = state
+            .claims(now(), true, Some(Provider::Codex), None)
+            .remove(0);
+        state.complete(
+            &claim,
+            Ok(reading("account", now() + Duration::days(3))),
+            now(),
+        );
+        let reply = state.value(now());
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../windows/tests/TraceCommons.Interop.Tests/Fixtures/SubscriptionUsage/subscription_usage.json",
+        );
+        let recorded: Option<Value> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok());
+        assert_eq!(
+            recorded,
+            Some(reply.clone()),
+            "update {} to:\n{}",
+            path.display(),
+            serde_json::to_string_pretty(&reply).unwrap()
+        );
+    }
+
     #[test]
     fn a_reading_names_its_source_and_no_reading_names_none() {
         let (mut state, claim) = prepared();

@@ -60,7 +60,7 @@ internal sealed class EdgeRailWindow : Window
         _privateAITiles = privateAITiles;
         _tracesTiles = tracesTiles;
         _openApp = openApp;
-        Title = MonitorShellCopy.Section("edge_rail", "rail_label");
+        Title = WindowTitles.EdgeRail;
         _hwnd = ToolWindows.Prepare(this, OnWindowMessage);
 
         // The window the keyboard goes back to is the last one other than

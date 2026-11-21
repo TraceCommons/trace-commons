@@ -9508,23 +9508,10 @@ async fn an_index_write_past_its_deadline_releases_the_rows() {
         async move { service.process_run(&tenant, run_id).await }
     });
     held.wait_until_entered().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
 
-    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+    let state = run_row_once_free(&backend, &tenant, run.run_id)
         .await
-        .unwrap();
-    let state: String = tx
-        .query_one(
-            "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
-            &[&tenant, &run.run_id],
-        )
-        .await
-        .expect("the run row is free once the dispatch's deadline passed")
-        .get(0);
-    tx.commit().await.unwrap();
-    drop(client);
+        .expect("the run row is free once the dispatch's deadline passed");
     assert_eq!(
         state, "leased",
         "the run is not released while its write runs"
@@ -9544,6 +9531,49 @@ async fn an_index_write_past_its_deadline_releases_the_rows() {
         (PipelineRunState::Retry, "pending")
     );
     assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+}
+
+/// Lock `run_id`'s row once the held work's one-second deadline has let go of
+/// it, and return its state. The deadline is the code's own timer, so a
+/// loaded runner can release the row later than a fixed wait allows; the row
+/// is tried in 300 ms lock waits, at most 60 of them, well inside
+/// [`HELD_CALL_BOUND`] (the held call is not released meanwhile, so a row
+/// that comes free here came free while that call still ran). The error is
+/// the last attempt's, so a row that never comes free fails with it.
+async fn run_row_once_free(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> Result<String, tokio_postgres::Error> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let tx = tenant_tx(&mut client, tenant).await;
+        tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+            .await
+            .unwrap();
+        match tx
+            .query_one(
+                "SELECT state FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
+                &[&tenant, &run_id],
+            )
+            .await
+        {
+            Ok(row) => {
+                tx.commit().await.unwrap();
+                return Ok(row.get(0));
+            }
+            Err(error)
+                if attempts < 60
+                    && error.code()
+                        == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) =>
+            {
+                drop(tx);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Waits until `index` holds exactly `expected` entries of `tenant_ref`,
@@ -31907,21 +31937,10 @@ async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
         }
     });
     held.wait_until_entered().await;
-    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
 
-    let mut client = backend.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    tx.batch_execute("SET LOCAL lock_timeout = '300ms'")
+    run_row_once_free(&backend, &tenant, settled.run_id)
         .await
-        .unwrap();
-    tx.query_one(
-        "SELECT 1 FROM pipeline_runs WHERE tenant_id = $1 AND run_id = $2 FOR UPDATE",
-        &[&tenant, &settled.run_id],
-    )
-    .await
-    .expect("the run row is free once the rebuild's deadline passed");
-    tx.commit().await.unwrap();
-    drop(client);
+        .expect("the run row is free once the rebuild's deadline passed");
     assert!(
         !rebuild.is_finished(),
         "the rebuild waits for the call in flight"

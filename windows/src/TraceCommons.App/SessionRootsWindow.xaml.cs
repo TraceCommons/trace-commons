@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App;
 
@@ -33,8 +34,8 @@ public sealed partial class SessionRootsWindow : Window
             WindowAppearance.Follow(this, root);
         }
 
-        // The app's name from brand.rs (tc_app_name), never a literal (W10).
-        Title = TraceCommons.Interop.Shell.MonitorWords.AppName;
+        // The app's name from brand.rs (tc_app_name), never a literal (W10, WindowTitles).
+        Title = WindowTitles.SessionRoots;
         WindowClocks.Watch(this);
 
         ViewModel = new SessionRootsViewModel(host, candidates);

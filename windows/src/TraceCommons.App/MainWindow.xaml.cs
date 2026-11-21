@@ -1396,6 +1396,10 @@ public sealed partial class MainWindow : Window
             page.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
         }
         ViewModel.ShowInsights();
+        // Overview's credit tile is Home's (InsightsView.swift:177-182): hand
+        // Insights what Home last read, then read Home's figures again.
+        ShowInsightsCreditTile();
+        _ = RefreshHomeAsync();
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
     }
 
@@ -1426,7 +1430,9 @@ public sealed partial class MainWindow : Window
 
                     return skills;
                 },
-                weekReader: InsightsViewModel.SampleWeekReader);
+                weekReader: InsightsViewModel.SampleWeekReader,
+                // The Mac's sample logins, never a live daemon's (InsightsSample.swift:221-222).
+                subscriptions: new SubscriptionUsageModel(InsightsViewModel.SampleSubscriptionsReader));
         }
 #endif
         // Feed T through the daemon's insights_week, as the Mac reads it (W20-D1).
@@ -1435,7 +1441,10 @@ public sealed partial class MainWindow : Window
             iso => _host.CallAsync(InsightsCounterWeek.Method,
                 InsightsCounterWeek.Parameters(iso, (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalSeconds)),
             // The summary card's Hide: the daemon's insights_recap_card_enabled off (InsightsView.swift:88-91).
-            () => new InsightsRecapSwitch((method, parameters) => _host.CallAsync(method, parameters)).SetAsync(false));
+            () => new InsightsRecapSwitch((method, parameters) => _host.CallAsync(method, parameters)).SetAsync(false),
+            // Claude and Codex limits through the daemon's subscription_usage (InsightsView.swift:59-66).
+            subscriptions: new SubscriptionUsageModel(SubscriptionUsageClient.Reader((method, parameters) => _host.CallAsync(method, parameters)),
+                SubscriptionUsageClient.Writer((method, parameters) => _host.CallAsync(method, parameters))));
     }
 
     private async void OnShowSettings(object sender, RoutedEventArgs e)

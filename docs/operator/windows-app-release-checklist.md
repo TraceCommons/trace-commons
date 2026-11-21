@@ -10,7 +10,7 @@ using it, because it is the source of truth.
 - **A tag push publishes the Windows MSIX.** Since the commit that put
   `windows-app` back on tags (revert it alone to undo), an `app-v*` push
   runs `windows-app` beside `macos`: it signs, installs and checks the
-  MSIX, uploads it and then `TraceCommons.appinstaller` to the bucket, and
+  MSIX, uploads it and then `NearAIGateway.appinstaller` to the bucket, and
   `publish` attaches both to the GitHub Release. The `windows` zip job
   stays dispatch-only (decision 3 below: the zips do not return).
 - **A dispatch can publish the MSIX and feed, and nothing else.** Set
@@ -97,10 +97,10 @@ the version; the MSIX version is stamped from the tag at build time.
 ## Where it lands
 
 - GitHub Release `app-vX.Y.Z` (`publish` job): the MSIX with its `.sha256`
-  and `TraceCommons.appinstaller`. (The CLI and portable app zips come from
+  and `NearAIGateway.appinstaller`. (The CLI and portable app zips come from
   the dispatch-only `windows` job and are not on a tag's Release.)
 - `gs://tracecommons-flatpak/windows/<package>.msix` (immutable cache), then
-  `gs://tracecommons-flatpak/windows/TraceCommons.appinstaller` (no-cache),
+  `gs://tracecommons-flatpak/windows/NearAIGateway.appinstaller` (no-cache),
   from the `windows-app` job, before the Release is cut.
 - Build provenance attestations for every signed binary and the MSIX.
 - `gs://tracecommons-flatpak/updates/latest.json` and `latest.json.sig`

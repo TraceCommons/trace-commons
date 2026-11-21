@@ -39,6 +39,69 @@ public class HomeFactsTests
         Assert.Null(HomeFacts.PendingCondition(stated with { SettlementExplanation = "" }));
     }
 
+    private static (string Value, string Detail) Tile(double? final, double? pending, int? accepted, int? submitted, CommonsCredit? credit) =>
+        HomeFacts.CreditTile(final, pending, accepted, submitted, credit, Figure, TileWords);
+
+    private static readonly HomeFacts.CreditTileWords TileWords = new("Pending", "Final", "{amount} credit pending");
+
+    /// <summary>
+    /// HomeViews.swift:2074-2104 and HomeViewTests.swift:164-217: one credit
+    /// tile, History's Final figure once any credit is decided with what is
+    /// still pending under it, and before that the pending figure under D6,
+    /// marked Pending. Insights' "Credits earned" tile is this one.
+    /// </summary>
+    [Fact]
+    public void TheCreditTileShowsFinalOnceDecided()
+    {
+        var known = new CommonsCredit(PostureKnown: true, SettlementExplanation: "Scored when the commons reviews it.", PointsKnown: false, PointsLifetimeEarned: null, AccountSessionRequired: false);
+
+        (string Value, string Detail) undecided = Tile(0, 50.35, 3, 0, known);
+        Assert.Equal(HomeFacts.Points(50.35, Figure), undecided.Value);
+        Assert.Equal("Pending", undecided.Detail);
+        Assert.Equal("—", Tile(null, 50.35, null, 0, null).Value);
+
+        (string Value, string Detail) decided = Tile(48, 2.35, 3, 0, known);
+        Assert.Equal("48.0", decided.Value);
+        Assert.Equal("2.4 credit pending", decided.Detail);
+
+        Assert.Equal(("48.0", "Final"), Tile(48, 0, 3, 0, known));
+        // Every accepted trace decided with no award reads Final 0, never Pending.
+        Assert.Equal(("0.0", "Final"), Tile(0, 0, 22, 0, known));
+        // With nothing accepted yet it is still the pending figure.
+        Assert.Equal("Pending", Tile(0, 0, 0, 0, known).Detail);
+        // Without the commons' statement, pending is not shown as a figure.
+        Assert.Equal("Final", Tile(48, 2.35, 3, 0, null).Detail);
+        // A trace still waiting to be scored is not decided; an unknown count is not zero.
+        Assert.Equal(("48.0", "Pending"), Tile(48, 0, 56, 1, known));
+        Assert.Equal("Pending", Tile(0, 0, 22, 1, known).Detail);
+        Assert.Equal("Pending", Tile(0, 0, 22, null, known).Detail);
+        Assert.Equal(("48.0", "Pending"), Tile(48, 0, 3, null, known));
+
+        Assert.True(HomeFacts.ShowsFinalFigure(48, 0, 3, 0));
+        Assert.True(HomeFacts.ShowsFinalFigure(48, 2, 3, 1));
+        Assert.True(HomeFacts.ShowsFinalFigure(0, 0, 22, 0));
+        Assert.False(HomeFacts.ShowsFinalFigure(0, 3, 22, 0));
+        Assert.False(HomeFacts.ShowsFinalFigure(null, null, null, null));
+        Assert.Null(HomeFacts.CreditPendingAccessory(0, "said", "{amount} credit pending", Figure));
+        Assert.Null(HomeFacts.CreditPendingAccessory(2, null, "{amount} credit pending", Figure));
+        Assert.Null(HomeFacts.CreditPendingAccessory(2, "said", "", Figure));
+    }
+
+    /// <summary>
+    /// InsightsView.swift:177-182: Insights draws Home's tile from Home's own
+    /// reads, the rollup and the commons' credit, and only once either came.
+    /// </summary>
+    [Fact]
+    public void InsightsDrawsHomesTileOnceHomesReadsCame()
+    {
+        Assert.Null(HomeFacts.InsightsCreditTile(null, null, Figure, TileWords));
+        var rollup = new HistoryRollup { CreditFinal = 48, CreditPending = 0, AllTime = new HistoryCounts { Accepted = 3, Submitted = 0 } };
+        Assert.Equal(("48.0", "Final"), HomeFacts.InsightsCreditTile(rollup, null, Figure, TileWords));
+        var known = new CommonsCredit(true, "Settles monthly.", false, null, false);
+        Assert.Equal(("—", "Pending"), HomeFacts.InsightsCreditTile(null, known, Figure, TileWords));
+        Assert.Equal(HomeFacts.CreditTile(48, 0, 3, 0, known, Figure, TileWords), HomeFacts.InsightsCreditTile(rollup, known, Figure, TileWords));
+    }
+
     /// <summary>The recorded normalDay reply: the commons has not said, so pending is a dash, and the account wants a session.</summary>
     [Fact]
     public void TheRecordedCreditSummaryDecodes()

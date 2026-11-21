@@ -152,27 +152,35 @@ pub(super) fn lock_sources(
 /// Git is used only for fixed read-only builtins on one tracked file. No shell,
 /// hooks, network, recursive file listing or configured fsmonitor is invoked.
 /// A revision is attached only when the tracked blob exactly matches local bytes.
-pub(super) fn git_source(path: &Path, bytes: &[u8]) -> Option<SkillSource> {
+pub(super) fn git_source(path: &Path, bytes: &[u8], budget: &mut GitBudget) -> Option<SkillSource> {
+    if budget.timed_out {
+        return None;
+    }
     let mut current = path.parent()?;
     for _ in 0..12 {
         if current.join(".git").exists() {
             let relative = native_skill_path(path.strip_prefix(current).ok()?)?;
-            git(current, &["ls-files", "--error-unmatch", "--", &relative])?;
+            git(
+                current,
+                &["ls-files", "--error-unmatch", "--", &relative],
+                budget,
+            )?;
             let repository = normalize_repository(
                 git(
                     current,
                     &["config", "--no-includes", "--get", "remote.origin.url"],
+                    budget,
                 )?
                 .trim(),
             )?;
-            let revision = git(current, &["rev-parse", "--verify", "HEAD"])?;
+            let revision = git(current, &["rev-parse", "--verify", "HEAD"], budget)?;
             let revision = revision.trim();
             if !matches!(revision.len(), 40 | 64)
                 || !revision.chars().all(|c| c.is_ascii_hexdigit())
             {
                 return None;
             }
-            let blob = git_bytes(current, &["show", &format!("HEAD:{relative}")])?;
+            let blob = git_bytes(current, &["show", &format!("HEAD:{relative}")], budget)?;
             return Some(SkillSource {
                 repository,
                 path: relative,
@@ -185,13 +193,85 @@ pub(super) fn git_source(path: &Path, bytes: &[u8]) -> Option<SkillSource> {
     None
 }
 
-fn git(root: &Path, args: &[&str]) -> Option<String> {
-    String::from_utf8(git_bytes(root, args)?).ok()
+/// How long one read-only git command may take, as shipped, before the scan
+/// gives up on that skill's provenance.
+///
+/// Measured 2026-11-20 with the four commands `git_source` runs, from a
+/// fresh process each time: on a Mac, 10-19 ms. On a 4-core Windows VM with
+/// Defender real-time scanning on, 60-250 ms idle (p50 about 150 ms) and
+/// 95-566 ms with every core busy (p50 about 260 ms, p99 427 ms). The old
+/// 250 ms bound failed about half the calls on that loaded machine and left
+/// those skills without provenance, silently. Three seconds is about five
+/// times the worst loaded call seen. A hung git still costs at most this
+/// long, once per scan: `GitBudget` stops calling git after the first
+/// timeout, and never lets a call outlive the scan's own deadline.
+// Under test only the unix stand-in-git tests read it directly.
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
+const SHIPPED_GIT_DEADLINE: Duration = Duration::from_secs(3);
+
+/// The bound `git_source` uses. Tests wait longer: what they check is the
+/// provenance found, not this bound, and a loaded CI runner can be slower
+/// than any contributor's machine. The tests of the bound itself pass
+/// `SHIPPED_GIT_DEADLINE` explicitly.
+#[cfg(not(test))]
+const GIT_DEADLINE: Duration = SHIPPED_GIT_DEADLINE;
+#[cfg(test)]
+const GIT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The git work one skill scan may do. Each call gets `GIT_DEADLINE`, but
+/// never past the scan's own deadline; after the first call that runs out of
+/// time, the rest of the scan makes no git calls at all, so a hung or
+/// pathologically slow git costs one per-call bound, not one per skill.
+pub(super) struct GitBudget {
+    scan_deadline: Instant,
+    timed_out: bool,
 }
 
-fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+impl GitBudget {
+    pub(super) fn new(scan_deadline: Instant) -> Self {
+        Self {
+            scan_deadline,
+            timed_out: false,
+        }
+    }
+}
+
+/// How one git command ended.
+#[derive(Debug)]
+enum GitRun {
+    Output(Vec<u8>),
+    /// Exited unsuccessfully, could not start, or wrote more than the cap.
+    Failed,
+    /// Still running at the deadline, and killed.
+    TimedOut,
+}
+
+fn git(root: &Path, args: &[&str], budget: &mut GitBudget) -> Option<String> {
+    String::from_utf8(git_bytes(root, args, budget)?).ok()
+}
+
+fn git_bytes(root: &Path, args: &[&str], budget: &mut GitBudget) -> Option<Vec<u8>> {
+    let now = Instant::now();
+    if budget.timed_out || now >= budget.scan_deadline {
+        budget.timed_out = true;
+        return None;
+    }
+    let deadline = (now + GIT_DEADLINE).min(budget.scan_deadline);
+    match run_git(Command::new("git"), root, args, deadline) {
+        GitRun::Output(bytes) => Some(bytes),
+        GitRun::Failed => None,
+        GitRun::TimedOut => {
+            budget.timed_out = true;
+            None
+        }
+    }
+}
+
+/// Runs `command` (git, or a test's stand-in for it) with the fixed
+/// read-only flags, `-C root` and `args`, killing it at `deadline`.
+fn run_git(mut command: Command, root: &Path, args: &[&str], deadline: Instant) -> GitRun {
     use std::io::Read;
-    let mut child = Command::new("git")
+    let spawned = command
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -221,11 +301,17 @@ fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .stdout(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .spawn();
+    let Ok(mut child) = spawned else {
+        return GitRun::Failed;
+    };
     // Reading concurrently prevents a pipe-sized valid SKILL.md from blocking
     // the child before it exits. The reader itself keeps at most the byte cap.
-    let stdout = child.stdout.take()?;
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return GitRun::Failed;
+    };
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout
@@ -234,20 +320,30 @@ fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
             .ok()?;
         Some(bytes)
     });
-    let deadline = Instant::now() + Duration::from_millis(250);
-    let success = loop {
+    let finished = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
+            Ok(Some(status)) => break Some(status.success()),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-            _ => {
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break false;
+                break None;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Some(false);
             }
         }
     };
-    let bytes = reader.join().ok()??;
-    (success && bytes.len() as u64 <= super::MAX_SKILL_BYTES).then_some(bytes)
+    let bytes = reader.join().ok().flatten();
+    match (finished, bytes) {
+        (None, _) => GitRun::TimedOut,
+        (Some(true), Some(bytes)) if bytes.len() as u64 <= super::MAX_SKILL_BYTES => {
+            GitRun::Output(bytes)
+        }
+        _ => GitRun::Failed,
+    }
 }
 
 /// A package repository is not proof that the package is rooted at the repo
@@ -333,4 +429,140 @@ fn manifest_repository(value: &serde_json::Value) -> Option<(String, String)> {
     // Reuse the strict file-path normalizer to validate a directory prefix.
     normalize_skill_path(&format!("{directory}/SKILL.md"))?;
     Some((repository, directory.to_string()))
+}
+
+#[cfg(test)]
+mod git_deadline_tests {
+    use super::*;
+    use std::fs;
+
+    /// A stand-in for git: `/bin/sh` running `script`, then the real git.
+    /// Run through `sh` rather than exec'd, so a write-then-exec race with
+    /// another test's fork (ETXTBSY) cannot touch it.
+    #[cfg(unix)]
+    fn slow_git(dir: &Path, script: &str) -> Command {
+        let path = dir.join("slow-git.sh");
+        fs::write(&path, script).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.arg(path);
+        command
+    }
+
+    /// A git that takes longer than the old 250 ms bound but well inside the
+    /// shipped one, as on a loaded Windows machine with antivirus scanning
+    /// git, still answers.
+    #[cfg(unix)]
+    #[test]
+    fn slow_git_inside_the_shipped_deadline_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = slow_git(dir.path(), "sleep 0.6\nexec git \"$@\"\n");
+        let run = run_git(
+            git,
+            dir.path(),
+            &["--version"],
+            Instant::now() + SHIPPED_GIT_DEADLINE,
+        );
+        let GitRun::Output(bytes) = run else {
+            panic!("a 0.6 s git should finish inside the shipped deadline, got {run:?}");
+        };
+        assert!(bytes.starts_with(b"git version"), "{bytes:?}");
+    }
+
+    /// A git that would answer, but only after the shipped deadline, is
+    /// killed at the deadline rather than waited for.
+    #[cfg(unix)]
+    #[test]
+    fn git_past_the_shipped_deadline_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let late = SHIPPED_GIT_DEADLINE + Duration::from_secs(2);
+        // `sleep` writes nothing, so it gets no handle on the stdout pipe and
+        // killing `sh` closes it.
+        let git = slow_git(
+            dir.path(),
+            &format!(
+                "sleep {}.{:03} >/dev/null\nexec git \"$@\"\n",
+                late.as_secs(),
+                late.subsec_millis()
+            ),
+        );
+        let started = Instant::now();
+        let run = run_git(
+            git,
+            dir.path(),
+            &["--version"],
+            started + SHIPPED_GIT_DEADLINE,
+        );
+        let elapsed = started.elapsed();
+        assert!(matches!(run, GitRun::TimedOut), "{run:?}");
+        assert!(
+            elapsed >= SHIPPED_GIT_DEADLINE && elapsed < late,
+            "killed after {elapsed:?}; deadline {SHIPPED_GIT_DEADLINE:?}, git done at {late:?}"
+        );
+    }
+
+    fn tracked_skill() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap().join("skill");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            )
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/publisher/repo.git",
+        ]);
+        fs::write(repo.join("SKILL.md"), b"# skill\n").unwrap();
+        git(&["add", "SKILL.md"]);
+        git(&[
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Initial",
+        ]);
+        let path = repo.join("SKILL.md");
+        (dir, path)
+    }
+
+    /// After one git call runs out of time, the rest of the scan makes none:
+    /// a hung git costs one per-call bound per scan, not one per skill.
+    #[test]
+    fn a_timeout_ends_git_for_the_rest_of_the_scan() {
+        let (_dir, path) = tracked_skill();
+        let bytes = fs::read(&path).unwrap();
+        let mut fresh = GitBudget::new(Instant::now() + Duration::from_secs(60));
+        assert!(git_source(&path, &bytes, &mut fresh).is_some());
+        assert!(!fresh.timed_out);
+
+        let mut spent = GitBudget::new(Instant::now() + Duration::from_secs(60));
+        spent.timed_out = true;
+        assert!(git_source(&path, &bytes, &mut spent).is_none());
+    }
+
+    /// No git call outlives the scan's own deadline.
+    #[test]
+    fn no_git_call_past_the_scan_deadline() {
+        let (_dir, path) = tracked_skill();
+        let bytes = fs::read(&path).unwrap();
+        let mut budget = GitBudget::new(Instant::now());
+        assert!(git_source(&path, &bytes, &mut budget).is_none());
+        assert!(budget.timed_out);
+    }
 }

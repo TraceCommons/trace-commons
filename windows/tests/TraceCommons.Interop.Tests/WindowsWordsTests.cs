@@ -18,6 +18,16 @@ public class WindowsWordsTests
             WindowsWords.CreditIconAnimationCaption);
     }
 
+    /// <summary>
+    /// The Look inside window's title word, a key of its own beside the
+    /// button's (copy guide rule 4); the word the window has always had.
+    /// </summary>
+    [Fact]
+    public void ThePreviewWindowHasItsOwnTitleWord()
+    {
+        Assert.Equal("Look inside", WindowsWords.PreviewWindowTitle);
+    }
+
     [Fact]
     public void NoWindowsWordNamesTheDockOrTheMenuBar()
     {

@@ -13,8 +13,8 @@ namespace TraceCommons.Interop;
 /// <para>
 /// The registry half lives in <c>TraceCommons.App.RunAtLogin</c>. What is
 /// here is the part that is wrong-able without any Windows API involved: the
-/// value name, which is what the entry is called in Task Manager's Startup
-/// tab and in Settings -> Apps -> Startup, and the quoting of the executable
+/// value name, which is the entry's identity and what Autoruns and the
+/// registry call it, and the quoting of the executable
 /// path, which decides whether the app starts at all from a folder whose name
 /// contains a space -- <c>C:\Program Files</c>, or any user whose display
 /// name has one.
@@ -29,16 +29,20 @@ namespace TraceCommons.Interop;
 public static class AutostartCommand
 {
     /// <summary>
-    /// The value name under the Run key.
+    /// The value name under the Run key: the app's name, from
+    /// <c>brand.rs</c> (<c>tc_app_name</c>).
     /// </summary>
     /// <remarks>
-    /// The product name rather than the executable's, because this string is
-    /// shown to the contributor by Windows itself in Task Manager's Startup
-    /// tab. That list is where someone goes to audit what starts with their
-    /// machine, and anything there that they cannot recognise reads as
-    /// malware -- correctly.
+    /// Neither Startup list shows this name (Windows 11 24H2, 2026-11-21):
+    /// Settings -> Apps -> Startup shows the executable's FileDescription and
+    /// CompanyName, and Task Manager's Startup apps page its file name, as
+    /// it does for Windows' own Run entries. Autoruns and the registry show
+    /// this one. Someone auditing what starts with their machine reads
+    /// anything they cannot recognise as malware -- correctly -- so it is the
+    /// app's name, as every other surface Windows shows (owner rule
+    /// 2026-11-20).
     /// </remarks>
-    public const string ValueName = "Trace Commons";
+    public static string ValueName => Shell.MonitorWords.AppName;
 
     /// <summary>
     /// The per-user Run key, relative to HKEY_CURRENT_USER.
