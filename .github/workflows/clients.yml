@@ -337,16 +337,25 @@ jobs:
       - name: Named-pipe ACL - verify the pipe excludes a second local user
         shell: pwsh
         run: pwsh -File scripts/windows/verify-pipe-acl.ps1
-      # The WinUI job below needs the FFI cdylib. Building it last costs a
-      # link, not a compile: every dependency is already built above, in the
-      # same dev profile. Debug, not --release: see windows-contributor-app.
+      # The WinUI job below needs the FFI cdylib. Debug, not --release: see
+      # windows-contributor-app. Built with the static C runtime, as the
+      # release workflow builds it: without +crt-static the DLL imports
+      # vcruntime140.dll, which a stock Windows lacks and the MSIX neither
+      # bundles nor declares, so the app's core fails to load on a clean
+      # machine (it shipped that way in 1.0.14). The flag changes every
+      # crate's fingerprint, so this build gets its own target dir rather
+      # than invalidating the one the tests around it use.
       - name: Build the contributor FFI cdylib for the app job
-        run: cargo build -p trace-commons-contributor-ffi
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        run: cargo build -p trace-commons-contributor-ffi --target-dir target/crt-static
+      - name: Check the FFI cdylib needs no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/crt-static/debug/trace_commons_contributor_ffi.dll
       - name: Upload the FFI cdylib
         uses: actions/upload-artifact@v4
         with:
           name: windows-ffi-cdylib
-          path: target/debug/trace_commons_contributor_ffi.dll
+          path: target/crt-static/debug/trace_commons_contributor_ffi.dll
           if-no-files-found: error
           retention-days: 1
       # W25-D2: the FFI self-check reaches the real Credential Manager. Its
