@@ -1166,8 +1166,12 @@ mod tests {
             tool_display_name(crate::source::SOURCE_CODEX),
             Some("Codex")
         );
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_ANTIGRAVITY),
+            Some("Antigravity")
+        );
         assert_eq!(tool_display_name(crate::source::SOURCE_TRAJECTORY), None);
-        assert_eq!(tool_display_name("antigravity"), None);
+        assert_eq!(tool_display_name("unknown-tool"), None);
         for spec in TOOLS {
             assert_eq!(tool_display_name(spec.source), Some(spec.name));
         }

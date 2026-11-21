@@ -207,6 +207,9 @@ use crate::insights::analytics_constants::{
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
+use crate::insights::google_series::{
+    AntigravityTurnSeriesScan, GoogleTurnSeriesEvidence, extract_gemini_turn_series,
+};
 use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
@@ -225,9 +228,6 @@ use crate::insights::week_patterns::{week_figures, week_patterns};
 use crate::insights::week_rollup::{
     AnalyticsSource, CodexObserved, Feed, SessionBody, SessionInput, UnknownReason, WeekRollup,
     change_vs_last_week, comparable, local_week_start, week_rollup,
-};
-use crate::insights::google_series::{
-    AntigravityTurnSeriesScan, GoogleTurnSeriesEvidence, extract_gemini_turn_series,
 };
 use crate::source::{SOURCE_ANTIGRAVITY, SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
 
@@ -4398,7 +4398,7 @@ fn scan_session(
         }
         if antigravity
             .as_mut()
-            .is_some_and(|scan| scan.observe(&record).is_err())
+            .is_some_and(|scan| !scan.observe(&record))
         {
             antigravity = None;
         }
@@ -4458,7 +4458,9 @@ fn scan_session(
         ScannedBody::Antigravity(Some(evidence)) => evidence.earliest.zip(evidence.latest),
         _ => time
             .and_then(|scan| scan.finish(digest).ok())
-            .and_then(|evidence| Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at))),
+            .and_then(|evidence| {
+                Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at))
+            }),
     };
     Some(ScannedSession {
         body,
@@ -6712,12 +6714,11 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_code_and_codex_are_counted() {
+    fn only_supported_analytics_sources_are_counted() {
         let f = Fixture::new();
         let path = f.write("s.jsonl", &claude_bytes());
         for source in [
             crate::source::SOURCE_TRAJECTORY,
-            crate::source::SOURCE_GEMINI_CLI,
             crate::source::SOURCE_CLINE,
             crate::source::SOURCE_OPENCODE,
         ] {
@@ -7130,6 +7131,53 @@ mod tests {
                 },
                 Err(_) => unknown,
             },
+            AnalyticsSource::GeminiCli => match extract_gemini_turn_series(bytes, key) {
+                Some(evidence) => {
+                    let mut series = evidence.series;
+                    if group_member_count > 0 {
+                        series.truncated = true;
+                    }
+                    RowBody::GeminiCli {
+                        model_labels: evidence.model_labels,
+                        series,
+                    }
+                }
+                None => unknown,
+            },
+            AnalyticsSource::Antigravity => {
+                let mut scan = AntigravityTurnSeriesScan::new(key);
+                let mut ok = true;
+                for line in bytes.split(|byte| *byte == b'\n') {
+                    if line.iter().all(|b| b.is_ascii_whitespace()) {
+                        continue;
+                    }
+                    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+                        ok = false;
+                        break;
+                    };
+                    if !scan.observe(&record) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    match scan.finish() {
+                        Some(evidence) => {
+                            let mut series = evidence.series;
+                            if group_member_count > 0 {
+                                series.truncated = true;
+                            }
+                            RowBody::Antigravity {
+                                model_labels: evidence.model_labels,
+                                series,
+                            }
+                        }
+                        None => unknown,
+                    }
+                } else {
+                    unknown
+                }
+            }
         };
         let first_event_at = bytes.split(|byte| *byte == b'\n').find_map(|line| {
             let record: serde_json::Value = serde_json::from_slice(line).ok()?;
@@ -7275,6 +7323,8 @@ mod tests {
             let adapter = match source {
                 AnalyticsSource::ClaudeCode => SOURCE_CLAUDE_CODE,
                 AnalyticsSource::Codex => SOURCE_CODEX,
+                AnalyticsSource::GeminiCli => SOURCE_GEMINI_CLI,
+                AnalyticsSource::Antigravity => SOURCE_ANTIGRAVITY,
             };
             let path = f.write(&format!("{}.jsonl", name.replace(' ', "-")), &bytes);
             for members in [0, 2] {

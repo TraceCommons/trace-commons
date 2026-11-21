@@ -408,8 +408,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_source_codex",
         "Codex · total from first to last reading",
     ),
-    ("analytics_source_gemini_cli", "Gemini CLI · counted per turn"),
-    ("analytics_source_antigravity", "Antigravity · counted per turn"),
+    (
+        "analytics_source_gemini_cli",
+        "Gemini CLI · counted per turn",
+    ),
+    (
+        "analytics_source_antigravity",
+        "Antigravity · counted per turn",
+    ),
     (
         "analytics_codex_interval",
         "Codex · whole-trace totals, not by day",

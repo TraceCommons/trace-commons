@@ -11,9 +11,10 @@
 //! - Cline: "Installing Cline" on docs.cline.bot, the docs site the
 //!   `cline/cline` README links to.
 //! - OpenCode: <https://opencode.ai/docs/>
+//! - Antigravity: <https://antigravity.google/>
 
 /// `(source slug, setup guide)`, in the order first run asks about tools.
-pub const INSTALL_GUIDES: [(&str, &str); 5] = [
+pub const INSTALL_GUIDES: [(&str, &str); 6] = [
     ("claude-code", "https://code.claude.com/docs/en/setup"),
     ("codex", "https://developers.openai.com/codex/cli/"),
     (
@@ -25,6 +26,7 @@ pub const INSTALL_GUIDES: [(&str, &str); 5] = [
         "https://docs.cline.bot/getting-started/installing-cline",
     ),
     ("opencode", "https://opencode.ai/docs/"),
+    ("antigravity", "https://antigravity.google/"),
 ];
 
 /// The setup guide for a discovery source slug.
@@ -50,7 +52,14 @@ mod tests {
 
     #[test]
     fn every_guide_is_https_and_every_asked_tool_has_one() {
-        for slug in ["claude-code", "codex", "gemini-cli", "cline", "opencode"] {
+        for slug in [
+            "claude-code",
+            "codex",
+            "gemini-cli",
+            "cline",
+            "opencode",
+            "antigravity",
+        ] {
             let url = install_guide(slug).unwrap_or_else(|| panic!("{slug}"));
             assert!(url.starts_with("https://"), "{url}");
         }

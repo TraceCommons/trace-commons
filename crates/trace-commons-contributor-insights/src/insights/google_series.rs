@@ -109,12 +109,12 @@ impl AntigravityTurnSeriesScan {
         }
     }
 
-    pub fn observe(&mut self, record: &Value) -> Result<(), ()> {
+    pub fn observe(&mut self, record: &Value) -> bool {
         let Some(obj) = record.as_object() else {
-            return Err(());
+            return false;
         };
         if !obj.contains_key("type") && !obj.contains_key("step_index") {
-            return Err(());
+            return false;
         }
         self.saw_step = true;
 
@@ -125,7 +125,7 @@ impl AntigravityTurnSeriesScan {
         }
 
         if record.get("type").and_then(|v| v.as_str()) != Some("PLANNER_RESPONSE") {
-            return Ok(());
+            return true;
         }
 
         let input = record.get("input_tokens").and_then(|v| v.as_u64());
@@ -138,7 +138,7 @@ impl AntigravityTurnSeriesScan {
         // Only count steps that actually carry token counters or tool calls.
         let calls = record.get("tool_calls").and_then(|v| v.as_array());
         if input.is_none() && output.is_none() && calls.is_none_or(Vec::is_empty) {
-            return Ok(());
+            return true;
         }
 
         let turn_ordinal = self.ordinal;
@@ -196,7 +196,7 @@ impl AntigravityTurnSeriesScan {
             }
         }
 
-        Ok(())
+        true
     }
 
     pub fn finish(self) -> Option<GoogleTurnSeriesEvidence> {
@@ -242,7 +242,9 @@ pub fn extract_gemini_turn_series(
         }
         let tokens = message.get("tokens");
         let input = tokens.and_then(|t| t.get("input")).and_then(|v| v.as_u64());
-        let output = tokens.and_then(|t| t.get("output")).and_then(|v| v.as_u64());
+        let output = tokens
+            .and_then(|t| t.get("output"))
+            .and_then(|v| v.as_u64());
         let cached = tokens
             .and_then(|t| t.get("cached"))
             .and_then(|v| v.as_u64())
@@ -353,7 +355,7 @@ mod tests {
             }),
         ];
         for line in &lines {
-            scan.observe(line).unwrap();
+            assert!(scan.observe(line));
         }
         let evidence = scan.finish().expect("evidence");
         assert_eq!(evidence.model_labels, vec!["gemini-4-neon-medium"]);

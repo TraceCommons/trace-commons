@@ -172,10 +172,7 @@ fn conversation_id_for(transcript_path: &Path) -> Option<String> {
 
 fn session_ref_for(path: PathBuf) -> Option<SessionRef> {
     let metadata = std::fs::metadata(&path).ok()?;
-    let started_at = metadata
-        .modified()
-        .ok()
-        .map(DateTime::<Utc>::from);
+    let started_at = metadata.modified().ok().map(DateTime::<Utc>::from);
     Some(SessionRef {
         source: SOURCE_ANTIGRAVITY,
         declared_source: None,
@@ -289,7 +286,9 @@ fn parse_tool_args(raw: Option<&Value>) -> Value {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
                 let unwrapped = match v {
-                    Value::String(s) => serde_json::from_str::<Value>(s).unwrap_or_else(|_| v.clone()),
+                    Value::String(s) => {
+                        serde_json::from_str::<Value>(s).unwrap_or_else(|_| v.clone())
+                    }
                     other => other.clone(),
                 };
                 out.insert(k.clone(), unwrapped);
@@ -522,10 +521,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_transcript(root: &Path, conv_id: &str, file: &str, body: &str) -> PathBuf {
-        let logs = root
-            .join(conv_id)
-            .join(SYSTEM_GENERATED_DIR)
-            .join(LOGS_DIR);
+        let logs = root.join(conv_id).join(SYSTEM_GENERATED_DIR).join(LOGS_DIR);
         fs::create_dir_all(&logs).unwrap();
         let path = logs.join(file);
         fs::write(&path, body).unwrap();
@@ -576,7 +572,10 @@ mod tests {
         assert_eq!(transcript.events[2].structured["Path"], "/repo/lib.rs");
         assert_eq!(transcript.events[2].token_counts, Some((1200, 80)));
         assert_eq!(
-            transcript.events[2].served_by.as_ref().map(|s| s.cache_read_tokens),
+            transcript.events[2]
+                .served_by
+                .as_ref()
+                .map(|s| s.cache_read_tokens),
             Some(300)
         );
         assert_eq!(transcript.events[3].kind, SessionEventKind::ToolResult);

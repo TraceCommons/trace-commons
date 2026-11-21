@@ -201,8 +201,8 @@ where
 fn describe_antigravity(home: &Path, env: &impl Fn(&str) -> Option<String>) -> SourceCandidate {
     let roots = super::antigravity::conventional_roots(home, env);
     let primary = super::antigravity::conventional_root(home, env);
-    let relocated_by_env = env(super::antigravity::ANTIGRAVITY_HOME_ENV)
-        .is_some_and(|v| !v.is_empty());
+    let relocated_by_env =
+        env(super::antigravity::ANTIGRAVITY_HOME_ENV).is_some_and(|v| !v.is_empty());
     let mut exists = false;
     let mut tally = Tally::new();
     for root in &roots {

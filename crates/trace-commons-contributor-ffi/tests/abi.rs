@@ -1833,7 +1833,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 5, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 6, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
@@ -1846,7 +1846,14 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // to that gate would stop the daemon on every installed client.
     assert_eq!(
         sources,
-        vec!["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+        vec![
+            "claude-code",
+            "codex",
+            "gemini-cli",
+            "cline",
+            "opencode",
+            "antigravity"
+        ]
     );
 
     for item in items {
@@ -1865,6 +1872,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
     assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
     assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+    assert_eq!(answers_at("antigravity"), serde_json::json!("Google"));
     assert_eq!(
         answers_at("cline"),
         serde_json::Value::Null,

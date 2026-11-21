@@ -184,8 +184,11 @@ enum InsightsProjectRows {
                        spendMicros: totals?.usdMicrosKnown ?? 0)
         }
         func tokens(_ row: Row) -> Int64 {
-            (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0)
-                + (row.gemini?.tokens ?? 0) + (row.antigravity?.tokens ?? 0)
+            let claude: Int64 = row.claude?.tokens ?? 0
+            let codex: Int64 = row.codex?.tokens ?? 0
+            let gemini: Int64 = row.gemini?.tokens ?? 0
+            let antigravity: Int64 = row.antigravity?.tokens ?? 0
+            return claude + codex + gemini + antigravity
         }
         return rows.sorted { a, b in
             let (aUnknown, bUnknown) = (a.id.hasPrefix("\u{0}"), b.id.hasPrefix("\u{0}"))
