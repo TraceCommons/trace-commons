@@ -2418,7 +2418,7 @@ public sealed partial class TracesMapView : UserControl
 /// where the next would not fit: the legend at the map's foot wraps rather
 /// than run under the zoom (FlowMapView.swift:181-186, <c>HistoryFilterFlow</c>).
 /// </summary>
-internal sealed partial class FlowPanel : Panel
+public sealed partial class FlowPanel : Panel
 {
     public double Spacing { get; set; }
 
@@ -2430,6 +2430,11 @@ internal sealed partial class FlowPanel : Panel
         foreach (UIElement child in Children)
         {
             child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (child.Visibility == Visibility.Collapsed)
+            {
+                continue;
+            }
+
             Size d = child.DesiredSize;
             if (x > 0 && x + d.Width > available.Width)
             {
@@ -2451,6 +2456,11 @@ internal sealed partial class FlowPanel : Panel
         double x = 0, y = 0, line = 0;
         foreach (UIElement child in Children)
         {
+            if (child.Visibility == Visibility.Collapsed)
+            {
+                continue;
+            }
+
             Size d = child.DesiredSize;
             if (x > 0 && x + d.Width > final.Width)
             {

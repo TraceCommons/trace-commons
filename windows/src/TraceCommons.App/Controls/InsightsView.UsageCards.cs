@@ -230,7 +230,7 @@ public sealed partial class InsightsView
         string title = Text(copy, "analytics_credit_title");
         panel.Children.Add(Heading(title, 18));
         // This shell has no "i": what the figures cover is a note under the title.
-        panel.Children.Add(Caption(Text(copy, "analytics_credit_scope")));
+        panel.Children.Add(Caption(WindowsWords.InsightsCreditScope));
         if (dimensions.Count > 1)
         {
             var choices = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };

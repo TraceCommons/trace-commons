@@ -520,6 +520,11 @@ public sealed partial class MainWindow
     /// </summary>
     private void ApplyPaneAvailability()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         bool available = MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
         InspectorToggle.IsEnabled = available;
         var wanted = new PaneVisibility(_wantsMap, _wantsInspector && available);
@@ -559,6 +564,11 @@ public sealed partial class MainWindow
     /// </summary>
     private void MovePanes(PaneVisibility next)
     {
+        if (_closed)
+        {
+            return;
+        }
+
         PaneVisibility old = _transition?.To ?? _presented;
         if (old == next)
         {
@@ -633,7 +643,7 @@ public sealed partial class MainWindow
     private void OnMoveFrame(object? sender, object e)
     {
         // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
-        if (_moveFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        if (_moveFramePace.Skips(OpenRoot, GlassClock.Now))
         {
             return;
         }
@@ -697,6 +707,11 @@ public sealed partial class MainWindow
     /// <summary>Sets the columns from the Mac's arithmetic at the row's width.</summary>
     private void LayoutPanes()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         double width = ClientWidth;
         MonitorPaneLayout layout = _transition is PaneTransition transition
             ? MonitorPaneLayout.For(width, transition)
@@ -772,7 +787,7 @@ public sealed partial class MainWindow
     /// </summary>
     private void UpdateTitleBarRegions()
     {
-        if (Content?.XamlRoot is null)
+        if (_closed || OpenRoot is null)
         {
             return;
         }
@@ -839,6 +854,11 @@ public sealed partial class MainWindow
             case TitleBarRead.AfterDispatch:
                 DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
                 {
+                    if (_closed)
+                    {
+                        return;
+                    }
+
                     if (_pendingFrame is LayoutRect pending && !_minimised)
                     {
                         _pendingFrame = null;
@@ -864,7 +884,7 @@ public sealed partial class MainWindow
     private void OnClocksChanged(bool mayTick)
     {
         ViewModel.SetClocksRunning(mayTick);
-        WindowClocks.Set(mayTick, Content?.XamlRoot);
+        WindowClocks.Set(mayTick, OpenRoot);
         if (!mayTick)
         {
             _visibilityDebounceTimer.Stop();
@@ -900,6 +920,11 @@ public sealed partial class MainWindow
     /// </summary>
     private void ApplyMinimumSize()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         double minimum = _transition is PaneTransition transition
             ? MonitorPaneLayout.WindowWidthLowerLimit(transition)
             : MonitorPaneLayout.MinimumWindowWidth(_presented.Map, _presented.Inspector);
@@ -951,7 +976,7 @@ public sealed partial class MainWindow
             settings.AboutRequested += (_, _) => ShowAboutWindow();
             AttachSpendOrganizations(settings);
             settings.Settings.ConsentScopesConfirmed += (before, confirmed) =>
-                OnConsentScopesConfirmed(before, confirmed, _settingsWindow?.Content?.XamlRoot);
+                OnConsentScopesConfirmed(before, confirmed, _settingsWindow?.OpenRoot);
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += async (_, _) =>
             {

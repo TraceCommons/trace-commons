@@ -21,7 +21,7 @@ public class SettingsWindowKeyboardTests
     {
         string window = Source("SettingsWindow.xaml.cs");
         int activate = window.IndexOf("        Activate();\n", StringComparison.Ordinal);
-        int focus = window.IndexOf("ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => AppWindow.IsVisible);", StringComparison.Ordinal);
+        int focus = window.IndexOf("ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => !_windowClosed && AppWindow.IsVisible);", StringComparison.Ordinal);
         Assert.True(activate > 0 && focus > activate, $"activate {activate}, focus {focus}");
 
         string tools = Source("ToolWindows.cs");

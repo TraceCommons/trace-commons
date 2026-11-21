@@ -25,6 +25,7 @@ public sealed class AboutWindow : Window
     public const double MinWidth = 280;
 
     private bool _placed;
+    private bool _windowClosed;
 
     public AboutWindow()
     {
@@ -110,6 +111,9 @@ public sealed class AboutWindow : Window
         var ground = new Grid { Children = { column } };
         ThemeBrushes.Bind(ground, Panel.BackgroundProperty, "TcWindowBackgroundBrush");
         Content = ground;
+        // Settings > General's appearance, as on every window (WindowAppearance).
+        WindowAppearance.Follow(this, ground);
+        Closed += (_, _) => _windowClosed = true;
         WindowClocks.Watch(this);
     }
 
@@ -159,7 +163,7 @@ public sealed class AboutWindow : Window
         // Copy takes focus, never the bare window (box tab walk, 2026-11-19).
         if (Content is FrameworkElement root)
         {
-            ToolWindows.FocusFirst(root, FocusState.Programmatic, () => AppWindow.IsVisible);
+            ToolWindows.FocusFirst(root, FocusState.Programmatic, () => !_windowClosed && AppWindow.IsVisible);
         }
     }
 }
