@@ -401,7 +401,9 @@ fn add(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 /// dated.
 pub(crate) fn latest_at(session: &SessionInput) -> Option<DateTime<Utc>> {
     let turns = match &session.body {
-        SessionBody::Claude { series, .. } => Some(&series.turns),
+        SessionBody::Claude { series, .. }
+        | SessionBody::GeminiCli { series, .. }
+        | SessionBody::Antigravity { series, .. } => Some(&series.turns),
         SessionBody::Codex {
             series: Some(evidence),
             ..
@@ -493,6 +495,14 @@ fn prepare(
         let own_label = labels.get(&session.session_ref);
         let (accounting, labels, turns) = match &session.body {
             SessionBody::Claude {
+                series,
+                model_labels,
+            }
+            | SessionBody::GeminiCli {
+                series,
+                model_labels,
+            }
+            | SessionBody::Antigravity {
                 series,
                 model_labels,
             } => (PricingAccounting::ClaudeCode, model_labels, &series.turns),

@@ -534,7 +534,12 @@ fn sources(rollup: &WeekRollup) -> Vec<OverviewSource> {
 
 pub fn overview(glance: &WeekGlance) -> WeekOverview {
     let rollup = &glance.rollup;
-    let by_tool = [AnalyticsSource::ClaudeCode, AnalyticsSource::Codex]
+    let by_tool = [
+        AnalyticsSource::ClaudeCode,
+        AnalyticsSource::Codex,
+        AnalyticsSource::GeminiCli,
+        AnalyticsSource::Antigravity,
+    ]
         .into_iter()
         .filter_map(|source| {
             rollup

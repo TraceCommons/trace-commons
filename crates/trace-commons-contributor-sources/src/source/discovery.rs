@@ -191,7 +191,36 @@ where
                 env("XDG_DATA_HOME").is_some_and(|v| Path::new(&v).is_absolute());
             row
         },
+        // Appended: shells index the first rows by position.
+        describe_antigravity(home, &env),
     ]
+}
+
+/// Probe conventional Antigravity brain directories (CLI, IDE, App) and
+/// aggregate their counts under one `antigravity` candidate.
+fn describe_antigravity(home: &Path, env: &impl Fn(&str) -> Option<String>) -> SourceCandidate {
+    let roots = super::antigravity::conventional_roots(home, env);
+    let primary = super::antigravity::conventional_root(home, env);
+    let relocated_by_env = env(super::antigravity::ANTIGRAVITY_HOME_ENV)
+        .is_some_and(|v| !v.is_empty());
+    let mut exists = false;
+    let mut tally = Tally::new();
+    for root in &roots {
+        if root.is_dir() {
+            exists = true;
+            antigravity_layout_into(root, &mut tally);
+        }
+    }
+    SourceCandidate {
+        source: super::SOURCE_ANTIGRAVITY.into(),
+        path: primary,
+        exists,
+        session_count: tally.count,
+        most_recent: tally.most_recent,
+        total_bytes: exists.then_some(tally.bytes),
+        relocated_by_env,
+        answers_at: source_answers_at(super::SOURCE_ANTIGRAVITY).map(str::to_string),
+    }
 }
 
 /// Probe conventional stores, including OpenCode's local database.
@@ -317,6 +346,7 @@ pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
         (SOURCE_GEMINI_CLI, gemini_layout(path)),
         (SOURCE_CLINE, cline_layout(path)),
         (SOURCE_OPENCODE, opencode_layout(path)),
+        (super::SOURCE_ANTIGRAVITY, antigravity_layout(path)),
         (SOURCE_TRAJECTORY, trajectory_layout(path)),
     ]
     .into_iter()
@@ -496,6 +526,21 @@ impl Tally {
                 Some(current) if current >= stamp => current,
                 _ => stamp,
             });
+        }
+    }
+}
+
+/// `<conversation-id>/.system_generated/logs/transcript[_full].jsonl`.
+fn antigravity_layout(root: &Path) -> Tally {
+    let mut tally = Tally::new();
+    antigravity_layout_into(root, &mut tally);
+    tally
+}
+
+fn antigravity_layout_into(root: &Path, tally: &mut Tally) {
+    for conv in tally.subdirs(root) {
+        if let Some(transcript) = super::antigravity::canonical_transcript_in(&conv.path()) {
+            tally.note(std::fs::metadata(&transcript).ok());
         }
     }
 }

@@ -36,6 +36,8 @@ pub enum Feed {
 pub enum AnalyticsSource {
     ClaudeCode,
     Codex,
+    GeminiCli,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -142,6 +144,14 @@ pub enum SessionBody {
         /// the drill and the Models answers read this.
         series: Option<CodexTurnSeriesEvidence>,
     },
+    GeminiCli {
+        series: UsageSeries,
+        model_labels: Vec<String>,
+    },
+    Antigravity {
+        series: UsageSeries,
+        model_labels: Vec<String>,
+    },
     Unknown {
         source: Option<AnalyticsSource>,
         reason: UnknownReason,
@@ -182,6 +192,8 @@ impl SessionInput {
         match &self.body {
             SessionBody::Claude { .. } => Some(AnalyticsSource::ClaudeCode),
             SessionBody::Codex { .. } => Some(AnalyticsSource::Codex),
+            SessionBody::GeminiCli { .. } => Some(AnalyticsSource::GeminiCli),
+            SessionBody::Antigravity { .. } => Some(AnalyticsSource::Antigravity),
             SessionBody::Unknown { source, .. } => *source,
         }
     }
@@ -189,7 +201,9 @@ impl SessionInput {
     /// The dated span used for the overlap rule.
     fn dated_range(&self) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
         match &self.body {
-            SessionBody::Claude { series, .. } => {
+            SessionBody::Claude { series, .. }
+            | SessionBody::GeminiCli { series, .. }
+            | SessionBody::Antigravity { series, .. } => {
                 let mut dates = series.turns.iter().filter_map(|turn| turn.at);
                 let first = dates.next()?;
                 Some(dates.fold((first, first), |(low, high), at| {
@@ -435,6 +449,14 @@ pub fn week_rollup<Tz: TimeZone>(
             SessionBody::Claude {
                 series,
                 model_labels,
+            }
+            | SessionBody::GeminiCli {
+                series,
+                model_labels,
+            }
+            | SessionBody::Antigravity {
+                series,
+                model_labels,
             } => {
                 let any_dated = series.turns.iter().any(|turn| turn.at.is_some());
                 let touches = |turns: &mut dyn Iterator<Item = &TurnRecord>| {
@@ -624,7 +646,9 @@ pub fn week_rollup<Tz: TimeZone>(
                 *line.tokens.get_or_insert(0) += tokens;
                 line.largest_session_tokens = line.largest_session_tokens.max(Some(tokens));
                 let share = match source {
-                    AnalyticsSource::ClaudeCode => CacheShare::claude(
+                    AnalyticsSource::ClaudeCode
+                    | AnalyticsSource::GeminiCli
+                    | AnalyticsSource::Antigravity => CacheShare::claude(
                         contribution.uncached,
                         contribution.cache_read,
                         contribution.cache_write,

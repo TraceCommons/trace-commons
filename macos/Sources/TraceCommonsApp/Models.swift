@@ -783,6 +783,7 @@ struct DaemonSettingsView: Decodable, Equatable {
     let geminiSourceMode: String?
     let clineSourceMode: String?
     var opencodeSourceMode: String? = nil
+    var antigravitySourceMode: String? = nil
     /// The declared folder of exported traces: `watch`, `off`, or `unset`,
     /// never its path. Watched folders draws its own row from it.
     var trajectorySourceMode: String? = nil
@@ -867,6 +868,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case opencodeSourceMode = "opencode_source_mode"
+        case antigravitySourceMode = "antigravity_source_mode"
         case trajectorySourceMode = "trajectory_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"

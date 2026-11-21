@@ -114,6 +114,7 @@ pub(crate) fn schema() -> Value {
         "gemini_source",
         "cline_source",
         "opencode_source",
+        "antigravity_source",
         "trajectory_source",
     ] {
         let mut entry = source.clone();

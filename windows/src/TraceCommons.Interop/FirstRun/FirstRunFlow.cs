@@ -105,6 +105,7 @@ public sealed class FirstRunRoots
         ["gemini-cli"] = "gemini_source",
         ["cline"] = "cline_source",
         ["opencode"] = "opencode_source",
+        ["antigravity"] = "antigravity_source",
     };
 
     public const string TrajectoryKey = "trajectory_source";

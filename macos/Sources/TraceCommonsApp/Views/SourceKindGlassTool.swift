@@ -12,6 +12,7 @@ extension SourceKind {
         case .geminiCli: .geminiCLI
         case .cline: .cline
         case .opencode: .openCode
+        case .antigravity: .antigravity
         }
     }
 }

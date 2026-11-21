@@ -121,6 +121,8 @@ enum InsightsProjectRows {
         let label: String
         let claude: Usage?
         let codex: Usage?
+        var gemini: Usage? = nil
+        var antigravity: Usage? = nil
         /// The NEAR AI amount, or the dash when there was no call or a call
         /// had no charge.
         let nearAi: String
@@ -139,17 +141,19 @@ enum InsightsProjectRows {
     /// week. Largest NEAR AI spend first, then most tokens; the unknown
     /// folder last.
     static func rows(_ week: DaemonData.InsightsWeek, copy: [String: String]) -> [Row] {
-        var usage: [String?: (claude: Usage?, codex: Usage?)] = [:]
+        var usage: [String?: (claude: Usage?, codex: Usage?, gemini: Usage?, antigravity: Usage?)] = [:]
         func add(_ current: Usage?, tokens: Int64?) -> Usage {
             let traces = (current?.traces ?? 0) + 1
             let known: Int64? = current == nil ? 0 : current?.tokens
             return Usage(traces: traces, tokens: known.flatMap { sum in tokens.map { sum + $0 } })
         }
         for session in week.rollup?.sessions ?? [] {
-            var entry = usage[session.folder] ?? (nil, nil)
+            var entry = usage[session.folder] ?? (nil, nil, nil, nil)
             switch session.source {
             case "claude_code": entry.claude = add(entry.claude, tokens: session.tokens)
             case "codex": entry.codex = add(entry.codex, tokens: session.tokens)
+            case "gemini_cli": entry.gemini = add(entry.gemini, tokens: session.tokens)
+            case "antigravity": entry.antigravity = add(entry.antigravity, tokens: session.tokens)
             default: continue
             }
             usage[session.folder] = entry
@@ -166,6 +170,7 @@ enum InsightsProjectRows {
             return Row(id: folder ?? "\u{0}unknown",
                        label: InsightsCreditWords.label(folder, dimension: .folder, copy: copy),
                        claude: usage[folder]?.claude, codex: usage[folder]?.codex,
+                       gemini: usage[folder]?.gemini, antigravity: usage[folder]?.antigravity,
                        nearAi: group.map {
                            InsightsCreditWords.spend($0.usdMicros, known: $0.usdMicrosKnown,
                                                      copy: copy)
@@ -178,7 +183,10 @@ enum InsightsProjectRows {
                        spend: week.work.map { _ in InsightsWorkWords.spend(totals, copy: copy) },
                        spendMicros: totals?.usdMicrosKnown ?? 0)
         }
-        func tokens(_ row: Row) -> Int64 { (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0) }
+        func tokens(_ row: Row) -> Int64 {
+            (row.claude?.tokens ?? 0) + (row.codex?.tokens ?? 0)
+                + (row.gemini?.tokens ?? 0) + (row.antigravity?.tokens ?? 0)
+        }
         return rows.sorted { a, b in
             let (aUnknown, bUnknown) = (a.id.hasPrefix("\u{0}"), b.id.hasPrefix("\u{0}"))
             if aUnknown != bUnknown { return bUnknown }
@@ -201,13 +209,14 @@ enum InsightsProjectRows {
     /// spend only while some folder has it. A Claude user sees no Codex
     /// column of dashes, and the reverse.
     struct Columns: Equatable {
-        var spend = false, claude = false, codex = false, nearAi = false
+        var spend = false, claude = false, codex = false, gemini = false, antigravity = false, nearAi = false
     }
 
     static func columns(_ week: DaemonData.InsightsWeek, rows: [Row]) -> Columns {
         let folders = week.work?.byFolder ?? []
         return Columns(spend: rows.contains { $0.spend != nil } && folders.contains { InsightsWorkWords.knowsSpend($0) },
                        claude: rows.contains { $0.claude != nil }, codex: rows.contains { $0.codex != nil },
+                       gemini: rows.contains { $0.gemini != nil }, antigravity: rows.contains { $0.antigravity != nil },
                        nearAi: hasNearAi(week))
     }
 
@@ -290,6 +299,12 @@ struct InsightsDetailsTable: View {
                     if columns.codex {
                         Text(text("analytics_credit_tool_codex")).insightsCaption().gridColumnAlignment(.trailing)
                     }
+                    if columns.gemini {
+                        Text(text("analytics_credit_tool_gemini_cli")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
+                    if columns.antigravity {
+                        Text(text("analytics_credit_tool_antigravity")).insightsCaption().gridColumnAlignment(.trailing)
+                    }
                     if columns.nearAi {
                         Text(text("analytics_usage_near_ai")).insightsCaption().gridColumnAlignment(.trailing)
                     }
@@ -301,6 +316,8 @@ struct InsightsDetailsTable: View {
                         if columns.spend { Text(row.spend ?? text("analytics_unavailable")).insightsMono() }
                         if columns.claude { usage(row.claude) }
                         if columns.codex { usage(row.codex) }
+                        if columns.gemini { usage(row.gemini) }
+                        if columns.antigravity { usage(row.antigravity) }
                         if columns.nearAi {
                             VStack(alignment: .trailing, spacing: 0) {
                                 Text(row.nearAi).insightsMono()

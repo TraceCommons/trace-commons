@@ -22,6 +22,7 @@ pub mod episode_store;
 pub mod episodes;
 pub mod goal_store;
 pub mod goals;
+pub mod google_series;
 pub mod ledger_series;
 pub mod lever;
 pub mod markers;

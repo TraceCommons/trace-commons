@@ -42,7 +42,8 @@ final class SourceDeclarationTests: XCTestCase {
     func testThePerRowKeysAreTheOnesTheRootsScreenWrites() throws {
         // Two writers of the same file must speak one dialect.
         let roots = SessionRoots(
-            claude: .watch(path: "/a"), codex: .off, gemini: .watch(path: "/g"), cline: .off, opencode: .off)
+            claude: .watch(path: "/a"), codex: .off, gemini: .watch(path: "/g"), cline: .off, opencode: .off,
+            antigravity: .watch(path: "/ag"))
         let whole = try JSONSerialization.jsonObject(
             with: Data(try XCTUnwrap(roots.settingsJSON()).utf8)) as? [String: Any]
         XCTAssertEqual(

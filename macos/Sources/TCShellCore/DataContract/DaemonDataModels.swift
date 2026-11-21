@@ -1006,6 +1006,7 @@ extension DaemonData {
         public let geminiSourceMode: String?
         public let clineSourceMode: String?
         public let opencodeSourceMode: String?
+        public let antigravitySourceMode: String?
         /// The declared trajectory folder's mode; the path is never sent.
         public let trajectorySourceMode: String?
         /// Whether Insights may read the proxy ledger (owner decision D3,
@@ -1074,6 +1075,7 @@ extension DaemonData {
             case geminiSourceMode = "gemini_source_mode"
             case clineSourceMode = "cline_source_mode"
             case opencodeSourceMode = "opencode_source_mode"
+            case antigravitySourceMode = "antigravity_source_mode"
             case trajectorySourceMode = "trajectory_source_mode"
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"

@@ -1037,6 +1037,8 @@ pub struct Settings {
     /// unset, as the Mac's does.
     #[serde(default)]
     pub opencode_source_mode: String,
+    #[serde(default)]
+    pub antigravity_source_mode: String,
     /// The local proxy declaration as the daemon holds it. Absent means
     /// off -- there is no conventional fallback for a local service, so
     /// unlike a source root there is no third state.

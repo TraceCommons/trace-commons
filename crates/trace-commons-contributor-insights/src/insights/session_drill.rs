@@ -158,6 +158,14 @@ pub fn session_drill(
             drill.source = Some(AnalyticsSource::ClaudeCode);
             draw_series(&mut drill, &mut reasons, series);
         }
+        SessionBody::GeminiCli { series, .. } => {
+            drill.source = Some(AnalyticsSource::GeminiCli);
+            draw_series(&mut drill, &mut reasons, series);
+        }
+        SessionBody::Antigravity { series, .. } => {
+            drill.source = Some(AnalyticsSource::Antigravity);
+            draw_series(&mut drill, &mut reasons, series);
+        }
         SessionBody::Codex {
             observed,
             series: Some(evidence),

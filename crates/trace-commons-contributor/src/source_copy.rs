@@ -49,8 +49,8 @@
 
 use crate::routing_copy::{TOOL_CLAUDE, TOOL_CLINE, TOOL_CODEX, TOOL_GEMINI};
 use crate::source::{
-    SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
-    undeclared_scans_conventional,
+    SOURCE_ANTIGRAVITY, SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI,
+    SOURCE_OPENCODE, undeclared_scans_conventional,
 };
 
 /// The tools the settings screen has a session-source row for.
@@ -65,6 +65,7 @@ pub enum SourceTool {
     Gemini,
     Cline,
     OpenCode,
+    Antigravity,
 }
 
 impl SourceTool {
@@ -77,6 +78,7 @@ impl SourceTool {
             "gemini" => Some(Self::Gemini),
             "cline" => Some(Self::Cline),
             "opencode" => Some(Self::OpenCode),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }
@@ -90,6 +92,7 @@ impl SourceTool {
             Self::Gemini => TOOL_GEMINI,
             Self::Cline => TOOL_CLINE,
             Self::OpenCode => "OpenCode",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -104,6 +107,7 @@ impl SourceTool {
             Self::Gemini => SOURCE_GEMINI_CLI,
             Self::Cline => SOURCE_CLINE,
             Self::OpenCode => SOURCE_OPENCODE,
+            Self::Antigravity => SOURCE_ANTIGRAVITY,
         }
     }
 }
@@ -295,6 +299,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         ("gemini", SourceTool::Gemini),
         ("cline", SourceTool::Cline),
         ("opencode", SourceTool::OpenCode),
+        ("antigravity", SourceTool::Antigravity),
     ]
     .into_iter()
     .map(|(key, tool)| {
@@ -425,7 +430,7 @@ mod tests {
     #[test]
     fn settings_metadata_uses_adapter_policy_and_retains_queue_effects() {
         let copy = source_settings_copy();
-        assert_eq!(copy.tools.len(), 5);
+        assert_eq!(copy.tools.len(), 6);
         for (adapter, tool) in &copy.tools {
             assert_eq!(
                 tool.unset_scans_conventional,

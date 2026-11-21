@@ -521,6 +521,10 @@ pub struct DaemonSettings {
     /// adapter; there is no conventional native database or export location.
     #[serde(default)]
     pub opencode_source: Option<SourceDeclaration>,
+    /// Antigravity transcript store (`~/.gemini/antigravity*/brain`). Absent/null
+    /// and Off construct no adapter; see [`gemini_source`].
+    #[serde(default)]
+    pub antigravity_source: Option<SourceDeclaration>,
     /// A folder of exported trajectory files the contributor chose, read
     /// with the strict trajectory reader alongside the staging folder.
     ///
@@ -1426,6 +1430,7 @@ impl Default for DaemonSettings {
             gemini_source: None,
             cline_source: None,
             opencode_source: None,
+            antigravity_source: None,
             trajectory_source: None,
             ironwire: None,
             ironwire_attested_bodies: false,
@@ -1761,6 +1766,10 @@ impl DaemonSettings {
             .declare(crate::source::SOURCE_CLINE, self.cline_source.clone())
             .declare(crate::source::SOURCE_OPENCODE, self.opencode_source.clone())
             .declare(
+                crate::source::SOURCE_ANTIGRAVITY,
+                self.antigravity_source.clone(),
+            )
+            .declare(
                 crate::source::SOURCE_TRAJECTORY,
                 self.trajectory_source.clone(),
             )
@@ -1925,6 +1934,7 @@ pub fn source_settings_key(source: &str) -> Option<&'static str> {
         crate::source::SOURCE_GEMINI_CLI => Some("gemini_source"),
         crate::source::SOURCE_CLINE => Some("cline_source"),
         crate::source::SOURCE_OPENCODE => Some("opencode_source"),
+        crate::source::SOURCE_ANTIGRAVITY => Some("antigravity_source"),
         crate::source::SOURCE_TRAJECTORY => Some("trajectory_source"),
         _ => None,
     }
@@ -2096,6 +2106,9 @@ pub fn apply_settings_object(
             }
             "opencode_source" => {
                 settings.opencode_source = parse_source_declaration(value)?;
+            }
+            "antigravity_source" => {
+                settings.antigravity_source = parse_source_declaration(value)?;
             }
             "trajectory_source" => {
                 let declaration = parse_source_declaration(value)?;

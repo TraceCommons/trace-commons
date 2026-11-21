@@ -219,7 +219,7 @@ pub fn validate_source_session_identity(
 ) -> Result<(), SourceSessionIdentityError> {
     let requires_uuid = match identity.adapter.as_str() {
         "codex" | "claude-code" => true,
-        "opencode" | "cline" | "gemini-cli" => false,
+        "opencode" | "cline" | "gemini-cli" | "antigravity" => false,
         _ => return Err(SourceSessionIdentityError::UnsupportedAdapter),
     };
     let native_id = identity.native_id.as_bytes();

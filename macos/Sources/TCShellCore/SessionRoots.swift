@@ -65,6 +65,7 @@ extension SourceKind {
         case .geminiCli: return "gemini_source"
         case .cline: return "cline_source"
         case .opencode: return "opencode_source"
+        case .antigravity: return "antigravity_source"
         }
     }
 }
@@ -83,6 +84,7 @@ public struct SessionRoots: Equatable, Sendable {
     public var gemini: SourceChoice
     public var cline: SourceChoice
     public var opencode: SourceChoice
+    public var antigravity: SourceChoice
     /// A declared folder of exported trajectory files. Not a `SourceKind`:
     /// it is no agent store, discovery never offers it, and the daemon never
     /// arms what it finds there. Optional like Gemini and Cline.
@@ -97,6 +99,7 @@ public struct SessionRoots: Equatable, Sendable {
         gemini: SourceChoice = .undecided,
         cline: SourceChoice = .undecided,
         opencode: SourceChoice = .undecided,
+        antigravity: SourceChoice = .undecided,
         trajectory: SourceChoice = .undecided
     ) {
         self.claude = claude
@@ -104,6 +107,7 @@ public struct SessionRoots: Equatable, Sendable {
         self.gemini = gemini
         self.cline = cline
         self.opencode = opencode
+        self.antigravity = antigravity
         self.trajectory = trajectory
     }
 
@@ -120,6 +124,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .geminiCli: return gemini
             case .cline: return cline
             case .opencode: return opencode
+            case .antigravity: return antigravity
             }
         }
         set {
@@ -129,6 +134,7 @@ public struct SessionRoots: Equatable, Sendable {
             case .geminiCli: gemini = newValue
             case .cline: cline = newValue
             case .opencode: opencode = newValue
+            case .antigravity: antigravity = newValue
             }
         }
     }
@@ -188,6 +194,9 @@ public struct SessionRoots: Equatable, Sendable {
         }
         if let declaration = opencode.declaration {
             object[SourceKind.opencode.settingsKey] = declaration
+        }
+        if let declaration = antigravity.declaration {
+            object[SourceKind.antigravity.settingsKey] = declaration
         }
         if let declaration = trajectory.declaration {
             object[Self.trajectorySettingsKey] = declaration
