@@ -74,6 +74,21 @@ internal sealed class EdgeRailWindow : Window
         _closeTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
         _closeTimer.Interval = TimeSpan.FromMilliseconds(50);
         _closeTimer.Tick += (_, _) => Step(_hover.Tick(DateTimeOffset.UtcNow));
+        _rootLatch = new WindowRootLatch<XamlRoot>(() => Content?.XamlRoot);
+
+        // A slide, the hover timer and queued placement can outlast the
+        // window, where reading its members throws and ends the process.
+        Closed += (_, _) =>
+        {
+            _windowClosed = true;
+            _rootLatch.MarkClosed();
+            _closeTimer.Stop();
+            if (_sliding)
+            {
+                _sliding = false;
+                CompositionTarget.Rendering -= OnSlideFrame;
+            }
+        };
 
         BuildClosed();
         BuildOpen();
@@ -154,6 +169,11 @@ internal sealed class EdgeRailWindow : Window
     /// <summary>Puts the window on the primary screen's right edge at the size the state needs (EdgeRailController.swift:102-106).</summary>
     private void Place(bool open)
     {
+        if (_windowClosed)
+        {
+            return;
+        }
+
         (double scale, (int X, int Y, int Width, int Height) work) = ToolWindows.Primary();
         ToolWindows.PlaceAndShow(this, EdgeRailGeometry.FramePixels(open, work, scale));
     }
@@ -209,11 +229,13 @@ internal sealed class EdgeRailWindow : Window
     }
 
     private readonly FocusFramePace<XamlRoot> _slideFramePace = new(WindowClocks.Windows);
+    private readonly WindowRootLatch<XamlRoot> _rootLatch;
+    private bool _windowClosed;
 
     private void OnSlideFrame(object? sender, object e)
     {
         // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
-        if (_slideFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        if (_slideFramePace.Skips(_rootLatch.WhileOpen(), GlassClock.Now))
         {
             return;
         }

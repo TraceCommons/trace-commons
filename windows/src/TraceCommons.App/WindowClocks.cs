@@ -50,11 +50,16 @@ internal static class WindowClocks
     /// </summary>
     public static void FollowFocus(Window window)
     {
+        // Close() raises a last Deactivated on a window that has already
+        // closed, where reading Content throws and ends the process: the
+        // latch answers a deactivation without reading the window.
+        var latch = new WindowRootLatch<XamlRoot>(() => window.Content?.XamlRoot);
         window.Activated += (_, args) =>
         {
-            if (window.Content?.XamlRoot is XamlRoot root)
+            bool focused = args.WindowActivationState != WindowActivationState.Deactivated;
+            if (latch.ForActivation(focused) is XamlRoot root)
             {
-                Windows.SetFocused(root, args.WindowActivationState != WindowActivationState.Deactivated);
+                Windows.SetFocused(root, focused);
             }
         };
     }
@@ -67,11 +72,11 @@ internal static class WindowClocks
     public static void Watch(Window window)
     {
         var gate = new WindowClockGate();
-        XamlRoot? root = null;
+        var latch = new WindowRootLatch<XamlRoot>(() => window.Content?.XamlRoot);
         void Report(bool mayTick)
         {
-            root ??= window.Content?.XamlRoot;
-            if (root is not null)
+            // Also runs from Closed, so it only uses a root already read.
+            if (latch.Known is XamlRoot root)
             {
                 Windows.Set(root, mayTick);
             }
@@ -80,7 +85,11 @@ internal static class WindowClocks
         gate.Changed += Report;
         if (window.Content is FrameworkElement content)
         {
-            content.Loaded += (_, _) => Report(gate.MayTick);
+            content.Loaded += (_, _) =>
+            {
+                latch.WhileOpen();
+                Report(gate.MayTick);
+            };
         }
 
         window.AppWindow.Changed += (sender, args) =>

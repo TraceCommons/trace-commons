@@ -1970,6 +1970,9 @@ pub struct WindowsWordsCopy {
     /// Look inside button (docs/ui-copy-guide.md rule 4). Windows shows it
     /// followed by the app's name in its switchers.
     pub preview_window_title: &'static str,
+    /// Insights' breakdown note, where the shared key says "this Mac"
+    /// (owner-approved 2026-11-21).
+    pub insights_credit_scope: &'static str,
 }
 
 /// The Windows app's own words (`WindowsWordsCopy`).
@@ -1978,6 +1981,7 @@ pub fn windows_words_copy() -> WindowsWordsCopy {
         credit_icon_animation_toggle: CREDIT_ICON_ANIMATION_TOGGLE_TASKBAR,
         credit_icon_animation_caption: CREDIT_ICON_ANIMATION_CAPTION_TASKBAR,
         preview_window_title: "Look inside",
+        insights_credit_scope: "This week, from this PC",
     }
 }
 
@@ -2038,6 +2042,16 @@ mod tests {
     #[test]
     fn the_preview_window_title_is_its_own_key() {
         assert_eq!(windows_words_copy().preview_window_title, "Look inside");
+    }
+
+    /// Insights' breakdown note says PC on Windows, in the owner's words of
+    /// 2026-11-21. The shared key keeps the Mac's line.
+    #[test]
+    fn the_windows_breakdown_note_names_this_pc() {
+        assert_eq!(
+            windows_words_copy().insights_credit_scope,
+            "This week, from this PC"
+        );
     }
 
     /// The Settings card eyebrows the owner cut 2026-11-04 (Settings copy

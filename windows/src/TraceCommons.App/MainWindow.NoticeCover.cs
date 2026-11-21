@@ -86,7 +86,7 @@ public sealed partial class MainWindow
             && NoticeStackHost.IsHitTestVisible
             && NoticeFront.ActualWidth > 0
             && NoticeFront.ActualHeight > 0
-            && Content?.XamlRoot is not null)
+            && OpenRoot is not null)
         {
             CoverRect card = CoverBounds(NoticeFront);
             var host = new Rect(card.X, card.Y, card.Width, card.Height);
@@ -138,7 +138,7 @@ public sealed partial class MainWindow
         {
             CoverFocusMove move = NoticeCover.FocusMove(_coverTabbedForward);
             bool moved = move != CoverFocusMove.ToCard
-                && Content?.XamlRoot?.Content is DependencyObject root
+                && OpenRoot?.Content is DependencyObject root
                 && FocusManager.TryMoveFocus(
                     move == CoverFocusMove.Forward ? FocusNavigationDirection.Next : FocusNavigationDirection.Previous,
                     new FindNextElementOptions { SearchRoot = root });

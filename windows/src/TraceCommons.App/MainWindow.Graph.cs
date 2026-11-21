@@ -136,7 +136,7 @@ public sealed partial class MainWindow
     private void OnGraphFrame(object? sender, object e)
     {
         // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
-        if (_graphFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        if (_graphFramePace.Skips(OpenRoot, GlassClock.Now))
         {
             return;
         }

@@ -104,6 +104,12 @@ public sealed partial class MainWindow : Window
     private bool _activationReady;
     private bool _closed;
 
+    // Layout passes, frames and queued work can land after the close, where
+    // reading Content throws and ends the process.
+    private readonly WindowRootLatch<XamlRoot> _rootLatch;
+
+    private XamlRoot? OpenRoot => _rootLatch.WhileOpen();
+
     private bool _quitConfirmed;
 
     /// <summary>
@@ -120,6 +126,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _rootLatch = new WindowRootLatch<XamlRoot>(() => Content?.XamlRoot);
         FollowAppearance();
 
         // DispatcherQueue.GetForCurrentThread() on the UI thread is the queue
@@ -1931,6 +1938,7 @@ public sealed partial class MainWindow : Window
     private async void OnClosed(object sender, WindowEventArgs args)
     {
         _closed = true;
+        _rootLatch.MarkClosed();
         _clockGate.SetClosed();
         StopMoveTicks();
         _settingsWindow?.Close();

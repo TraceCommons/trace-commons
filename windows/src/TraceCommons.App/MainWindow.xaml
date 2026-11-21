@@ -2006,8 +2006,9 @@
                                                 and the words must be too. Its
                                                 tooltip says which one this is.
                                             -->
-                                            <StackPanel Orientation="Horizontal"
+                                            <controls:FlowPanel
                                                         Spacing="8"
+                                                            LineSpacing="8"
                                                         Margin="0,4,0,0">
                                                 <!-- Tag carries the row's own
                                                      view model. The handler
@@ -2050,7 +2051,7 @@
                                                         Visibility="{x:Bind MaySubmit, Mode=OneWay}"
                                                         ToolTipService.ToolTip="Sends this trace without opening it. Scrubbing still runs, and Undo follows for a few seconds."
                                                         Click="OnSubmitEntry" />
-                                            </StackPanel>
+                                            </controls:FlowPanel>
                                         </StackPanel>
                                     </Border>
                                 </StackPanel>

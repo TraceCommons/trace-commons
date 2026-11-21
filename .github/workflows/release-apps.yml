@@ -393,6 +393,13 @@ jobs:
       id-token: write
       attestations: write
     timeout-minutes: 60
+    # Link the C runtime statically. Without it every Rust binary imports
+    # vcruntime140.dll, which a stock Windows does not have (only the Visual
+    # C++ Redistributable installs it), so the binaries fail to load on a
+    # clean machine. RUSTFLAGS in the environment overrides any
+    # .cargo/config rustflags, so it is set here, per job.
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -407,6 +414,9 @@ jobs:
 
       - name: Build the CLI
         run: cargo build --locked --release --bin trace-commons-contributor --bin near-ai -p trace-commons-contributor --target x86_64-pc-windows-msvc
+
+      - name: Check the CLI needs no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/x86_64-pc-windows-msvc/release/trace-commons-contributor.exe target/x86_64-pc-windows-msvc/release/near-ai.exe
 
       # The WinUI desktop app, from here to the second signing pass below.
       #
@@ -435,6 +445,9 @@ jobs:
       # optimisation.
       - name: Build the contributor FFI cdylib
         run: cargo build --locked --release -p trace-commons-contributor-ffi --target x86_64-pc-windows-msvc
+
+      - name: Check the FFI cdylib needs no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/x86_64-pc-windows-msvc/release/trace_commons_contributor_ffi.dll
 
       # Self-contained and unpackaged (WindowsPackageType=None, SelfContained,
       # WindowsAppSDKSelfContained -- all three set in the csproj), so the
@@ -825,6 +838,12 @@ jobs:
       id-token: write
       attestations: write
     timeout-minutes: 60
+    # Static C runtime, for the same reason as the `windows` job: the MSIX
+    # bundles no vcruntime140.dll and declares no VCLibs dependency, so a
+    # cdylib that imports it fails to load on a machine without the Visual
+    # C++ Redistributable.
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -851,6 +870,9 @@ jobs:
 
       - name: Build the contributor FFI cdylib
         run: cargo build --locked -p trace-commons-contributor-ffi --release
+
+      - name: Check the FFI cdylib needs no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/release/trace_commons_contributor_ffi.dll
 
       # Compile first, package later. The publisher the package must carry is
       # not known until a certificate has actually signed something, so the
