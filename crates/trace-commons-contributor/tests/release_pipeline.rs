@@ -2507,22 +2507,19 @@ fn flatpak_manifest_and_release_job_agree_on_gnome_51() {
     }
 }
 
-/// The feed is published as `NearAIGateway.appinstaller`, and also, every
-/// release, under its old name `TraceCommons.appinstaller`. Windows checks
-/// for updates at the Uri an install came from, and 1.0.12 and 1.0.13 hard-
-/// code the old address in `AppUpdater.cs`, so dropping the old name would
-/// strand every existing install on the version it has. Each file's
-/// AppInstaller@Uri must be its own address: App Installer re-reads the feed
-/// from that Uri, so a feed naming the other file would silently move an
-/// install onto it (or, after a future removal, onto nothing).
+/// The Windows feed is `NearAIGateway.appinstaller`. It replaced
+/// `TraceCommons.appinstaller` while no Windows installs existed, so the old
+/// name is no longer generated or uploaded (the object last written at 1.0.13
+/// stays in the bucket until someone removes it). The feed's AppInstaller@Uri
+/// must be its own address: App Installer re-reads the feed from that Uri.
 #[test]
-fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
+fn windows_feed_is_published_as_near_ai_gateway_only() {
     const NEW_FEED: &str = "NearAIGateway.appinstaller";
     const OLD_FEED: &str = "TraceCommons.appinstaller";
     const FEED_BASE: &str = "https://storage.googleapis.com/tracecommons-flatpak/windows/";
 
     // The generator takes the feed's file name and derives its own Uri from
-    // it, rather than carrying a literal name that every output would share.
+    // it, rather than carrying a literal name.
     let script = executable_text(&read("windows/scripts/make-appinstaller.ps1"));
     assert!(
         script.contains("[string]$FeedName"),
@@ -2531,7 +2528,7 @@ fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
     assert!(
         script.contains("$selfUri = \"$base/$FeedName\""),
         "make-appinstaller.ps1 must write AppInstaller@Uri from -FeedName, so \
-         each generated feed names itself"
+         the generated feed names itself"
     );
     assert!(
         !script.contains(OLD_FEED) && !script.contains(NEW_FEED),
@@ -2540,8 +2537,9 @@ fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
 
     let workflow = read(".github/workflows/release-apps.yml");
     let job = extract_job(&workflow, "windows-app");
+    let job_code = executable_text(job);
 
-    // Both feeds are generated, each with its own name and output file.
+    // The feed is generated once, under the new name.
     let feed_step_start = job
         .find("Generate the appinstaller feed")
         .expect("the feed-generation step must exist");
@@ -2549,21 +2547,19 @@ fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
         .find("- uses:")
         .map(|end| feed_step_start + end)
         .unwrap_or(job.len());
-    let feed_step = &job[feed_step_start..feed_step_end];
-    assert!(
-        feed_step.contains(&format!(
-            "foreach ($feed in @('{NEW_FEED}', '{OLD_FEED}')) {{"
-        )),
-        "the feed step must generate both {NEW_FEED} and {OLD_FEED}"
+    let feed_step = executable_text(&job[feed_step_start..feed_step_end]);
+    assert_eq!(
+        feed_step.matches("make-appinstaller.ps1").count(),
+        1,
+        "the feed step must generate exactly one feed"
     );
     assert!(
-        feed_step.contains("-FeedName $feed") && feed_step.contains("-OutputPath \"dist\\$feed\""),
-        "each generated feed must be written under its own name, with \
-         -FeedName and -OutputPath both taken from that name"
+        feed_step.contains(&format!("-FeedName {NEW_FEED}"))
+            && feed_step.contains(&format!("-OutputPath dist\\{NEW_FEED}")),
+        "the feed step must generate {NEW_FEED} to dist\\{NEW_FEED}"
     );
 
-    // Both are uploaded, after the package, as uncacheable appinstaller
-    // files at their own names.
+    // It is uploaded after the package, uncacheable, at its own name.
     let publish_step_start = job
         .rfind("name: Publish")
         .expect("the publish step must exist");
@@ -2571,27 +2567,36 @@ fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
     let pkg_upload_pos = publish_step
         .find("gs://$env:BUCKET/windows/$env:PKG_NAME")
         .expect("the publish step must upload the package");
-    for name in [NEW_FEED, OLD_FEED] {
-        let upload =
-            format!("gcloud storage cp \"dist\\{name}\" \"gs://$env:BUCKET/windows/{name}\"");
-        let at = publish_step
-            .find(&upload)
-            .unwrap_or_else(|| panic!("the publish step must upload {name} to windows/{name}"));
-        assert!(
-            pkg_upload_pos < at,
-            "{name} must be uploaded after the package it names"
-        );
-        let flags = publish_step[at + upload.len()..]
-            .lines()
-            .nth(1)
-            .unwrap_or_default();
-        assert!(
-            flags.contains("--content-type=application/appinstaller")
-                && flags.contains("--cache-control=\"no-cache, max-age=0\""),
-            "{name} must be uploaded as application/appinstaller with \
-             no-cache, max-age=0; got {flags:?}"
-        );
-    }
+    let upload =
+        format!("gcloud storage cp \"dist\\{NEW_FEED}\" \"gs://$env:BUCKET/windows/{NEW_FEED}\"");
+    let at = publish_step
+        .find(&upload)
+        .unwrap_or_else(|| panic!("the publish step must upload {NEW_FEED} to windows/{NEW_FEED}"));
+    assert!(
+        pkg_upload_pos < at,
+        "{NEW_FEED} must be uploaded after the package it names"
+    );
+    let flags = publish_step[at + upload.len()..]
+        .lines()
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        flags.contains("--content-type=application/appinstaller")
+            && flags.contains("--cache-control=\"no-cache, max-age=0\""),
+        "{NEW_FEED} must be uploaded as application/appinstaller with \
+         no-cache, max-age=0; got {flags:?}"
+    );
+    assert_eq!(
+        publish_step.matches("gcloud storage cp").count(),
+        2,
+        "the publish step uploads the package and one feed, nothing else"
+    );
+
+    // The old name is neither generated nor uploaded, anywhere it runs.
+    assert!(
+        !job_code.contains(OLD_FEED),
+        "the windows-app job must no longer generate or upload {OLD_FEED}"
+    );
 
     // Everything a new install is pointed at names the new feed.
     let publish_job = extract_job(&workflow, "publish");
@@ -2611,20 +2616,18 @@ fn windows_feed_is_published_as_near_ai_gateway_and_under_its_old_name() {
         "the community site's Windows install link must be {NEW_FEED}"
     );
 
-    // CI generates both and checks that each one's Uri is its own address.
-    let ci = read(".github/workflows/clients.yml");
-    for name in [NEW_FEED, OLD_FEED] {
-        assert!(
-            ci.contains(&format!("'{name}'")),
-            "clients.yml must generate and parse {name}"
-        );
-    }
+    // CI generates the new feed and checks that its Uri is its own address.
+    let ci = executable_text(&read(".github/workflows/clients.yml"));
     assert!(
-        ci.contains("-FeedName $name"),
-        "clients.yml must pass each feed's name to make-appinstaller.ps1"
+        ci.contains(&format!("$name = '{NEW_FEED}'")) && ci.contains("-FeedName $name"),
+        "clients.yml must generate {NEW_FEED} with make-appinstaller.ps1"
+    );
+    assert!(
+        !ci.contains(OLD_FEED),
+        "clients.yml must no longer generate {OLD_FEED}"
     );
     assert!(
         ci.contains("does not name itself"),
-        "clients.yml must check that each feed's AppInstaller@Uri is its own address"
+        "clients.yml must check that the feed's AppInstaller@Uri is its own address"
     );
 }

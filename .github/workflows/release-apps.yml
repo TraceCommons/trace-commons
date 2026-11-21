@@ -1080,22 +1080,15 @@ jobs:
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item "$env:PKG_PATH" "dist\$env:PKG_NAME" -Force
-          # The feed is NearAIGateway.appinstaller. It is also published under
-          # its old name, TraceCommons.appinstaller, every release: Windows
-          # checks for updates at the address an install came from, and
-          # 1.0.12 and 1.0.13 hard-code the old one. Each file's Uri is its
-          # own address; both name the same package.
-          foreach ($feed in @('NearAIGateway.appinstaller', 'TraceCommons.appinstaller')) {
-            ./windows/scripts/make-appinstaller.ps1 `
-              -PackageName Iqlusion.TraceCommons `
-              -Publisher $env:CERT_SUBJECT `
-              -Version $env:QUAD `
-              -ProcessorArchitecture x64 `
-              -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
-              -PackageFileName $env:PKG_NAME `
-              -FeedName $feed `
-              -OutputPath "dist\$feed"
-          }
+          ./windows/scripts/make-appinstaller.ps1 `
+            -PackageName Iqlusion.TraceCommons `
+            -Publisher $env:CERT_SUBJECT `
+            -Version $env:QUAD `
+            -ProcessorArchitecture x64 `
+            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
+            -PackageFileName $env:PKG_NAME `
+            -FeedName NearAIGateway.appinstaller `
+            -OutputPath dist\NearAIGateway.appinstaller
           $hash = (Get-FileHash "dist\$env:PKG_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $env:PKG_NAME" | Out-File "dist\$env:PKG_NAME.sha256" -Encoding ascii -NoNewline
 
@@ -1166,9 +1159,6 @@ jobs:
           gcloud storage cp "dist\NearAIGateway.appinstaller" "gs://$env:BUCKET/windows/NearAIGateway.appinstaller" `
             --content-type=application/appinstaller --cache-control="no-cache, max-age=0"
           if ($LASTEXITCODE -ne 0) { throw "uploading the feed failed" }
-          gcloud storage cp "dist\TraceCommons.appinstaller" "gs://$env:BUCKET/windows/TraceCommons.appinstaller" `
-            --content-type=application/appinstaller --cache-control="no-cache, max-age=0"
-          if ($LASTEXITCODE -ne 0) { throw "uploading the feed under its old name failed" }
 
   linux-flatpak:
     name: Linux flatpak
