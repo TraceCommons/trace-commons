@@ -76,58 +76,23 @@ jobs:
     # `macos/` was covered by `swift build` in the release workflow and
     # nothing else -- the tests were real, ran locally, and gated nothing.
     runs-on: macos-26
-    # 45, not 30: the job now also builds and runs the contributor lib suite.
+    # The Tauri workspace and the contributor crates run in
+    # `macos-contributor-crates`, beside this job. Together they took about
+    # 44 minutes of a 45-minute limit (Tauri 10, FFI 4, contributor libs 14,
+    # contracts 3, swift test 8.5, Release build 4.5), and the job was
+    # cancelled at its limit on slower runners.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - name: Clippy and test the Tauri desktop workspace
-        shell: bash
-        run: |
-          mkdir -p tauri-desktop/frontend/dist
-          cargo clippy --locked --manifest-path tauri-desktop/Cargo.toml \
-            --all-targets -- -D warnings \
-            -A clippy::type_complexity -A clippy::collapsible_if \
-            -A clippy::manual_option_as_slice -A clippy::useless_vec \
-            -A clippy::redundant_pattern_matching
-          cargo test --locked --manifest-path tauri-desktop/Cargo.toml
       # The Swift package links the contributor FFI dylib
       # (`-ltrace_commons_contributor_ffi` out of TC_FFI_LIB_DIR, which
       # defaults to ../target/debug), so the dylib has to exist before
       # `swift test` can link anything. Debug profile, to match that default.
       - name: Build the FFI dylib
         run: cargo build -p trace-commons-contributor-ffi
-      # The whole contributor lib suite, not a filter. Several credential
-      # tests are `#[cfg(target_os = "macos")]` and compile nowhere else: the
-      # data-protection store's unentitled answer (a CI runner is exactly an
-      # unentitled process), the legacy-keychain sweep that must never delete
-      # the active reference, the ceremony-tail sweep, and the
-      # legacy-to-data-protection move. Before this step, only
-      # `os_secret_store` ran here, so the tests that guard a contributor's
-      # live `sk-` key ran in no CI lane at all.
-      #
-      # They use the in-memory test registry; the only real-store calls are
-      # reads of references that were never stored.
-      #
-      # Parsers, Insights, and OS credential/file primitives now have separate
-      # crates. Keep all of their old contributor-lib coverage, including the
-      # macOS-only os_secret_store tests in the platform crate.
-      - name: Contributor lib tests on macOS
-        run: |
-          cargo test -p trace-commons-contributor --lib
-          cargo test -p trace-commons-contributor-sources --lib
-          cargo test -p trace-commons-contributor-insights --lib
-          cargo test -p trace-commons-contributor-platform --lib
-          cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::'
-      # These three tests used to be part of the contributor's lib harness.
-      # Keep their macOS coverage without making every client test build the server.
-      - name: Native auth client/server contracts on macOS
-        run: |
-          cargo test -p trace-commons-client-server-tests --test contracts native_auth::
       # The release job is the only thing that runs the entitlement verifier
       # for real, so a bug in the script itself would first show on release
       # day. This runs its static checks against ad-hoc-signed fixtures.
@@ -159,6 +124,58 @@ jobs:
       - name: swift build (Release)
         working-directory: macos
         run: swift build -c release -Xswiftc -warnings-as-errors
+
+  # The macOS halves of the Rust suites, split out of `macOS app tests`
+  # (see there) so neither job runs up against its limit. Not a required
+  # check, like every job in this workflow.
+  macos-contributor-crates:
+    name: macOS contributor crates and Tauri desktop
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy and test the Tauri desktop workspace
+        shell: bash
+        run: |
+          mkdir -p tauri-desktop/frontend/dist
+          cargo clippy --locked --manifest-path tauri-desktop/Cargo.toml \
+            --all-targets -- -D warnings \
+            -A clippy::type_complexity -A clippy::collapsible_if \
+            -A clippy::manual_option_as_slice -A clippy::useless_vec \
+            -A clippy::redundant_pattern_matching
+          cargo test --locked --manifest-path tauri-desktop/Cargo.toml
+      # The whole contributor lib suite, not a filter. Several credential
+      # tests are `#[cfg(target_os = "macos")]` and compile nowhere else: the
+      # data-protection store's unentitled answer (a CI runner is exactly an
+      # unentitled process), the legacy-keychain sweep that must never delete
+      # the active reference, the ceremony-tail sweep, and the
+      # legacy-to-data-protection move. Before this step, only
+      # `os_secret_store` ran here, so the tests that guard a contributor's
+      # live `sk-` key ran in no CI lane at all.
+      #
+      # They use the in-memory test registry; the only real-store calls are
+      # reads of references that were never stored.
+      #
+      # Parsers, Insights, and OS credential/file primitives now have separate
+      # crates. Keep all of their old contributor-lib coverage, including the
+      # macOS-only os_secret_store tests in the platform crate.
+      - name: Contributor lib tests on macOS
+        run: |
+          cargo test -p trace-commons-contributor --lib
+          cargo test -p trace-commons-contributor-sources --lib
+          cargo test -p trace-commons-contributor-insights --lib
+          cargo test -p trace-commons-contributor-platform --lib
+          cargo test -p trace-commons-contributor-ffi --test it -- 'credential_store_self_check::'
+      # These three tests used to be part of the contributor's lib harness.
+      # Keep their macOS coverage without making every client test build the server.
+      - name: Native auth client/server contracts on macOS
+        run: |
+          cargo test -p trace-commons-client-server-tests --test contracts native_auth::
 
   # The glass design system's pre-Liquid Glass fallback. Every other macOS
   # job runs on macos-26, where `GlassMaterial.current` always answers
@@ -535,6 +552,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # gdb prints the threads of a mounted test that outlives its time limit
+      # (weston-portal-verify-inner.sh, run_ignored_test).
       # fonts-dejavu-core is not decoration. --no-install-recommends means
       # GTK pulls no fonts, so the shell renders chrome and colour but no
       # legible glyphs: the frame is non-uniform (so the blank check passes)
@@ -567,7 +586,8 @@ jobs:
             tesseract-ocr-eng \
             fonts-dejavu-core \
             desktop-file-utils \
-            appstream
+            appstream \
+            gdb
       # The desktop entry has always named an icon; until the icon slice
       # nothing installed one, and a dangling Icon= is invisible until a
       # software centre shows a blank tile. appstreamcli validate is the only
