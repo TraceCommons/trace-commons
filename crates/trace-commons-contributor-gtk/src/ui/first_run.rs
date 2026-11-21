@@ -2506,12 +2506,67 @@ mod window_tests {
 
     #[cfg(target_os = "linux")]
     fn settle(context: &glib::MainContext) {
-        let end = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        // DIAGNOSTIC (temporary). Written to the raw handle so libtest's
+        // capture does not hold it back from a run that is later killed.
+        use std::io::Write as _;
+        let start = std::time::Instant::now();
+        let end = start + std::time::Duration::from_millis(400);
+        let (mut n, mut longest) = (0u64, std::time::Duration::ZERO);
+        let mut reported = start;
         while std::time::Instant::now() < end {
             while context.pending() {
+                let t = std::time::Instant::now();
                 context.iteration(false);
+                let d = t.elapsed();
+                n += 1;
+                longest = longest.max(d);
+                if d > std::time::Duration::from_millis(250) {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "DIAG slow iteration {d:?} at {:?}, number {n}",
+                        start.elapsed()
+                    );
+                    diag_windows();
+                }
+                if reported.elapsed() > std::time::Duration::from_secs(5) {
+                    reported = std::time::Instant::now();
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "DIAG settle still draining: {:?} in, {n} iterations, longest {longest:?}",
+                        start.elapsed()
+                    );
+                    diag_windows();
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = writeln!(
+            std::io::stderr(),
+            "DIAG settle: wall {:?}, {n} iterations, longest {longest:?}",
+            start.elapsed()
+        );
+        diag_windows();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn diag_windows() {
+        use std::io::Write as _;
+        for item in gtk::Window::toplevels().iter::<glib::Object>() {
+            let window = item.unwrap().downcast::<gtk::Window>().unwrap();
+            let clock = window.frame_clock();
+            let _ = writeln!(
+                std::io::stderr(),
+                "DIAG   {} visible {} {}x{} frames {:?} fps {:?} covered {:?}",
+                window.type_().name(),
+                window.is_visible(),
+                window.width(),
+                window.height(),
+                clock.as_ref().map(|c| c.frame_counter()),
+                clock.as_ref().map(|c| c.fps()),
+                window
+                    .child()
+                    .map(|c| c.has_css_class(super::super::motion_css::MODAL_COVERED)),
+            );
         }
     }
 
