@@ -18,5 +18,11 @@ internal static class WindowAppearance
         void OnChanged(Appearance appearance) => root.RequestedTheme = GeneralSection.Theme(appearance);
         AppearanceChoice.Shared.Changed += OnChanged;
         window.Closed += (_, _) => AppearanceChoice.Shared.Changed -= OnChanged;
+
+        // The main window draws its own title bar.
+        if (window is not MainWindow)
+        {
+            WindowCaption.Follow(window, root);
+        }
     }
 }

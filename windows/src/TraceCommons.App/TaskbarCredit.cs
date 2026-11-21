@@ -108,7 +108,7 @@ internal sealed class TaskbarCredit
     /// for the taskbar (G-3 (a)), inset as the Dock draws an app icon inside
     /// its tile.
     /// </summary>
-    private static PixelCanvas BaseIcon(int px, bool darkTaskbar)
+    internal static PixelCanvas BaseIcon(int px, bool darkTaskbar)
     {
         var canvas = new PixelCanvas(px, px);
         double inset = px * (TrayStrip.Height - TrayStrip.MarkSize) / 2 / TrayStrip.Height;

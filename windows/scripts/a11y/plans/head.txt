@@ -43,6 +43,8 @@ size preview 776 520
 audit preview preview-short 30
 key preview 1B
 expect preview hidden
+# The app outlives the close: a dead process also reads as hidden.
+expect main has TracesHistoryButton
 # The map, shown from its toolbar toggle.
 clickaid main MapToggle
 audit main map 120

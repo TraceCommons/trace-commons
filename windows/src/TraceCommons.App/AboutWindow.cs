@@ -110,6 +110,8 @@ public sealed class AboutWindow : Window
         var ground = new Grid { Children = { column } };
         ThemeBrushes.Bind(ground, Panel.BackgroundProperty, "TcWindowBackgroundBrush");
         Content = ground;
+        // Settings > General's appearance, as on every window (WindowAppearance).
+        WindowAppearance.Follow(this, ground);
         WindowClocks.Watch(this);
     }
 
