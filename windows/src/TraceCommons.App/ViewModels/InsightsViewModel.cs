@@ -85,8 +85,9 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     /// </param>
     public InsightsViewModel(ILocalInsights? service = null, Func<Func<string, string>, InsightsBenchmarksModel>? benchmarks = null,
         Func<Func<string, string?>, InsightsSkillsModel>? skills = null, Func<string?, Task<DaemonResponse>>? weekReader = null,
-        Func<Task>? turnOffRecap = null)
+        Func<Task>? turnOffRecap = null, SubscriptionUsageModel? subscriptions = null)
     {
+        Subscriptions = subscriptions ?? new SubscriptionUsageModel();
         _service = service ?? new LocalInsights();
         _weekReader = weekReader;
         _turnOffRecap = turnOffRecap;
@@ -127,6 +128,68 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
 
     public bool SkillsEnabled { get; private set; }
     public InsightsSkillsModel Skills { get; }
+
+    /// <summary>
+    /// Claude and Codex limits for the usage cards (<c>SubscriptionUsageModel</c>):
+    /// read while Overview is on screen and the window's clocks run, silently
+    /// on open (InsightsView.swift:281 <c>observe(readOnOpen: true)</c>).
+    /// </summary>
+    public SubscriptionUsageModel Subscriptions { get; }
+
+    private CancellationTokenSource? _subscriptionsObservation;
+
+    /// <summary>Whether the limits are being read now.</summary>
+    public bool SubscriptionsObserved => _subscriptionsObservation is not null;
+
+    private void StartSubscriptions()
+    {
+        if (_subscriptionsObservation is not null || !_clocksRunning || _closed) return;
+        var observation = new CancellationTokenSource();
+        _subscriptionsObservation = observation;
+        _ = Subscriptions.ObserveAsync(true, observation.Token);
+    }
+
+    private void StopSubscriptions()
+    {
+        _subscriptionsObservation?.Cancel();
+        _subscriptionsObservation = null;
+    }
+
+    /// <summary>Breakdown's drill-down view; a usage card's "By project" opens it on By project.</summary>
+    public InsightsDetailsWords.Dimension DetailsView { get; set; } = InsightsDetailsWords.Dimension.Folder;
+
+    /// <summary>A usage card's "By project": By project, on Breakdown (InsightsView.swift:277). Returns the tab to show.</summary>
+    public int ShowProjects()
+    {
+        DetailsView = InsightsDetailsWords.Dimension.Folder;
+        return PatternsTab;
+    }
+
+    private (string Value, string Detail)? _creditTile;
+
+    /// <summary>
+    /// Home's credit tile, the same figure and word as Home's (Kristi: Home
+    /// and Traces must agree); null hides it. The window sets it from Home's
+    /// own reads (InsightsView.swift:177-182).
+    /// </summary>
+    public (string Value, string Detail)? CreditTile
+    {
+        get => _creditTile;
+        set
+        {
+            if (_creditTile == value) return;
+            _creditTile = value;
+            Changed();
+        }
+    }
+
+    /// <summary>
+    /// A sample window's limits: the Mac's sample logins at this moment
+    /// (<c>InsightsSampleModels</c>, InsightsSample.swift:221-222), so no
+    /// window ever reads as expired; nothing reaches a daemon.
+    /// </summary>
+    public static Task<SubscriptionUsage> SampleSubscriptionsReader(bool refresh, bool interactive, string? provider, string? login) =>
+        Task.FromResult(InsightsSample.Subscriptions(DateTimeOffset.UtcNow));
     private CancellationTokenSource? _skillsObservation;
     private bool _clocksRunning = true;
 
@@ -162,8 +225,13 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
     {
         if (_clocksRunning == running) return;
         _clocksRunning = running;
-        if (!running) StopSkills();
+        if (!running)
+        {
+            StopSkills();
+            StopSubscriptions();
+        }
         else if (_shownTab == SkillsTab && SkillsEnabled && !_closed) StartSkills();
+        else if (_shownTab == OverviewTab && !_closed) StartSubscriptions();
     }
 
     private void StartSkills()
@@ -201,6 +269,10 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _shownTab = tab;
+        // The limits are read only while Overview is on screen (the Mac's
+        // task on its Overview case ends when another tab shows).
+        if (tab == OverviewTab) StartSubscriptions();
+        else StopSubscriptions();
         if (tab == SkillsTab)
         {
             StartSkills();
@@ -1072,6 +1144,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         // Leaving Insights stops Skills' reads (the Mac's task ends with the view).
         if (_skillsObservation is not null) Skills.InvalidateDetails();
         StopSkills();
+        StopSubscriptions();
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;
@@ -1086,6 +1159,7 @@ public sealed class InsightsViewModel : INotifyPropertyChanged, IDisposable
         if (_closed) return;
         _closed = true;
         StopSkills();
+        StopSubscriptions();
         MutationNotice = "";
         ++_selectionVersion;
         ++_episodePresentationVersion;

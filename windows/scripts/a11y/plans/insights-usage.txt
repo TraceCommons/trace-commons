@@ -1,0 +1,15 @@
+# Insights' usage cards, credit tile and By project (the Mac's
+# InsightsUsageCards and InsightsDetailsTable): Overview on the sample week
+# and the Mac's sample logins, then a card's "By project", then By model.
+size main 1400 1100
+tab TabInsights
+sleep 5000
+snap main insights-usage-overview
+audit main insights-usage-overview 120
+click main Claude by project
+sleep 2500
+snap main insights-usage-byproject
+audit main insights-usage-byproject 90
+click main By model
+sleep 1500
+snap main insights-usage-bymodel

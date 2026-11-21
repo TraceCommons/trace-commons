@@ -1,0 +1,55 @@
+{
+  "schema_version": "trace_commons.subscription_usage.v1",
+  "providers": [
+    {
+      "provider": "codex",
+      "enabled": true,
+      "refreshing": false,
+      "logins": [
+        {
+          "id": "default",
+          "label": "default",
+          "default_login": true,
+          "state": "observed",
+          "reason": null,
+          "updated_at": "2026-10-26T12:00:00Z",
+          "stale": false,
+          "windows": [
+            {
+              "lane": "weekly",
+              "label": null,
+              "used_permille": 420,
+              "remaining_text": "58%",
+              "resets_at": "2026-10-29T12:00:00Z",
+              "duration_mins": 10080
+            }
+          ],
+          "refreshing": false,
+          "banked_resets": 2,
+          "source": "api"
+        }
+      ]
+    },
+    {
+      "provider": "claude",
+      "enabled": true,
+      "refreshing": false,
+      "logins": [
+        {
+          "id": "claude-default",
+          "label": "Claude",
+          "default_login": false,
+          "state": "unknown",
+          "reason": "not_checked",
+          "updated_at": null,
+          "stale": false,
+          "windows": [],
+          "refreshing": false,
+          "banked_resets": null,
+          "source": null
+        }
+      ]
+    }
+  ],
+  "truncated": false
+}

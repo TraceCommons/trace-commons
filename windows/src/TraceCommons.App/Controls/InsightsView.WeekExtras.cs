@@ -15,18 +15,20 @@ namespace TraceCommons.App.Controls;
 
 /// <summary>
 /// Feed T's parts beyond the week itself, as the Mac draws them (W20 round 2):
-/// on Overview the weekly summary card, the spend and top-model tiles, the
-/// NEAR AI usage card, spend by model and trends
-/// (<c>InsightsOverviewTab</c>, InsightsOverviewTab.swift:61-100); on
-/// Breakdown the goals set with <c>/goal</c> (InsightsPatternsTab.swift:56-60,
-/// :97-128). Each is drawn only behind the Mac's gate, every word is the
-/// core's, and an unknown figure is the dash. Under the saved feed none of it
-/// is drawn. Built in code, into the two slots the XAML leaves for it.
+/// on Overview the weekly summary card, the spend, top-model and credit
+/// tiles, the usage cards (InsightsView.UsageCards.cs), spend by model and
+/// trends (<c>InsightsOverviewTab</c>, InsightsOverviewTab.swift:61-100); on
+/// Breakdown the drill-down and the goals set with <c>/goal</c>
+/// (InsightsPatternsTab.swift:49-60, :97-128). Each is drawn only behind the
+/// Mac's gate, every word is the core's, and an unknown figure is the dash.
+/// Under the saved feed only the credit tile and the login cards are drawn:
+/// neither belongs to the week. Built in code, into the slots the XAML leaves.
 /// </summary>
 public sealed partial class InsightsView
 {
     private InsightsCounterWeek? _drawnWeek;
     private InsightsRecap? _drawnRecap;
+    private (string Value, string Detail)? _drawnTile;
     private bool _extrasWired;
 
     private Func<string, string?> Words => key => ViewModel[key] is { Length: > 0 } word ? word : null;
@@ -38,13 +40,14 @@ public sealed partial class InsightsView
         _extrasWired = true;
         ViewModel.PropertyChanged += (_, _) =>
         {
-            if (!ReferenceEquals(ViewModel.CounterWeek, _drawnWeek)) DrawWeekExtras();
+            if (!ReferenceEquals(ViewModel.CounterWeek, _drawnWeek) || ViewModel.CreditTile != _drawnTile) DrawWeekExtras();
         };
         ViewModel.Comparisons.Changed += () => DispatcherQueue.TryEnqueue(() =>
         {
             if (!ReferenceEquals(ViewModel.Comparisons.Recap, _drawnRecap)) DrawWeekExtras();
         });
         ActualThemeChanged += (_, _) => DrawWeekExtras();
+        WireUsageCards();
         DrawWeekExtras();
     }
 
@@ -54,6 +57,7 @@ public sealed partial class InsightsView
         InsightsCounterWeek? week = ViewModel.CounterFeed ? ViewModel.CounterWeek : null;
         _drawnWeek = ViewModel.CounterWeek;
         _drawnRecap = ViewModel.Comparisons.Recap;
+        _drawnTile = ViewModel.CreditTile;
         Func<string, string?> copy = Words;
 
         OverviewExtras.Children.Clear();
@@ -62,7 +66,8 @@ public sealed partial class InsightsView
             OverviewExtras.Children.Add(RecapCard(recap, copy));
         }
 
-        IReadOnlyList<InsightsWorkWords.Tile> tiles = InsightsWorkWords.Tiles(week?.Work, copy);
+        // Home's credit tile follows the week's own under either feed (InsightsWorkViews.swift:188-190).
+        IReadOnlyList<InsightsWorkWords.Tile> tiles = InsightsWorkWords.Tiles(week?.Work, ViewModel.CreditTile, copy);
         if (tiles.Count > 0)
         {
             // One row, the tiles sharing it, so neither runs off a narrow pane.
@@ -78,11 +83,9 @@ public sealed partial class InsightsView
             OverviewExtras.Children.Add(row);
         }
 
-        if (week?.NearAiCredit is { } credit && InsightsUsageWords.ShowsNearAi(credit))
-        {
-            OverviewExtras.Children.Add(Heading(Text(copy, "analytics_usage_title"), 18));
-            OverviewExtras.Children.Add(NearAiCard(credit, copy));
-        }
+        // The login cards follow the account, not the week; their bars and the NEAR AI card need feed T.
+        DrawUsageCards(week, copy);
+        OverviewExtras.Children.Add(_usageSection);
 
         if (week?.Work is { } work)
         {
@@ -90,7 +93,12 @@ public sealed partial class InsightsView
             if (InsightsWorkWords.ShowsTrends(work, week.ChangeVsLastWeek, copy)) OverviewExtras.Children.Add(TrendsCard(work, week.ChangeVsLastWeek, copy));
         }
 
-        OverviewExtras.Visibility = OverviewExtras.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateExtrasVisibility();
+
+        // Breakdown leads with the drill-down, by project or by model (InsightsPatternsTab.swift:43-49).
+        PatternsDetails.Children.Clear();
+        if (week is not null) PatternsDetails.Children.Add(DetailsTable(week, copy));
+        PatternsDetails.Visibility = PatternsDetails.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         PatternsGoals.Children.Clear();
         if (InsightsGoalsWords.Shows(week)) PatternsGoals.Children.Add(GoalsCard(week!.Goals!, copy));
@@ -150,29 +158,7 @@ public sealed partial class InsightsView
         return card;
     }
 
-    // ---- NEAR AI (InsightsUsageCards.swift:125-145) -------------------------
-
-    private static UIElement NearAiCard(InsightsNearAiCredit credit, Func<string, string?> copy)
-    {
-        var panel = new StackPanel { Spacing = 8 };
-        string name = Text(copy, "analytics_usage_near_ai");
-        TextBlock title = Heading(name, 15);
-        panel.Children.Add(title);
-        // This shell has no "i": what the figures cover is a note under the title.
-        panel.Children.Add(Caption(Text(copy, "analytics_credit_scope_near_ai")));
-        panel.Children.Add(UsageRow(Text(copy, "analytics_this_week"), InsightsCreditWords.SpendAndTokens(credit.Week, copy)));
-        panel.Children.Add(UsageRow(Text(copy, "analytics_today"), InsightsCreditWords.SpendAndTokens(credit.Today, copy)));
-        panel.Children.Add(UsageRow(Text(copy, "analytics_usage_last_31_days"), InsightsCreditWords.SpendAndTokens(credit.Last31Days, copy)));
-        IReadOnlyList<InsightsUsageWords.Day> days = InsightsUsageWords.Days(credit, copy);
-        // No bars from a daemon that sends no days, rather than an empty plot.
-        if (days.Count > 0) panel.Children.Add(UsageBars(days, Text(copy, "analytics_usage_last_7_days")));
-        Border card = Card(panel);
-        card.MaxWidth = 560;
-        card.HorizontalAlignment = HorizontalAlignment.Left;
-        return card;
-    }
-
-    private static UIElement UsageRow(string label, string value)
+    private static UIElement UsageRow(string label, string value, bool warns = false)
     {
         var grid = new Grid { ColumnSpacing = 12 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -180,6 +166,7 @@ public sealed partial class InsightsView
         grid.Children.Add(Caption(label));
         TextBlock figure = Body(value);
         figure.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+        if (warns) figure.Foreground = ThemeBrushes.Get("TcStatusOutsideTextBrush");
         Grid.SetColumn(figure, 1);
         grid.Children.Add(figure);
         AutomationProperties.SetName(grid, label + ", " + value);
