@@ -37,7 +37,8 @@ description: >-
 # That still holds for a mismatch. But a short Ubuntu archive outage -- a
 # connection reset, a timeout, a 5xx from a mirror -- fails a whole job
 # that a second attempt would pass, so the owner chose to allow a few
-# retries. The action writes `Acquire::Retries "3"` to
+# retries. The ubuntu runner image already sets `Acquire::Retries "1"`
+# itself; this raises it. The action writes `Acquire::Retries "3"` to
 # /etc/apt/apt.conf.d, so it covers this `apt-get update` and every
 # `apt-get install` later in the same job. Three retries cost seconds on a
 # transient failure; a persistent one still fails, loudly, as below.
@@ -114,7 +115,13 @@ runs:
         fi
         # Applies to every apt call for the rest of the job, the installs
         # after this action included. See "Retries" above.
-        echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/80-acquire-retries >/dev/null
+        # apt reads apt.conf.d in name order and the last setting wins; the
+        # runner image sets `Acquire::Retries "1"` in a file of its own, so
+        # this name sorts after anything an image is likely to ship, and the
+        # read-back below catches one that sorts later still.
+        echo "apt.conf.d files that set Acquire::Retries before this step:"
+        grep -l 'Acquire::Retries' /etc/apt/apt.conf.d/* 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+        echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/zz-trace-commons-acquire-retries >/dev/null
         retries=""
         eval "$(apt-config shell retries Acquire::Retries)"
         echo "apt: Acquire::Retries=$retries"
