@@ -329,7 +329,7 @@ jobs:
         run: ./scripts/ci/verify-macos-entitlements.sh macos/.build/Near.ai.app
 
       - name: Verify the Gateway 1.0.11+ feature restrictions in the signed app
-        if: contains(fromJSON('["1.0.11", "1.0.12", "1.0.13", "1.0.14"]'), needs.version.outputs.short)
+        if: contains(fromJSON('["1.0.11", "1.0.12", "1.0.13", "1.0.14", "1.0.15"]'), needs.version.outputs.short)
         run: |
           set -euo pipefail
           config_dir="$(mktemp -d)"
