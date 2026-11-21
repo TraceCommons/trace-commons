@@ -379,6 +379,11 @@ public sealed partial class MainWindow
     /// </summary>
     private void Celebrate()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         CreditCelebrationPlan plan = CreditCelebration.Plan(
             _prefs.CreditIconAnimation,
             reduceMotion: !SystemSettingWatch.AnimationsEnabled,
@@ -411,7 +416,7 @@ public sealed partial class MainWindow
         // (GeneralSection.swift:41-43; MenuBarGlassPanel.swift:692-699).
         double? t = _prefs.CreditIconAnimation ? _creditPlayer.Step() : null;
         _tray.ShowCreditFrame(t);
-        _taskbarCredit?.ShowFrame(AppWindow.IsVisible ? t : null, still: !SystemSettingWatch.AnimationsEnabled);
+        _taskbarCredit?.ShowFrame(!_closed && AppWindow.IsVisible ? t : null, still: !SystemSettingWatch.AnimationsEnabled);
         if (t is null)
         {
             _creditTimer?.Stop();

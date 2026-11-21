@@ -102,7 +102,7 @@ public sealed partial class MainWindow
     private void ReviewSentTraining()
     {
         SentTraining.Review();
-        if (Content?.XamlRoot is XamlRoot root)
+        if (OpenRoot is XamlRoot root)
         {
             _ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);
         }
@@ -153,7 +153,12 @@ public sealed partial class MainWindow
             return;
         }
 
-        if (!AppWindow.IsVisible || Content?.XamlRoot is not XamlRoot root)
+        if (_closed)
+        {
+            return;
+        }
+
+        if (!AppWindow.IsVisible || OpenRoot is not XamlRoot root)
         {
             if (!_offerWaitsForWindow)
             {
@@ -169,7 +174,7 @@ public sealed partial class MainWindow
 
     private void OnActivatedWithOffer(object sender, WindowActivatedEventArgs args)
     {
-        if (args.WindowActivationState == WindowActivationState.Deactivated || !AppWindow.IsVisible)
+        if (_closed || args.WindowActivationState == WindowActivationState.Deactivated || !AppWindow.IsVisible)
         {
             return;
         }

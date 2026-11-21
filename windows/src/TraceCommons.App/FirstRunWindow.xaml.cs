@@ -89,6 +89,12 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private double? _scanEndedAt;
     private readonly OnboardingCopy? _onboardingCopy = OnboardingCopy.Load();
     private bool _closed;
+
+    // Layout passes, frames and queued work can land after the close, where
+    // reading Content throws and ends the process.
+    private readonly WindowRootLatch<XamlRoot> _rootLatch;
+
+    private XamlRoot? OpenRoot => _rootLatch.WhileOpen();
     private bool _contentStale;
     private string? _shownKey;
 
@@ -115,6 +121,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     internal FirstRunWindow(DaemonHost host, OnboardingState onboarding, FirstRunStep? previewAt)
     {
         InitializeComponent();
+        _rootLatch = new WindowRootLatch<XamlRoot>(() => Content?.XamlRoot);
         WindowClocks.Watch(this);
         _host = host;
         _onboarding = onboarding;
@@ -197,6 +204,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             // A sign-in still waiting on the browser ends with the window:
             // its poll would otherwise run on and draw into a closed window.
             _closed = true;
+            _rootLatch.MarkClosed();
             _ = _runner.CancelSignIn();
             _gate.SetClosed();
             Stop();
@@ -238,7 +246,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     /// <summary>The step thread's buttons take the pointer inside the drag strip.</summary>
     private void UpdateDragRegions()
     {
-        if (Content?.XamlRoot is null)
+        if (_closed || OpenRoot is null)
         {
             return;
         }
@@ -278,6 +286,11 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     /// </summary>
     private void SizeToCanvas()
     {
+        if (_closed)
+        {
+            return;
+        }
+
         double scale = Scale();
         if (Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
         {
@@ -488,7 +501,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private void OnFrame(object? sender, object e)
     {
         // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
-        if (_framePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        if (_framePace.Skips(OpenRoot, GlassClock.Now))
         {
             return;
         }
@@ -544,6 +557,12 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        if (_closed)
+        {
+            // The close disposed the painter; this draw was already queued.
+            return;
+        }
+
         long begun = LookFrames.Begin();
         double now = Now;
         Budget(sender, now);
@@ -775,7 +794,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     /// <summary>Whether keyboard focus is inside <paramref name="root"/>.</summary>
     private bool FocusWithin(DependencyObject root)
     {
-        if (Content?.XamlRoot is not { } xamlRoot || FocusManager.GetFocusedElement(xamlRoot) is not DependencyObject focused)
+        if (OpenRoot is not { } xamlRoot || FocusManager.GetFocusedElement(xamlRoot) is not DependencyObject focused)
         {
             return false;
         }

@@ -13,14 +13,18 @@ public sealed class WindowRootLatch<TRoot> where TRoot : class
 {
     private readonly Func<TRoot?> _read;
     private TRoot? _root;
+    private bool _closed;
 
     public WindowRootLatch(Func<TRoot?> read) => _read = read;
 
     /// <summary>The root as last read. Never touches the window.</summary>
     public TRoot? Known => _root;
 
-    /// <summary>Reads the root if it is not known yet. Only for a window that is open.</summary>
-    public TRoot? WhileOpen() => _root ??= _read();
+    /// <summary>Reads the root if it is not known yet, unless the window has closed.</summary>
+    public TRoot? WhileOpen() => _root ??= _closed ? null : _read();
+
+    /// <summary>The window has closed: from here on only what is known is answered.</summary>
+    public void MarkClosed() => _closed = true;
 
     /// <summary>The root for an activation change: read when activating, never when deactivating.</summary>
     public TRoot? ForActivation(bool activating) => activating ? WhileOpen() : Known;

@@ -134,7 +134,7 @@ public sealed class FirstRunTrainingOfferTests
         Assert.Contains("_ = ShowSentTrainingSheetAsync(root, SentTracesTrainingSite.Monitor);", training);
         Assert.Contains("if (_onboarding is null)", training);
         // A window hidden to the tray keeps the offer until it is activated.
-        Assert.Contains("if (!AppWindow.IsVisible || Content?.XamlRoot is not XamlRoot root)", training);
+        Assert.Contains("if (!AppWindow.IsVisible || OpenRoot is not XamlRoot root)", training);
         Assert.Contains("Activated += OnActivatedWithOffer;", training);
     }
 }

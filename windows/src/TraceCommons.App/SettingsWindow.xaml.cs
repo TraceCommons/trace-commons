@@ -20,10 +20,15 @@ public sealed partial class SettingsWindow : Window
     public const double DesignHeight = 640;
 
     private bool _placed;
+    private bool _windowClosed;
+
+    /// <summary>The window's root while it is open, read from its own element.</summary>
+    internal XamlRoot? OpenRoot => _windowClosed ? null : SettingsRoot.XamlRoot;
 
     public SettingsWindow(SettingsView view)
     {
         InitializeComponent();
+        Closed += (_, _) => _windowClosed = true;
         WindowClocks.Watch(this);
         Title = WindowTitles.Settings;
         SettingsHost.Content = view;
@@ -72,7 +77,7 @@ public sealed partial class SettingsWindow : Window
 
         // Focus the first control, not the bare input site: a nameless
         // first stop that Escape never reached (W25 audit, box az9).
-        ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => AppWindow.IsVisible);
+        ToolWindows.FocusFirst(SettingsRoot, FocusState.Programmatic, () => !_windowClosed && AppWindow.IsVisible);
     }
 }
 

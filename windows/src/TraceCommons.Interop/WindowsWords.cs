@@ -26,6 +26,9 @@ public static class WindowsWords
     /// <summary>The Look inside window's title word, apart from the button's (copy guide rule 4).</summary>
     public static string PreviewWindowTitle => Word("preview_window_title");
 
+    /// <summary>Insights' breakdown note: a PC where the Mac's says this Mac (owner, 2026-11-21).</summary>
+    public static string InsightsCreditScope => Word("insights_credit_scope");
+
     private static string Word(string key) => Words.Value.TryGetValue(key, out string? word) ? word : string.Empty;
 
     /// <summary>The table's string fields; nothing for anything but a JSON object.</summary>
