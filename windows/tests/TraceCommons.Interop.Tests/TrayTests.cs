@@ -541,7 +541,6 @@ public class AutostartCommandTests
         // rules 2026-11-02 and 2026-11-20).
         Assert.Equal("Near AI Gateway", AutostartCommand.ValueName);
         Assert.Equal(Shell.MonitorWords.AppName, AutostartCommand.ValueName);
-        Assert.Equal(new[] { "Trace Commons" }, AutostartCommand.FormerValueNames);
     }
 
     [Fact]
