@@ -36,6 +36,20 @@ public sealed record MapSnapshot(
     public CommonsGate Gate => new(Ready, Status, Destinations);
 
     public MapContributions Contributions => MapContributions.From(History);
+
+    /// <summary>
+    /// The daemon's replies this snapshot was read from, verbatim; null when
+    /// it was made some other way.
+    /// </summary>
+    public string? Replies { get; init; }
+
+    /// <summary>
+    /// Whether two reads got the same replies, so nothing drawn from them can
+    /// differ: the map keeps its scene and the tree its rows. Never true for
+    /// a snapshot without its replies.
+    /// </summary>
+    public static bool SameRead(MapSnapshot? a, MapSnapshot? b) =>
+        a?.Replies is { } x && b?.Replies is { } y && string.Equals(x, y, StringComparison.Ordinal);
 }
 
 /// <summary>Reads a <see cref="MapSnapshot"/> over <c>tc_call</c>.</summary>
@@ -94,6 +108,13 @@ public static class MapFeed
         Task<string?> harnesses = Result(DaemonProtocol.Methods.HarnessList);
         await Task.WhenAll(pending, projects, settings, status, destinations, history, harnesses).ConfigureAwait(false);
         string? harnessJson = harnesses.Result;
+        var replies = new System.Text.StringBuilder();
+        foreach (Task<string?> reply in new[] { pending, projects, settings, status, destinations, history, harnesses })
+        {
+            // Each reply's length first (-1 for none), so no two sets of replies join alike.
+            replies.Append(reply.Result?.Length ?? -1).Append(':').Append(reply.Result).Append('\n');
+        }
+
         return new MapSnapshot(
             MapReads.Pending(pending.Result),
             MapReads.Projects(projects.Result),
@@ -101,7 +122,10 @@ public static class MapFeed
             MapReads.Status(status.Result),
             MapReads.Destinations(destinations.Result),
             MapReads.History(history.Result),
-            harnessJson is null ? null : HarnessSurface.ParseListing(harnessJson).Harnesses);
+            harnessJson is null ? null : HarnessSurface.ParseListing(harnessJson).Harnesses)
+        {
+            Replies = replies.ToString(),
+        };
     }
 
     /// <summary>
