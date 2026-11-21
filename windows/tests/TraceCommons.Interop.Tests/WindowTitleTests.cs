@@ -46,7 +46,9 @@ public class WindowTitleTests
         Assert.Equal("Look inside - Near AI Gateway", WindowTitles.Preview);
         Assert.Equal("About Near AI Gateway", WindowTitles.About);
         Assert.Equal(MonitorWords.SettingsTitle + " - " + MonitorWords.AppName, WindowTitles.Settings);
-        Assert.Equal(MonitorWords.LookInside + " - " + MonitorWords.AppName, WindowTitles.Preview);
+        // The window's own title key, not the Look inside button's
+        // (docs/ui-copy-guide.md rule 4: titles and buttons get separate keys).
+        Assert.Equal(WindowsWords.PreviewWindowTitle + " - " + MonitorWords.AppName, WindowTitles.Preview);
     }
 
     [Fact]

@@ -113,12 +113,6 @@ public static class MonitorWords
     /// </summary>
     public static string ProjectModeFailed => WordAt(ShellWordsJson.Value, "settings", "project_mode_failed");
 
-    /// <summary>
-    /// The review's Look inside word (<c>session_review.look_inside</c>):
-    /// the inspector's button and the preview window's own word.
-    /// </summary>
-    public static string LookInside => WordAt(TracesWordsJson.Value, "session_review", "look_inside");
-
     private static string QueueWord(string key) => WordAt(ShellWordsJson.Value, "queue", key);
 
     private static string TracesWord(string key) => WordAt(TracesWordsJson.Value, null, key);

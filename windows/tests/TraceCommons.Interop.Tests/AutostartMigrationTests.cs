@@ -124,6 +124,40 @@ public class AutostartMigrationTests
         Assert.Equal(other, e.Run[AutostartCommand.ValueName]);
     }
 
+    /// <summary>
+    /// The contributor's own toggle claims an old-name entry wherever it
+    /// points, as writing one name always did: an entry left by a moved or
+    /// older copy would otherwise survive every toggle and keep starting it.
+    /// </summary>
+    [Fact]
+    public void TheTogglesClaimAnOldEntryWhereverItPoints()
+    {
+        var e = new Entries();
+        string stale = AutostartCommand.For(@"D:\Moved\TraceCommons.exe");
+        e.Run["Trace Commons"] = stale;
+        e.Approved["Trace Commons"] = Disabled;
+
+        Assert.True(AutostartCommand.Migrate(e, Exe, claimAnyPath: true));
+
+        Assert.False(e.Run.ContainsKey("Trace Commons"));
+        Assert.Equal(stale, e.Run[AutostartCommand.ValueName]);
+        Assert.Equal(Disabled, e.Approved[AutostartCommand.ValueName]);
+    }
+
+    [Fact]
+    public void TheTogglesRemoveAnOldEntryBesideANewOneWhereverEitherPoints()
+    {
+        var e = new Entries();
+        string other = AutostartCommand.For(@"D:\Other\TraceCommons.exe");
+        e.Run["Trace Commons"] = AutostartCommand.For(@"D:\Moved\TraceCommons.exe");
+        e.Run[AutostartCommand.ValueName] = other;
+
+        Assert.True(AutostartCommand.Migrate(e, Exe, claimAnyPath: true));
+
+        Assert.Equal(other, e.Run[AutostartCommand.ValueName]);
+        Assert.Single(e.Run);
+    }
+
     [Fact]
     public void NothingToMoveChangesNothing()
     {

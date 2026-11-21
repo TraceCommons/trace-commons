@@ -168,9 +168,10 @@ public static class RunAtLogin
 
         try
         {
-            // An entry under a former name first, so turning off removes it
-            // too and turning on does not write a second one.
-            Migrate(executable);
+            // An entry under a former name first, wherever it points, so
+            // turning off removes it too and turning on does not write a
+            // second one.
+            Migrate(executable, claimAnyPath: true);
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(
                 AutostartCommand.RunKeyPath);
 
@@ -203,7 +204,7 @@ public static class RunAtLogin
     /// Moves this executable's entry off a name it was written under before
     /// (<see cref="AutostartCommand.FormerValueNames"/>) to the app's name.
     /// </summary>
-    private static void Migrate(string executable)
+    private static void Migrate(string executable, bool claimAnyPath = false)
     {
         using RegistryKey? run = Registry.CurrentUser.OpenSubKey(AutostartCommand.RunKeyPath, writable: true);
         if (run is null)
@@ -212,7 +213,7 @@ public static class RunAtLogin
         }
 
         using var entries = new RegistryEntries(run);
-        if (AutostartCommand.Migrate(entries, executable))
+        if (AutostartCommand.Migrate(entries, executable, claimAnyPath))
         {
             Debug.WriteLine("tracecommons run-at-login entry moved to the app's name");
         }

@@ -33,10 +33,11 @@ public static class AutostartCommand
     /// <c>brand.rs</c> (<c>tc_app_name</c>).
     /// </summary>
     /// <remarks>
-    /// Task Manager's Startup apps page and Settings -> Apps -> Startup show
-    /// the executable's FileDescription and CompanyName, not this name
-    /// (measured on Windows 11 24H2, 2026-11-21); Autoruns and the registry
-    /// show this one. Someone auditing what starts with their machine reads
+    /// Neither Startup list shows this name (Windows 11 24H2, 2026-11-21):
+    /// Settings -> Apps -> Startup shows the executable's FileDescription and
+    /// CompanyName, and Task Manager's Startup apps page its file name, as
+    /// it does for Windows' own Run entries. Autoruns and the registry show
+    /// this one. Someone auditing what starts with their machine reads
     /// anything they cannot recognise as malware -- correctly -- so it is the
     /// app's name, as every other surface Windows shows (owner rule
     /// 2026-11-20).
@@ -96,12 +97,16 @@ public static class AutostartCommand
     /// app touches that key, and it never changes what it says.
     /// </para>
     /// <para>
-    /// Another copy's entry is left alone, as <c>RunAtLogin.Refresh</c>
-    /// leaves it, and so is ours when the new name already belongs to
-    /// another copy: moving it then would overwrite that copy's entry.
+    /// At launch another copy's entry is left alone, as
+    /// <c>RunAtLogin.Refresh</c> leaves it, and so is ours when the new name
+    /// already belongs to another copy: moving it then would overwrite that
+    /// copy's entry. The contributor's own toggle passes
+    /// <paramref name="claimAnyPath"/>, as writing the one name always
+    /// did: an entry left by a moved or older copy would otherwise survive
+    /// every toggle and keep starting it.
     /// </para>
     /// </remarks>
-    public static bool Migrate(IStartupEntries entries, string executablePath)
+    public static bool Migrate(IStartupEntries entries, string executablePath, bool claimAnyPath = false)
     {
         ArgumentNullException.ThrowIfNull(entries);
         ArgumentNullException.ThrowIfNull(executablePath);
@@ -110,20 +115,20 @@ public static class AutostartCommand
         foreach (string former in FormerValueNames)
         {
             string? stored = entries.Command(former);
-            if (!PointsAt(stored, executablePath))
+            if (stored is null || (!claimAnyPath && !PointsAt(stored, executablePath)))
             {
                 continue;
             }
 
             string? current = entries.Command(ValueName);
-            if (current is not null && !PointsAt(current, executablePath))
+            if (!claimAnyPath && current is not null && !PointsAt(current, executablePath))
             {
                 continue;
             }
 
             if (current is null)
             {
-                entries.SetCommand(ValueName, stored!);
+                entries.SetCommand(ValueName, stored);
                 if (entries.Approval(former) is byte[] approval && entries.Approval(ValueName) is null)
                 {
                     entries.SetApproval(ValueName, approval);

@@ -7,8 +7,9 @@ namespace TraceCommons.Interop;
 /// <summary>
 /// The Windows app's own words where it cannot say what the Mac says
 /// (<c>preview_copy::windows_words_copy</c>): Settings' credit-arrival switch
-/// names the taskbar and tray, not the Dock and menu bar. Owner-approved
-/// 2026-11-19. Empty when the core could not produce them, so the card is
+/// names the taskbar and tray, not the Dock and menu bar (owner-approved
+/// 2026-11-19), and the Look inside window has a title, where the Mac's is a
+/// sheet. Empty when the core could not produce them, so the card is
 /// left out rather than showing words typed here.
 /// </summary>
 public static class WindowsWords
@@ -21,6 +22,9 @@ public static class WindowsWords
 
     /// <summary>The line under that switch.</summary>
     public static string CreditIconAnimationCaption => Word("credit_icon_animation_caption");
+
+    /// <summary>The Look inside window's title word, apart from the button's (copy guide rule 4).</summary>
+    public static string PreviewWindowTitle => Word("preview_window_title");
 
     private static string Word(string key) => Words.Value.TryGetValue(key, out string? word) ? word : string.Empty;
 

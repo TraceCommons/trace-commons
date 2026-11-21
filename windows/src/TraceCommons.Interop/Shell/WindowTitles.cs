@@ -50,10 +50,11 @@ public static class WindowTitles
     public static string Settings => Secondary(MonitorWords.SettingsTitle);
 
     /// <summary>
-    /// The Look inside window: the core's Look inside word
-    /// (<c>session_review.look_inside</c>), then the app's name.
+    /// The Look inside window: its own title word
+    /// (<c>windows_words_copy().preview_window_title</c>, a key apart from
+    /// the button's), then the app's name.
     /// </summary>
-    public static string Preview => Secondary(MonitorWords.LookInside);
+    public static string Preview => Secondary(WindowsWords.PreviewWindowTitle);
 
     /// <summary>The edge rail's accessible name (<c>edge_rail.rail_label</c>); never in a switcher.</summary>
     public static string EdgeRail => MonitorShellCopy.Section("edge_rail", "rail_label");

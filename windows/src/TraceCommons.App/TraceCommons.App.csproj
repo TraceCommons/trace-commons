@@ -7,11 +7,11 @@
     <RootNamespace>TraceCommons.App</RootNamespace>
     <AssemblyName>TraceCommons</AssemblyName>
     <!-- The exe's version resource: FileDescription (from AssemblyTitle), which
-         Task Manager and Startup apps show, and ProductName. brand.rs APP_NAME,
+         Settings > Apps > Startup shows, and ProductName. brand.rs APP_NAME,
          pinned by ManifestBrandTests; the assembly name stays (W10-D1 (a)). -->
     <AssemblyTitle>Near AI Gateway</AssemblyTitle>
     <Product>Near AI Gateway</Product>
-    <!-- CompanyName, the publisher Task Manager and Startup apps show beside
+    <!-- CompanyName, the publisher Settings > Apps > Startup shows beside
          the name; unset, the SDK writes the assembly name ("TraceCommons").
          The manifest's PublisherDisplayName, pinned by ManifestBrandTests. -->
     <Company>Iqlusion Inc</Company>
