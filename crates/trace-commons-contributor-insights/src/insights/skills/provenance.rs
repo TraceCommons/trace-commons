@@ -205,6 +205,8 @@ pub(super) fn git_source(path: &Path, bytes: &[u8], budget: &mut GitBudget) -> O
 /// times the worst loaded call seen. A hung git still costs at most this
 /// long, once per scan: `GitBudget` stops calling git after the first
 /// timeout, and never lets a call outlive the scan's own deadline.
+// Under test only the unix stand-in-git tests read it directly.
+#[cfg_attr(all(test, not(unix)), allow(dead_code))]
 const SHIPPED_GIT_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The bound `git_source` uses. Tests wait longer: what they check is the
