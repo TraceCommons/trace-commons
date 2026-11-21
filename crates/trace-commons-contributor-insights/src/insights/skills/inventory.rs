@@ -131,6 +131,7 @@ pub fn scan_inventory_with_policy(
     let plugin_states = claude_plugin_roots(&claude_config, &mut roots, &mut inventory, &policy);
     let mut budget = MAX_DIRECTORY_ENTRIES;
     let deadline = Instant::now() + Duration::from_secs(10);
+    let mut git_budget = provenance::GitBudget::new(deadline);
     // Cache metadata gets its own bounded budget and a shorter deadline so a
     // large cache cannot consume the capacity reserved for actual skill roots.
     let mut plugin_budget = MAX_DIRECTORY_ENTRIES;
@@ -165,6 +166,7 @@ pub fn scan_inventory_with_policy(
             &mut inventory,
             &mut budget,
             deadline,
+            &mut git_budget,
             &policy,
         );
         if root.agent == "codex" {
@@ -179,6 +181,7 @@ pub fn scan_inventory_with_policy(
                 &mut inventory,
                 &mut budget,
                 deadline,
+                &mut git_budget,
                 &policy,
             );
         }
@@ -205,6 +208,7 @@ fn scan_root(
     inventory: &mut Inventory,
     budget: &mut usize,
     deadline: Instant,
+    git_budget: &mut provenance::GitBudget,
     policy: &ReadPolicy,
 ) {
     let mut status = ScanStatus::Complete;
@@ -299,7 +303,7 @@ fn scan_root(
         }
         let mut source = sources.get(&canonical).cloned();
         if source.is_none() && !policy.has_exclusions() {
-            source = provenance::git_source(&canonical, &bytes);
+            source = provenance::git_source(&canonical, &bytes, git_budget);
         }
         if source.is_none() && root.scope == "plugin_cache" {
             let (plugin_source, partial_metadata) = provenance::plugin_source(&document, policy);
