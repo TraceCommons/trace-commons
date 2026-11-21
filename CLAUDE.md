@@ -357,7 +357,7 @@ names exactly: renaming a required job drops it from the gate.
 ### Client shells: `clients.yml`
 
 `.github/workflows/clients.yml` holds the client jobs: `macOS app tests`,
-`macOS 15 fallback tests`, `windows contributor crates (tests, named-pipe
+`macOS contributor crates and Tauri desktop`, `macOS 15 fallback tests`, `windows contributor crates (tests, named-pipe
 ACL, update conformance)`, `install.ps1 against the real release`, `windows contributor app`, `linux-shell desktop entry and metainfo`,
 `linux-shell desktop integration (weston + portal)`. It runs on every push to
 `main`, on `workflow_dispatch`, and on a pull request only when it touches a
@@ -369,6 +369,11 @@ client regression surfaces on `main` after the merge.
   job that runs the whole Swift suite (`macOS 15 fallback tests` runs a
   filtered subset). Needs `cargo build -p trace-commons-contributor-ffi`
   first, because the Swift package links that dylib.
+- `macOS contributor crates and Tauri desktop` — the Tauri workspace's
+  clippy and tests, the contributor, sources, Insights and platform lib
+  suites, and the native-auth contracts, on `macos-26`. Split out of
+  `macOS app tests` on 2026-11-20: together they took about 44 of that
+  job's 45 minutes and it was cancelled at its limit.
 - `windows contributor crates (tests, named-pipe ACL, update conformance)` —
   one job, so one compile serves the crate tests, the pipe-ACL check and the
   update conformance; each keeps its own named step. Its named-pipe ACL step

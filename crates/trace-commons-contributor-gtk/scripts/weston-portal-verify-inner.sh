@@ -52,12 +52,61 @@ insights_frame() {
 # deleted -- a gate built on the exit code alone stays green while testing
 # nothing. Capture the output and require an explicit "N passed" with N >= 1
 # on top of a zero exit code.
+#
+# Each run is also bounded. A mounted test that never returned used to hold
+# the job until its 40-minute limit and was then cancelled with no test named
+# (its output is captured, so nothing of it was printed). Past
+# TEST_LIMIT_SECONDS the run prints what it wrote, the stack of every thread
+# of every process under it, and is killed and failed by name. The slowest
+# run on a passing job takes about 2 minutes, the first one, which builds the
+# test binary; the rest take seconds.
+TEST_LIMIT_SECONDS="${TEST_LIMIT_SECONDS:-300}"
+
+# The pids under $1, deepest first.
+descendants() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    descendants "$child"
+    echo "$child"
+  done
+}
+
 run_ignored_test() {
   local description="$1"
   shift
-  local output
-  output=$("$@" 2>&1)
+  local log
+  log=$(mktemp)
+  "$@" >"$log" 2>&1 &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$TEST_LIMIT_SECONDS" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    cat "$log"
+    echo "::error::$description: still running after ${TEST_LIMIT_SECONDS}s; the stacks of its processes follow"
+    local tree child
+    tree=$(descendants "$pid")
+    for child in $tree; do
+      echo "--- pid $child: $(tr '\0' ' ' 2>/dev/null < "/proc/$child/cmdline" | cut -c1-200)"
+      if command -v gdb >/dev/null; then
+        sudo -n gdb -p "$child" -batch -ex 'thread apply all bt' 2>&1 | grep -E '^(Thread|#)' | head -200
+      fi
+    done
+    for child in $tree "$pid"; do
+      kill -9 "$child" 2>/dev/null || true
+    done
+    wait "$pid" 2>/dev/null
+    rm -f "$log"
+    fail "$description (still running after ${TEST_LIMIT_SECONDS}s; killed)"
+    return
+  fi
+  wait "$pid"
   local rc=$?
+  local output
+  output=$(cat "$log")
+  rm -f "$log"
   echo "$output"
   if [ "$rc" -ne 0 ]; then
     fail "$description (test exited non-zero)"
