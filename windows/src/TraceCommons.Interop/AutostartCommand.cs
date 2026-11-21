@@ -13,8 +13,8 @@ namespace TraceCommons.Interop;
 /// <para>
 /// The registry half lives in <c>TraceCommons.App.RunAtLogin</c>. What is
 /// here is the part that is wrong-able without any Windows API involved: the
-/// value name, which is what the entry is called in Task Manager's Startup
-/// tab and in Settings -> Apps -> Startup, and the quoting of the executable
+/// value name, which is the entry's identity and what Autoruns and the
+/// registry call it, and the quoting of the executable
 /// path, which decides whether the app starts at all from a folder whose name
 /// contains a space -- <c>C:\Program Files</c>, or any user whose display
 /// name has one.
@@ -33,11 +33,13 @@ public static class AutostartCommand
     /// <c>brand.rs</c> (<c>tc_app_name</c>).
     /// </summary>
     /// <remarks>
-    /// The product name rather than the executable's, because Windows shows
-    /// a startup entry by name to someone auditing what starts with their
-    /// machine, and anything there that they cannot recognise reads as
-    /// malware -- correctly. It is the name every other surface Windows
-    /// shows uses (owner rule 2026-11-20).
+    /// Task Manager's Startup apps page and Settings -> Apps -> Startup show
+    /// the executable's FileDescription and CompanyName, not this name
+    /// (measured on Windows 11 24H2, 2026-11-21); Autoruns and the registry
+    /// show this one. Someone auditing what starts with their machine reads
+    /// anything they cannot recognise as malware -- correctly -- so it is the
+    /// app's name, as every other surface Windows shows (owner rule
+    /// 2026-11-20).
     /// </remarks>
     public static string ValueName => Shell.MonitorWords.AppName;
 

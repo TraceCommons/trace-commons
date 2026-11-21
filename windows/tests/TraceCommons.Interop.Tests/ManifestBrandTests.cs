@@ -82,4 +82,25 @@ public class ManifestBrandTests
         Assert.Equal(MonitorWords.AppName, Property("AssemblyTitle"));
         Assert.Equal(MonitorWords.AppName, Property("Product"));
     }
+
+    /// <summary>
+    /// The exe's <c>CompanyName</c>, which Task Manager's Startup apps page
+    /// and Settings &gt; Apps &gt; Startup show as the publisher beside the
+    /// name. Unset, the SDK writes the assembly name, and both showed
+    /// "TraceCommons" under "Near AI Gateway" (tc-win-az11, 2026-11-21). It
+    /// is the publisher the packaged build shows, the manifest's
+    /// <c>PublisherDisplayName</c>.
+    /// </summary>
+    [Fact]
+    public void TheExesPublisherIsThePackagesNotTheAssemblyName()
+    {
+        XDocument project = XDocument.Load(
+            Path.Combine(AppContext.BaseDirectory, "manifest-source", "TraceCommons.App.csproj.txt"));
+        string? company = project.Descendants().SingleOrDefault(e => e.Name.LocalName == "Company")?.Value;
+        string? publisher = Manifest().Descendants().Single(e => e.Name.LocalName == "PublisherDisplayName").Value;
+
+        Assert.False(string.IsNullOrWhiteSpace(publisher));
+        Assert.Equal(publisher, company);
+        Assert.NotEqual("TraceCommons", company);
+    }
 }
