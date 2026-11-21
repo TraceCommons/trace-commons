@@ -1,7 +1,8 @@
 name: apt-get update against Ubuntu's own archive only
 description: >-
   Removes every third-party apt source the runner image ships, asserts none
-  remains, then runs `apt-get update` loudly. Use in place of a bare
+  remains, sets apt to retry a failed download 3 times for the rest of the
+  job, then runs `apt-get update` loudly. Use in place of a bare
   `sudo apt-get update` in any job that installs Ubuntu-archive packages.
 #
 # Why. The hosted ubuntu-* images come with vendor repositories configured
@@ -25,12 +26,21 @@ description: >-
 #     cache installs the wrong package versions and passes; that is worse
 #     than red. If `apt-get update` fails AFTER the vendor sources are gone,
 #     Ubuntu's own archive is the problem and the job should fail saying so.
-#   - No `Acquire::Retries`. A hash-sum mismatch is a corrupt index, not a
-#     dropped packet; a retry re-fetches the same bad file.
 #   - No silent `rm -f` of a guessed path. A removal of a path that does not
 #     exist succeeds and leaves the failure in place, which reads as a fix
 #     until it recurs. The step lists what it found, what it removed, and
 #     asserts afterwards that nothing outside Ubuntu's archive remains.
+#
+# Retries (owner decision, 2026-11-20). The first version of this action
+# set no `Acquire::Retries`, reasoning that a hash-sum mismatch is a corrupt
+# index, not a dropped packet, and a retry re-fetches the same bad file.
+# That still holds for a mismatch. But a short Ubuntu archive outage -- a
+# connection reset, a timeout, a 5xx from a mirror -- fails a whole job
+# that a second attempt would pass, so the owner chose to allow a few
+# retries. The action writes `Acquire::Retries "3"` to
+# /etc/apt/apt.conf.d, so it covers this `apt-get update` and every
+# `apt-get install` later in the same job. Three retries cost seconds on a
+# transient failure; a persistent one still fails, loudly, as below.
 inputs:
   sources-dir:
     description: The apt sources.list.d directory. Only overridden by the action's own tests.
@@ -102,8 +112,18 @@ runs:
           echo "dry run: not calling apt-get update"
           exit 0
         fi
+        # Applies to every apt call for the rest of the job, the installs
+        # after this action included. See "Retries" above.
+        echo 'Acquire::Retries "3";' | sudo tee /etc/apt/apt.conf.d/80-acquire-retries >/dev/null
+        retries=""
+        eval "$(apt-config shell retries Acquire::Retries)"
+        echo "apt: Acquire::Retries=$retries"
+        if [ "$retries" != "3" ]; then
+          echo "::error::apt did not take Acquire::Retries=3 (apt-config says '$retries')"
+          exit 1
+        fi
         if ! sudo apt-get update; then
-          echo "::error::apt-get update failed against Ubuntu's own archive." \
+          echo "::error::apt-get update failed against Ubuntu's own archive, with 3 retries per download." \
                "Every third-party source had already been removed ($removed of them)," \
                "so this is archive.ubuntu.com / security.ubuntu.com or the runner's mirror," \
                "not a vendor repository. Do not add '|| true'; a stale index installs the wrong packages and passes."
