@@ -39,7 +39,7 @@ For Windows 10 22H2 or later and Windows 11, 64-bit.
 ## Installing
 
 - **App (recommended):** install the signed package from
-  https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller.
+  https://storage.googleapis.com/tracecommons-flatpak/windows/NearAIGateway.appinstaller.
   Windows keeps it up to date from that address. It installs for your user
   account only and needs no administrator rights.
 - **Portable zip:** `trace-commons-app-windows-x86_64-<version>.zip` on this

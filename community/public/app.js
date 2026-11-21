@@ -635,7 +635,7 @@ function renderInstall() {
         <h2>Windows</h2>
         <p class="lede">The app is Authenticode-signed through Azure Trusted Signing and RFC3161 timestamped.</p>
         <p class="install-label">Desktop app, keeps itself up to date</p>
-        <pre class="install-code"><code>https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller</code></pre>
+        <pre class="install-code"><code>https://storage.googleapis.com/tracecommons-flatpak/windows/NearAIGateway.appinstaller</code></pre>
         <p class="install-note">Open that address in Windows. It installs the signed MSIX and Windows updates it from the same address afterwards.</p>
         <p class="install-label">Desktop app, portable</p>
         <p class="install-note">Unzip <code>trace-commons-app-windows-x86_64-*.zip</code> from the release and run <code>TraceCommons.exe</code>. It is self-contained, so there is no runtime to install first.</p>

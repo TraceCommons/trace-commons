@@ -36,6 +36,11 @@ param(
     [Parameter(Mandatory = $true)][ValidateSet('x86', 'x64', 'arm64', 'neutral')][string]$ProcessorArchitecture,
     [Parameter(Mandatory = $true)][string]$BaseUri,
     [Parameter(Mandatory = $true)][string]$PackageFileName,
+    # The feed's own file name in the bucket. AppInstaller@Uri is written
+    # from it, so each generated feed names its own address: App Installer
+    # re-reads the feed from that Uri, and a feed naming another file would
+    # move an install onto that file.
+    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9]+\.appinstaller$')][string]$FeedName,
     [Parameter(Mandatory = $true)][string]$OutputPath
 )
 
@@ -67,8 +72,7 @@ if ($base -notmatch '^https://') {
     throw "BaseUri must be https; got '$BaseUri'."
 }
 
-$feedName = 'TraceCommons.appinstaller'
-$selfUri = "$base/$feedName"
+$selfUri = "$base/$FeedName"
 $packageUri = "$base/$PackageFileName"
 
 $settings = New-Object System.Xml.XmlWriterSettings

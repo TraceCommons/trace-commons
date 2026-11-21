@@ -869,32 +869,47 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          ./windows/scripts/make-appinstaller.ps1 `
-            -PackageName Iqlusion.TraceCommons `
-            -Publisher "CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US" `
-            -Version 0.0.1.0 -ProcessorArchitecture x64 `
-            -BaseUri https://storage.googleapis.com/tracecommons-flatpak/windows `
-            -PackageFileName probe.msix `
-            -OutputPath "$env:RUNNER_TEMP\TraceCommons.appinstaller"
-          [xml]$feed = Get-Content "$env:RUNNER_TEMP\TraceCommons.appinstaller"
-          $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
-          $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
-          $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
-          # AutomaticBackgroundTask is in the 2017/2 namespace. Written in
-          # 2021, Windows refuses the whole feed (0x8008020C).
-          if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/a:AutomaticBackgroundTask', $ns)) {
-            throw "the feed lost its background update task"
-          }
-          if ($feed.SelectSingleNode('//s4:AutomaticBackgroundTask', $ns)) {
-            throw "AutomaticBackgroundTask is in the 2021 namespace, where Windows rejects the feed"
-          }
-          if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
-            throw "the feed allows downgrades, which this project forbids"
-          }
-          $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
-          [xml]$manifest = Get-Content windows\packaging\Package.appxmanifest
-          if ($main.Name -ne $manifest.Package.Identity.Name) {
-            throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
+          $base = 'https://storage.googleapis.com/tracecommons-flatpak/windows'
+          # The release publishes the feed under both names (the old one
+          # keeps existing installs updating), so both are checked.
+          foreach ($name in @('NearAIGateway.appinstaller', 'TraceCommons.appinstaller')) {
+            ./windows/scripts/make-appinstaller.ps1 `
+              -PackageName Iqlusion.TraceCommons `
+              -Publisher "CN=Iqlusion Inc, O=Iqlusion Inc, L=Santa Clara, S=California, C=US" `
+              -Version 0.0.1.0 -ProcessorArchitecture x64 `
+              -BaseUri $base `
+              -PackageFileName probe.msix `
+              -FeedName $name `
+              -OutputPath "$env:RUNNER_TEMP\$name"
+            [xml]$feed = Get-Content "$env:RUNNER_TEMP\$name"
+            $ns = New-Object System.Xml.XmlNamespaceManager($feed.NameTable)
+            $ns.AddNamespace('a', 'http://schemas.microsoft.com/appx/appinstaller/2017/2')
+            $ns.AddNamespace('s4', 'http://schemas.microsoft.com/appx/appinstaller/2021')
+            # App Installer re-reads the feed from its own Uri, so a feed
+            # naming the other file would move an install onto that file.
+            $root = $feed.SelectSingleNode('/a:AppInstaller', $ns)
+            if ($root.Uri -ne "$base/$name") {
+              throw "feed $name does not name itself: its Uri is $($root.Uri)"
+            }
+            # AutomaticBackgroundTask is in the 2017/2 namespace. Written in
+            # 2021, Windows refuses the whole feed (0x8008020C).
+            if (-not $feed.SelectSingleNode('/a:AppInstaller/a:UpdateSettings/a:AutomaticBackgroundTask', $ns)) {
+              throw "the feed lost its background update task"
+            }
+            if ($feed.SelectSingleNode('//s4:AutomaticBackgroundTask', $ns)) {
+              throw "AutomaticBackgroundTask is in the 2021 namespace, where Windows rejects the feed"
+            }
+            if ($feed.SelectSingleNode('//s4:ForceUpdateFromAnyVersion', $ns)) {
+              throw "the feed allows downgrades, which this project forbids"
+            }
+            $main = $feed.SelectSingleNode('/a:AppInstaller/a:MainPackage', $ns)
+            if ($main.Uri -ne "$base/probe.msix") {
+              throw "feed $name names package $($main.Uri), not $base/probe.msix"
+            }
+            [xml]$manifest = Get-Content windows\packaging\Package.appxmanifest
+            if ($main.Name -ne $manifest.Package.Identity.Name) {
+              throw "feed package name $($main.Name) does not match manifest identity $($manifest.Package.Identity.Name)"
+            }
           }
 
       # make-msix.ps1 is what the `windows` release job runs (under pwsh) and

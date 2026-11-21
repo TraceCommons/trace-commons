@@ -141,19 +141,28 @@ that installs alongside the old one instead of updating it.
 
 ### Distribution
 
-The release job publishes two objects to the public bucket:
+The release job publishes three objects to the public bucket:
 
 | Object | Content type | Cache-Control |
 | --- | --- | --- |
 | `windows/<MSBuild-produced package filename>.msix` | `application/msix` | `public, max-age=31536000, immutable` |
+| `windows/NearAIGateway.appinstaller` | `application/appinstaller` | `no-cache, max-age=0` |
 | `windows/TraceCommons.appinstaller` | `application/appinstaller` | `no-cache, max-age=0` |
 
 The package is uploaded before the feed, so there is never a window in which
 the feed names an object that is not there yet. The feed is uncacheable on
 purpose: a cached `.appinstaller` is a release nobody receives.
 
+`NearAIGateway.appinstaller` is the feed. The same feed is also published as
+`TraceCommons.appinstaller`, its old name, on every release: Windows checks
+for updates at the address an install came from, and 1.0.12 and 1.0.13
+hard-code the old address in `AppUpdater.cs`, so dropping it would leave
+those installs on the version they have. Each file's `AppInstaller` `Uri` is
+its own address (`make-appinstaller.ps1 -FeedName`), and both name the same
+package.
+
 Contributors install once from
-`https://storage.googleapis.com/tracecommons-flatpak/windows/TraceCommons.appinstaller`.
+`https://storage.googleapis.com/tracecommons-flatpak/windows/NearAIGateway.appinstaller`.
 After that Windows checks the feed on app launch, at most once every 8 hours,
 and again every 8 hours in the background whether or not the app was opened.
 The app additionally surfaces a banner and an apply-now action, which drains
