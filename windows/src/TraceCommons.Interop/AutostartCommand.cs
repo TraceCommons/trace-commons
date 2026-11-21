@@ -29,16 +29,111 @@ namespace TraceCommons.Interop;
 public static class AutostartCommand
 {
     /// <summary>
-    /// The value name under the Run key.
+    /// The value name under the Run key: the app's name, from
+    /// <c>brand.rs</c> (<c>tc_app_name</c>).
     /// </summary>
     /// <remarks>
-    /// The product name rather than the executable's, because this string is
-    /// shown to the contributor by Windows itself in Task Manager's Startup
-    /// tab. That list is where someone goes to audit what starts with their
+    /// The product name rather than the executable's, because Windows shows
+    /// a startup entry by name to someone auditing what starts with their
     /// machine, and anything there that they cannot recognise reads as
-    /// malware -- correctly.
+    /// malware -- correctly. It is the name every other surface Windows
+    /// shows uses (owner rule 2026-11-20).
     /// </remarks>
-    public const string ValueName = "Trace Commons";
+    public static string ValueName => Shell.MonitorWords.AppName;
+
+    /// <summary>
+    /// Names the entry was written under before <see cref="ValueName"/>,
+    /// newest first. <see cref="Migrate"/> moves this executable's entry off
+    /// them; nothing ever writes one.
+    /// </summary>
+    public static IReadOnlyList<string> FormerValueNames { get; } = new[] { "Trace Commons" };
+
+    /// <summary>
+    /// Where Windows records that the contributor disabled a startup entry
+    /// (Settings -> Apps -> Startup, Task Manager), keyed by the Run value's
+    /// name; relative to HKEY_CURRENT_USER.
+    /// </summary>
+    public const string ApprovedKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+    /// <summary>
+    /// The Run key and Windows' approval record beside it, by value name:
+    /// the registry in the app, plain maps in the tests.
+    /// </summary>
+    public interface IStartupEntries
+    {
+        /// <summary>The Run value under <paramref name="name"/>; null when absent.</summary>
+        string? Command(string name);
+
+        /// <summary>The StartupApproved value under <paramref name="name"/>; null when absent.</summary>
+        byte[]? Approval(string name);
+
+        void SetCommand(string name, string command);
+
+        void SetApproval(string name, byte[] approval);
+
+        /// <summary>Removes <paramref name="name"/> from both keys.</summary>
+        void Remove(string name);
+    }
+
+    /// <summary>
+    /// Moves this executable's entry from a former name to
+    /// <see cref="ValueName"/>, with Windows' record of whether the
+    /// contributor disabled it. Returns whether anything moved.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The value name is the entry's identity. Left under the old name, the
+    /// entry would still start the app, and a new one written beside it
+    /// would start it twice; turning the toggle off would remove only the
+    /// new one.
+    /// </para>
+    /// <para>
+    /// The approval record moves with it, unchanged. Windows keeps
+    /// "disabled" under the same name, so a move that dropped it would turn
+    /// back on what the contributor turned off. This is the only time the
+    /// app touches that key, and it never changes what it says.
+    /// </para>
+    /// <para>
+    /// Another copy's entry is left alone, as <c>RunAtLogin.Refresh</c>
+    /// leaves it, and so is ours when the new name already belongs to
+    /// another copy: moving it then would overwrite that copy's entry.
+    /// </para>
+    /// </remarks>
+    public static bool Migrate(IStartupEntries entries, string executablePath)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(executablePath);
+
+        bool moved = false;
+        foreach (string former in FormerValueNames)
+        {
+            string? stored = entries.Command(former);
+            if (!PointsAt(stored, executablePath))
+            {
+                continue;
+            }
+
+            string? current = entries.Command(ValueName);
+            if (current is not null && !PointsAt(current, executablePath))
+            {
+                continue;
+            }
+
+            if (current is null)
+            {
+                entries.SetCommand(ValueName, stored!);
+                if (entries.Approval(former) is byte[] approval && entries.Approval(ValueName) is null)
+                {
+                    entries.SetApproval(ValueName, approval);
+                }
+            }
+
+            entries.Remove(former);
+            moved = true;
+        }
+
+        return moved;
+    }
 
     /// <summary>
     /// The per-user Run key, relative to HKEY_CURRENT_USER.

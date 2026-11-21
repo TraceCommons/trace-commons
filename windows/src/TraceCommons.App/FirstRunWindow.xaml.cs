@@ -118,7 +118,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         WindowClocks.Watch(this);
         _host = host;
         _onboarding = onboarding;
-        Title = MonitorWords.AppName;
+        Title = WindowTitles.FirstRun;
         _copy = FirstRunCopy.Load();
         foreach (string kind in FirstRunStageLayout.RingOrder)
         {

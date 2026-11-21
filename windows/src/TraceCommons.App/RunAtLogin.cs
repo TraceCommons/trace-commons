@@ -38,9 +38,12 @@ namespace TraceCommons.App;
 /// <b>Windows can veto it.</b> Settings -> Apps -> Startup lets a
 /// contributor disable a startup entry without deleting it; Windows records
 /// that in a separate <c>StartupApproved</c> key and simply does not run the
-/// command. This class does not read or write that key, and must not: it is
-/// the user's override of the app's request, and an app that reverses it is
-/// doing the thing that makes startup entries distrusted in the first place.
+/// command. This class never changes what that key says: it is the user's
+/// override of the app's request, and an app that reverses it is doing the
+/// thing that makes startup entries distrusted in the first place. The one
+/// time it touches the key is <see cref="AutostartCommand.Migrate"/>, which
+/// moves the record, unchanged, with an entry written under a former name,
+/// because Windows keys it by the entry's name.
 /// The consequence is that <see cref="IsEnabled"/> answers "this app asked
 /// to run at login", not "it will". <c>LoginItemManager</c> has the same
 /// honest gap on macOS, where it is called <c>requiresApproval</c>.
@@ -131,6 +134,7 @@ public static class RunAtLogin
 
         try
         {
+            Migrate(executable);
             using RegistryKey? key = Registry.CurrentUser.OpenSubKey(AutostartCommand.RunKeyPath, writable: true);
             string? stored = key?.GetValue(AutostartCommand.ValueName) as string;
             if (key is not null
@@ -164,6 +168,9 @@ public static class RunAtLogin
 
         try
         {
+            // An entry under a former name first, so turning off removes it
+            // too and turning on does not write a second one.
+            Migrate(executable);
             using RegistryKey key = Registry.CurrentUser.CreateSubKey(
                 AutostartCommand.RunKeyPath);
 
@@ -190,5 +197,55 @@ public static class RunAtLogin
         }
 
         return IsEnabled;
+    }
+
+    /// <summary>
+    /// Moves this executable's entry off a name it was written under before
+    /// (<see cref="AutostartCommand.FormerValueNames"/>) to the app's name.
+    /// </summary>
+    private static void Migrate(string executable)
+    {
+        using RegistryKey? run = Registry.CurrentUser.OpenSubKey(AutostartCommand.RunKeyPath, writable: true);
+        if (run is null)
+        {
+            return;
+        }
+
+        using var entries = new RegistryEntries(run);
+        if (AutostartCommand.Migrate(entries, executable))
+        {
+            Debug.WriteLine("tracecommons run-at-login entry moved to the app's name");
+        }
+    }
+
+    /// <summary>The two HKCU keys behind <see cref="AutostartCommand.IStartupEntries"/>.</summary>
+    /// <remarks>
+    /// The approval key is opened when it exists, and created only when a
+    /// record has to move into it.
+    /// </remarks>
+    private sealed class RegistryEntries(RegistryKey run) : AutostartCommand.IStartupEntries, IDisposable
+    {
+        private RegistryKey? _approved = Registry.CurrentUser.OpenSubKey(AutostartCommand.ApprovedKeyPath, writable: true);
+
+        public void Dispose() => _approved?.Dispose();
+
+        public string? Command(string name) => run.GetValue(name) as string;
+
+        public byte[]? Approval(string name) => _approved?.GetValue(name) as byte[];
+
+        public void SetCommand(string name, string command) =>
+            run.SetValue(name, command, RegistryValueKind.String);
+
+        public void SetApproval(string name, byte[] approval)
+        {
+            _approved ??= Registry.CurrentUser.CreateSubKey(AutostartCommand.ApprovedKeyPath);
+            _approved.SetValue(name, approval, RegistryValueKind.Binary);
+        }
+
+        public void Remove(string name)
+        {
+            run.DeleteValue(name, throwOnMissingValue: false);
+            _approved?.DeleteValue(name, throwOnMissingValue: false);
+        }
     }
 }

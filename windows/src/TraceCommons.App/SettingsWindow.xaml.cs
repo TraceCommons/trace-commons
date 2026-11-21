@@ -25,7 +25,7 @@ public sealed partial class SettingsWindow : Window
     {
         InitializeComponent();
         WindowClocks.Watch(this);
-        Title = MonitorWords.SettingsTitle;
+        Title = WindowTitles.Settings;
         SettingsHost.Content = view;
 
         // Settings > General's appearance, here as on the Monitor window.

@@ -30,15 +30,14 @@ public class NoCommonsNameTests
     /// Lines that keep the name, each with why.
     /// </summary>
     /// <remarks>
-    /// <c>AutostartCommand.ValueName</c> is the Run-key value's identity, not
-    /// only its label: renaming it would leave every existing install's entry
-    /// behind, so the app would start twice at login and turning the toggle
-    /// off would not remove the old one. Changing it needs a migration, which
-    /// is listed for the owner rather than done here.
+    /// <c>AutostartCommand.FormerValueNames</c> is the Run-key value the app
+    /// used to write, kept only so <c>AutostartCommand.Migrate</c> can find
+    /// an existing install's entry and move it to the app's name. Nothing
+    /// writes it and nothing shows it.
     /// </remarks>
     private static readonly (string File, string Needle)[] Allowed =
     {
-        ("TraceCommons.Interop/AutostartCommand.cs.txt", "public const string ValueName = \"Trace Commons\";"),
+        ("TraceCommons.Interop/AutostartCommand.cs.txt", "public static IReadOnlyList<string> FormerValueNames { get; } = new[] { \"Trace Commons\" };"),
     };
 
     [Fact]

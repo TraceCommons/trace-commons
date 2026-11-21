@@ -536,7 +536,12 @@ public class AutostartCommandTests
     [Fact]
     public void TheEntryIsNamedSomeoneAuditingStartupWouldRecognise()
     {
-        Assert.Equal("Trace Commons", AutostartCommand.ValueName);
+        // The app's name from brand.rs (tc_app_name), what every other
+        // surface Windows shows calls it; the commons' name never (owner
+        // rules 2026-11-02 and 2026-11-20).
+        Assert.Equal("Near AI Gateway", AutostartCommand.ValueName);
+        Assert.Equal(Shell.MonitorWords.AppName, AutostartCommand.ValueName);
+        Assert.Equal(new[] { "Trace Commons" }, AutostartCommand.FormerValueNames);
     }
 
     [Fact]

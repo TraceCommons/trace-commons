@@ -38,7 +38,7 @@ public sealed class PreviewWindow : Window
         QueueEntryViewModel entry,
         Func<string, QueueEntryViewModel?>? liveEntry)
     {
-        Title = "Look inside";
+        Title = WindowTitles.Preview;
 
         _sheet = new PreviewSheet(host, entry, liveEntry);
         _sheet.Decided += OnDecided;

@@ -33,7 +33,7 @@ internal sealed class TrayFlyoutWindow : Window
     public TrayFlyoutWindow(Action openApp, Action openSettings)
     {
         _hwnd = ToolWindows.Prepare(this);
-        Title = MonitorWords.AppName;
+        Title = WindowTitles.TrayFlyout;
         var root = new Border
         {
             Child = new ScrollViewer { Content = _body, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled },
