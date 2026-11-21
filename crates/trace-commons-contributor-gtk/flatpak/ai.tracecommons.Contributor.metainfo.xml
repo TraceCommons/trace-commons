@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.14" date="2026-11-21">
+      <description>
+        <p>Maintenance release with no changes on Linux.</p>
+      </description>
+    </release>
     <release version="1.0.13" date="2026-11-21">
       <description>
         <p>Animations slow down while the window is in the background, and the map and first-run screen use less CPU on slower machines.</p>
