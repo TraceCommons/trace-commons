@@ -17,7 +17,7 @@ public class MapClockTests
     private static MapClockInputs Idle => new(
         AnimationsEnabled: true, Loaded: true, WindowVisible: true, PaneShown: true,
         HasLibrary: false, Flows: false, Healthy: true, TransferPlaying: false, PileMoving: false,
-        LightFading: false, SecondsShown: 5, NextDeadlineIn: null);
+        LightFading: false, SecondsShown: 5, NextDeadlineIn: null, LibraryOnMovingLayer: false);
 
     [Fact]
     public void NothingTicksHiddenMinimisedUnloadedWithItsPaneClosedOrUnderReduceMotion()
@@ -34,15 +34,96 @@ public class MapClockTests
     public void EachPartRunsAtTheMacsOwnRate()
     {
         // Transfers and the pile at 60 (FlowMapView.swift:107, :140); the
-        // dashes at 30 (:283); the station and orb alone at 20
-        // (LibraryStation.swift:39).
+        // dashes at 30 (:283).
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, TransferPlaying = true }));
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { PileMoving = true }));
         Assert.Equal(1.0 / 60, MapMotion.ClockInterval(Idle with { LightFading = true }));
         Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
-        Assert.Equal(1.0 / 20, MapMotion.ClockInterval(Idle with { HasLibrary = true }));
-        // Paused or stale dashes do not move (FlowMapView.swift:278-285).
-        Assert.Equal(1.0 / 20, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
+    }
+
+    /// <summary>
+    /// #2268: the station is not redrawn at the dashes' rate, only when its
+    /// own 15-a-second frame changes. On Windows one tick source serves both
+    /// layers, so they are composed together: the moving layer's clock turns
+    /// the station whenever it runs at least that fast, and the station's own
+    /// clock runs only while the moving one is slower (no dashes, waiting for
+    /// the shimmer). A second clock beside the dashes' composed the window
+    /// about 12 more times a second and cost CPU (PR #2278).
+    /// </summary>
+    [Fact]
+    public void TheStationTurnsAtItsOwnRateOnOneTickSource()
+    {
+        // At rest the moving layer's clock runs for the dashes only.
+        Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true })!.Value, 9);
+        Assert.Equal(36, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false })!.Value, 9);
+        Assert.Equal(1.0 / 30, MapMotion.ClockInterval(Idle with { HasLibrary = true, Flows = true }));
+
+        // The station's own clock runs only while the moving one is slower than 15 a second.
+        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true }));
+        Assert.Equal(1.0 / 15, MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true, Healthy = false }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, Flows = true }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, SecondsShown = 1.5 }));
+        Assert.Null(MapMotion.LibraryInterval(Idle with { HasLibrary = true, LightFading = true }));
+        Assert.Null(MapMotion.LibraryInterval(Idle));
+
+        // On the moving layer, the moving clock turns it and its own stops.
+        MapClockInputs onMoving = Idle with { HasLibrary = true, LibraryOnMovingLayer = true };
+        Assert.Equal(1.0 / 15, MapMotion.ClockInterval(onMoving));
+        Assert.Equal(1.0 / 30, MapMotion.ClockInterval(onMoving with { Flows = true }));
+        Assert.Null(MapMotion.LibraryInterval(onMoving));
+
+        // It stops where every map clock stops.
+        MapClockInputs turning = Idle with { HasLibrary = true };
+        Assert.Null(MapMotion.LibraryInterval(turning with { WindowVisible = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { Loaded = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { PaneShown = false }));
+        Assert.Null(MapMotion.LibraryInterval(turning with { AnimationsEnabled = false }));
+    }
+
+    /// <summary>
+    /// The library's own layer is shown, and drawn again as the station
+    /// turns, only while there is a library to draw and the moving layer
+    /// does not have it; otherwise it is collapsed and left alone (a view
+    /// with no library, such as Private AI, must not keep a pane-sized
+    /// layer).
+    /// </summary>
+    [Fact]
+    public void TheLibraryLayerIsShownOnlyWithALibraryTheMovingLayerDoesNotHave()
+    {
+        Assert.True(MapMotion.LibraryLayerShown(hasLibrary: true, onMovingLayer: false));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: true, onMovingLayer: true));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: false, onMovingLayer: false));
+        Assert.False(MapMotion.LibraryLayerShown(hasLibrary: false, onMovingLayer: true));
+    }
+
+    /// <summary>The station's frame of the turn: 15 a second, 390 a turn, the same a turn later.</summary>
+    [Fact]
+    public void TheStationsFrameIsFifteenASecondAroundTheTurn()
+    {
+        double turn = LibraryStation.TurnSeconds;
+        Assert.Equal(390, MapMotion.LibraryFrames(turn));
+        Assert.Equal(0, MapMotion.LibraryFrameIndex(0, turn));
+        Assert.Equal(0, MapMotion.LibraryFrameIndex(1.0 / 15 - 1e-9, turn));
+        Assert.Equal(1, MapMotion.LibraryFrameIndex(1.0 / 15 + 1e-9, turn));
+        Assert.Equal(15, MapMotion.LibraryFrameIndex(1.0 + 1e-9, turn));
+        Assert.Equal(389, MapMotion.LibraryFrameIndex(turn - 1e-6, turn));
+        foreach (double t in new[] { 3.31, 17.03, 7e8 + 0.52, -2.23 })
+        {
+            int index = MapMotion.LibraryFrameIndex(t, turn);
+            Assert.InRange(index, 0, 389);
+            Assert.Equal(index, MapMotion.LibraryFrameIndex(t + turn, turn));
+        }
+
+        // Fifteen changes in a second, at whatever rate it is asked.
+        int changes = 0, last = MapMotion.LibraryFrameIndex(100, turn);
+        for (int tick = 1; tick <= 210; tick++)
+        {
+            int index = MapMotion.LibraryFrameIndex(100 + tick / 210.0 * 1.0, turn);
+            changes += index != last ? 1 : 0;
+            last = index;
+        }
+
+        Assert.InRange(changes, 15, 16);
     }
 
     [Fact]
@@ -91,7 +172,7 @@ public class MapClockTests
 
     [Theory]
     [InlineData(true, 32.5, 1.0 / 30, true)]   // waiting for a shimmer, the arcs want 30 a second
-    [InlineData(true, 1.0 / 20, 1.0 / 60, true)]
+    [InlineData(true, 1.0 / 15, 1.0 / 60, true)]
     [InlineData(true, 1.0 / 60, 1.0 / 30, true)]
     [InlineData(false, 32.5, 1.0 / 30, true)]  // stopped: start it
     [InlineData(true, 1.0 / 30, 1.0 / 30, false)] // already on the wanted beat: leave its phase alone

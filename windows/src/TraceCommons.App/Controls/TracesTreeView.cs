@@ -108,6 +108,11 @@ internal sealed class TracesTreeView : UserControl
     private readonly TextBox _searchBox = new();
     private readonly TranslateTransform _searchShift = new();
     private readonly Dictionary<string, FrameworkElement> _rowById = new(StringComparer.Ordinal);
+
+    /// <summary>Each drawn row's key (<see cref="TreeRowKeys"/>), in the order drawn: a row whose key holds is kept.</summary>
+    private readonly Dictionary<string, string> _rowKeys = new(StringComparer.Ordinal);
+    private readonly List<string> _drawnIds = new();
+    private bool _refreshQueued;
     private readonly Stopwatch _clock = new();
     private bool _searching;
     private bool _ticking;
@@ -174,9 +179,9 @@ internal sealed class TracesTreeView : UserControl
         _rows.PointerMoved += OnRowsPointerMoved;
         _rows.PointerReleased += OnRowsPointerReleased;
         _rows.PointerCaptureLost += (_, _) => EndDrag();
-        ActualThemeChanged += (_, _) => Render();
+        ActualThemeChanged += (_, _) => RenderAll();
         // A live theme or high contrast switch too (ThemeBrushes).
-        ThemeBrushes.RedrawOnChange(this, () => { Render(); });
+        ThemeBrushes.RedrawOnChange(this, () => { RenderAll(); });
         Unloaded += (_, _) => StopTicking();
     }
 
@@ -202,8 +207,34 @@ internal sealed class TracesTreeView : UserControl
         Render();
     }
 
-    /// <summary>The queue's own rows changed (sizes, holds, offers): draw them again.</summary>
+    /// <summary>The queue's own rows changed (sizes, holds, offers): draw again the rows that changed.</summary>
     public void Refresh() => Render();
+
+    /// <summary>
+    /// <see cref="Refresh"/>, once, after the rest of this turn: a queue
+    /// refresh clears and refills its collections a row at a time, and each
+    /// change asked for a whole draw.
+    /// </summary>
+    public void RequestRefresh()
+    {
+        if (_refreshQueued)
+        {
+            return;
+        }
+
+        _refreshQueued = DispatcherQueue.TryEnqueue(() =>
+        {
+            _refreshQueued = false;
+            Render();
+        });
+        if (!_refreshQueued)
+        {
+            Render();
+        }
+    }
+
+    /// <summary>Draws <paramref name="folderId"/>'s row again even when nothing it draws changed: a switch that wrote nothing goes back.</summary>
+    public void Redraw(string folderId) => Render(new TreeSelection.Folder(folderId).RawValue);
 
     /// <summary>Selects a row from elsewhere (the map, a notice): its folder opens and it is scrolled to.</summary>
     public void Select(TreeSelection? selection)
@@ -511,26 +542,80 @@ internal sealed class TracesTreeView : UserControl
 
     // ---- The rows --------------------------------------------------------
 
-    private void Render()
+    /// <summary>Every row built again: the theme changed, which no row's key holds.</summary>
+    private void RenderAll()
+    {
+        _rowKeys.Clear();
+        Render();
+    }
+
+    /// <summary>
+    /// Draws the rows, building again only those whose drawn values changed
+    /// (<see cref="TreeRowKeys"/>) and <paramref name="force"/>; the others
+    /// are kept, in their place when the order holds.
+    /// </summary>
+    private void Render(string? force = null)
     {
         DrawEye();
         ShowListControls();
-        _rows.Children.Clear();
-        _rowById.Clear();
         IReadOnlyList<TreeRow> rows = _state.Rows;
+        var keyed = new List<(string Id, string Key)>(rows.Count);
         foreach (TreeRow row in rows)
         {
-            FrameworkElement drawn = row switch
+            keyed.Add((row.Id, Key(row)));
+        }
+
+        TreeRowPlan plan = TreeRowKeys.Plan(_drawnIds, _rowKeys, keyed, force);
+        var build = new HashSet<string>(plan.Build, StringComparer.Ordinal);
+        var drawn = new List<FrameworkElement>(rows.Count);
+        for (int i = 0; i < rows.Count; i++)
+        {
+            TreeRow row = rows[i];
+            if (!build.Contains(row.Id) && _rowById.TryGetValue(row.Id, out FrameworkElement? kept))
+            {
+                drawn.Add(kept);
+                continue;
+            }
+
+            drawn.Add(row switch
             {
                 TreeRow.FolderRow f => FolderRow(f.Folder),
                 TreeRow.SessionRow s => SessionRow(s.Entry, s.Off),
                 _ => throw new InvalidOperationException(),
-            };
-            _rowById[row.Id] = drawn;
-            _rows.Children.Add(drawn);
+            });
         }
 
-        if (_state.Shown.Folders.Count == 0 && _state.Search.Trim().Length > 0)
+        bool searchNone = _state.Shown.Folders.Count == 0 && _state.Search.Trim().Length > 0;
+        if (plan.InPlace && !searchNone && _rows.Children.Count == rows.Count)
+        {
+            for (int i = 0; i < drawn.Count; i++)
+            {
+                if (!ReferenceEquals(_rows.Children[i], drawn[i]))
+                {
+                    _rows.Children[i] = drawn[i];
+                }
+            }
+        }
+        else
+        {
+            _rows.Children.Clear();
+            foreach (FrameworkElement element in drawn)
+            {
+                _rows.Children.Add(element);
+            }
+        }
+
+        _rowById.Clear();
+        _rowKeys.Clear();
+        _drawnIds.Clear();
+        for (int i = 0; i < rows.Count; i++)
+        {
+            _rowById[keyed[i].Id] = drawn[i];
+            _rowKeys[keyed[i].Id] = keyed[i].Key;
+            _drawnIds.Add(keyed[i].Id);
+        }
+
+        if (searchNone)
         {
             _empty.Text = _words["search_none"];
             _empty.Foreground = Brush("textTertiary");
@@ -639,6 +724,36 @@ internal sealed class TracesTreeView : UserControl
         return row;
     }
 
+    /// <summary>Everything <paramref name="row"/> draws, by value (<see cref="TreeRowKeys"/>).</summary>
+    private string Key(TreeRow row)
+    {
+        switch (row)
+        {
+            case TreeRow.FolderRow { Folder: var folder }:
+                ViewModels.QueueGroupViewModel? group = _host.Group(folder.Id);
+                return TreeRowKeys.Folder(
+                    folder,
+                    _state.Selection == new TreeSelection.Folder(folder.Id),
+                    _state.Expanded.Contains(folder.Id),
+                    group is null ? null : new TreeRowKeys.GroupFacts(group.ShowSubmitAll, group.OfferedCount, group.HasWithheldText ? group.WithheldText : null),
+                    _host.AutomaticWrites.Writing.Contains(folder.Id),
+                    _host.AutomaticWrites.Refusal(folder.Id),
+                    _draggingFolder == folder.Id ? _dragOffset : null);
+            case TreeRow.SessionRow { Entry: var entry, Off: var off }:
+                ViewModels.QueueEntryViewModel? live = _host.Entry(entry.EntryId);
+                return TreeRowKeys.Session(
+                    entry,
+                    off,
+                    _state.Selection == new TreeSelection.Session(entry.EntryId),
+                    live is null ? null : new TreeRowKeys.LiveFacts(
+                        live.SizeBytes, live.ReasonCode, live.CanContribute, live.HasEligibilityText ? live.EligibilityText : null, live.WasTrimmed,
+                        live.AttestationText, live.AttestationIsClear, live.AttestationIsAttention,
+                        _state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode)));
+            default:
+                throw new InvalidOperationException();
+        }
+    }
+
     private FrameworkElement FolderRow(TracesTree.FolderNode folder)
     {
         var id = new TreeSelection.Folder(folder.Id);
@@ -689,7 +804,7 @@ internal sealed class TracesTreeView : UserControl
             AutomationProperties.SetName(split, TracesTreeRows.SubmitTitle(group.OfferedCount, _words));
             AutomationProperties.SetHelpText(split, help);
             ToolTipService.SetToolTip(split, help);
-            split.Click += (_, _) => _host.SubmitFolder(group, null);
+            split.Click += (_, _) => _host.SubmitFolder(_host.Group(folder.Id) ?? group, null);
             var verdicts = new MenuFlyout();
             foreach ((string label, string outcome) in new[]
             {
@@ -697,7 +812,7 @@ internal sealed class TracesTreeView : UserControl
             })
             {
                 var item = new MenuFlyoutItem { Text = label };
-                item.Click += (_, _) => _host.SubmitFolder(group, outcome);
+                item.Click += (_, _) => _host.SubmitFolder(_host.Group(folder.Id) ?? group, outcome);
                 verdicts.Items.Add(item);
             }
 
@@ -739,7 +854,7 @@ internal sealed class TracesTreeView : UserControl
             var kebab = Kebab(_words["folder_menu"], selected);
             var menu = new MenuFlyout();
             var ignore = new MenuFlyoutItem { Text = _words["ignore_folder"] };
-            ignore.Click += (_, _) => _host.IgnoreFolder(group);
+            ignore.Click += (_, _) => _host.IgnoreFolder(_host.Group(folder.Id) ?? group);
             menu.Items.Add(ignore);
             kebab.Flyout = menu;
             Grid.SetColumn(kebab, 4);
@@ -844,7 +959,7 @@ internal sealed class TracesTreeView : UserControl
             var kebab = Kebab(_words["dismiss_session"], selected);
             var menu = new MenuFlyout();
             var dismiss = new MenuFlyoutItem { Text = _words["dismiss_session"] };
-            dismiss.Click += (_, _) => _host.DismissTrace(live);
+            dismiss.Click += (_, _) => _host.DismissTrace(_host.Entry(entry.EntryId) ?? live);
             menu.Items.Add(dismiss);
             kebab.Flyout = menu;
             Grid.SetColumn(kebab, 4);
@@ -1097,8 +1212,16 @@ internal sealed class TracesTreeView : UserControl
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
+
     private void OnFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_framePace.Skips(XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         double now = _clock.Elapsed.TotalSeconds;
         bool moving = false;
         if (_searchAt >= 0)

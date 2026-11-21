@@ -149,6 +149,7 @@ public sealed partial class MainWindow
         ToolbarCapsule.SizeChanged += (_, _) => UpdateTitleBarRegions();
         AppWindow.Changed += OnAppWindowChanged;
         _clockGate.Changed += OnClocksChanged;
+        WindowClocks.FollowFocus(this);
         InitArmingMotion();
 
         ViewModel.PropertyChanged += OnShellViewModelChanged;
@@ -627,8 +628,16 @@ public sealed partial class MainWindow
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _moveFramePace = new(WindowClocks.Windows);
+
     private void OnMoveFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_moveFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         if (_moveRun is not PaneMoveRun run)
         {
             StopMoveTicks();
@@ -1100,6 +1109,7 @@ public sealed partial class MainWindow
                 NoticeStackHost.Visibility = Visibility.Collapsed;
             }
 
+            UpdateNoticeCover();
             return;
         }
 
@@ -1144,6 +1154,7 @@ public sealed partial class MainWindow
         ToolTipService.SetToolTip(NoticeClose, closeName);
 
         LayoutPlates(ids);
+        UpdateNoticeCover();
     }
 
     private NoticePlace NoticeMonitorPlace() => MonitorNavigation.Place(_at);
@@ -1154,6 +1165,7 @@ public sealed partial class MainWindow
     {
         var present = PresentNotices().Select(p => p.Kind);
         LayoutPlates(NoticeCatalog.Shown(NoticeMonitorPlace(), present, _closedNotices).Select(card => card.Id).ToArray());
+        UpdateNoticeCover();
     }
 
     /// <summary>The plates behind the front card, its size, peeking below it.</summary>

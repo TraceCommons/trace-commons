@@ -89,7 +89,9 @@ struct Inner {
     /// The scroller the steps sit in: the graphic is clipped to it.
     scroller: Option<gtk::Widget>,
     tick: Option<gtk::TickCallbackId>,
-    last_frame: i64,
+    /// The frame-rate gate: the step's own rate, 15 a second at most
+    /// while the window is not focused.
+    pace: super::glass_motion::Pace,
     /// How many times the stage has been drawn.
     draws: u64,
     /// Each found tool's beam: the opacity it fades from, to, and when.
@@ -128,6 +130,13 @@ pub(super) struct Stage {
     private_count: RefCell<Option<(gtk::Label, usize)>>,
     /// Traces' estimate, risen once the count is done.
     estimate: RefCell<Option<Lift>>,
+    /// The backdrop's ground, drawn once per size and painted each frame.
+    ground: paint::GroundCache,
+    /// How much of the backdrop is drawn: without the breath where the
+    /// stage cannot keep its frame rate and the breath is a real share of
+    /// each frame (`stage::Lighten`). `None` until the stage is first
+    /// drawn.
+    lighten: RefCell<Option<stage::Lighten>>,
     /// Tools' rows: told None while the scan holds them back, then the
     /// seconds since they began to rise.
     tools_rows: RefCell<Option<Rc<dyn Fn(Option<f64>)>>>,
@@ -135,6 +144,45 @@ pub(super) struct Stage {
 
 fn animations() -> bool {
     gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+}
+
+/// The refresh rate of the display `widget` is on, in hertz, if known.
+fn refresh_hz(widget: &impl IsA<gtk::Widget>) -> Option<f64> {
+    let surface = widget.native()?.surface()?;
+    let monitor = widget.display().monitor_at_surface(&surface)?;
+    let millihertz = monitor.refresh_rate();
+    (millihertz > 0).then(|| f64::from(millihertz) / 1000.0)
+}
+
+/// Whether the stage lightens its backdrop when it cannot keep up. Always
+/// in the app; in tests only when a test asks (`lighten_for_test`), so
+/// the mounted tests and their renders, which run on a software
+/// compositor, keep the whole look.
+#[cfg(not(test))]
+fn lightens() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIGHTENS: Cell<bool> = const { Cell::new(false) };
+    /// A backdrop a measuring test holds every stage to.
+    static FORCED: Cell<Option<stage::Backdrop>> = const { Cell::new(None) };
+    /// Draw the ground whole every frame, as before it was cached, for a
+    /// measuring test's before.
+    static UNCACHED: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn lightens() -> bool {
+    LIGHTENS.with(Cell::get)
+}
+
+/// Lets the stages a test makes after this lighten their backdrop as the
+/// app's do.
+#[cfg(test)]
+pub(super) fn lighten_for_test(on: bool) {
+    LIGHTENS.with(|cell| cell.set(on));
 }
 
 impl Stage {
@@ -176,7 +224,7 @@ impl Stage {
                 traces_counted: false,
                 scroller: None,
                 tick: None,
-                last_frame: 0,
+                pace: super::glass_motion::Pace::default(),
                 draws: 0,
                 beams: BTreeMap::new(),
                 ring_tight_at: None,
@@ -194,6 +242,8 @@ impl Stage {
             private_count: RefCell::new(None),
             estimate: RefCell::new(None),
             tools_rows: RefCell::new(None),
+            ground: paint::GroundCache::default(),
+            lighten: RefCell::new(None),
         });
         let weak = Rc::downgrade(&stage);
         stage.area.set_draw_func(move |_, cr, w, h| {
@@ -485,6 +535,9 @@ impl Stage {
         {
             return;
         }
+        if let Some(watch) = self.lighten.borrow_mut().as_mut() {
+            watch.reset();
+        }
         let weak = Rc::downgrade(self);
         let id = self.area.add_tick_callback(move |area, clock| {
             let Some(stage) = weak.upgrade() else {
@@ -503,16 +556,9 @@ impl Stage {
                 drop(inner);
                 stage::motion::frame_interval(step, scanning, stage.in_flight(at))
             };
-            let due = {
-                let mut inner = stage.inner.borrow_mut();
-                let since = (frame - inner.last_frame) as f64 / 1e6;
-                let due = stage::motion::frame_due(since, interval);
-                if due {
-                    inner.last_frame = frame;
-                }
-                due
-            };
+            let due = stage.inner.borrow().pace.due(area, frame, interval);
             if due {
+                stage.watch_frame(area, at, interval);
                 stage.advance(at, false);
                 stage.drive(at);
                 if stage.lines_rising() {
@@ -792,10 +838,67 @@ impl Stage {
         (seen, discovered)
     }
 
+    /// Counts a frame drawn at `at` towards the backdrop's frame-rate
+    /// watch, as a frame of a stage asking for one every `interval`
+    /// seconds; a window that is not focused keeps the 15-a-second rule's
+    /// rate, not the stage's, and is not judged.
+    fn watch_frame(&self, area: &gtk::DrawingArea, at: f64, interval: f64) {
+        let mut lighten = self.lighten.borrow_mut();
+        let Some(watch) = lighten.as_mut() else {
+            return;
+        };
+        let focused = super::glass_motion::seen(area) == super::glass_motion::Seen::Focused;
+        let asked = focused.then(|| stage::Lighten::asked_fps(interval, refresh_hz(area)));
+        if let Some(reached) = watch.frame(at, asked) {
+            // Slow for long enough: is the breath what slows it?
+            let breath = paint::breath_cost(
+                f64::from(area.width()),
+                f64::from(area.height()),
+                area.scale_factor(),
+                &self.palette,
+            );
+            watch.judge(breath, reached);
+        }
+    }
+
+    /// The backdrop the stage draws now: what its frame-rate watch allows.
+    fn backdrop_detail(&self) -> stage::Backdrop {
+        #[cfg(test)]
+        if let Some(level) = FORCED.with(Cell::get) {
+            return level;
+        }
+        let mut lighten = self.lighten.borrow_mut();
+        if lighten.is_none() && lightens() {
+            *lighten = Some(stage::Lighten::default());
+        }
+        lighten
+            .as_ref()
+            .map_or(stage::Backdrop::Full, stage::Lighten::level)
+    }
+
+    /// The backdrop at `detail`, its ground painted from the cache.
+    fn paint_backdrop(
+        &self,
+        cr: &gtk::cairo::Context,
+        w: f64,
+        h: f64,
+        phase: f64,
+        detail: stage::Backdrop,
+    ) {
+        #[cfg(test)]
+        if UNCACHED.with(Cell::get) {
+            paint::backdrop_in(cr, w, h, &self.palette, phase, detail);
+            return;
+        }
+        let scale = self.area.scale_factor();
+        paint::backdrop_cached(cr, &self.ground, w, h, scale, &self.palette, phase, detail);
+    }
+
     fn draw(&self, cr: &gtk::cairo::Context, w: f64, h: f64) {
         let reduce = !animations();
         let at = now();
         let p = &self.palette;
+        let detail = self.backdrop_detail();
         // The scan runs once per first run, when Tools first has rows.
         self.advance(at, reduce);
         let (tools, _) = self.tools_seen();
@@ -834,7 +937,7 @@ impl Stage {
             })
             .collect();
         let time = at;
-        paint::backdrop(cr, w, h, p, stage::backdrop_phase(time, reduce));
+        self.paint_backdrop(cr, w, h, stage::backdrop_phase(time, reduce), detail);
         let scale = stage::fit_scale(w, h);
 
         // The thread's stretches.
@@ -1051,6 +1154,133 @@ mod mounted_tests {
     /// Welcome, each step's slot sized to its graphic at the window's
     /// scale, the tick only while mapped and only with animations on, and
     /// the final frame drawn when they are off.
+    /// The stage on Traces (60 frames a second asked) in an 860 by 760
+    /// window on this compositor and renderer, three seconds at a time:
+    /// the ground drawn whole each frame (as before its cache), then
+    /// cached with the whole look and without the breath; then the app's
+    /// own rule, left to choose for ten seconds. Logs frames, the
+    /// process's CPU time, the renderer and the breath's cost
+    /// (`stage-fps-cpu:` lines in the weston job's log). Asserts that the
+    /// rule keeps the whole look wherever dropping the breath bought no
+    /// frames; the CPU is logged, not asserted, as a shared runner's load
+    /// varies.
+    #[test]
+    #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
+    fn mounted_the_stage_frame_rate_and_cpu_at_each_backdrop() {
+        use std::io::Write as _;
+        fn cpu_ms() -> Option<f64> {
+            let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+            let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split(' ').collect();
+            let ticks: f64 =
+                fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
+            Some(ticks * 10.0)
+        }
+        assert_eq!(std::env::consts::OS, "linux");
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        adw::init().expect("GTK display unavailable");
+        super::super::style::install();
+        let settings = gtk::Settings::default().unwrap();
+        let previous = settings.is_gtk_enable_animations();
+        settings.set_gtk_enable_animations(true);
+        let open = |lighten: bool| {
+            lighten_for_test(lighten);
+            let stage = Stage::new(Rc::new(RefCell::new(Tools::default())));
+            let window = adw::Window::builder()
+                .default_width(860)
+                .default_height(760)
+                .build();
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            content.add_css_class("tc-first-run-stage");
+            content.append(stage.thread());
+            let traces = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            traces.append(&stage.slot(Step::Traces));
+            let scroll = gtk::ScrolledWindow::builder()
+                .vexpand(true)
+                .child(&traces)
+                .build();
+            stage.follow(&scroll);
+            content.append(&scroll);
+            window.set_content(Some(&stage.wrap(&content)));
+            let pick: Rc<dyn Fn(Step)> = Rc::new(|_| {});
+            stage.set_step(Step::Traces, true, pick);
+            window.present();
+            settle(&context, 1000);
+            (stage, window)
+        };
+        let run = |stage: &Rc<Stage>, seconds: u64| {
+            let (drawn, cpu) = (stage.inner.borrow().draws, cpu_ms());
+            settle(&context, seconds * 1000);
+            let cpu = cpu.zip(cpu_ms()).map(|(a, b)| b - a);
+            (stage.inner.borrow().draws - drawn, cpu)
+        };
+        let (stage, window) = open(false);
+        let renderer = stage
+            .area
+            .native()
+            .and_then(|n| n.renderer())
+            .map_or_else(|| "none".to_owned(), |r| r.type_().name().to_string());
+        let mut log = std::io::stderr();
+        UNCACHED.with(|c| c.set(true));
+        FORCED.with(|c| c.set(Some(stage::Backdrop::Full)));
+        let (frames, cpu) = run(&stage, 3);
+        let _ = writeln!(
+            log,
+            "stage-fps-cpu: renderer {renderer}, ground drawn each frame, full look: \
+             {frames} frames in 3 s, cpu {cpu:?} ms"
+        );
+        assert!(frames > 0, "the stage drew nothing");
+        UNCACHED.with(|c| c.set(false));
+        let mut forced = Vec::new();
+        for level in [stage::Backdrop::Full, stage::Backdrop::Ground] {
+            FORCED.with(|c| c.set(Some(level)));
+            let (frames, cpu) = run(&stage, 3);
+            let _ = writeln!(
+                log,
+                "stage-fps-cpu: renderer {renderer}, ground cached, {level:?}: \
+                 {frames} frames in 3 s, cpu {cpu:?} ms"
+            );
+            forced.push(frames);
+        }
+        FORCED.with(|c| c.set(None));
+        let breath = paint::breath_cost(
+            f64::from(stage.area.width()),
+            f64::from(stage.area.height()),
+            stage.area.scale_factor(),
+            &stage.palette,
+        );
+        window.destroy();
+
+        // The app's rule, left to choose for 10 seconds.
+        let (stage, window) = open(true);
+        let (frames, cpu) = run(&stage, 10);
+        let (level, judged) = stage
+            .lighten
+            .borrow()
+            .as_ref()
+            .map(|watch| (watch.level(), watch.judged()))
+            .expect("the stage was drawn");
+        let _ = writeln!(
+            log,
+            "stage-fps-cpu: renderer {renderer}, breath alone {breath:.2} ms; the app's rule \
+             (judged {judged}) chose {level:?}: {frames} frames in 10 s, cpu {cpu:?} ms"
+        );
+        // Dropping the breath bought under a tenth more frames here: the
+        // rule must have kept the whole look.
+        if forced[1] * 10 < forced[0] * 11 {
+            assert_eq!(
+                level,
+                stage::Backdrop::Full,
+                "the breath went for {} frames against {}",
+                forced[1],
+                forced[0]
+            );
+        }
+        window.destroy();
+        lighten_for_test(false);
+        settings.set_gtk_enable_animations(previous);
+    }
+
     #[test]
     #[ignore = "requires a Linux GTK display; run alone with --ignored --test-threads=1"]
     fn the_stage_draws_under_the_steps_and_ticks_only_while_shown() {

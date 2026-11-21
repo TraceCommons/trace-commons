@@ -102,6 +102,9 @@ pub struct QueueView {
     /// The folder list: a row per folder, and the traces of the open ones
     /// (`monitor::traces_list`).
     list: gtk::Box,
+    /// The rows in `list`, in order, with what each was drawn from, so a
+    /// render builds again only the rows whose inputs changed.
+    rows: RefCell<Vec<(RowKey, gtk::Widget)>>,
     disclosure: gtk::Box,
     empty: adw::StatusPage,
     /// Exposed so `App` can debounce a scroll settle against this same
@@ -353,6 +356,7 @@ impl QueueView {
             undo_let_it_send,
             expanded: RefCell::new(std::collections::HashSet::new()),
             revealed: RefCell::new(inspector::Selection::None),
+            rows: RefCell::new(Vec::new()),
             certificates,
             list,
             disclosure,
@@ -634,15 +638,120 @@ pub fn render(app: &Rc<App>) {
     app.schedule_visible_preview_update();
 }
 
+/// What a row of the folder list is drawn from: everything it shows, so a
+/// row whose key has not changed is the row already on screen.
+#[derive(Clone, Debug)]
+pub(crate) enum RowKey {
+    Folder {
+        folder: super::monitor::traces_tree::FolderNode,
+        open: bool,
+        selected: bool,
+        /// The daemon's count of what Submit all would send.
+        contributable: Option<u64>,
+        /// Whether this folder's Submit all is in flight.
+        busy: bool,
+    },
+    Session {
+        entry: Box<QueueEntry>,
+        off: bool,
+        selected: bool,
+    },
+}
+
+impl PartialEq for RowKey {
+    /// Field for field, and a folder's traces whole: `FolderNode`'s own
+    /// equality compares its traces by id and tool only, while its row
+    /// also draws from what the daemon says of each (Submit's count).
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Folder {
+                    folder: a,
+                    open: a_open,
+                    selected: a_selected,
+                    contributable: a_count,
+                    busy: a_busy,
+                },
+                Self::Folder {
+                    folder: b,
+                    open: b_open,
+                    selected: b_selected,
+                    contributable: b_count,
+                    busy: b_busy,
+                },
+            ) => {
+                a == b
+                    && a.sessions == b.sessions
+                    && (a_open, a_selected, a_count, a_busy)
+                        == (b_open, b_selected, b_count, b_busy)
+            }
+            (
+                Self::Session {
+                    entry: a,
+                    off: a_off,
+                    selected: a_selected,
+                },
+                Self::Session {
+                    entry: b,
+                    off: b_off,
+                    selected: b_selected,
+                },
+            ) => a == b && a_off == b_off && a_selected == b_selected,
+            _ => false,
+        }
+    }
+}
+
+impl RowKey {
+    fn id(&self) -> (bool, &str) {
+        match self {
+            Self::Folder { folder, .. } => (true, folder.id.as_str()),
+            Self::Session { entry, .. } => (false, entry.entry_id.as_str()),
+        }
+    }
+}
+
+/// For each row of the new list (`new`), the place in the list drawn
+/// last (`old`) of a row it can keep: the same row, drawn from the same
+/// inputs. `None` is a row built again.
+pub(crate) fn reusable(old: &[RowKey], new: &[RowKey]) -> Vec<Option<usize>> {
+    let by_id: std::collections::HashMap<(bool, &str), usize> = old
+        .iter()
+        .enumerate()
+        .map(|(at, key)| (key.id(), at))
+        .collect();
+    new.iter()
+        .map(|key| by_id.get(&key.id()).copied().filter(|&at| old[at] == *key))
+        .collect()
+}
+
+/// Whether a kept row is still the daemon's: no switch in it has moved
+/// its knob ahead of its state (pressed, its write refused or its
+/// confirmation declined). Such a row is built again, from the read.
+fn settled(row: &gtk::Widget) -> bool {
+    if let Some(switch) = row.downcast_ref::<super::glass_switch::GlassSwitch>()
+        && switch.is_active() != switch.state()
+    {
+        return false;
+    }
+    let mut child = row.first_child();
+    while let Some(widget) = child {
+        if !settled(&widget) {
+            return false;
+        }
+        child = widget.next_sibling();
+    }
+    true
+}
+
 /// The folder list alone (`TracesTreeView`): a row per listed folder and
-/// the traces of the open ones, redrawn from scratch. `render` calls it,
-/// and a selection made anywhere (`Shell::select`) redraws it, so the
-/// selected row is always the inspector's subject.
+/// the traces of the open ones. `render` calls it, and a selection made
+/// anywhere (`Shell::select`) redraws it, so the selected row is always
+/// the inspector's subject. Only a row whose inputs changed is built
+/// again; the others stay, moved into place, so a read that changes one
+/// folder (its mode, after a switch press) rebuilds that folder's row.
 pub(crate) fn render_list(app: &Rc<App>) {
     let view = &app.queue;
-    clear(&view.list);
-    // Rebuilt below alongside `view.list`: every row is redrawn from
-    // scratch, so the old widgets in here are already gone.
     app.card_widgets.borrow_mut().clear();
     let entries = app.entries.borrow();
     // The folders the core lists, ignored ones left out, newest waiting
@@ -658,40 +767,105 @@ pub(crate) fn render_list(app: &Rc<App>) {
     // A moved selection is kept on screen (`TracesTreeView`'s
     // `scroll(to:)`), once its rebuilt row is laid out.
     let moved = *view.revealed.borrow() != selection;
-    let mut selected_row: Option<gtk::Widget> = None;
     if *view.revealed.borrow() != selection {
         let open = traces_list::revealing(&selection, &tree, &view.expanded.borrow());
         *view.expanded.borrow_mut() = open;
         *view.revealed.borrow_mut() = selection.clone();
     }
     let expanded = view.expanded.borrow().clone();
+    let busy_folder = app.submitting_folder.borrow().clone();
+    let mut keys: Vec<RowKey> = Vec::new();
     for folder in &tree.folders {
         let open = expanded.contains(&folder.id);
-        let chosen = selection == inspector::Selection::Folder(folder.id.clone());
-        let row = traces_list::folder_row(app, folder, open, chosen);
-        if chosen {
-            selected_row = Some(row.clone());
-        }
-        view.list.append(&row);
+        keys.push(RowKey::Folder {
+            folder: folder.clone(),
+            open,
+            selected: selection == inspector::Selection::Folder(folder.id.clone()),
+            contributable: crate::eligibility::group_contributable(
+                &app.projects.borrow(),
+                &folder.id,
+            ),
+            busy: busy_folder.as_deref() == Some(folder.id.as_str()),
+        });
         if !open {
             continue;
         }
         let off = folder.mode == Some(ProjectMode::Ignore);
         for entry in &folder.sessions {
-            let chosen = selection == inspector::Selection::Session(entry.entry_id.clone());
-            let widget = traces_list::session_row(app, entry, off, chosen);
-            if chosen {
+            keys.push(RowKey::Session {
+                entry: Box::new(entry.clone()),
+                off,
+                selected: selection == inspector::Selection::Session(entry.entry_id.clone()),
+            });
+        }
+    }
+    let old = view.rows.take();
+    let old_keys: Vec<RowKey> = old.iter().map(|(key, _)| key.clone()).collect();
+    let plan = if super::redraw_counts::rebuild_all() {
+        vec![None; keys.len()]
+    } else {
+        reusable(&old_keys, &keys)
+    };
+    let mut rows: Vec<(RowKey, gtk::Widget)> = Vec::with_capacity(keys.len());
+    let mut selected_row: Option<gtk::Widget> = None;
+    for (key, kept) in keys.into_iter().zip(plan) {
+        let widget = match kept.map(|at| old[at].1.clone()).filter(settled) {
+            Some(widget) => widget,
+            None => {
+                super::redraw_counts::row_built();
+                match &key {
+                    RowKey::Folder {
+                        folder,
+                        open,
+                        selected,
+                        ..
+                    } => traces_list::folder_row(app, folder, *open, *selected),
+                    RowKey::Session {
+                        entry,
+                        off,
+                        selected,
+                    } => traces_list::session_row(app, entry, *off, *selected),
+                }
+            }
+        };
+        match &key {
+            RowKey::Folder { selected, .. } | RowKey::Session { selected, .. } if *selected => {
                 selected_row = Some(widget.clone());
             }
+            _ => {}
+        }
+        if let RowKey::Session { entry, .. } = &key {
             // Kept so a scroll settle can ask each row its own bounds
             // against the scroller -- see
             // `App::schedule_visible_preview_update`.
             app.card_widgets
                 .borrow_mut()
                 .insert(entry.entry_id.clone(), widget.clone());
-            view.list.append(&widget);
+        }
+        rows.push((key, widget));
+    }
+    // Into place without taking a kept row out of the list, so it keeps
+    // the keyboard focus and any motion it is in.
+    let wanted: std::collections::HashSet<gtk::Widget> =
+        rows.iter().map(|(_, widget)| widget.clone()).collect();
+    for (_, widget) in &old {
+        if !wanted.contains(widget) && widget.parent().as_ref() == Some(view.list.upcast_ref()) {
+            view.list.remove(widget);
         }
     }
+    let mut previous: Option<gtk::Widget> = None;
+    for (_, widget) in &rows {
+        if widget.parent().as_ref() == Some(view.list.upcast_ref()) {
+            let after = widget.prev_sibling();
+            if after != previous {
+                view.list.reorder_child_after(widget, previous.as_ref());
+            }
+        } else {
+            view.list.insert_child_after(widget, previous.as_ref());
+        }
+        previous = Some(widget.clone());
+    }
+    view.rows.replace(rows);
     if moved && let Some(row) = selected_row {
         traces_list::scroll_into_view(&view.scroller, &row, &view.scroll_driver);
     }
@@ -2033,6 +2207,96 @@ mod consent_mounted_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder_key(id: &str, mode: ProjectMode, waiting: usize) -> RowKey {
+        let mut folder = super::super::monitor::traces_tree::FolderNode::new(id, id, Some(mode));
+        folder.sessions = (0..waiting)
+            .map(|n| QueueEntry {
+                entry_id: format!("{id}-{n}"),
+                project_id: id.into(),
+                state: "pending".into(),
+                ..QueueEntry::default()
+            })
+            .collect();
+        RowKey::Folder {
+            folder,
+            open: false,
+            selected: false,
+            contributable: None,
+            busy: false,
+        }
+    }
+
+    /// A render keeps every row whose inputs are unchanged and builds
+    /// again only the one that changed: a folder's mode after its switch
+    /// is pressed, wherever the rows moved to.
+    #[test]
+    fn a_render_builds_again_only_the_rows_that_changed() {
+        let old = vec![
+            folder_key("api", ProjectMode::AutoUpload, 2),
+            folder_key("web", ProjectMode::Ask, 1),
+            folder_key("cli", ProjectMode::Ask, 0),
+        ];
+        // The same reads again: every row kept.
+        assert_eq!(reusable(&old, &old), vec![Some(0), Some(1), Some(2)]);
+        // api turned off: only its row is built; the others are kept,
+        // even moved.
+        let new = vec![
+            folder_key("web", ProjectMode::Ask, 1),
+            folder_key("api", ProjectMode::Ask, 2),
+            folder_key("cli", ProjectMode::Ask, 0),
+        ];
+        assert_eq!(reusable(&old, &new), vec![Some(1), None, Some(2)]);
+        // A new trace, the selection, opening, the daemon's count and a
+        // Submit in flight each change a row.
+        let with = |change: &dyn Fn(&mut RowKey)| {
+            let mut key = folder_key("web", ProjectMode::Ask, 1);
+            change(&mut key);
+            key
+        };
+        let mut eligibility = folder_key("web", ProjectMode::Ask, 1);
+        if let RowKey::Folder { folder, .. } = &mut eligibility {
+            folder.sessions[0].eligibility = Some("ineligible_configuration".into());
+        }
+        for changed in [
+            folder_key("web", ProjectMode::Ask, 2),
+            with(&|key| {
+                if let RowKey::Folder { selected, .. } = key {
+                    *selected = true;
+                }
+            }),
+            with(&|key| {
+                if let RowKey::Folder { open, .. } = key {
+                    *open = true;
+                }
+            }),
+            with(&|key| {
+                if let RowKey::Folder { contributable, .. } = key {
+                    *contributable = Some(1);
+                }
+            }),
+            with(&|key| {
+                if let RowKey::Folder { busy, .. } = key {
+                    *busy = true;
+                }
+            }),
+            eligibility,
+        ] {
+            assert_eq!(reusable(&old, &[changed]), vec![None]);
+        }
+        // A trace row and a folder row never stand in for each other.
+        let trace = RowKey::Session {
+            entry: Box::new(QueueEntry {
+                entry_id: "web".into(),
+                ..QueueEntry::default()
+            }),
+            off: false,
+            selected: false,
+        };
+        assert_eq!(reusable(&old, std::slice::from_ref(&trace)), vec![None]);
+        let same = std::slice::from_ref(&trace);
+        assert_eq!(reusable(same, same), vec![Some(0)]);
+    }
     #[test]
     fn private_inference_offer_requires_a_confirmed_write() {
         use super::private_inference_answer_confirmed as confirmed;

@@ -1143,14 +1143,10 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     }
 }
 
-/// Whether Red Team managed sessions are available on this build and enabled
-/// by the `red_team_sessions` feature flag.
-pub fn red_team_available(shared: &DaemonShared) -> bool {
+/// Whether Red Team managed sessions are available on this build: every
+/// macOS build, no other OS.
+pub fn red_team_available(_shared: &DaemonShared) -> bool {
     cfg!(target_os = "macos")
-        && shared
-            .feature_flags
-            .snapshot()
-            .is_enabled(crate::managed::RED_TEAM_FLAG)
 }
 
 /// Synchronous entry. A proxy whose session ended is dropped, which

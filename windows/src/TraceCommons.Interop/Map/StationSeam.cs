@@ -31,23 +31,46 @@ public static class StationSeam
     public static IReadOnlyList<MapPoint> Outset(IReadOnlyList<MapPoint> points, double by)
     {
         int n = points.Count;
-        if (n < 3)
-        {
-            return points;
-        }
-
-        double area = 0;
+        var all = new MapPoint[n];
+        var corners = new int[n];
         for (int i = 0; i < n; i++)
         {
-            MapPoint a = points[i], b = points[(i + 1) % n];
-            area += a.X * b.Y - b.X * a.Y;
+            all[i] = points[i];
+            corners[i] = i;
         }
 
-        if (Math.Abs(area) < 1e-9)
+        if (!HasArea(all, corners, 0, n))
         {
             return points;
         }
 
+        var result = new MapPoint[n];
+        Outset(all, corners, 0, n, by, result);
+        return result;
+    }
+
+    /// <summary>
+    /// <see cref="Outset(IReadOnlyList{MapPoint}, double)"/> for the face
+    /// whose corners are <c>projected[corners[first..first + count]]</c>,
+    /// written into <paramref name="into"/> (its first
+    /// <paramref name="count"/> places): the painter's path, which keeps
+    /// its buffers from face to face. A face with no area is copied as it is.
+    /// </summary>
+    public static void Outset(MapPoint[] projected, int[] corners, int first, int count, double by, MapPoint[] into)
+    {
+        int n = count;
+        MapPoint At(int i) => projected[corners[first + i]];
+        if (!HasArea(projected, corners, first, n))
+        {
+            for (int i = 0; i < n; i++)
+            {
+                into[i] = At(i);
+            }
+
+            return;
+        }
+
+        double area = SignedArea(projected, corners, first, n);
         double side = area > 0 ? 1 : -1;
         (double X, double Y) Normal(MapPoint a, MapPoint b)
         {
@@ -55,10 +78,9 @@ public static class StationSeam
             return length < 1e-12 ? (0, 0) : (side * dy / length, -side * dx / length);
         }
 
-        var result = new MapPoint[n];
         for (int i = 0; i < n; i++)
         {
-            MapPoint previous = points[(i + n - 1) % n], here = points[i], next = points[(i + 1) % n];
+            MapPoint previous = At((i + n - 1) % n), here = At(i), next = At((i + 1) % n);
             (double X, double Y) n1 = Normal(previous, here), n2 = Normal(here, next);
             double sx = n1.X + n2.X, sy = n1.Y + n2.Y, s = Math.Sqrt(sx * sx + sy * sy);
             double mx, my;
@@ -75,9 +97,22 @@ public static class StationSeam
                 (mx, my) = (ux * reach, uy * reach);
             }
 
-            result[i] = new MapPoint(here.X + mx, here.Y + my);
+            into[i] = new MapPoint(here.X + mx, here.Y + my);
+        }
+    }
+
+    private static bool HasArea(MapPoint[] projected, int[] corners, int first, int n) =>
+        n >= 3 && Math.Abs(SignedArea(projected, corners, first, n)) >= 1e-9;
+
+    private static double SignedArea(MapPoint[] projected, int[] corners, int first, int n)
+    {
+        double area = 0;
+        for (int i = 0; i < n; i++)
+        {
+            MapPoint a = projected[corners[first + i]], b = projected[corners[first + (i + 1) % n]];
+            area += a.X * b.Y - b.X * a.Y;
         }
 
-        return result;
+        return area;
     }
 }

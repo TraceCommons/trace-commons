@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop.Map;
+using TraceCommons.App.Look;
 using TraceCommons.Interop.Shell;
 using Windows.UI.ViewManagement;
 
@@ -130,8 +131,16 @@ public sealed partial class MainWindow
         }
     }
 
+    private readonly FocusFramePace<XamlRoot> _graphFramePace = new(WindowClocks.Windows);
+
     private void OnGraphFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_graphFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         BezierCurve curve = TracesGraphState.Footer;
         double t = _graphClock.Elapsed.TotalSeconds;
         SetGraphFrame(curve.At(t));

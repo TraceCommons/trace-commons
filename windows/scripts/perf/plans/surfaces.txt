@@ -1,0 +1,27 @@
+# Home, Insights (tab bar, Skills Home), glass controls on Traces, the
+# tray flyout. normalDay with the skillsHome extra, so Skills is drawn.
+animations on
+launch normalDay {throttle} extra=skillsHome
+size 1020 725
+tab TabHome
+snap home
+measure home 2
+hover tabs-hover 1 Home,Private AI,Traces,Insights
+tab TabInsights
+measure insights 1
+press insights-tabbar 1 Overview,Breakdown,Benchmarks,Sessions,Analyze
+select Overview
+select Skills
+snap skills
+measure skills-home 2
+tab TabTraces
+measure traces-tree 1
+hover glass-hover 1 Pause watching,Refresh the queue,History,Search
+press glass-switch 1 Automatic for api
+minimize
+measure minimised 1
+restore
+flyout
+snap flyout
+measure flyout 1
+quit

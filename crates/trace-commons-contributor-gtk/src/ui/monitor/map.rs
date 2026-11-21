@@ -31,10 +31,10 @@
 //! `PanePrefs`): on the rocket map, the default, this computer is a launch
 //! pad and the library the NEAR AI space station (`station`); on the
 //! standard map they are the laptop and the turning orb (`orb`). The
-//! library is drawn between the two halves of the still layer on the map's
-//! resting timeline (20 frames a second, 30 with moving dashes, never the
-//! run's 60), kept between frames (`LibraryArt`), and drawn once at rest
-//! with animations off. Under everything is the Mac's field (`field`).
+//! library is drawn between the two halves of the still layer at its own
+//! 15 frames a second (never the dashes' 30 or the run's 60), kept between
+//! frames (`LibraryArt`), its glow drawn once per size, and drawn once at
+//! rest with animations off. Under everything is the Mac's field (`field`).
 //! The coins carry each tool's logo, or its initials, in its tint
 //! (`tool_art`). Colours are resolved from the inks (`MapColours::resolve`):
 //! in the standard look the Mac's own map tokens in the flat theme, the
@@ -367,6 +367,8 @@ mod imp {
         pub tick: RefCell<Option<gtk::TickCallbackId>>,
         /// The clock's last drawn frame and its rate, in seconds.
         pub last_frame: Cell<f64>,
+        /// The frame-rate gate the clock's frames pass.
+        pub pace: crate::ui::glass_motion::Pace,
         pub interval: Cell<f64>,
         /// The still layer and what it was drawn from: what lies under the
         /// station, and, at rest, the rocket and the pile over it.
@@ -692,21 +694,16 @@ mod imp {
             if let Some(under) = still.as_ref().and_then(|layer| layer.under.as_ref()) {
                 snapshot.append_node(under);
             }
-            // The library's station or orb turns on the map's resting
-            // timeline, over the nodes and under the rocket and the pile,
-            // as the Mac draws it: during a run too, it moves at the
-            // resting rate, not the run's.
+            // The library's station or orb turns at its own rate, over the
+            // nodes and under the rocket and the pile, as the Mac draws it:
+            // it moves at that rate while the dashes move at theirs and a
+            // run at its own, and is built once a turn's frame, however
+            // often the map draws.
             let style = self.style.get();
             if let Some(frame) = library_frame(&scene, &fit, style) {
-                let interval = transfers::resting_motion(
-                    reduce,
-                    scene.flows(),
-                    healthy,
-                    library_turns(&scene),
-                )
-                .interval;
-                let seconds = library_seconds(self.now(), interval);
-                snapshot.append_node(self.library.node(style, &frame, seconds, reduce));
+                let seconds = library_seconds(self.now());
+                let scale = f64::from(obj.scale_factor());
+                snapshot.append_node(self.library.node(style, &frame, seconds, reduce, scale));
             }
             if let Some(over) = still.as_ref().and_then(|layer| layer.over.as_ref()) {
                 snapshot.append_node(over);
@@ -948,13 +945,7 @@ mod imp {
             {
                 return node.clone();
             }
-            let arcs = gtk::Snapshot::new();
-            let cr = arcs.append_cairo(bounds);
-            draw_arcs(&cr, scene, fit, palette, healthy, phase);
-            drop(cr);
-            let node = arcs
-                .to_node()
-                .unwrap_or_else(|| gtk::gsk::ContainerNode::new(&[]).upcast());
+            let node = arcs_node_in(scene, fit, palette, healthy, phase, bounds);
             let key = ArcsKey {
                 phase,
                 healthy,
@@ -1432,6 +1423,7 @@ impl MapCanvas {
     }
 
     fn relayout(&self) {
+        crate::ui::redraw_counts::laid_out();
         self.imp().layout_scene();
         self.sync_children();
         self.update_clock();
@@ -1493,7 +1485,9 @@ impl MapCanvas {
             if now - imp.dash_time.get() >= imp.dash_interval.get() * 0.9 {
                 imp.dash_time.set(now);
             }
-            if now - imp.last_frame.get() >= interval * 0.9 {
+            // The window's focus rule over the map's own rate: 15 a second
+            // at most while another app has the focus.
+            if imp.pace.due(canvas, clock.frame_time(), interval) {
                 imp.last_frame.set(now);
                 if imp.pile_moved() {
                     canvas.queue_allocate();
@@ -2190,14 +2184,13 @@ pub fn library_frame(scene: &Scene, fit: &MapGeometry, style: MapStyle) -> Optio
     })
 }
 
-/// The map's seconds held to the resting timeline's last tick, so the
-/// library moves at the resting rate even while a run draws at 60.
-pub fn library_seconds(now: f64, interval: f64) -> f64 {
-    if interval > 0.0 {
-        (now / interval).floor() * interval
-    } else {
-        now
-    }
+/// The map's seconds held to the library's own last frame
+/// (`transfers::LIBRARY_INTERVAL`), so the library moves at its own rate
+/// whatever the map draws at: the dashes' 30 a second, or a run's 60
+/// (`GlassLibraryStation.frameInterval`, on its own timeline on the Mac).
+pub fn library_seconds(now: f64) -> f64 {
+    let interval = transfers::LIBRARY_INTERVAL;
+    (now / interval).floor() * interval
 }
 
 /// What the library was last drawn from.
@@ -2206,25 +2199,43 @@ struct LibraryKey {
     style: MapStyle,
     frame: LibraryFrame,
     angle: f64,
+    scale: f64,
+}
+
+/// What the station's glow was drawn for: its frame's size, the display's
+/// scale and its strength. Not where the frame is, nor the angle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GlowKey {
+    width: f64,
+    height: f64,
+    scale: f64,
+    lit: bool,
 }
 
 /// The library's drawing, kept until its angle, light, frame or style
-/// changes: built at most once a resting frame.
+/// changes: built at most once a turn's frame. The station's glow is kept
+/// apart, until its size, scale or light changes: drawn once, not once a
+/// frame. One of each is kept; a window resized by hand passes through
+/// many sizes.
 #[derive(Default)]
 pub struct LibraryArt {
     kept: RefCell<Option<(LibraryKey, gtk::gsk::RenderNode)>>,
     builds: Cell<usize>,
+    glow: RefCell<Option<(GlowKey, Option<gtk::gdk::Texture>)>>,
+    glow_builds: Cell<usize>,
 }
 
 impl LibraryArt {
     /// The library at `seconds` on the map's clock (`library_seconds`),
-    /// at rest under reduced motion.
+    /// at rest under reduced motion, for a display of `scale` device
+    /// pixels a point.
     pub fn node(
         &self,
         style: MapStyle,
         frame: &LibraryFrame,
         seconds: f64,
         reduce_motion: bool,
+        scale: f64,
     ) -> gtk::gsk::RenderNode {
         let angle = match style {
             MapStyle::Launch => station::angle(seconds, reduce_motion),
@@ -2234,6 +2245,7 @@ impl LibraryArt {
             style,
             frame: *frame,
             angle,
+            scale,
         };
         if let Some((kept, node)) = self.kept.borrow().as_ref()
             && *kept == key
@@ -2247,7 +2259,15 @@ impl LibraryArt {
             lit,
         } = *frame;
         let node = match style {
-            MapStyle::Launch => station::node(origin, width, height, angle, lit),
+            MapStyle::Launch => {
+                let glow = self.station_glow(GlowKey {
+                    width,
+                    height,
+                    scale,
+                    lit,
+                });
+                station::node(origin, width, height, angle, glow.as_ref())
+            }
             MapStyle::Standard => orb::node(origin, width, height, angle, lit),
         };
         self.builds.set(self.builds.get() + 1);
@@ -2255,9 +2275,28 @@ impl LibraryArt {
         node
     }
 
+    /// The station's glow for `key`, drawn only when it differs from the
+    /// last one's.
+    fn station_glow(&self, key: GlowKey) -> Option<gtk::gdk::Texture> {
+        if let Some((kept, texture)) = self.glow.borrow().as_ref()
+            && *kept == key
+        {
+            return texture.clone();
+        }
+        let texture = station::glow_texture(key.width, key.height, key.scale, key.lit);
+        self.glow_builds.set(self.glow_builds.get() + 1);
+        self.glow.replace(Some((key, texture.clone())));
+        texture
+    }
+
     /// How many times the drawing has been built.
     pub fn builds(&self) -> usize {
         self.builds.get()
+    }
+
+    /// How many times the station's glow has been drawn.
+    pub fn glow_builds(&self) -> usize {
+        self.glow_builds.get()
     }
 }
 
@@ -2376,6 +2415,66 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 /// a flowing arc lit; otherwise it is still and dashed, never live.
 /// `phase` is how far a flowing arc's dashes have moved, in design units:
 /// 0 under reduced motion, where they stand still.
+/// The box the arcs draw in, within `pane`: each arc lies inside its
+/// curve's four control points, widened by the widest line it is drawn
+/// with (the dashes', 1.3 times the arc's, with round caps) and a point
+/// for anti-aliasing, then rounded out to whole points, which at a whole
+/// display scale are whole device pixels, so the arcs fall on the same
+/// pixels as in a node over the whole pane. `None` with no arcs.
+pub fn arcs_extent(
+    scene: &Scene,
+    fit: &MapGeometry,
+    pane: &gtk::graphene::Rect,
+) -> Option<gtk::graphene::Rect> {
+    let pad = 1.4 * fit.scale * 1.3 / 2.0 + 1.0;
+    let (mut x0, mut y0, mut x1, mut y1) = (
+        f64::INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NEG_INFINITY,
+    );
+    for arc in &scene.arcs {
+        for at in [arc.from, arc.control1, arc.control2, arc.to] {
+            let p = fit.point(at);
+            x0 = x0.min(p.x - pad);
+            y0 = y0.min(p.y - pad);
+            x1 = x1.max(p.x + pad);
+            y1 = y1.max(p.y + pad);
+        }
+    }
+    let (left, top) = (f64::from(pane.x()), f64::from(pane.y()));
+    let (right, bottom) = (
+        left + f64::from(pane.width()),
+        top + f64::from(pane.height()),
+    );
+    let (x0, y0) = (x0.floor().max(left), y0.floor().max(top));
+    let (x1, y1) = (x1.ceil().min(right), y1.ceil().min(bottom));
+    (x1 > x0 && y1 > y0)
+        .then(|| gtk::graphene::Rect::new(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32))
+}
+
+/// The arcs as a node over only the box they draw in (`arcs_extent`), not
+/// the whole pane: they are drawn again on every frame their dashes move,
+/// and the renderer redraws what a changed node covers.
+fn arcs_node_in(
+    scene: &Scene,
+    fit: &MapGeometry,
+    palette: &Palette,
+    healthy: bool,
+    phase: f64,
+    pane: &gtk::graphene::Rect,
+) -> gtk::gsk::RenderNode {
+    use gtk::gsk::prelude::IsRenderNode;
+    match arcs_extent(scene, fit, pane) {
+        Some(extent) => {
+            let node = gtk::gsk::CairoNode::new(&extent);
+            draw_arcs(&node.draw_context(), scene, fit, palette, healthy, phase);
+            node.upcast()
+        }
+        None => gtk::gsk::ContainerNode::new(&[]).upcast(),
+    }
+}
+
 fn draw_arcs(
     cr: &gtk::cairo::Context,
     scene: &Scene,
@@ -4053,12 +4152,12 @@ mod tests {
         assert!(at(MapStyle::Standard) > 200, "no laptop screen");
     }
 
-    /// The library turns on the map's resting timeline, as on the Mac,
-    /// where it is drawn on that timeline (20 frames a second, 30 while
-    /// arcs carry dashes) and never on the run's 60: its drawing is built
-    /// once a resting frame and kept between, however often the map draws.
+    /// The library turns at its own 15 frames a second, as on the Mac,
+    /// where it has its own timeline, never the dashes' 30 or a run's 60:
+    /// its drawing is built once a frame of its own and kept between,
+    /// however often the map draws. Its glow is drawn once.
     #[test]
-    fn the_library_is_built_once_a_resting_frame_while_a_run_draws_at_sixty() {
+    fn the_library_is_built_at_its_own_rate_whatever_the_map_draws_at() {
         let art = LibraryArt::default();
         let frame = LibraryFrame {
             origin: (10.0, 20.0),
@@ -4069,30 +4168,59 @@ mod tests {
         // One second of a run, drawn at 60 frames a second.
         for i in 0..60 {
             let now = 100.01 + f64::from(i) / 60.0;
-            art.node(
-                MapStyle::Launch,
-                &frame,
-                library_seconds(now, 1.0 / 20.0),
-                false,
-            );
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
         }
-        assert_eq!(art.builds(), 20, "20 station frames in a second");
-        // With moving dashes the resting timeline is 30 a second.
-        for i in 0..60 {
-            let now = 200.01 + f64::from(i) / 60.0;
-            art.node(
-                MapStyle::Launch,
-                &frame,
-                library_seconds(now, 1.0 / 30.0),
-                false,
-            );
+        assert_eq!(art.builds(), 15, "15 station frames in a second");
+        // One second of moving dashes, drawn at 30 frames a second.
+        for i in 0..30 {
+            let now = 200.01 + f64::from(i) / 30.0;
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
         }
-        assert_eq!(art.builds(), 50);
+        assert_eq!(art.builds(), 30, "15 more, not 30");
+        // A whole turn: the glow was drawn once, for its size, scale and
+        // light, not once a frame.
+        for i in 0..(26 * 15) {
+            let now = 300.01 + f64::from(i) / 15.0;
+            art.node(MapStyle::Launch, &frame, library_seconds(now), false, 2.0);
+        }
+        assert_eq!(art.glow_builds(), 1, "the glow is drawn once");
+        // Moved on the map, it is the same glow.
+        let moved = LibraryFrame {
+            origin: (40.0, 60.0),
+            ..frame
+        };
+        art.node(MapStyle::Launch, &moved, 0.0, false, 2.0);
+        assert_eq!(art.glow_builds(), 1, "a moved station keeps its glow");
+        // A new light, size or scale draws it again.
+        art.node(
+            MapStyle::Launch,
+            &LibraryFrame {
+                lit: false,
+                ..moved
+            },
+            0.0,
+            false,
+            2.0,
+        );
+        assert_eq!(art.glow_builds(), 2);
+        art.node(
+            MapStyle::Launch,
+            &LibraryFrame {
+                width: 120.0,
+                ..moved
+            },
+            0.0,
+            false,
+            2.0,
+        );
+        assert_eq!(art.glow_builds(), 3);
+        art.node(MapStyle::Launch, &moved, 0.0, false, 1.0);
+        assert_eq!(art.glow_builds(), 4);
         // Under reduced motion it rests: built once, whatever the clock.
         let still = LibraryArt::default();
         for i in 0..60 {
             let now = 300.0 + f64::from(i) / 7.0;
-            still.node(MapStyle::Launch, &frame, now, true);
+            still.node(MapStyle::Launch, &frame, now, true, 2.0);
         }
         assert_eq!(still.builds(), 1);
         // A change of light, frame or style builds it again.
@@ -4104,6 +4232,7 @@ mod tests {
             },
             0.0,
             true,
+            2.0,
         );
         still.node(
             MapStyle::Standard,
@@ -4113,8 +4242,10 @@ mod tests {
             },
             0.0,
             true,
+            2.0,
         );
         assert_eq!(still.builds(), 3);
+        assert_eq!(still.glow_builds(), 2, "the orb has no cached glow");
     }
 
     /// A coin is drawn as `MapToolPile` draws it: its edge and rim in the
@@ -4786,6 +4917,198 @@ mod tests {
         }
     }
 
+    /// A Traces scene with five tools whose arcs take every style in turn,
+    /// the flowing one first.
+    fn every_arc_scene() -> Scene {
+        let entries: Vec<QueueEntry> = ["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+            .iter()
+            .enumerate()
+            .map(|(i, source)| entry(&format!("e{i}"), &format!("p{i}"), source))
+            .collect();
+        let mut scene = traces_scene(&entries);
+        let styles = [
+            ArcStyle::Flowing,
+            ArcStyle::Quiet,
+            ArcStyle::Dashed,
+            ArcStyle::Shared,
+            ArcStyle::Unknown,
+        ];
+        for (i, arc) in scene.arcs.iter_mut().enumerate() {
+            arc.style = styles[i % styles.len()];
+        }
+        scene
+    }
+
+    /// The arcs, drawn again on every frame their dashes move, are a node
+    /// over the box they draw in, not over the whole pane, so the renderer
+    /// redraws that box and not the pane; and in that box they land on
+    /// exactly the pixels they did over the whole pane, at both display
+    /// scales, zoomed and not, healthy or not, at any phase.
+    #[test]
+    fn the_arcs_are_drawn_in_their_own_box_on_the_same_pixels() {
+        use gtk::gsk::prelude::IsRenderNode;
+        let scene = every_arc_scene();
+        assert!(scene.flows() && scene.arcs.len() >= 5);
+        let palette = Palette::fixed();
+        let hub = map_scene::Scene::hub(scene.space);
+        for (w, h, zoom, focus) in [
+            (580, 760, 1.0, None),
+            (900, 500, 1.0, None),
+            (580, 760, 2.4, Some(hub)),
+        ] {
+            let fit = MapGeometry::new(
+                Size::new(f64::from(w), f64::from(h)),
+                zoom,
+                focus,
+                scene.space,
+            );
+            let pane = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            let extent = arcs_extent(&scene, &fit, &pane).expect("the arcs have a box");
+            assert!(
+                extent.x() >= 0.0
+                    && extent.y() >= 0.0
+                    && extent.x() + extent.width() <= w as f32
+                    && extent.y() + extent.height() <= h as f32,
+                "the box stays in the pane"
+            );
+            assert_eq!(extent.x().fract(), 0.0, "whole points");
+            assert_eq!(extent.width().fract(), 0.0, "whole points");
+            if zoom == 1.0 {
+                let share = extent.width() * extent.height() / (w * h) as f32;
+                assert!(share < 0.5, "the arcs' box is {share} of the pane");
+            }
+            // The map's arcs node is that box, not the pane.
+            let node = arcs_node_in(&scene, &fit, &palette, true, 0.0, &pane);
+            assert_eq!(
+                node.bounds(),
+                extent,
+                "the arcs node covers {:?}",
+                node.bounds()
+            );
+            for scale in [1, 2] {
+                for (healthy, phase) in [(true, 0.0), (true, 7.3), (false, 3.0)] {
+                    let render = |rect: &gtk::graphene::Rect| {
+                        let node = gtk::gsk::CairoNode::new(rect);
+                        draw_arcs(&node.draw_context(), &scene, &fit, &palette, healthy, phase);
+                        let mut surface = gtk::cairo::ImageSurface::create(
+                            gtk::cairo::Format::ARgb32,
+                            w * scale,
+                            h * scale,
+                        )
+                        .unwrap();
+                        {
+                            let cr = gtk::cairo::Context::new(&surface).unwrap();
+                            cr.scale(f64::from(scale), f64::from(scale));
+                            node.upcast().draw(&cr);
+                        }
+                        surface.flush();
+                        surface.data().unwrap().to_vec()
+                    };
+                    let whole = render(&pane);
+                    assert!(whole.iter().any(|&b| b > 0), "the arcs drew nothing");
+                    assert!(
+                        render(&extent) == whole,
+                        "the arcs moved off their pixels at {w}x{h} zoom {zoom} scale {scale} phase {phase}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What a frame of the moving map costs the cairo renderer (software
+    /// rendering), which repaints what changed: with the arcs over the
+    /// whole pane every frame repaints the pane; with the arcs in their
+    /// box, the box and, on the station's frames, the station's. Prints
+    /// the share of the pane and the time to repaint it at twice the size.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_the_maps_redraw_region() {
+        use gtk::gsk::prelude::IsRenderNode;
+        let scene = every_arc_scene();
+        let (w, h) = (580, 760);
+        let fit = MapGeometry::new(
+            Size::new(f64::from(w), f64::from(h)),
+            1.0,
+            None,
+            scene.space,
+        );
+        let palette = Palette::fixed();
+        let pane = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+        let field = field::Field::default();
+        let ground = field.node(w, h, false, &palette.map);
+        let still = gtk::gsk::CairoNode::new(&pane);
+        {
+            let cr = still.draw_context();
+            for node in &scene.nodes {
+                draw_node(&cr, &scene, node, &fit, &palette, false, MapStyle::Launch);
+            }
+        }
+        let still: gtk::gsk::RenderNode = still.upcast();
+        let art = LibraryArt::default();
+        let station = library_frame(&scene, &fit, MapStyle::Launch).unwrap();
+        let extent = arcs_extent(&scene, &fit, &pane).unwrap();
+        let station_rect = gtk::graphene::Rect::new(
+            (station.origin.0 - station::GLOW_MARGIN) as f32,
+            (station.origin.1 - station::GLOW_MARGIN) as f32,
+            (station.width + station::GLOW_MARGIN * 2.0) as f32,
+            (station.height + station::GLOW_MARGIN * 2.0) as f32,
+        );
+        let frames = 120;
+        let time = |rects: &[gtk::graphene::Rect], whole_arcs: bool| {
+            let mut surface =
+                gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w * 2, h * 2).unwrap();
+            let start = std::time::Instant::now();
+            for i in 0..frames {
+                let now = 100.0 + f64::from(i) / 30.0;
+                let arcs_rect = if whole_arcs { pane } else { extent };
+                let arcs = gtk::gsk::CairoNode::new(&arcs_rect);
+                draw_arcs(
+                    &arcs.draw_context(),
+                    &scene,
+                    &fit,
+                    &palette,
+                    true,
+                    now * 18.0,
+                );
+                let lib = art.node(MapStyle::Launch, &station, library_seconds(now), false, 2.0);
+                let frame = gtk::gsk::ContainerNode::new(&[
+                    ground.clone(),
+                    arcs.upcast(),
+                    still.clone(),
+                    lib,
+                ]);
+                let cr = gtk::cairo::Context::new(&mut surface).unwrap();
+                cr.scale(2.0, 2.0);
+                for rect in rects {
+                    cr.rectangle(
+                        f64::from(rect.x()),
+                        f64::from(rect.y()),
+                        f64::from(rect.width()),
+                        f64::from(rect.height()),
+                    );
+                }
+                cr.clip();
+                frame.upcast().draw(&cr);
+            }
+            start.elapsed().as_secs_f64() * 1e3 / f64::from(frames)
+        };
+        time(&[pane], true);
+        let whole = time(&[pane], true);
+        let boxed = time(&[extent, station_rect], false);
+        let area = |r: &gtk::graphene::Rect| r.width() * r.height();
+        let share = (area(&extent) + area(&station_rect)) / area(&pane);
+        eprintln!(
+            "map redraw: pane {w}x{h}, arcs box {}x{} at ({}, {}), station box {}x{}; \
+             redrawn share {share:.3}; whole pane {whole:.2} ms, boxes {boxed:.2} ms a frame",
+            extent.width(),
+            extent.height(),
+            extent.x(),
+            extent.y(),
+            station_rect.width(),
+            station_rect.height(),
+        );
+    }
+
     /// Renders the Traces map's drawing (no words: they need a widget's
     /// fonts) in each scheme, for comparison with the Mac's. Writes raw
     /// premultiplied BGRA into `TC_MAP_RENDER_DIR`.
@@ -4830,7 +5153,7 @@ mod tests {
                     }
                     if let Some(frame) = library_frame(&scene, &fit, style) {
                         LibraryArt::default()
-                            .node(style, &frame, 0.0, true)
+                            .node(style, &frame, 0.0, true, 2.0)
                             .draw(&cr);
                     }
                     map_transfers::resting_rocket(&cr, &scene, &fit, &palette, style);

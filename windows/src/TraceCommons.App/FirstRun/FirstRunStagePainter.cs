@@ -75,7 +75,7 @@ public sealed class FirstRunStagePainter : IDisposable
         VerticalAlignment = CanvasVerticalAlignment.Center,
     };
 
-    public void Draw(CanvasDrawingSession ds, ICanvasResourceCreator rc, FirstRunStageModel model, double now, double width, double height, string? tracesCountText = null, string? tracesCaption = null, string? privateAIPill = null, IReadOnlyList<string>? usesCaptions = null)
+    public void Draw(CanvasDrawingSession ds, ICanvasResourceCreator rc, FirstRunStageModel model, double now, double width, double height, string? tracesCountText = null, string? tracesCaption = null, string? privateAIPill = null, IReadOnlyList<string>? usesCaptions = null, StageBackdrop backdrop = StageBackdrop.Full)
     {
         Prepare(rc);
         model.Tick(now);
@@ -94,11 +94,11 @@ public sealed class FirstRunStagePainter : IDisposable
             // Mac's window draws FirstRunBackdrop under FirstRunStageFit
             // (FirstRunViews.swift:28-29): no unpainted bands at the sides.
             ds.Transform = Matrix3x2.Identity;
-            Backdrop(ds, rc, width, height, now, reduce);
+            Backdrop(ds, rc, width, height, now, reduce, backdrop);
         }
 
         ds.Transform = fit;
-        Backdrop(ds, rc, stageWidth, stageHeight, now, reduce);
+        Backdrop(ds, rc, stageWidth, stageHeight, now, reduce, backdrop);
         Matrix3x2 graphic = Matrix3x2.CreateTranslation((float)left, 0) * fit;
         ds.Transform = graphic;
         double top = s.GraphicTop;
@@ -186,10 +186,21 @@ public sealed class FirstRunStagePainter : IDisposable
 
     // ---- The scene ---------------------------------------------------------
 
-    /// <summary>FirstRunBackdrop (FirstRunStage.swift:109-149), dark only.</summary>
-    private static void Backdrop(CanvasDrawingSession ds, ICanvasResourceCreator rc, double w, double h, double now, bool reduce)
+    /// <summary>
+    /// FirstRunBackdrop (FirstRunStage.swift:109-149), dark only. On a
+    /// machine that cannot keep up (<see cref="StageBackdropBudget"/>, Windows
+    /// only) the blurred breath is left out, then the two ground gradients,
+    /// which leave the scene's base colour.
+    /// </summary>
+    private static void Backdrop(CanvasDrawingSession ds, ICanvasResourceCreator rc, double w, double h, double now, bool reduce, StageBackdrop backdrop)
     {
         var rect = new Rect(0, 0, w, h);
+        if (backdrop == StageBackdrop.NoGround)
+        {
+            ds.FillRectangle(rect, Argb(FirstRunTokens.SceneBase));
+            return;
+        }
+
         using (var ground = new CanvasRadialGradientBrush(rc, Argb(FirstRunTokens.SceneWarm), Argb(FirstRunTokens.SceneBase)))
         {
             ground.Center = V(w / 2, 0);
@@ -210,6 +221,11 @@ public sealed class FirstRunStagePainter : IDisposable
             corner.RadiusX = (float)(w * 1.2);
             corner.RadiusY = (float)(h * 0.95);
             ds.FillRectangle(rect, corner);
+        }
+
+        if (backdrop != StageBackdrop.Full)
+        {
+            return;
         }
 
         // The breath, at the backdrop timeline's 30 a second (:131-142).

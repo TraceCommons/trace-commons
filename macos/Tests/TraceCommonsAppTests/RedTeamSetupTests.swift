@@ -4,7 +4,8 @@ import TCShellCore
 import XCTest
 @testable import TraceCommonsApp
 
-/// The daemon reports a `red_team` tool row (with the flag on) whose
+/// The daemon reports a `red_team` tool row (on every macOS build, no feature
+/// flag) whose
 /// `installed` follows `<config>/red-team/runtime`, and installs that runtime
 /// on `managed_tool_setup` `{"tool":"red_team","action":"install"}`. The Start
 /// button needs it installed, so the app must offer that install.
@@ -42,12 +43,28 @@ final class RedTeamSetupTests: XCTestCase {
 
     /// The Private AI tab's card: offered while the runtime is not
     /// installed and the card was not dismissed; never once installed or
-    /// with the flag off (no row).
+    /// when the daemon sent no row.
     func testTheSetupCardIsOfferedOnlyUntilInstalledOrDismissed() throws {
         XCTAssertTrue(RedTeamSetupCard.offered(setup: try snapshot(redTeam: false).redTeamSetup, dismissed: false))
         XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: false).redTeamSetup, dismissed: true))
         XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: true).redTeamSetup, dismissed: false))
         XCTAssertFalse(RedTeamSetupCard.offered(setup: try snapshot(redTeam: nil).redTeamSetup, dismissed: false))
+    }
+
+    /// Red Team needs no feature flag: with no flag snapshot at all, and with
+    /// a flag snapshot that never heard of Red Team, the daemon's row alone
+    /// drives the setup state and the card.
+    func testRedTeamIsOfferedWithoutAnyFeatureFlag() throws {
+        let model = AppModel()
+        model.featureFlags = nil
+        model.managedSnapshot = try snapshot(redTeam: false)
+        XCTAssertFalse(model.featureIsEnabled("red_team_sessions"))
+        XCTAssertEqual(model.managedSnapshot?.redTeamSetup, .notInstalled)
+        XCTAssertTrue(RedTeamSetupCard.offered(setup: model.managedSnapshot?.redTeamSetup, dismissed: false))
+        let sources = ["Views/RedTeamSetup.swift", "Views/Monitor/InferenceViews.swift", "Views/Monitor/InferenceAccount.swift"]
+        for file in sources {
+            XCTAssertFalse(try GlassSurfaceRulesTests.text(file).contains("featureIsEnabled"), file)
+        }
     }
 
     func testTheTabCardAndSettingsRowAreDrawn() throws {

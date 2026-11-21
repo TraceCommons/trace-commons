@@ -95,6 +95,8 @@ public sealed class HomeView : UserControl
             _loaded = true;
             WindowClocks.Changed -= OnWindowClocks;
             WindowClocks.Changed += OnWindowClocks;
+            WindowClocks.Windows.Changed -= OnWindowFocus;
+            WindowClocks.Windows.Changed += OnWindowFocus;
             SystemSettingWatch.Changed -= OnSystemSettings;
             SystemSettingWatch.Changed += OnSystemSettings;
             ThemeBrushes.Changed -= OnSystemSettings;
@@ -105,6 +107,7 @@ public sealed class HomeView : UserControl
         {
             _loaded = false;
             WindowClocks.Changed -= OnWindowClocks;
+            WindowClocks.Windows.Changed -= OnWindowFocus;
             SystemSettingWatch.Changed -= OnSystemSettings;
             ThemeBrushes.Changed -= OnSystemSettings;
             UpdateClocks();
@@ -114,6 +117,15 @@ public sealed class HomeView : UserControl
     }
 
     private void OnWindowClocks(bool running) => DispatcherQueue.TryEnqueue(UpdateClocks);
+
+    /// <summary>The window's focus changed: its clocks' rate follows (FocusFrameRule).</summary>
+    private void OnWindowFocus(XamlRoot root, bool mayTick)
+    {
+        if (ReferenceEquals(root, XamlRoot))
+        {
+            DispatcherQueue.TryEnqueue(UpdateClocks);
+        }
+    }
 
     /// <summary>
     /// The clocks follow the motion setting; the cards, whose colours are
@@ -777,8 +789,11 @@ public sealed class HomeView : UserControl
 
     private void UpdateClocks()
     {
-        if (GlyphClock.Interval(_loaded && _showing && WindowClocks.Running, _glyphs.Count > 0, AnimationsOn) is TimeSpan every)
+        // At most 15 a second while the window is not focused (FocusFrameRule).
+        if (GlyphClock.Interval(_loaded && _showing && WindowClocks.Running, _glyphs.Count > 0, AnimationsOn) is TimeSpan wanted
+            && WindowClocks.Windows.Interval(XamlRoot, wanted.TotalSeconds) is double seconds)
         {
+            TimeSpan every = TimeSpan.FromSeconds(seconds);
             if (_glyphTimer.Interval != every)
             {
                 _glyphTimer.Interval = every;
@@ -815,12 +830,15 @@ public sealed class HomeView : UserControl
 
     private void DrawGlyphs()
     {
+        long begun = LookFrames.Begin();
         double time = PixelField.Time(DateTimeOffset.UtcNow, still: !AnimationsOn);
         bool dark = ActualTheme != ElementTheme.Light;
         foreach (HeroGlyphView glyph in _glyphs)
         {
             glyph.Draw(time, dark);
         }
+
+        LookFrames.End("home-glyphs", begun);
     }
 
     /// <summary>
@@ -841,6 +859,8 @@ public sealed class HomeView : UserControl
                 _countSteps = BalanceArrival.CountSteps(effect.FromNanos, effect.ToNanos, BalanceArrival.CountFrames);
                 _countIndex = 0;
                 _countScale = scale;
+                _countTimer.Interval = TimeSpan.FromSeconds(
+                    WindowClocks.Windows.Interval(XamlRoot, BalanceArrival.CountFrame.TotalSeconds) ?? BalanceArrival.CountFrame.TotalSeconds);
                 _countTimer.Start();
                 CountStep();
                 break;
@@ -903,8 +923,16 @@ public sealed class HomeView : UserControl
         _burst.Draw(0, flash: true);
     }
 
+    private readonly FocusFramePace<XamlRoot> _burstFramePace = new(WindowClocks.Windows);
+
     private void OnBurstFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_burstFramePace.Skips(XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         if (_burst is null)
         {
             EndBurst();

@@ -138,10 +138,20 @@ impl Lift {
         });
         self.set_opacity(0.0);
         let weak = self.downgrade();
-        let tick = self.add_tick_callback(move |_, _| {
+        let pace = super::glass_motion::Pace::default();
+        let tick = self.add_tick_callback(move |_, clock| {
             let Some(lift) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            // Frames the window's focus rule skips wait for the next one;
+            // the slide's time is the wall clock's, so it ends on time.
+            if !pace.due(&lift, clock.frame_time(), 0.0) {
+                return if lift.sliding() {
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                };
+            }
             if lift.step_slide() {
                 glib::ControlFlow::Continue
             } else {

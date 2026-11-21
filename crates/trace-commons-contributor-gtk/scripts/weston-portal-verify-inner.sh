@@ -52,12 +52,61 @@ insights_frame() {
 # deleted -- a gate built on the exit code alone stays green while testing
 # nothing. Capture the output and require an explicit "N passed" with N >= 1
 # on top of a zero exit code.
+#
+# Each run is also bounded. A mounted test that never returned used to hold
+# the job until its 40-minute limit and was then cancelled with no test named
+# (its output is captured, so nothing of it was printed). Past
+# TEST_LIMIT_SECONDS the run prints what it wrote, the stack of every thread
+# of every process under it, and is killed and failed by name. The slowest
+# run on a passing job takes about 2 minutes, the first one, which builds the
+# test binary; the rest take seconds.
+TEST_LIMIT_SECONDS="${TEST_LIMIT_SECONDS:-300}"
+
+# The pids under $1, deepest first.
+descendants() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    descendants "$child"
+    echo "$child"
+  done
+}
+
 run_ignored_test() {
   local description="$1"
   shift
-  local output
-  output=$("$@" 2>&1)
+  local log
+  log=$(mktemp)
+  "$@" >"$log" 2>&1 &
+  local pid=$!
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$TEST_LIMIT_SECONDS" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    cat "$log"
+    echo "::error::$description: still running after ${TEST_LIMIT_SECONDS}s; the stacks of its processes follow"
+    local tree child
+    tree=$(descendants "$pid")
+    for child in $tree; do
+      echo "--- pid $child: $(tr '\0' ' ' 2>/dev/null < "/proc/$child/cmdline" | cut -c1-200)"
+      if command -v gdb >/dev/null; then
+        sudo -n gdb -p "$child" -batch -ex 'thread apply all bt' 2>&1 | grep -E '^(Thread|#)' | head -200
+      fi
+    done
+    for child in $tree "$pid"; do
+      kill -9 "$child" 2>/dev/null || true
+    done
+    wait "$pid" 2>/dev/null
+    rm -f "$log"
+    fail "$description (still running after ${TEST_LIMIT_SECONDS}s; killed)"
+    return
+  fi
+  wait "$pid"
   local rc=$?
+  local output
+  output=$(cat "$log")
+  rm -f "$log"
   echo "$output"
   if [ "$rc" -ne 0 ]; then
     fail "$description (test exited non-zero)"
@@ -252,6 +301,9 @@ else
     ui::glass_feedback::tests::mounted_a_refresh_turns_until_its_read_ends \
     ui::glass_motion::tests::mounted_a_running_driver_follows_reduce_motion_live \
     ui::glass_motion::tests::mounted_a_loop_follows_reduce_motion_live \
+    ui::glass_motion::tests::mounted_a_movement_runs_at_fifteen_fps_while_its_window_is_unfocused \
+    ui::glass_motion::tests::mounted_a_loop_runs_at_fifteen_fps_while_its_window_is_unfocused \
+    ui::glass_motion::tests::mounted_an_unfocused_window_draws_at_most_fifteen_frames_a_second \
     ui::motion_css::tests::mounted_gtk_parses_the_motion_rules \
     ui::glass_motion::tests::mounted_an_opened_expanders_details_fade_in \
     ui::glass_switch::tests::mounted_a_pressed_switch_slides_and_keeps_gtks_contract \
@@ -263,6 +315,7 @@ else
     ui::monitor::traces_list::mounted_tests::mounted_the_folder_lists_icons_are_in_the_theme \
     ui::monitor::traces_list::mounted_tests::mounted_a_selected_rows_submit_is_the_macs_control_on_the_selection \
     ui::monitor::traces_list::mounted_tests::mounted_the_row_menus_dismiss_asks_first \
+    ui::monitor::traces_list::mounted_tests::mounted_a_switch_press_builds_only_the_changed_row \
     ui::monitor::shell::fit_tests::every_hosted_screen_fits_the_440_main_pane \
     ui::queue::consent_mounted_tests::mounted_folder_undo_cancels_by_project_and_waits_for_the_daemon \
     ui::queue::consent_mounted_tests::mounted_trace_undo_cancels_by_entry_id \
@@ -315,6 +368,7 @@ else
     ui::first_run_stage_view::mounted_tests::welcome_lines_rise_and_replay_after_the_agent_prompt \
     ui::first_run_stage_view::mounted_tests::the_threads_way_back_follows_a_commit \
     ui::first_run_stage_view::mounted_tests::the_stage_moves_its_widgets_on_the_macs_clock \
+    ui::first_run_stage_view::mounted_tests::mounted_the_stage_frame_rate_and_cpu_at_each_backdrop \
     ui::first_run_fade::mounted_tests::steps_crossfade_on_the_spatial_spring \
     ui::first_run_switch::mounted_tests::the_small_switch_ticks_only_while_it_slides; do
     WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
@@ -322,6 +376,15 @@ else
       cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$test_name" \
       -- --exact --ignored --test-threads=1
   done
+
+  # The first-run stage's frame rate and CPU once more under GSK's cairo
+  # renderer, the software path GTK takes with no GL at all, beside the
+  # run above on whatever renderer GTK picked here.
+  WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory GSK_RENDERER=cairo \
+    run_ignored_test "GTK display regression failed: the stage under the cairo renderer" \
+    cargo test --locked --manifest-path "$GTK_MANIFEST" --lib \
+    ui::first_run_stage_view::mounted_tests::mounted_the_stage_frame_rate_and_cpu_at_each_backdrop \
+    -- --exact --ignored --test-threads=1
 
   # Mission drafts are absent while missions are hidden and, with the switch
   # on, reachable without starting Contributions, and

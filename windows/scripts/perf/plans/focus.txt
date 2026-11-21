@@ -1,0 +1,16 @@
+# The focus rule: the Traces map while its window is focused, then visible
+# behind the desktop's focus (at most 15 frames a second), then focused again.
+# The window is narrower than the screen so the desktop beside it can be
+# clicked without covering it; the plan stops if the app keeps the focus.
+animations on
+launch armedFolder {throttle}
+size 820 640
+tab TabTraces
+click Show the flow map
+measure first 3
+measure focused 2
+unfocus
+measure unfocused 2
+focus
+measure refocused 1
+quit

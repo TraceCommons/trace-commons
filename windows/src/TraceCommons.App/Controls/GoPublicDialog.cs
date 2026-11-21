@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
@@ -112,6 +113,9 @@ public static class GoPublicDialog
             },
             IsChecked = false,
         };
+
+        // A TextBlock, not a string, so UI Automation finds no name in it.
+        AutomationProperties.SetName(acknowledgement, PublicProfileCopy.GoPublicAcknowledgement);
 
         var dialog = new ContentDialog
         {

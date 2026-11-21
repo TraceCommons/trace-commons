@@ -185,6 +185,15 @@ pub(super) fn git_source(path: &Path, bytes: &[u8]) -> Option<SkillSource> {
     None
 }
 
+/// How long one read-only git command may take before the scan gives up on
+/// that skill's provenance. Tests wait longer: a loaded CI runner can take
+/// more than a quarter of a second just to start git (seen on Windows), and
+/// what they check is the provenance, not this bound.
+#[cfg(not(test))]
+const GIT_DEADLINE: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const GIT_DEADLINE: Duration = Duration::from_secs(30);
+
 fn git(root: &Path, args: &[&str]) -> Option<String> {
     String::from_utf8(git_bytes(root, args)?).ok()
 }
@@ -234,7 +243,7 @@ fn git_bytes(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
             .ok()?;
         Some(bytes)
     });
-    let deadline = Instant::now() + Duration::from_millis(250);
+    let deadline = Instant::now() + GIT_DEADLINE;
     let success = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),

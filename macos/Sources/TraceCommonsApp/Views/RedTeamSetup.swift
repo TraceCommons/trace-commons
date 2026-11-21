@@ -4,8 +4,8 @@ import TCShellCore
 
 /// Red Team's row in Settings' Private AI tools panel, under Claude
 /// Desktop: whether its runtime is installed, and Install while it is not.
-/// The daemon sends no `red_team` row while the flag is off, so the row
-/// draws nothing then. Every word is the managed copy's.
+/// The daemon sends no `red_team` row off macOS, so the row draws nothing
+/// there. Every word is the managed copy's.
 struct RedTeamSettingsRow: View {
     @EnvironmentObject private var model: AppModel
 

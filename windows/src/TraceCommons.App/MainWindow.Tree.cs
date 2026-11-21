@@ -34,6 +34,10 @@ public sealed partial class MainWindow : ITracesTreeHost
     {
         var writes = new FolderAutomatic(
             (method, payload) => ViewModel.Host.CallAsync(method, payload),
+            // A confirmed write reads everything again, as before: the core's
+            // answer is the authority. What the reads draw is cheap when little
+            // changed: the tree builds only the rows whose values moved, and
+            // the map keeps its scene when its read is the same as the last.
             async () =>
             {
                 await ViewModel.RefreshAsync();
@@ -57,12 +61,14 @@ public sealed partial class MainWindow : ITracesTreeHost
     {
         if (folder.IsBucket)
         {
-            _tree?.Refresh();
+            _tree?.Redraw(folder.Id);
             return;
         }
 
+        // The row is drawn as the core has it once the write is done: a
+        // write refused, or one that changed nothing, puts the switch back.
         await ((ITracesTreeHost)this).AutomaticWrites.SetAsync(folder, on);
-        _tree?.Refresh();
+        _tree?.Redraw(folder.Id);
     }
 
     /// <summary>The person's folder order, kept beside the daemon's state as the map style is.</summary>
@@ -102,10 +108,12 @@ public sealed partial class MainWindow : ITracesTreeHost
 
         // The queue's own rows carry what the tree draws beside the map's
         // read: sizes, holds, and what Submit may send.
-        ViewModel.Groups.CollectionChanged += (_, _) => _tree.Refresh();
+        // A refresh clears and refills both a row at a time: the tree draws
+        // once after it, building only the rows that changed.
+        ViewModel.Groups.CollectionChanged += (_, _) => _tree.RequestRefresh();
         ViewModel.Pending.CollectionChanged += (_, _) =>
         {
-            _tree.Refresh();
+            _tree.RequestRefresh();
             RefreshMaySubmit();
         };
     }

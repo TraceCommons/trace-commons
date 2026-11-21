@@ -7271,14 +7271,20 @@ mod tests {
         let h = TransientRetryHarness::build_with(true, true).await;
         let mut now = TransientRetryHarness::now();
         for _ in 0..(MAX_TRANSIENT_UPLOAD_FAILURES * 3) {
+            // The wait runs from when the pass saw the failure, which is
+            // `now` plus the time the pass took (a refused connect alone
+            // takes about two seconds on Windows), so the hour is measured
+            // from the latest that can be.
+            let started = std::time::Instant::now();
             h.pass(now).await;
+            let failed_by = now + chrono::Duration::from_std(started.elapsed()).unwrap();
             let entry = h.entry();
             assert_eq!(entry.state, queue::QueueState::Approved, "{entry:?}");
             assert_eq!(entry.reason_label.as_deref(), Some("witness_unreachable"));
             assert!(!entry.held_for_review(), "{entry:?}");
             let next = entry.retry_after.expect("a retry time");
             assert!(
-                next > now && next - now <= chrono::Duration::hours(1),
+                next > now && next - failed_by <= chrono::Duration::hours(1),
                 "{entry:?}"
             );
             now = next;
@@ -7386,11 +7392,24 @@ mod tests {
         }
         *h.witness_saturated.lock().unwrap() = Some("45");
         let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
         h.pass(now).await;
+        let took = chrono::Duration::from_std(started.elapsed()).unwrap();
         let entry = h.entry();
         assert_eq!(entry.state, queue::QueueState::Approved);
-        assert!(entry.retry_after.unwrap() >= now + chrono::Duration::seconds(45));
-        assert!(entry.retry_after.unwrap() < now + chrono::Duration::seconds(70));
+        // Exactly the witness's 45 seconds and this session's spread, from
+        // when the pass saw the refusal: somewhere in the pass, so between
+        // `now` and `now` plus what the pass took. Seventeen earlier
+        // failures add nothing.
+        let spread = witness_capacity_jitter(id, 45);
+        assert!(
+            spread <= chrono::Duration::seconds(22),
+            "at most half the delay"
+        );
+        let wait = chrono::Duration::seconds(45) + spread;
+        let retry_after = entry.retry_after.unwrap();
+        assert!(retry_after >= now + wait, "{entry:?}");
+        assert!(retry_after <= now + took + wait, "{entry:?}");
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage

@@ -26,6 +26,8 @@ using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text;
 using Windows.UI.ViewManagement;
 
+using TraceCommons.App.Look;
+
 namespace TraceCommons.App;
 
 /// <summary>
@@ -73,6 +75,15 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     private string? _termsLabel;
     private bool _ticking;
     private double _lastFrame = double.NegativeInfinity;
+
+    /// <summary>The interval the clock last drew at; the backdrop budget judges only fast ones.</summary>
+    private double _drawInterval = FirstRunMotion.DisplayRate;
+
+    /// <summary>Whether the window is the foreground one; an unfocused window may draw slower on purpose.</summary>
+    private bool _foreground = true;
+
+    /// <summary>The lighter backdrop on a machine that cannot keep up; made at the first draw, from the canvas's device.</summary>
+    private StageBackdropBudget? _budget;
     private bool _reduceMotion;
     private FirstRunStep _shownStep = (FirstRunStep)(-1);
     private double? _scanEndedAt;
@@ -167,7 +178,12 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             await LoadAsync();
         };
         VisibilityChanged += (_, e) => _gate.SetHiddenToTray(!e.Visible);
-        Activated += (_, _) => ReadMotionSetting();
+        Activated += (_, e) =>
+        {
+            _foreground = e.WindowActivationState != WindowActivationState.Deactivated;
+            _budget?.Pause();
+            ReadMotionSetting();
+        };
         AppWindow.Changed += (sender, args) =>
         {
             if (args.DidPresenterChange || args.DidSizeChange)
@@ -463,10 +479,20 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             _ticking = false;
             Microsoft.UI.Xaml.Media.CompositionTarget.Rendering -= OnFrame;
         }
+
+        _budget?.Pause();
     }
+
+    private readonly FocusFramePace<XamlRoot> _framePace = new(WindowClocks.Windows);
 
     private void OnFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_framePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         double now = Now;
         if (_reduceMotion || !_gate.MayTick)
         {
@@ -491,6 +517,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         }
 
         _lastFrame = now;
+        _drawInterval = interval;
         ApplyMotions(now);
         Stage.Invalidate();
     }
@@ -517,11 +544,42 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
 
     private void OnDraw(CanvasControl sender, CanvasDrawEventArgs args)
     {
+        long begun = LookFrames.Begin();
         double now = Now;
+        Budget(sender, now);
         _painter.Draw(args.DrawingSession, sender, _model, _reduceMotion ? now + 1e6 : now, sender.ActualWidth, sender.ActualHeight,
             tracesCountText: TracesCount(now), tracesCaption: _copy?.Traces.OnThisComputer,
             privateAIPill: _privateCopy?.StatInferenceAccess is { Length: > 0 } pill ? pill : null,
-            usesCaptions: _copy is null ? null : new[] { Copy.Uses.ThisComputer, UsesGateLabel(), Copy.Uses.TheCommons });
+            usesCaptions: _copy is null ? null : new[] { Copy.Uses.ThisComputer, UsesGateLabel(), Copy.Uses.TheCommons },
+            backdrop: _budget.Level);
+        LookFrames.End("stage", begun);
+    }
+
+    /// <summary>
+    /// Counts a frame the clock drew toward the lighter backdrop
+    /// (<see cref="StageBackdropBudget"/>): only while the clock runs and the
+    /// window is the foreground one, since a still stage or an unfocused
+    /// window draws slowly on purpose.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(_budget))]
+    private void Budget(CanvasControl sender, double now)
+    {
+        if (_budget is null)
+        {
+            var adapter = RenderAdapter.Read(sender.Device);
+            _budget = new StageBackdropBudget(RenderAdapter.IsSoftware(adapter));
+            string read = adapter.HasValue ? $"{adapter.Value.Vendor:x4}:{adapter.Value.Device:x4}:{adapter.Value.Flags}" : "unread";
+            Look.LookTrace.Write($"stage-backdrop adapter={read} level={_budget.Level}");
+        }
+
+        if (!_ticking || !_foreground || _reduceMotion)
+        {
+            _budget.Pause();
+        }
+        else if (_budget.Drew(now, _drawInterval))
+        {
+            Look.LookTrace.Write($"stage-backdrop level={_budget.Level}");
+        }
     }
 
     private string TracesCount(double now)

@@ -539,6 +539,39 @@ mod tests {
     use ring::signature::{Ed25519KeyPair, KeyPair as _};
     use trace_commons_protocol::witness_accepted_list::WITNESS_ACCEPTED_LIST_SCHEMA;
 
+    /// Taken to write while a stand-in gcloud is written, and to read while
+    /// a test signs (which starts one). A process started in another thread
+    /// holds a copy of every descriptor open at the moment it forks until it
+    /// execs, so a fork that lands while a script is open for writing keeps
+    /// it open, and running that script then fails with ETXTBSY ("Text file
+    /// busy"). Under the lock no test forks while a script is being written.
+    #[cfg(unix)]
+    static STAND_INS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+    /// Write an executable stand-in under [`STAND_INS`].
+    #[cfg(unix)]
+    fn write_stand_in(script: &Path, body: impl AsRef<[u8]>) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _writing = STAND_INS.write().unwrap_or_else(|e| e.into_inner());
+        std::fs::write(script, body).unwrap();
+        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// [`super::sign`], never while a stand-in is being written.
+    fn sign(args: &SignArgs) -> Result<(AcceptedList, usize)> {
+        #[cfg(unix)]
+        let _starting = STAND_INS.read().unwrap_or_else(|e| e.into_inner());
+        super::sign(args)
+    }
+
+    /// [`super::sign_configuration`], never while a stand-in is being
+    /// written.
+    fn sign_configuration(args: &SignArgs) -> Result<(WitnessConfiguration, usize)> {
+        #[cfg(unix)]
+        let _starting = STAND_INS.read().unwrap_or_else(|e| e.into_inner());
+        super::sign_configuration(args)
+    }
+
     /// A throwaway key for this test run only. Never a real list key.
     fn test_key() -> Ed25519KeyPair {
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
@@ -660,7 +693,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn build_sign_and_verify_round_trip_through_a_stand_in_gcloud() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("list.json");
         std::fs::write(&input, serde_json::to_vec_pretty(&operator_list()).unwrap()).unwrap();
@@ -677,16 +709,14 @@ mod tests {
             let expected = dir.path().join(format!("{name}.expected"));
             std::fs::write(&expected, &payload).unwrap();
             let script = dir.path().join(name);
-            std::fs::write(
+            write_stand_in(
                 &script,
                 format!(
                     "#!/bin/sh\nset -e\nin=''\nout=''\nfor a in \"$@\"; do\n  case \"$a\" in\n    --digest-algorithm*) exit 9;;\n    --input-file=*) in=\"${{a#--input-file=}}\";;\n    --signature-file=*) out=\"${{a#--signature-file=}}\";;\n  esac\ndone\ncmp -s \"$in\" '{}'\nprintf '%s' '{}' > \"$out\"\n",
                     expected.display(),
                     signature
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             script
         };
 
@@ -721,7 +751,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_signature_that_does_not_match_the_public_key_writes_nothing() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("list.json");
         std::fs::write(&input, serde_json::to_vec(&operator_list()).unwrap()).unwrap();
@@ -729,12 +758,10 @@ mod tests {
         std::fs::write(dir.path().join("public.pem"), pem_of(&test_key())).unwrap();
         // A stand-in that signs garbage.
         let script = dir.path().join("gcloud-bad");
-        std::fs::write(
+        write_stand_in(
             &script,
             "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --signature-file=*) head -c 64 /dev/zero > \"${a#--signature-file=}\";; esac; done\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let args = sign_args(dir.path(), script);
         let error = sign(&args).unwrap_err().to_string();
         assert_eq!(error, "signature_does_not_match_public_key");
@@ -903,16 +930,19 @@ mod tests {
         key: &Ed25519KeyPair,
         name: &str,
     ) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         let signature =
             base64::engine::general_purpose::STANDARD.encode(key.sign(payload).as_ref());
         let expected = dir.join(format!("{name}.expected"));
         std::fs::write(&expected, payload).unwrap();
         let script = dir.join(name);
-        std::fs::write(&script, format!(
-            "#!/bin/sh\nset -e\nin=''\nout=''\nfor a in \"$@\"; do\n case \"$a\" in\n --digest-algorithm*) exit 9;;\n --input-file=*) in=\"${{a#--input-file=}}\";;\n --signature-file=*) out=\"${{a#--signature-file=}}\";;\n esac\ndone\ncmp -s \"$in\" '{}'\nprintf '%s' '{}' > \"$out\"\n", expected.display(), signature
-        )).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_stand_in(
+            &script,
+            format!(
+                "#!/bin/sh\nset -e\nin=''\nout=''\nfor a in \"$@\"; do\n case \"$a\" in\n --digest-algorithm*) exit 9;;\n --input-file=*) in=\"${{a#--input-file=}}\";;\n --signature-file=*) out=\"${{a#--signature-file=}}\";;\n esac\ndone\ncmp -s \"$in\" '{}'\nprintf '%s' '{}' > \"$out\"\n",
+                expected.display(),
+                signature
+            ),
+        );
         script
     }
 

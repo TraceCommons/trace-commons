@@ -26,9 +26,6 @@ pub mod tool_setup;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Feature flag gating Red Team managed sessions (macOS only).
-pub const RED_TEAM_FLAG: &str = "red_team_sessions";
-
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
 )]
@@ -159,7 +156,7 @@ pub enum ManagedError {
     /// ticket was sent. Shells show the general failure line.
     #[error("the terminal app's command failed")]
     TerminalCallFailed,
-    /// Red Team sessions are disabled by feature flag or unsupported on this OS.
+    /// Red Team sessions are unsupported on this OS.
     #[error("Red Team sessions are not available in this app build.")]
     RedTeamUnavailable,
     /// Red Team sessions require NEAR AI sign-in or a saved NEAR AI key.

@@ -208,8 +208,16 @@ internal sealed class EdgeRailWindow : Window
         OnSlideFrame(null, EventArgs.Empty);
     }
 
+    private readonly FocusFramePace<XamlRoot> _slideFramePace = new(WindowClocks.Windows);
+
     private void OnSlideFrame(object? sender, object e)
     {
+        // The window's frame rule (FocusFrameRule): at most 15 a second while unfocused.
+        if (_slideFramePace.Skips(Content?.XamlRoot, GlassClock.Now))
+        {
+            return;
+        }
+
         bool reduce = !SystemSettingWatch.AnimationsEnabled;
         (double offset, double opacity, bool done) = reduce && !_slidingOpen
             ? (0, 0, true)
