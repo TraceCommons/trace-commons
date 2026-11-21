@@ -219,28 +219,6 @@ else
     mkdir -p "$TC_RENDER_DIR"
   fi
 
-  # DIAGNOSTIC (temporary): the alternating pair, drain arms interleaved so
-  # runner drift hits both alike.
-  PAIR_A=ui::first_run::window_tests::mounted_every_step_is_one_window_size_and_welcome_is_centred
-  PAIR_B=ui::first_run::window_tests::mounted_every_window_is_listed_by_the_brand_never_the_raw_id
-  cargo test --locked --manifest-path "$GTK_MANIFEST" --lib --no-run
-  for round in $(seq 1 120); do
-    for arm in unbounded bounded; do
-      if [ "$arm" = bounded ]; then export TC_DIAG_BOUNDED=1; else unset TC_DIAG_BOUNDED; fi
-      for diag_test in "$PAIR_A" "$PAIR_B"; do
-        FAIL=0; started=$SECONDS
-        WAYLAND_DISPLAY="$WAYLAND_SOCKET" GDK_BACKEND=wayland GSETTINGS_BACKEND=memory \
-          TEST_LIMIT_SECONDS=60 run_ignored_test "diagnostic $arm round $round ${diag_test##*::}" \
-          cargo test --locked --manifest-path "$GTK_MANIFEST" --lib "$diag_test" \
-          -- --exact --ignored --test-threads=1 --nocapture
-        echo "=== DIAGRESULT arm=$arm round=$round test=${diag_test##*::} secs=$((SECONDS - started)) failed=$FAIL"
-      done
-    done
-  done
-  unset TC_DIAG_BOUNDED
-  echo "=== diagnostic FAIL=$FAIL"
-  exit 1
-
   # Exercise the actual rooted Rust view as well as the rendered-frame OCR.
   # The background-service dialogs and the Private AI start area's "Set up"
   # (Flatpak on the host service) are mounted tests with no display

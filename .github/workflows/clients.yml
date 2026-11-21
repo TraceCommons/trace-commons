@@ -492,6 +492,11 @@ jobs:
         run: bash crates/trace-commons-contributor-gtk/scripts/pack-gnome-shell-extension.sh "$RUNNER_TEMP"
 
   linux-shell-desktop-integration:
+    strategy:  # DIAGNOSTIC (temporary)
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        attempt: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24]
     name: linux-shell desktop integration (weston + portal)
     runs-on: ubuntu-latest
     # 40, not the 20 this started with, and not the 30 the other Rust jobs
@@ -504,7 +509,7 @@ jobs:
     # mid-build. A cancellation reads as a red required check with no failing
     # assertion, which is the most confusing possible signal: it looks like the
     # PR broke desktop integration when nothing ever ran.
-    timeout-minutes: 150
+    timeout-minutes: 60
     # crates/trace-commons-contributor-gtk is excluded from the root
     # workspace (it cannot build on macOS) and was previously verified only
     # under Xvfb with no portal/tray service on the bus at all -- see
@@ -640,7 +645,7 @@ jobs:
           TC_RENDER_DIR: ${{ runner.temp }}/tc-renders
         run: bash crates/trace-commons-contributor-gtk/scripts/weston-portal-verify.sh
       - name: Upload the captured frame
-        if: ${{ !cancelled() }}
+        if: ${{ false }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: weston-insights-frame
@@ -648,7 +653,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload the offscreen renders
-        if: ${{ !cancelled() }}
+        if: ${{ false }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gtk-offscreen-renders
