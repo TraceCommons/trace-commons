@@ -16,7 +16,7 @@ frozen, and the Linux GTK app, back in development since 2026-11-11, is not
 released on tags until it catches up. An `app-v*` tag push in
 `release-apps.yml` builds and publishes the macOS DMG (the GitHub Release,
 `updates/latest.json` and the Sparkle appcast) and the Windows MSIX (the
-`windows-app` job: the signed package and `TraceCommons.appinstaller` in
+`windows-app` job: the signed package and `NearAIGateway.appinstaller` in
 the `tracecommons-flatpak` bucket, and both on the GitHub Release). The
 Homebrew cask is bumped by hand (see "Publishing, and the manual tap
 bump"). From `app-v0.23.0` until the commit that put `windows-app` back on
