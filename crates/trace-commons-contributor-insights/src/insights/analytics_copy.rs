@@ -137,6 +137,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_subscriptions_claude_keychain_pending",
         "Keychain access hasn't finished. Check for a macOS prompt before choosing Refresh again.",
     ),
+    // The same state off the Mac, with no Keychain or macOS (owner, 2026-11-21).
+    (
+        "analytics_subscriptions_credential_pending",
+        "Credential access hasn't finished. Check for a prompt before choosing Refresh again.",
+    ),
     (
         "analytics_subscriptions_claude_auth_changed",
         "Claude credentials changed while usage was read. Choose Refresh again.",
@@ -242,6 +247,15 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_credit_scope_near_ai",
         "Charged for NEAR AI calls from this Mac.",
+    ),
+    // The same note where "this Mac" would be false (owner, 2026-11-21).
+    (
+        "analytics_credit_scope_near_ai_windows",
+        "Charged for NEAR AI calls from this PC.",
+    ),
+    (
+        "analytics_credit_scope_near_ai_linux",
+        "Charged for NEAR AI calls from this computer.",
     ),
     ("analytics_usage_by_project", "By project"),
     ("analytics_usage_by_project_a11y", "{label} by project"),
@@ -990,3 +1004,48 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Your own data will replace it once trace activity is provided.",
     ),
 ];
+
+#[cfg(test)]
+mod off_mac_wording_tests {
+    use super::ANALYTICS_COPY;
+
+    fn word(key: &str) -> &'static str {
+        ANALYTICS_COPY
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or_else(|| panic!("missing {key}"))
+    }
+
+    #[test]
+    fn windows_and_linux_never_name_the_mac_in_these_lines() {
+        assert_eq!(
+            word("analytics_credit_scope_near_ai_windows"),
+            "Charged for NEAR AI calls from this PC."
+        );
+        assert_eq!(
+            word("analytics_credit_scope_near_ai_linux"),
+            "Charged for NEAR AI calls from this computer."
+        );
+        let pending = word("analytics_subscriptions_credential_pending");
+        assert!(!pending.contains("macOS") && !pending.contains("Keychain"));
+    }
+
+    #[test]
+    fn each_shell_reads_its_own_line() {
+        let gtk = include_str!("../../../trace-commons-contributor-gtk/src/ui/insights_usage.rs");
+        assert!(gtk.contains("\"analytics_credit_scope_near_ai_linux\""));
+        assert!(!gtk.contains("\"analytics_credit_scope_near_ai\""));
+
+        let windows = include_str!(
+            "../../../../windows/src/TraceCommons.App/Controls/InsightsView.UsageCards.cs"
+        );
+        assert!(windows.contains("\"analytics_credit_scope_near_ai_windows\""));
+        assert!(!windows.contains("\"analytics_credit_scope_near_ai\""));
+
+        let subscriptions =
+            include_str!("../../../../windows/src/TraceCommons.Interop/SubscriptionUsage.cs");
+        assert!(subscriptions.contains("\"analytics_subscriptions_credential_pending\""));
+        assert!(!subscriptions.contains("\"analytics_subscriptions_claude_keychain_pending\""));
+    }
+}

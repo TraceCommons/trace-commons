@@ -746,7 +746,7 @@ public sealed class SubscriptionUsageTests
             ("auth_expired", "claude_expired"), ("credentials_expired", "claude_expired"),
             ("auth_missing", "claude_auth_missing"), ("scope_missing", "claude_scope"),
             ("keychain_needs_permission", "claude_keychain_denied"),
-            ("credential_read_timeout", "claude_keychain_pending"), ("auth_changed", "claude_auth_changed"),
+            ("credential_read_timeout", "credential_pending"), ("auth_changed", "claude_auth_changed"),
             ("request_timeout", "request_timeout"), ("rate_limited", "rate_limited"),
         })
         {

@@ -134,7 +134,7 @@ public sealed partial class InsightsView
         panel.Children.Add(UsageRow(Text(copy, "analytics_today"), InsightsCreditWords.SpendAndTokens(credit.Today, copy)));
         panel.Children.Add(UsageRow(Text(copy, "analytics_usage_last_31_days"), InsightsCreditWords.SpendAndTokens(credit.Last31Days, copy)));
         // This shell has no "i": what the figures cover is a note under the title.
-        return UsageCard(title: Text(copy, "analytics_usage_near_ai"), Text(copy, "analytics_credit_scope_near_ai"), null, panel,
+        return UsageCard(title: Text(copy, "analytics_usage_near_ai"), Text(copy, "analytics_credit_scope_near_ai_windows"), null, panel,
             InsightsUsageWords.Days(credit, copy), copy);
     }
 

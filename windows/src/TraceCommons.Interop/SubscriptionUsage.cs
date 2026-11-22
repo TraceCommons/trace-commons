@@ -752,7 +752,7 @@ public static class InsightsSubscriptionWords
             "auth_missing" when claude => Text("analytics_subscriptions_claude_auth_missing"),
             "scope_missing" => Text("analytics_subscriptions_claude_scope"),
             "keychain_needs_permission" when claude => Text("analytics_subscriptions_claude_keychain_denied"),
-            "credential_read_timeout" => Text("analytics_subscriptions_claude_keychain_pending"),
+            "credential_read_timeout" => Text("analytics_subscriptions_credential_pending"),
             "auth_changed" when claude => Text("analytics_subscriptions_claude_auth_changed"),
             "request_timeout" or "rate_limited" => Text("analytics_subscriptions_" + reason),
             "credentials_missing" or "credentials_expired" or "sign_in_required" or "unsupported_login" or "authentication_failed"
