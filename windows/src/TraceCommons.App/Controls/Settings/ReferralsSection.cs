@@ -194,11 +194,12 @@ public sealed class ReferralsSection : UserControl
         if (ReferralSurface.CanCopy(row) && row.Code is { } shown)
         {
             string label = _flow.CopiedCodeId == row.CodeId ? surface.Copy["copied"] : surface.Copy["copy_button"];
-            actions.Children.Add(SettingsCards.Button(label, (_, _) =>
+            actions.Children.Add(SettingsCards.Button(label, (sender, _) =>
             {
-                // A clipboard another process holds open is "not copied": no
-                // "Copied" confirmation, and no exception into the click.
-                if (!ClipboardCopy.TryCopy(shown))
+                // A clipboard another process holds open is "not copied": the
+                // button says so, no "Copied" confirmation, and no exception
+                // into the click.
+                if (!ClipboardCopy.TryCopy(shown, sender))
                 {
                     return;
                 }

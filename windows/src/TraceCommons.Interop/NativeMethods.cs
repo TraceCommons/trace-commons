@@ -523,6 +523,16 @@ internal static partial class NativeMethods
     internal static extern IntPtr tc_certificate_detail_copy();
 
     /// <summary>
+    /// What a shell says when something outside the daemon fails: the clipboard
+    /// would not take a copy, or the background service did not start for a
+    /// reason other than the lock another copy holds. Needs no handle. Owned
+    /// JSON with <c>clipboard_failed</c> and <c>daemon_start_failed</c>. NULL
+    /// only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_shell_failure_copy();
+
+    /// <summary>
     /// The arming offer's words for one project
     /// (<c>project_copy::arming_offer_copy</c>), as an owned JSON object.
     /// NULL for a NULL label, and on a caught panic.

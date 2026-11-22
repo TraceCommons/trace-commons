@@ -1888,6 +1888,17 @@ char*       tc_certificate_detail_copy(void);
  */
 char*       tc_session_notification_copy(void);
 
+/* What a shell says when something outside the daemon fails: the clipboard
+ * would not take a copy (clipboard_failed), or the background service did not
+ * start for a reason other than another copy holding its lock
+ * (daemon_start_failed). Approved by the owner 2026-11-22.
+ *
+ * Needs no handle, because it is needed exactly when no daemon is there to
+ * send a copy table. Returns an owned JSON object with those two keys; free it
+ * with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_shell_failure_copy(void);
+
 /* What a disclosure surface says when tc_route_disclosure_copy answers NULL:
  * title, panel and session. Owned JSON; free it with tc_string_free. NULL only on a
  * caught panic.

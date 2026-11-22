@@ -114,4 +114,18 @@ public sealed class ShellRobustnessWiringTests
         Assert.Matches(@"private async void OnDaemonStatusChanged\(\)\s*\{\s*if \(_disposed\)\s*\{\s*return;\s*\}", model);
         Assert.Matches(@"_settingsWindow\.Closed \+= async \(_, _\) =>\s*\{\s*settings\.Settings\.Dispose\(\);", Code(Shell("MainWindow.Shell.cs")));
     }
+
+    /// <summary>
+    /// The update check is a network call; the startup a click can join does not
+    /// wait for it, and a failure of it is logged, not thrown into the UI.
+    /// </summary>
+    [Fact]
+    public void TheUpdateCheckRunsAfterTheStartupAndIsNotWaitedFor()
+    {
+        string window = Code(Shell("MainWindow.xaml.cs"));
+        int start = window.IndexOf("private async Task ContinueStartupAsync()", StringComparison.Ordinal);
+        string body = window[start..window.IndexOf("private async Task ShowSessionRootsAsync()", start, StringComparison.Ordinal)];
+        Assert.DoesNotContain("await ViewModel.CheckForUpdateAsync()", body);
+        Assert.Matches(@"OfferNextRedirectedInvite\(\);\s*_ = Observed\.Run\(ViewModel\.CheckForUpdateAsync\(\), ""update-check""\);\s*\}", body);
+    }
 }

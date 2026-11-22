@@ -536,17 +536,19 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async Task ContinueStartupAsync()
     {
-        // After the queue is on screen, not before. The update check is a
-        // network round trip through the deployment service and nothing
-        // about it should stand between a contributor and the sessions they
-        // opened the app to review.
-        await ViewModel.CheckForUpdateAsync();
         await RefreshNotifyOffersAsync();
 
         await RefreshTrayAsync();
         RefreshHomeIfShown();
         await ShowOnboardingIfNeededAsync();
         OfferNextRedirectedInvite();
+
+        // After the startup, and not waited for. The update check is a network
+        // round trip through the deployment service: nothing about it may stand
+        // between a contributor and the sessions they opened the app to review,
+        // and a click that joins this startup (SingleFlight) must not wait on it.
+        // Observed, so a failure is logged and never reaches the UI.
+        _ = Observed.Run(ViewModel.CheckForUpdateAsync(), "update-check");
     }
 
     /// <summary>

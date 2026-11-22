@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+using TraceCommons.Interop;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace TraceCommons.App;
@@ -18,8 +19,28 @@ internal static class ClipboardCopy
     private const int Attempts = 3;
     private const int PauseMilliseconds = 40;
 
-    /// <summary>True when <paramref name="text"/> is on the clipboard.</summary>
-    internal static bool TryCopy(string text, bool asCopyOperation = false)
+    /// <summary>
+    /// True when <paramref name="text"/> is on the clipboard. When it is not and
+    /// <paramref name="sender"/> is the button that was pressed, the button says
+    /// so with the core's words (<see cref="ShellFailureCopy.ClipboardFailed"/>);
+    /// a place with no button of its own just gets the false.
+    /// </summary>
+    internal static bool TryCopy(string text, object? sender = null, bool asCopyOperation = false)
+    {
+        if (TryCopyOnce(text, asCopyOperation))
+        {
+            return true;
+        }
+
+        if (sender is Microsoft.UI.Xaml.Controls.Button button && ShellFailureCopy.ClipboardFailed is string line)
+        {
+            button.Content = line;
+        }
+
+        return false;
+    }
+
+    private static bool TryCopyOnce(string text, bool asCopyOperation)
     {
         for (int attempt = 1; attempt <= Attempts; attempt++)
         {

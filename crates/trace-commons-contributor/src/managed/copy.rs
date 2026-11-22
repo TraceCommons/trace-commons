@@ -436,6 +436,42 @@ pub fn copy() -> serde_json::Value {
     }"#).expect("static managed copy is valid JSON")
 }
 
+/// What a shell says when something outside the daemon fails, needed exactly
+/// when no daemon is there to send a copy table: a clipboard another process
+/// holds open, a background service that could not start for a reason that is
+/// not the lock another copy holds. Approved by the owner 2026-11-22. The app's
+/// name is `app_name!`, as on every other surface. The shells read these across
+/// the C ABI (`tc_shell_failure_copy`) rather than writing them.
+pub mod shell_failures {
+    use crate::app_name;
+
+    /// A copy to the clipboard that did not happen.
+    pub const CLIPBOARD_FAILED: &str = "Couldn't copy. Try again.";
+
+    /// The background service did not start for a reason other than another
+    /// copy holding its lock (which keeps its own line).
+    pub const DAEMON_START_FAILED: &str = concat!(
+        app_name!(),
+        " couldn't start its background service. Restart the app; if it keeps \
+         happening, reinstall it."
+    );
+}
+
+/// The words of [`shell_failures`], as the ABI hands them across.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct ShellFailureCopy {
+    pub clipboard_failed: &'static str,
+    pub daemon_start_failed: &'static str,
+}
+
+/// [`shell_failures`] as one object, for `tc_shell_failure_copy`.
+pub fn shell_failure_copy() -> ShellFailureCopy {
+    ShellFailureCopy {
+        clipboard_failed: shell_failures::CLIPBOARD_FAILED,
+        daemon_start_failed: shell_failures::DAEMON_START_FAILED,
+    }
+}
+
 /// The background-service dialogs (`daemon::service`): what a shell shows
 /// when the host contributor daemon is not installed, not running, or too
 /// old for it. Words approved by the owner 2026-11-17, together with the
@@ -807,6 +843,53 @@ mod red_team_setup_copy_tests {
             assert!(
                 copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),
                 "{key}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_failure_copy_tests {
+    use super::{shell_failure_copy, shell_failures};
+
+    #[test]
+    fn the_owner_approved_words() {
+        assert_eq!(
+            shell_failures::CLIPBOARD_FAILED,
+            "Couldn't copy. Try again."
+        );
+        assert_eq!(
+            shell_failures::DAEMON_START_FAILED,
+            "Near AI Gateway couldn't start its background service. Restart the app; if it keeps happening, reinstall it."
+        );
+    }
+
+    #[test]
+    fn the_abi_object_carries_exactly_the_two_lines() {
+        let json = serde_json::to_value(shell_failure_copy()).unwrap();
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["clipboard_failed", "daemon_start_failed"]);
+        assert_eq!(json["clipboard_failed"], shell_failures::CLIPBOARD_FAILED);
+        assert_eq!(
+            json["daemon_start_failed"],
+            shell_failures::DAEMON_START_FAILED
+        );
+    }
+
+    #[test]
+    fn the_lines_name_no_path_no_error_text() {
+        for line in [
+            shell_failures::CLIPBOARD_FAILED,
+            shell_failures::DAEMON_START_FAILED,
+        ] {
+            assert!(
+                !line.contains('\\') && !line.contains('/') && !line.contains(':'),
+                "{line}"
             );
         }
     }

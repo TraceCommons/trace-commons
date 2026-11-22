@@ -201,7 +201,7 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
             // Not the daemon's refusal (the state directory, the core library):
             // the same line, and the type in the crash log.
             CrashGuard.Log.Record("daemon-start", exception);
-            Error = StartFailedLine();
+            Error = TraceCommons.Interop.ShellFailureCopy.DaemonStartFailed ?? StartFailedLine();
         }
         finally
         {
