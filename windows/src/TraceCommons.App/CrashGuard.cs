@@ -13,24 +13,25 @@ namespace TraceCommons.App;
 /// <c>shell-crashes.log</c> in the state directory (type, HResult and frames,
 /// never the message), once per type per run.
 /// <para>
-/// While the first-run window or another secondary window is open the fault is
-/// also survived (<see cref="UnhandledExceptionEventArgs.Handled"/>), so a
-/// screen that fails to build leaves the person where they were. With none
-/// open it is the main window's and is not swallowed.
+/// While a first-run window is open, a fault whose stack runs through the
+/// first-run window or flow is also survived
+/// (<see cref="UnhandledExceptionEventArgs.Handled"/>), so a screen that fails
+/// to build leaves the person on Welcome to try again. Any other fault, the
+/// main window's included, is logged and surfaces as it always did.
 /// </para>
 /// </summary>
 internal static class CrashGuard
 {
     internal static readonly CrashLog Log = new(DaemonHost.DefaultConfigDir());
 
-    internal static readonly SecondaryWindowTracker Secondary = new();
+    internal static readonly FirstRunWindowTracker FirstRun = new();
 
     internal static void Install(Application app)
     {
         app.UnhandledException += (_, e) =>
         {
             Log.Record("xaml", e.Exception);
-            if (Secondary.Any)
+            if (FirstRun.Survives(e.Exception))
             {
                 e.Handled = true;
             }
@@ -45,17 +46,17 @@ internal static class CrashGuard
         TaskScheduler.UnobservedTaskException += (_, e) => Log.Record("task", e.Exception);
     }
 
-    /// <summary>Counts <paramref name="window"/> as a secondary window until it closes.</summary>
-    internal static void Track(Window window)
+    /// <summary>Counts <paramref name="window"/> as an open first-run window until it closes.</summary>
+    internal static void TrackFirstRun(Window window)
     {
-        Secondary.Enter();
+        FirstRun.Enter();
         bool left = false;
         window.Closed += (_, _) =>
         {
             if (!left)
             {
                 left = true;
-                Secondary.Exit();
+                FirstRun.Exit();
             }
         };
     }

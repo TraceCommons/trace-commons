@@ -123,6 +123,8 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         InitializeComponent();
         _rootLatch = new WindowRootLatch<XamlRoot>(() => Content?.XamlRoot);
         WindowClocks.Watch(this);
+        // An exception that escapes first run is logged and survived (CrashGuard).
+        CrashGuard.TrackFirstRun(this);
         _host = host;
         _onboarding = onboarding;
         Title = WindowTitles.FirstRun;

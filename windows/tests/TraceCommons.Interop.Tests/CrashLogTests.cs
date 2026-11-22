@@ -159,9 +159,9 @@ public sealed class CrashLogTests : IDisposable
     }
 
     [Fact]
-    public void ExceptionsAreHandledOnlyWhileASecondaryWindowIsOpen()
+    public void TheTrackerCountsOpenFirstRunWindowsAndNeverGoesNegative()
     {
-        var tracker = new SecondaryWindowTracker();
+        var tracker = new FirstRunWindowTracker();
         Assert.False(tracker.Any);
         tracker.Enter();
         tracker.Enter();
@@ -170,10 +170,60 @@ public sealed class CrashLogTests : IDisposable
         Assert.True(tracker.Any);
         tracker.Exit();
         Assert.False(tracker.Any);
-        // A stray exit never goes negative.
         tracker.Exit();
         tracker.Enter();
         Assert.True(tracker.Any);
+    }
+
+    // A stack that runs through a type of this name, as a first-run fault's would.
+    private static Exception WithStack(string frame, Exception? inner = null) => new StackedException(frame, inner);
+
+    private sealed class StackedException : Exception
+    {
+        private readonly string _stack;
+
+        public StackedException(string frame, Exception? inner) : base("x", inner) => _stack = "   " + frame + "()\n   at Other.Frame()";
+
+        public override string? StackTrace => _stack;
+    }
+
+    [Theory]
+    [InlineData("at TraceCommons.App.FirstRunWindow.Render")]
+    [InlineData("at TraceCommons.App.FirstRunWindow.<>c.<Welcome>b__0")]
+    [InlineData("at TraceCommons.Interop.FirstRun.FirstRunRunner.ContinueFromWelcome")]
+    public void AFirstRunFaultIsSurvivedOnlyWhileAFirstRunWindowIsOpen(string frame)
+    {
+        var tracker = new FirstRunWindowTracker();
+        Exception fault = WithStack(frame);
+        Assert.False(tracker.Survives(fault), "no first-run window open");
+        tracker.Enter();
+        Assert.True(tracker.Survives(fault));
+        tracker.Exit();
+        Assert.False(tracker.Survives(fault), "closed again");
+    }
+
+    [Theory]
+    [InlineData("at TraceCommons.App.MainWindow.Render")]
+    [InlineData("at TraceCommons.App.SettingsWindow.Open")]
+    [InlineData("at TraceCommons.App.AboutWindow.Show")]
+    [InlineData("at TraceCommons.App.Controls.ManagedSessionsView.RenderRedTeam")]
+    [InlineData("at Microsoft.UI.Xaml.Controls.Button.OnClick")]
+    public void AnythingElseIsNeverSwallowedEvenWithFirstRunOpen(string frame)
+    {
+        var tracker = new FirstRunWindowTracker();
+        tracker.Enter();
+        Assert.False(tracker.Survives(WithStack(frame)));
+        Assert.False(tracker.Survives(null));
+        Assert.False(tracker.Survives(new InvalidOperationException()), "no stack at all");
+    }
+
+    [Fact]
+    public void AFirstRunFrameInAnInnerExceptionCounts()
+    {
+        var tracker = new FirstRunWindowTracker();
+        tracker.Enter();
+        Exception outer = WithStack("at TraceCommons.App.MainWindow.Render", WithStack("at TraceCommons.App.FirstRunWindow.Render"));
+        Assert.True(tracker.Survives(outer));
     }
 
     private static int CountOf(string text, string needle) =>

@@ -71,9 +71,6 @@ internal static class WindowClocks
     /// </summary>
     public static void Watch(Window window)
     {
-        // Every secondary window passes through here: an exception that
-        // escapes while one is open is logged and survived (CrashGuard).
-        CrashGuard.Track(window);
         var gate = new WindowClockGate();
         var latch = new WindowRootLatch<XamlRoot>(() => window.Content?.XamlRoot);
         void Report(bool mayTick)

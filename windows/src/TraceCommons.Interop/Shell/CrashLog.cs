@@ -163,14 +163,23 @@ public sealed class CrashLog
 }
 
 /// <summary>
-/// How many windows other than the main one are open: the first-run window,
-/// Settings, About and the other secondary windows. An exception that escapes
-/// while one is open is logged and survived, so a failed screen leaves the
-/// person on the one they were on rather than ending the process; with none
-/// open the fault is the main window's and still surfaces.
+/// How many first-run windows are open (a count, since a preview opens one
+/// too), and whether an exception that escaped belongs to first run: only then
+/// is it survived. First run is the one flow whose window is built and rebuilt
+/// by code that can throw before the person has anything to lose, and it owns
+/// its own recovery (Welcome is still there to try again). Every other fault,
+/// the main window's included, is logged and left to surface as before:
+/// swallowing one could leave the app silently half-broken.
 /// </summary>
-public sealed class SecondaryWindowTracker
+public sealed class FirstRunWindowTracker
 {
+    /// <summary>Frames that mark an exception as first run's: its window and its flow.</summary>
+    private static readonly string[] FirstRunFrames =
+    {
+        "TraceCommons.App.FirstRunWindow",
+        "TraceCommons.Interop.FirstRun.",
+    };
+
     private int _open;
 
     public bool Any => Volatile.Read(ref _open) > 0;
@@ -189,5 +198,32 @@ public sealed class SecondaryWindowTracker
             }
         }
         while (Interlocked.CompareExchange(ref _open, seen - 1, seen) != seen);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="exception"/> is survived: a first-run window is
+    /// open and its stack (or an inner exception's) runs through the first-run
+    /// window or flow.
+    /// </summary>
+    public bool Survives(Exception? exception)
+    {
+        if (!Any)
+        {
+            return false;
+        }
+
+        for (int depth = 0; exception is not null && depth < 8; depth++, exception = exception.InnerException)
+        {
+            string stack = exception.StackTrace ?? string.Empty;
+            foreach (string frame in FirstRunFrames)
+            {
+                if (stack.Contains(frame, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

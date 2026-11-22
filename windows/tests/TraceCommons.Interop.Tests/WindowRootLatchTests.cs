@@ -172,30 +172,31 @@ public class WindowRootLatchTests
 
     /// <summary>
     /// An exception nothing caught is recorded, not left to end the process with
-    /// no trace; it is survived only while a secondary window is open.
+    /// no trace; it is survived only for a first-run fault while first run is open.
     /// </summary>
     [Fact]
-    public void TheAppRecordsUnhandledExceptionsAndSurvivesThemOnlyInSecondaryWindows()
+    public void TheAppRecordsUnhandledExceptionsAndSurvivesOnlyFirstRunFaults()
     {
         string guard = Shell("CrashGuard.cs");
         Assert.Contains("app.UnhandledException +=", guard);
         Assert.Contains("AppDomain.CurrentDomain.UnhandledException +=", guard);
         Assert.Contains("TaskScheduler.UnobservedTaskException +=", guard);
-        Assert.Matches(@"if \(Secondary\.Any\)\s*\{\s*e\.Handled = true;", guard);
+        Assert.Matches(@"if \(FirstRun\.Survives\(e\.Exception\)\)\s*\{\s*e\.Handled = true;", guard);
         Assert.Equal(1, Regex.Matches(guard, @"Handled = true").Count);
         Assert.Contains("CrashGuard.Install(this);", Shell("App.xaml.cs"));
-        Assert.Contains("CrashGuard.Track(window);", Shell("WindowClocks.cs"));
+        Assert.Contains("CrashGuard.TrackFirstRun(this);", Shell("FirstRunWindow.xaml.cs"));
     }
 
-    /// <summary>Every window but the main one is watched, so it counts as secondary.</summary>
+    /// <summary>Only the first-run window is counted: no other window passes through the guard.</summary>
     [Theory]
-    [InlineData("FirstRunWindow.xaml.cs")]
+    [InlineData("WindowClocks.cs")]
     [InlineData("SettingsWindow.xaml.cs")]
     [InlineData("AboutWindow.cs")]
     [InlineData("SessionRootsWindow.xaml.cs")]
     [InlineData("PreviewWindow.cs")]
-    public void EachSecondaryWindowIsWatchedAndSoCounted(string file)
+    [InlineData("MainWindow.xaml.cs")]
+    public void NoOtherWindowIsCountedAsFirstRun(string file)
     {
-        Assert.Contains("WindowClocks.Watch(this);", Shell(file));
+        Assert.DoesNotContain("CrashGuard.TrackFirstRun", Shell(file));
     }
 }
