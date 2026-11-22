@@ -602,6 +602,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn session(
         path: Option<&str>,
         bus: Option<&str>,
