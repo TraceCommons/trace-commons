@@ -22,12 +22,12 @@
 //!   `red_team_installed` and `red_team_not_installed` -- the Private AI
 //!   tab's dismissable Red Team setup card and Settings' Red Team row
 //!   (owner request 2026-11-19). DRAFT, NEEDS APPROVAL.
-//! - `red_team_enable_action` "Enable Red Team" and `red_team_enable_explain`
+//! - `red_team_enable_action` "Enable Red Team", `red_team_enable_explain`
 //!   "Turns on Hyper-V and adds you to Hyper-V Administrators. Needs admin
-//!   once." are the owner's wording (2026-11-21, one-click enable on Windows);
-//!   `red_team_home_unsupported`, `red_team_enable_sign_out`,
+//!   once.", `red_team_home_unsupported`, `red_team_enable_sign_out`,
 //!   `red_team_enable_restart`, `red_team_enable_declined` and
-//!   `red_team_enable_failed` are DRAFT, NEEDS APPROVAL.
+//!   `red_team_enable_failed` -- Red Team's one-click enable on Windows.
+//!   Approved by the owner 2026-11-22.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
