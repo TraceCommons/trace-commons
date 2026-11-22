@@ -203,7 +203,7 @@ fn cards(week: &Value, subscriptions: &Value, now: i64) -> Vec<UsageCard> {
         let mut card = UsageCard {
             title: text("analytics_usage_near_ai"),
             rows: vec![],
-            notes: vec![text("analytics_credit_scope_near_ai")],
+            notes: vec![text("analytics_credit_scope_near_ai_linux")],
             days: vec![],
         };
         for (field, key) in [
