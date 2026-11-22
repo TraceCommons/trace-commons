@@ -43,4 +43,53 @@ public sealed class RedTeamEnableTests
         Assert.False(Snapshot("""{"tool":"red_team","installed":true,"install_url":null}""").OffersRedTeamEnable);
         Assert.False(Snapshot("""{"tool":"claude","installed":true,"install_url":"x"}""").OffersRedTeamEnable);
     }
+
+    private const string SignedInWithRedTeam = """
+    {"revision":1,"accounts":[],"sign_in_accounts":[{"id":"c","tool":"claude","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"},{"id":"r","tool":"red_team","connection":"near_ai_signin","label":"NEAR AI","auth_state":"ready"}],"sessions":[],"generations":{},"capabilities":{"managed_launch":true,"near_ai_signin":true,"terminal_launch":true},"copy":{}}
+    """;
+
+    private static ManagedSnapshot SignedIn(string tools) =>
+        ManagedSnapshot.Parse(SignedInWithRedTeam.Replace("\"copy\":{}", "\"copy\":{},\"tools\":" + tools))!;
+
+    [Fact]
+    public void RedTeamGetsAStartButtonOnlyOnceItsRuntimeIsReady()
+    {
+        const string claude = """{"tool":"claude","installed":true,"install_url":"x"}""";
+        var notReady = SignedIn($$"""[{{claude}},{"tool":"red_team","installed":false,"install_url":null}]""");
+        Assert.Equal(["claude"], notReady.SignInStartTools);
+        Assert.False(notReady.CanLaunch("red_team"));
+        var ready = SignedIn($$"""[{{claude}},{"tool":"red_team","installed":true,"install_url":null}]""");
+        Assert.Equal(["claude", "red_team"], ready.SignInStartTools);
+        Assert.True(ready.CanLaunch("red_team"));
+        Assert.Equal("start_red_team", ManagedSignIn.StartKey("red_team"));
+    }
+
+    [Fact]
+    public void RedTeamIsNeverACodingToolToInstall()
+    {
+        var snapshot = SignedIn("""[{"tool":"red_team","installed":false,"install_url":null}]""");
+        Assert.DoesNotContain(snapshot.MissingInstallTools, t => t.Tool == "red_team");
+        Assert.False(snapshot.CanLaunch("red_team"));
+    }
+
+    [Fact]
+    public void TheSetupStateFollowsTheDaemonsRow()
+    {
+        Assert.Equal(RedTeamSetup.NotInstalled, Snapshot("""{"tool":"red_team","installed":false,"install_url":null}""").RedTeamState);
+        Assert.Equal(RedTeamSetup.Installed, Snapshot("""{"tool":"red_team","installed":true,"install_url":null}""").RedTeamState);
+        Assert.Null(Snapshot("""{"tool":"claude","installed":true,"install_url":"x"}""").RedTeamState);
+    }
+
+    [Theory]
+    [InlineData("sign_out_needed", "red_team_enable_sign_out")]
+    [InlineData("restart_needed", "red_team_enable_restart")]
+    [InlineData("home_unsupported", "red_team_home_unsupported")]
+    [InlineData("declined", "red_team_enable_declined")]
+    [InlineData("failed", "red_team_enable_failed")]
+    [InlineData("anything else", "red_team_enable_failed")]
+    [InlineData(null, "red_team_enable_failed")]
+    public void EachEnableOutcomeHasItsOwnWords(string? outcome, string key)
+    {
+        Assert.Equal(key, ManagedSignIn.EnableOutcomeKey(outcome));
+    }
 }

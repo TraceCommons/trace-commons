@@ -261,6 +261,7 @@ public sealed class ManagedSessionsView : UserControl
                 _root.Children.Add(recovery);
             }
         }
+        RenderRedTeam();
         _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.SessionDestination is string destination
             ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
         _root.Children.Add(_rows);
@@ -308,6 +309,68 @@ public sealed class ManagedSessionsView : UserControl
         _root.Children.Add(_error);
         _root.Children.Add(new TextBlock { Text = T("global_title"), FontSize = 20 });
         _root.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
+    }
+
+    /// <summary>How the last "Enable Red Team" ended (a copy key), shown under the
+    /// row until Red Team is ready.</summary>
+    private string? _redTeamOutcomeKey;
+
+    /// <summary>
+    /// Red Team's setup row, as the Mac's Settings row (RedTeamSetup.swift):
+    /// the name, whether its runtime is installed, and its line, with Install
+    /// while it is not. On Windows the daemon also says why the host cannot run
+    /// it: Windows Home is explained and offered nothing; otherwise Enable Red
+    /// Team stands under the line that says what it does (turns on Hyper-V,
+    /// adds you to Hyper-V Administrators, needs admin once), so the person
+    /// reads that before the Windows prompt. Nothing is drawn while the daemon
+    /// sends no <c>red_team</c> row.
+    /// </summary>
+    private void RenderRedTeam()
+    {
+        if (_snapshot?.RedTeamState is not RedTeamSetup setup) return;
+        if (setup == RedTeamSetup.Installed) _redTeamOutcomeKey = null;
+        var section = new StackPanel { Spacing = 4 };
+        section.Children.Add(new TextBlock { Text = T("red_team"), FontSize = 20 });
+        section.Children.Add(new TextBlock { Text = T(setup == RedTeamSetup.Installed ? "red_team_installed" : "red_team_not_installed") });
+        section.Children.Add(new TextBlock { Text = T("red_team_settings_line"), TextWrapping = TextWrapping.Wrap });
+        if (_snapshot.RedTeamUnsupportedEdition)
+        {
+            section.Children.Add(new TextBlock { Text = T("red_team_home_unsupported"), TextWrapping = TextWrapping.Wrap });
+        }
+        else if (_snapshot.OffersRedTeamEnable)
+        {
+            section.Children.Add(new TextBlock { Text = T("red_team_enable_explain"), TextWrapping = TextWrapping.Wrap });
+            var enable = Button("red_team_enable_action", EnableRedTeamAsync);
+            AutomationProperties.SetName(enable, T("red_team_enable_action"));
+            section.Children.Add(enable);
+        }
+        else if (setup == RedTeamSetup.NotInstalled)
+        {
+            var install = Button("install", InstallRedTeamAsync);
+            AutomationProperties.SetName(install, $"{T("install")} {T("red_team")}");
+            section.Children.Add(install);
+        }
+        if (_redTeamOutcomeKey is string key)
+            section.Children.Add(new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap });
+        _root.Children.Add(section);
+    }
+
+    /// <summary>Installs the pinned runtime; the daemon answers when done and the
+    /// next snapshot says Installed.</summary>
+    private async Task InstallRedTeamAsync()
+    {
+        await CallAsync("managed_tool_setup", new { tool = "red_team", action = "install" });
+    }
+
+    /// <summary>
+    /// "Enable Red Team": the daemon runs its fixed script elevated (the Windows
+    /// prompt), with no arguments from here, and answers how it ended.
+    /// </summary>
+    private async Task EnableRedTeamAsync()
+    {
+        var result = await CallAsync("managed_tool_setup", new { tool = "red_team", action = "enable" });
+        _redTeamOutcomeKey = ManagedSignIn.EnableOutcomeKey(
+            result.TryGetProperty("outcome", out var outcome) ? outcome.GetString() : null);
     }
 
     /// <summary>
