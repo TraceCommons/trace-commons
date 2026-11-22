@@ -69,7 +69,24 @@ public sealed record FetchedTerms(string Version, string Effective, bool InEffec
         IntPtr raw = NativeMethods.tc_terms_document_json(out IntPtr err);
         string? label = NativeMethods.TakeOwnedString(err);
         string? json = NativeMethods.TakeOwnedString(raw);
-        return (Decode(json), json is null ? label ?? "terms-unavailable" : null);
+        return Resolve(json, label);
+    }
+
+    /// <summary>
+    /// The terms and the failure label for what the core returned. A document
+    /// that arrives but does not decode (a block kind this shell does not know,
+    /// a missing field) is a failure with its own label, so the reader says so
+    /// and offers Retry instead of saying "Loading" for good.
+    /// </summary>
+    internal static (FetchedTerms? Terms, string? Label) Resolve(string? json, string? label)
+    {
+        FetchedTerms? terms = Decode(json);
+        if (json is null)
+        {
+            return (null, label ?? "terms-unavailable");
+        }
+
+        return terms is null ? (null, "terms-unreadable") : (terms, null);
     }
 
     private sealed class Wire

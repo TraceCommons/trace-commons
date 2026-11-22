@@ -643,7 +643,27 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     }
 
     /// <summary>Rebuild the current step when it changes, and its footer each time.</summary>
+    /// <summary>
+    /// Renders, and never throws: every caller is a click, a queued callback or
+    /// an async continuation, where an exception that escapes ends the process.
+    /// A failure is recorded (type and frames, never the message) and the window
+    /// stays on what it showed, which <see cref="RenderCore"/> leaves untouched
+    /// when a step fails to build. Survival does not depend on the app-level
+    /// handler, whose exception details XAML does not guarantee.
+    /// </summary>
     private void Render()
+    {
+        try
+        {
+            RenderCore();
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("first-run-render", exception);
+        }
+    }
+
+    private void RenderCore()
     {
         if (_closed)
         {

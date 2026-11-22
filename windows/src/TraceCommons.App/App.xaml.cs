@@ -20,8 +20,9 @@ public partial class App : Application
 
     public App()
     {
-        InitializeComponent();
+        // Before InitializeComponent, so a failure in App.xaml itself is logged.
         CrashGuard.Install(this);
+        InitializeComponent();
     }
 
     /// <summary>
