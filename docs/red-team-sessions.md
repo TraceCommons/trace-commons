@@ -58,9 +58,7 @@ signing out and back in), `restart_needed` (Hyper-V was turned on; restart
 Windows), `home_unsupported`, `declined` (UAC cancelled) or `failed`. The app
 explains the change before the prompt with the `red_team_enable_explain` copy.
 
-The Windows runtime archive is pinned in `managed/red_team_release.rs`
-(`RTS_RELEASE_WINDOWS`); it holds a placeholder digest until the rts 0.1.7
-release exists, and a test fails while it does.
+
 
 ## Linux host requirements
 
@@ -85,7 +83,7 @@ A daemon inside a Flatpak sandbox sends no `red_team` row and reports
 host service and shows the background service's install command with "Copy
 command".
 
-The Linux runtime archive is pinned in `managed/red_team_release.rs`
-(`RTS_RELEASE_LINUX`, `rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz`); it holds a
-placeholder digest until the rts 0.1.8 release exists, and a test fails while
-it does.
+The runtime archives (rts 0.1.8) are pinned in `managed/red_team_release.rs`:
+`RTS_RELEASE` (macOS), `RTS_RELEASE_WINDOWS` and `RTS_RELEASE_LINUX`
+(`rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz`). A test fails if any pin is an
+all-zero placeholder.
