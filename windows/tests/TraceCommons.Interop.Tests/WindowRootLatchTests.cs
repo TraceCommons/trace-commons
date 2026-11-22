@@ -182,7 +182,7 @@ public class WindowRootLatchTests
         Assert.Contains("AppDomain.CurrentDomain.UnhandledException +=", guard);
         Assert.Contains("TaskScheduler.UnobservedTaskException +=", guard);
         Assert.Matches(@"if \(FirstRun\.Survives\(e\.Exception\)\)\s*\{\s*e\.Handled = true;", guard);
-        Assert.Equal(1, Regex.Matches(guard, @"Handled = true").Count);
+        Assert.Single(Regex.Matches(guard, @"Handled = true"));
         Assert.Contains("CrashGuard.Install(this);", Shell("App.xaml.cs"));
         Assert.Contains("CrashGuard.TrackFirstRun(this);", Shell("FirstRunWindow.xaml.cs"));
     }
