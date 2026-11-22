@@ -821,6 +821,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj --configuration Debug --filter "FullyQualifiedName~SampleDaemonTests|FullyQualifiedName~NativeBindingTests" --logger "console;verbosity=normal"
 
+      # The unpackaged Debug app, self-contained, for trying a change on a real
+      # Windows machine by hand (a first-run fix is only a fix once someone has
+      # clicked through it). Debug, with the debug cdylib: not a release build.
+      # Kept for a week.
+      - name: Keep the unpackaged Debug app for manual testing
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-app-debug-unpackaged
+          path: windows/src/TraceCommons.App/bin/x64/Debug
+          if-no-files-found: warn
+          retention-days: 7
+
       # W25-D2 (a), the Windows counterpart of the Mac's signed-app launch
       # check: the unpackaged app built above answers
       # TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT before it opens a window and

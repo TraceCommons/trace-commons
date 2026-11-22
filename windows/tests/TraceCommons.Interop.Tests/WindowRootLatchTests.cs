@@ -169,4 +169,66 @@ public class WindowRootLatchTests
         Assert.Equal(latched, Regex.Matches(code, @"window\.Content\?\.XamlRoot").Count);
         Assert.Contains(".ForActivation(", code);
     }
+
+    /// <summary>
+    /// An exception nothing caught is recorded, not left to end the process with
+    /// no trace; it is survived only for a first-run fault while first run is open.
+    /// </summary>
+    [Fact]
+    public void TheAppRecordsUnhandledExceptionsAndSurvivesOnlyFirstRunFaults()
+    {
+        string guard = Shell("CrashGuard.cs");
+        Assert.Contains("app.UnhandledException +=", guard);
+        Assert.Contains("AppDomain.CurrentDomain.UnhandledException +=", guard);
+        Assert.Contains("TaskScheduler.UnobservedTaskException +=", guard);
+        Assert.Matches(@"if \(FirstRun\.Survives\(e\.Exception\)\)\s*\{\s*e\.Handled = true;", guard);
+        Assert.Equal(1, Regex.Matches(guard, @"Handled = true").Count);
+        Assert.Contains("CrashGuard.Install(this);", Shell("App.xaml.cs"));
+        Assert.Contains("CrashGuard.TrackFirstRun(this);", Shell("FirstRunWindow.xaml.cs"));
+    }
+
+    /// <summary>Only the first-run window is counted: no other window passes through the guard.</summary>
+    [Theory]
+    [InlineData("WindowClocks.cs")]
+    [InlineData("SettingsWindow.xaml.cs")]
+    [InlineData("AboutWindow.cs")]
+    [InlineData("SessionRootsWindow.xaml.cs")]
+    [InlineData("PreviewWindow.cs")]
+    [InlineData("MainWindow.xaml.cs")]
+    public void NoOtherWindowIsCountedAsFirstRun(string file)
+    {
+        Assert.DoesNotContain("CrashGuard.TrackFirstRun", Shell(file));
+    }
+
+    /// <summary>
+    /// The step that is leaving moves from the current presenter to the outgoing
+    /// one. An element has one parent, so the current presenter lets go first;
+    /// reading one presenter's content straight into the other's is the
+    /// re-parenting that throws E_INVALIDARG.
+    /// </summary>
+    [Fact]
+    public void FirstRunHandsTheLeavingStepOverOnlyAfterTheCurrentPresenterLetsGo()
+    {
+        string source = Shell("FirstRunWindow.xaml.cs");
+        Assert.DoesNotContain("OutgoingStep.Content = first ? null : CurrentStep.Content", source);
+        Assert.Matches(
+            @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*if \(handedOver is UIElement held && Microsoft\.UI\.Xaml\.Media\.VisualTreeHelper\.GetParent\(held\) is not null\)\s*\{\s*(//[^\n]*\n\s*)*CrashGuard\.Log\.Record\(""handover"", new StepStillParentedException\(\)\);\s*handedOver = null;\s*\}\s*OutgoingStep\.Content = handedOver;",
+            source);
+    }
+
+    /// <summary>
+    /// A device that has never finished first run opens it on the first
+    /// activation; one that has keeps the quiet landing on Insights.
+    /// </summary>
+    [Fact]
+    public void FirstRunOpensOnItsOwnOnlyOnADeviceNeverSetUp()
+    {
+        Assert.True(TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(finishedBefore: false));
+        Assert.False(TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(finishedBefore: true));
+        string window = Shell("MainWindow.xaml.cs");
+        int activated = window.IndexOf("private void OnFirstActivated", StringComparison.Ordinal);
+        string handler = window[activated..window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)];
+        Assert.Matches(@"ShowInsightsPane\(\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
+        Assert.Contains("_ = OpenFirstRunOnFirstLaunchAsync();", handler);
+    }
 }

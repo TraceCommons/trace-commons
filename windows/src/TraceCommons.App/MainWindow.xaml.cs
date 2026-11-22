@@ -432,6 +432,30 @@ public sealed partial class MainWindow : Window
         }
 #endif
         ShowInsightsPane();
+        // A device never set up opens first run on its own, over Insights;
+        // one that has finished it keeps the quiet landing.
+        if (global::TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(OnboardingState.Default().AnyComplete()))
+        {
+            _ = OpenFirstRunOnFirstLaunchAsync();
+        }
+    }
+
+    /// <summary>
+    /// Runs the contribution startup's gates without leaving Insights: a daemon
+    /// refused for undeclared sources opens first run, a started daemon that is
+    /// not set up opens it too.
+    /// </summary>
+    private async Task OpenFirstRunOnFirstLaunchAsync()
+    {
+        try
+        {
+            await StartContributionsAsync();
+        }
+        catch (Exception exception)
+        {
+            // Never a second failure at launch; recorded for the next look.
+            CrashGuard.Log.Record("first-launch", exception);
+        }
     }
 
     /// <summary>

@@ -123,6 +123,8 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         InitializeComponent();
         _rootLatch = new WindowRootLatch<XamlRoot>(() => Content?.XamlRoot);
         WindowClocks.Watch(this);
+        // An exception that escapes first run is logged and survived (CrashGuard).
+        CrashGuard.TrackFirstRun(this);
         _host = host;
         _onboarding = onboarding;
         Title = WindowTitles.FirstRun;
@@ -659,7 +661,27 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         {
             double now = Now;
             bool first = (int)_shownStep < 0;
-            OutgoingStep.Content = first ? null : CurrentStep.Content;
+            // An element has one parent. ContentPresenter.set_Content answers
+            // E_INVALIDARG ("Value does not fall within the expected range") for
+            // one that still has another, which is what the step on screen was
+            // while it was handed from the current presenter to the outgoing one:
+            // on a fresh Windows 11 VM that threw out of Render at the first step
+            // change (Welcome to Tools) and again from the render queued behind it,
+            // and ended the process. The current presenter lets go first, and a
+            // step that somehow still has a parent is not handed over (its
+            // crossfade is skipped) rather than thrown.
+            object? handedOver = first ? null : CurrentStep.Content;
+            CurrentStep.Content = null;
+            if (handedOver is UIElement held && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(held) is not null)
+            {
+                // Still parented after the current presenter let go: not handed
+                // over, and recorded once (a type, no content) so a build that
+                // reaches this says so in shell-crashes.log.
+                CrashGuard.Log.Record("handover", new StepStillParentedException());
+                handedOver = null;
+            }
+
+            OutgoingStep.Content = handedOver;
             _motions.Clear();
             _model.SetStep(state.Step, now);
             if (state.Step == FirstRunStep.Tools && _model.ToolsScanned)
@@ -2124,4 +2146,12 @@ internal static class Win32Dpi
         uint dpi = GetDpiForWindow(hwnd);
         return dpi == 0 ? 96 : dpi;
     }
+}
+
+/// <summary>
+/// Recorded, never thrown: the step on screen still had a parent after the
+/// presenter that held it let go, so it was not handed to the outgoing one.
+/// </summary>
+internal sealed class StepStillParentedException : Exception
+{
 }
