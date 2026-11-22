@@ -62,6 +62,11 @@
   </provides>
 
   <releases>
+    <release version="1.0.17" date="2026-11-22">
+      <description>
+        <p>Maintenance release with no changes on Linux.</p>
+      </description>
+    </release>
     <release version="1.0.16" date="2026-11-22">
       <description>
         <p>Red Team SandBox on Windows; Red Team on macOS updated to rts 0.1.7. No changes on Linux.</p>
