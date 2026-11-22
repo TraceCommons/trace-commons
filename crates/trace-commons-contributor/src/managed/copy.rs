@@ -29,8 +29,8 @@
 //!   `red_team_enable_failed` -- Red Team's one-click enable on Windows.
 //!   Approved by the owner 2026-11-22.
 //! - `red_team_no_kvm`, `red_team_kvm_access`, `red_team_no_user_session` and
-//!   `red_team_flatpak_host` -- Red Team on Linux (2026-11-22). DRAFT, NEEDS
-//!   APPROVAL. The command beside the second is the person's to run;
+//!   `red_team_flatpak_host` -- Red Team on Linux. Approved by the owner
+//!   2026-11-22. The command beside the second is the person's to run;
 //!   "Copy command" is the background service's approved button.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
@@ -412,7 +412,7 @@ pub fn copy() -> serde_json::Value {
             "red_team_enable_failed": "Could not enable Red Team. Try again, or turn on Hyper-V in Windows Features.",
             "red_team_no_kvm": "Red Team needs hardware virtualization (KVM), which this computer does not provide.",
             "red_team_kvm_access": "Red Team needs access to /dev/kvm. Run this command, then sign out of every session and back in.",
-            "red_team_no_user_session": "Red Team needs a systemd user session (the systemd-run command and the user session bus), which this session does not have.",
+            "red_team_no_user_session": "Red Team needs a systemd user session, which this computer does not have.",
             "red_team_flatpak_host": "Red Team needs the host service. Install it on your computer, outside Flatpak, then reopen the app.",
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
