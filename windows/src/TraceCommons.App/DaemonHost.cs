@@ -277,6 +277,13 @@ public sealed class DaemonHost : IAsyncDisposable
         }
 #endif
 
+        // Nothing starts once the host is disposed: the window that closed has
+        // already torn the daemon down, and a start would leak a new one.
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(DaemonHost));
+        }
+
         // One start at a time. The window starts the daemon quietly at
         // launch (LaunchDaemonStart); a contribution start pressed while that
         // runs joins it rather than racing it for the state directory's lock,
@@ -286,6 +293,8 @@ public sealed class DaemonHost : IAsyncDisposable
     }
 
     private readonly DaemonStartGate _startGate = new();
+
+    private volatile bool _disposed;
 
     private async Task StartDaemonAsync(string? settingsJson, CancellationToken cancellationToken)
     {
@@ -575,6 +584,7 @@ public sealed class DaemonHost : IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
+        _disposed = true;
         TcDaemon? daemon = _daemon;
         TcSubscription? subscription = _subscription;
         _daemon = null;

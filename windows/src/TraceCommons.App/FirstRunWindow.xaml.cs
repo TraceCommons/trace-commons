@@ -22,7 +22,6 @@ using TraceCommons.App.FirstRun;
 using TraceCommons.Interop;
 using TraceCommons.Interop.FirstRun;
 using TraceCommons.Interop.Shell;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text;
 using Windows.UI.ViewManagement;
 
@@ -148,6 +147,14 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
                 }
                 catch (TcException)
                 {
+                    return false;
+                }
+                catch (Exception exception)
+                {
+                    // The state directory could not be made or the core library
+                    // could not be loaded: the start did not happen, which is
+                    // what false says, rather than an exception into the click.
+                    CrashGuard.Log.Record("daemon-start", exception);
                     return false;
                 }
             },
@@ -1103,9 +1110,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            var package = new DataPackage();
-            package.SetText(agent.Prompt);
-            Clipboard.SetContent(package);
+            ClipboardCopy.TryCopy(agent.Prompt);
         }
     }
 

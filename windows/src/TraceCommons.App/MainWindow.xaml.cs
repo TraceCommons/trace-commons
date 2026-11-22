@@ -98,6 +98,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
     private FirstRunWindow? _onboarding;
+    private SessionRootsWindow? _sessionRoots;
     private FirstRunWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
@@ -489,42 +490,45 @@ public sealed partial class MainWindow : Window
 #endif
 
     private bool _contributionStartupAttempted;
-    private bool _contributionStartupBusy;
-    private async Task<bool> StartContributionsAsync()
+    private readonly SingleFlight<bool> _contributionStartup = new();
+
+    /// <summary>
+    /// The contribution startup, one at a time. A caller that arrives while it
+    /// runs (a click on Queue, History, Settings or Private AI during the first
+    /// launch's startup, which includes a network update check) joins it and
+    /// gets its result; a flag that answered "false" to it dropped the click.
+    /// </summary>
+    private Task<bool> StartContributionsAsync() => _contributionStartup.Run(RunContributionStartupAsync);
+
+    private async Task<bool> RunContributionStartupAsync()
     {
-        if (_contributionStartupBusy) return false;
-        _contributionStartupBusy = true;
-        try
+        if (!_contributionStartupAttempted)
         {
-            if (!_contributionStartupAttempted)
-            {
-                await ViewModel.InitializeAsync();
-                _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
-                if (_closed) return false;
-                _activationReady = ViewModel.NeedsSessionRoots;
-                OfferNextRedirectedInvite();
-                if (_host.IsRunning) await ContinueStartupAsync();
-            }
-            if (ViewModel.NeedsSessionRoots)
-            {
-                await ShowSessionRootsAsync();
-                return false;
-            }
-            bool started = !_closed && _host.IsRunning;
-            if (!started && !_closed)
-            {
-                // A start failure that is not "session roots undeclared" --
-                // for example ViewModel.StatusText's "another instance may
-                // already be running" -- must still reach the contributor.
-                // Before Insights became the default landing pane, Queue was
-                // already on screen and its header chip showed that message;
-                // navigate there now so a click from any pane still surfaces
-                // it instead of doing nothing.
-                ViewModel.ShowQueue();
-            }
-            return started;
+            await ViewModel.InitializeAsync();
+            _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
+            if (_closed) return false;
+            _activationReady = ViewModel.NeedsSessionRoots;
+            OfferNextRedirectedInvite();
+            if (_host.IsRunning) await ContinueStartupAsync();
         }
-        finally { _contributionStartupBusy = false; }
+        if (ViewModel.NeedsSessionRoots)
+        {
+            await ShowSessionRootsAsync();
+            return false;
+        }
+        bool started = !_closed && _host.IsRunning;
+        if (!started && !_closed)
+        {
+            // A start failure that is not "session roots undeclared" --
+            // for example ViewModel.StatusText's "another instance may
+            // already be running" -- must still reach the contributor.
+            // Before Insights became the default landing pane, Queue was
+            // already on screen and its header chip showed that message;
+            // navigate there now so a click from any pane still surfaces
+            // it instead of doing nothing.
+            ViewModel.ShowQueue();
+        }
+        return started;
     }
 
     /// <summary>
@@ -573,6 +577,11 @@ public sealed partial class MainWindow : Window
 
         var roots = new SessionRootsWindow(_host, candidates);
         roots.Declared += OnSessionRootsDeclared;
+        _sessionRoots = roots;
+        roots.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_sessionRoots, roots)) _sessionRoots = null;
+        };
         roots.Activate();
     }
 
@@ -972,6 +981,9 @@ public sealed partial class MainWindow : Window
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
         {
+            // Closed because the app is quitting: nothing of this window's is
+            // left to offer or to redirect to.
+            if (_closed) return;
             await onboarding.CloseCompletion;
             if (ReferenceEquals(_onboarding, onboarding)) _onboarding = null;
             if (ReferenceEquals(_automaticOnboarding, onboarding)) _automaticOnboarding = null;
@@ -1969,6 +1981,10 @@ public sealed partial class MainWindow : Window
         StopCredit();
         CloseToolWindows();
         _aboutWindow?.Close();
+        // First run and the roots window are this window's: leaving them open
+        // would leave them running against a daemon host that is disposed below.
+        _onboarding?.Close();
+        _sessionRoots?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;
