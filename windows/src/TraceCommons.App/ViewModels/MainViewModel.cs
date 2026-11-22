@@ -1574,6 +1574,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(UndoButtonText));
     }
 
+    /// <summary>The line for a daemon that did not start: its refusal, or a state directory or core library that could not be used.</summary>
+    private static string StartFailedLine() =>
+        $"Could not start. Another {MonitorWords.AppName} instance may already be running.";
+
     /// <summary>
     /// Starts the daemon and loads the first queue snapshot.
     ///
@@ -1606,7 +1610,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // Deliberately not interpolating the exception message. It is a
             // fixed ABI label, but the UI string is more useful for saying
             // what to do about it.
-            StatusText = $"Could not start. Another {MonitorWords.AppName} instance may already be running.";
+            StatusText = StartFailedLine();
+            return;
+        }
+        catch (Exception exception)
+        {
+            // Not the daemon's own refusal: the state directory could not be
+            // made (IOException, UnauthorizedAccessException) or the core
+            // library could not be loaded (DllNotFoundException,
+            // EntryPointNotFoundException, BadImageFormatException). These
+            // reach here from async void click handlers, where an escaped
+            // exception ends the process. Same line, the one the person can
+            // act on; the type goes to the crash log, never its message.
+            CrashGuard.Log.Record("daemon-start", exception);
+            StatusText = StartFailedLine();
             return;
         }
 

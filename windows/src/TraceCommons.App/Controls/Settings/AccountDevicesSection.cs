@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace TraceCommons.App.Controls.Settings;
 
@@ -160,10 +159,10 @@ public sealed class AccountDevicesSection : UserControl
                 panel.Children.Add(SettingsCards.Row(
                     SettingsCards.Button(copyLabel, (_, _) =>
                     {
-                        var package = new DataPackage();
-                        package.SetText(command);
-                        Clipboard.SetContent(package);
-                        _flow.Copied(waiting.Code);
+                        if (ClipboardCopy.TryCopy(command))
+                        {
+                            _flow.Copied(waiting.Code);
+                        }
                     }),
                     SettingsCards.Button(surface.Copy.DoneButton, (_, _) => _flow.DismissLink())));
                 var progress = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };

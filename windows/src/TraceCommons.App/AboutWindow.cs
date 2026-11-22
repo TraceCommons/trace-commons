@@ -6,7 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using TraceCommons.Interop.Shell;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Graphics;
 using TraceCommons.App.Look;
 
@@ -123,12 +122,7 @@ public sealed class AboutWindow : Window
         return AboutLines.FromPackageVersion(v.Major, v.Minor, v.Build, v.Revision);
     }
 
-    private static void CopyToClipboard(string line)
-    {
-        var package = new DataPackage();
-        package.SetText(line);
-        Clipboard.SetContent(package);
-    }
+    private static void CopyToClipboard(string line) => ClipboardCopy.TryCopy(line);
 
     /// <summary>Shows the window on the monitor <paramref name="owner"/> is on, sized to its content the first time.</summary>
     public void ShowNearOwner(AppWindow owner)
