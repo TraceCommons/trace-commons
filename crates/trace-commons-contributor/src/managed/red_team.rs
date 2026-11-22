@@ -2,12 +2,12 @@
 //! running the sandboxed session on a blocking thread, and handling the
 //! `red-team tool <name>` bridge subcommand.
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 use super::ToolId;
 use super::{ManagedError, sessions::LaunchContext};
 use crate::config::ConfigStore;
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(red_team_platform, test))]
 use uuid::Uuid;
 
 /// Relative path under the config directory where Red Team session outputs
@@ -85,12 +85,19 @@ fn host_membership_problem() -> Option<super::red_team_host::HostProblem> {
         .then_some(super::red_team_host::HostProblem::NotInHyperVAdministrators)
 }
 
-#[cfg(not(windows))]
+/// Linux: no `/dev/kvm`, no access to it, or no systemd user session for mvm's
+/// per-VM scope.
+#[cfg(target_os = "linux")]
+fn host_membership_problem() -> Option<super::red_team_host::HostProblem> {
+    super::red_team_host::linux_host_problem()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn host_membership_problem() -> Option<super::red_team_host::HostProblem> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(red_team_platform, not(windows)))]
 fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
     let fetch = rts::setup::HttpsFetch::new().map_err(|e| e.to_string())?;
     let defaults = rts::config::Defaults::for_prefix(prefix, sessions_dir);
@@ -144,7 +151,7 @@ fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 fn run_setup_check(_prefix: &Path, _sessions_dir: &Path) -> Result<(), String> {
     Err("Red Team sessions are not available on this OS".into())
 }
@@ -207,7 +214,7 @@ fn windows_setup_context(prefix: &Path, sessions_dir: &Path) -> Result<WindowsSe
 /// `<config>/red-team/runtime`. On Windows this also installs OpenCode and the
 /// Hyper-V guest files, and refuses before downloading anything when the host
 /// cannot run the sandbox.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     let prefix = runtime_prefix(store);
     if let Some(parent) = prefix.parent() {
@@ -228,7 +235,7 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
             .map(|_| ())
             .map_err(|_| ManagedError::ToolUnavailable)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(red_team_platform, not(windows)))]
     {
         let defaults = rts::config::Defaults::for_prefix(&prefix, &sessions_dir);
         let supervisor = rts::install::prefix_supervisor(&prefix);
@@ -273,7 +280,7 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
     Err(ManagedError::RedTeamUnavailable)
 }
@@ -281,7 +288,7 @@ pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
 /// Copy each validated input file or directory into
 /// `<config>/red-team/<session_id>/in/`. Never symlinks; editing a staged copy
 /// never mutates the original.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(red_team_platform, test))]
 pub(crate) fn stage_inputs(
     store: &ConfigStore,
     session_id: Uuid,
@@ -340,13 +347,13 @@ pub(crate) fn stage_inputs(
 }
 
 /// Beside `in/` (never inside it): the symlinks staging skipped.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(red_team_platform, test))]
 pub(crate) const SKIPPED_SYMLINKS_FILE: &str = "skipped-symlinks.txt";
 
 /// Copies `src` to `dst`. A symlink inside a folder is never followed or
 /// copied: it is recorded in `skipped` (a project's node_modules/.bin is
 /// full of them). The selected input itself is checked by `stage_inputs`.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(red_team_platform, test))]
 fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
@@ -383,7 +390,7 @@ fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyho
 /// gateway several times a day, so staging accepts any compose the TEE
 /// measured (mr_config_id == sha256(app_compose)); the TDX quote, TCB status,
 /// nonce binding and GPU checks still apply.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub(crate) fn attest_options() -> rts::attest::AttestOptions {
     let mut options = rts::attest::AttestOptions::default();
     if cfg!(feature = "near-ai-staging") {
@@ -392,7 +399,7 @@ pub(crate) fn attest_options() -> rts::attest::AttestOptions {
     options
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     if cfg!(feature = "near-ai-staging") {
         rts::inference::NearEnvironment::Staging
@@ -401,7 +408,7 @@ pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub(crate) fn spec_for(
     store: &ConfigStore,
     context: &LaunchContext,
@@ -500,7 +507,7 @@ pub struct RunOutcome {
 
 /// Publish the preserved OpenCode store when `collect_traces` is set and
 /// compute the final `(SessionState, Option<CollectionState>)` for the row.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(red_team_platform, test))]
 pub(crate) fn finalize_outcome(
     store: &ConfigStore,
     context: &LaunchContext,
@@ -544,7 +551,7 @@ pub(crate) fn finalize_outcome(
 /// Copy exported files from `<session_dir>/out` into the operator's chosen
 /// output folder. Symlinks are skipped rather than followed. Only `run`
 /// calls it, so it is built where `run` is.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::Result<()> {
     let out_dir = session_dir.join("out");
     if !out_dir.is_dir() {
@@ -565,7 +572,7 @@ pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::R
 }
 
 /// Run a Red Team managed session through `rts::launch::run`.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     let spec = spec_for(store, context, context.initial_prompt.clone())?;
     let outcome = tokio::task::spawn_blocking(move || rts::launch::run(spec))
@@ -587,14 +594,14 @@ pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result
     ))
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 pub async fn run(_store: &ConfigStore, _context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     Err(ManagedError::RedTeamUnavailable.into())
 }
 
 /// Handle the hidden `red-team tool <name>` subcommand invoked by OpenCode's
 /// plugin shim inside a Red Team session.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 pub fn run_tool(name: &str) -> i32 {
     use std::io::Write;
     let outcome = rts::bridge::run(name);
@@ -607,7 +614,7 @@ pub fn run_tool(name: &str) -> i32 {
     outcome.code
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 pub fn run_tool(_name: &str) -> i32 {
     eprintln!("Red Team sessions are only supported on macOS and Windows.");
     1

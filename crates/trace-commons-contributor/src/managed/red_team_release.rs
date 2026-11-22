@@ -20,7 +20,7 @@ impl ReleasePin {
         true
     }
 
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(red_team_platform)]
     pub fn to_archive(self) -> rts::setup::ReleaseArchive {
         rts::setup::ReleaseArchive {
             url: self.url.to_owned(),
@@ -54,6 +54,19 @@ pub const RTS_RELEASE_WINDOWS: ReleasePin = ReleasePin {
     ],
 };
 
+/// Pinned release archive for x86-64 Linux (`rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz`:
+/// `bin/rts` and the plugin, no supervisor), from the same
+/// `nearai/nearai-red-sandbox` release as the others.
+///
+/// TODO(rts-0.1.8-linux-pin): the 0.1.8 release is not published yet, so the
+/// digest is the all-zero placeholder. The test
+/// `the_linux_pin_is_not_a_placeholder` fails until the release's real
+/// SHA-256 replaces it, so a placeholder cannot ship.
+pub const RTS_RELEASE_LINUX: ReleasePin = ReleasePin {
+    url: "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.8/rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz",
+    sha256: [0; 32],
+};
+
 /// The pin for this platform's Red Team runtime.
 #[cfg(windows)]
 pub const fn platform_release() -> ReleasePin {
@@ -61,7 +74,13 @@ pub const fn platform_release() -> ReleasePin {
 }
 
 /// The pin for this platform's Red Team runtime.
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub const fn platform_release() -> ReleasePin {
+    RTS_RELEASE_LINUX
+}
+
+/// The pin for this platform's Red Team runtime.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub const fn platform_release() -> ReleasePin {
     RTS_RELEASE
 }
@@ -143,6 +162,30 @@ mod tests {
         assert!(
             !RTS_RELEASE_WINDOWS.is_placeholder(),
             "the Windows pin is still the all-zero placeholder"
+        );
+    }
+
+    #[test]
+    fn the_linux_pin_names_the_x86_64_gnu_tarball_of_its_own_release() {
+        assert!(
+            RTS_RELEASE_LINUX.url.starts_with(
+                "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.8/"
+            )
+        );
+        assert!(
+            RTS_RELEASE_LINUX
+                .url
+                .ends_with("rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz")
+        );
+    }
+
+    /// Red on purpose until the 0.1.8 release exists (see
+    /// [`RTS_RELEASE_LINUX`]); it keeps a placeholder out of a release.
+    #[test]
+    fn the_linux_pin_is_not_a_placeholder() {
+        assert!(
+            !RTS_RELEASE_LINUX.is_placeholder(),
+            "TODO(rts-0.1.8-linux-pin): replace the placeholder SHA-256 with the release's"
         );
     }
 }

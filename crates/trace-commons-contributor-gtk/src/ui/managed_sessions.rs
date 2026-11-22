@@ -149,6 +149,147 @@ fn tiled(tool: &str, line: String) -> gtk::Box {
     row
 }
 
+/// What Red Team's row shows, from the daemon's snapshot.
+#[derive(Debug, PartialEq, Eq)]
+enum RedTeamRow {
+    /// Nothing: an older daemon, a platform without Red Team, or aarch64.
+    Hidden,
+    /// The daemon runs inside a Flatpak sandbox, which has no KVM and no user
+    /// session for a VM: the host service runs Red Team.
+    FlatpakHost,
+    /// The daemon's `red_team` row.
+    Row {
+        installed: bool,
+        /// A `host_problem` the person fixes themselves: the copy key that
+        /// explains it.
+        problem_key: Option<&'static str>,
+        /// The command the person runs in their own terminal, never the app.
+        fix_command: Option<String>,
+    },
+}
+
+/// The copy key that explains a `host_problem`; the Windows ones are another
+/// shell's.
+fn red_team_problem_key(problem: &str) -> Option<&'static str> {
+    match problem {
+        "no_kvm" => Some("red_team_no_kvm"),
+        "kvm_not_accessible" => Some("red_team_kvm_access"),
+        "no_user_session" => Some("red_team_no_user_session"),
+        _ => None,
+    }
+}
+
+fn red_team_row(snapshot: &Value, x86_64: bool) -> RedTeamRow {
+    if let Some(row) = snapshot["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|t| t["tool"] == "red_team")
+    {
+        return RedTeamRow::Row {
+            installed: row["installed"] == true,
+            problem_key: row["host_problem"].as_str().and_then(red_team_problem_key),
+            fix_command: row["fix_command"].as_str().map(str::to_owned),
+        };
+    }
+    // A daemon inside the sandbox sends no row; one on the host (or an older
+    // one that does not say) is not asked to explain.
+    if x86_64 && snapshot["capabilities"]["daemon_on_host"] == false {
+        RedTeamRow::FlatpakHost
+    } else {
+        RedTeamRow::Hidden
+    }
+}
+
+/// The `managed_launch_prepare` request that starts Red Team on the NEAR AI
+/// sign-in in the home folder (no `cwd`, as the other shells' Start), or None
+/// without a sign-in entry for it.
+fn red_team_start_request(snapshot: &Value, request_id: &str) -> Option<Value> {
+    let entry = snapshot["sign_in_accounts"]
+        .as_array()?
+        .iter()
+        .find(|a| a["tool"] == "red_team" && a["connection"] == "near_ai_signin")?;
+    Some(json!({
+        "request_id": request_id, "purpose": "coding", "tool": "red_team",
+        "connection": "near_ai_signin", "account_id": entry["id"],
+        "expected_generation": snapshot["generations"]["red_team"], "save_default": false,
+    }))
+}
+
+/// A command the person runs themselves, with the same "Copy command" the
+/// background-service dialog has; nothing here runs it.
+fn command_with_copy(root: &gtk::Box, command: &str) {
+    root.append(&super::service_dialog::command_label(command));
+    let copy = gtk::Button::with_label(
+        trace_commons_contributor::managed::copy::background_service::COPY_COMMAND,
+    );
+    copy.set_halign(gtk::Align::Start);
+    let command = command.to_owned();
+    copy.connect_clicked(move |button| button.clipboard().set_text(&command));
+    root.append(&copy);
+}
+
+/// Red Team's row: its state with Install and Start, or the host problem and
+/// the command that fixes it, or (inside a Flatpak) the host service's install
+/// command. Words are the managed copy's.
+fn red_team_section(app: &Rc<App>, root: &gtk::Box, snapshot: &Value) {
+    let row = red_team_row(snapshot, cfg!(target_arch = "x86_64"));
+    if row == RedTeamRow::Hidden {
+        return;
+    }
+    root.append(&style::section(&text("red_team")));
+    match row {
+        RedTeamRow::Hidden => {}
+        RedTeamRow::FlatpakHost => {
+            style::append_body(root, text("red_team_flatpak_host"));
+            command_with_copy(
+                root,
+                trace_commons_contributor::daemon::service::SERVICE_INSTALL_COMMAND,
+            );
+        }
+        RedTeamRow::Row {
+            installed,
+            problem_key,
+            fix_command,
+        } => {
+            style::append_meta(
+                root,
+                text(if installed {
+                    "red_team_installed"
+                } else {
+                    "red_team_not_installed"
+                }),
+            );
+            style::append_body(root, text("red_team_settings_line"));
+            if let Some(key) = problem_key {
+                style::append_body(root, text(key));
+                if let Some(command) = &fix_command {
+                    command_with_copy(root, command);
+                }
+            } else if !installed {
+                let a = Rc::clone(app);
+                root.append(&button("install", move || {
+                    action(
+                        &a,
+                        "managed_tool_setup",
+                        json!({"tool":"red_team","action":"install"}),
+                        false,
+                    )
+                }));
+            } else if let Some(request) =
+                red_team_start_request(snapshot, &uuid::Uuid::new_v4().to_string())
+            {
+                let a = Rc::clone(app);
+                root.append(&button("start_red_team", move || {
+                    let mut request = request.clone();
+                    request["request_id"] = json!(uuid::Uuid::new_v4());
+                    action(&a, "managed_launch_prepare", request, true)
+                }));
+            }
+        }
+    }
+}
+
 fn button(key: &str, f: impl Fn() + 'static) -> gtk::Button {
     let b = gtk::Button::with_label(&text(key));
     b.connect_clicked(move |_| f());
@@ -442,6 +583,7 @@ pub fn refresh(app: &Rc<App>) {
             set_up.connect_clicked(move |_| offer_service(&a, crate::service::Trigger::SetUp));
             root.append(&set_up);
         }
+        red_team_section(app, root, &snapshot);
         for account in snapshot["accounts"].as_array().into_iter().flatten() {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
             row.append(&tiled(account["tool"].as_str().unwrap_or_default(), format!("{} · {} · {} · {}", account["label"].as_str().unwrap_or_default(), text(account["tool"].as_str().unwrap_or_default()), text(account["connection"].as_str().unwrap_or_default()), account["auth_state"].as_str().unwrap_or_default())));
@@ -1470,5 +1612,108 @@ mod tests {
             crate::service::launch_press(&snapshot, true, false, false),
             crate::service::LaunchPress::OfferService
         );
+    }
+}
+
+#[cfg(test)]
+mod red_team_row_tests {
+    use super::*;
+
+    fn snap(tools: Value, on_host: Value) -> Value {
+        json!({
+            "tools": tools,
+            "capabilities": {"daemon_on_host": on_host},
+            "sign_in_accounts": [
+                {"id": "c", "tool": "claude", "connection": "near_ai_signin"},
+                {"id": "r", "tool": "red_team", "connection": "near_ai_signin"}
+            ],
+            "generations": {"red_team": 3}
+        })
+    }
+
+    #[test]
+    fn the_daemons_row_gives_state_and_the_problem_the_person_fixes() {
+        let ready = snap(
+            json!([{"tool": "red_team", "installed": true}]),
+            json!(true),
+        );
+        assert_eq!(
+            red_team_row(&ready, true),
+            RedTeamRow::Row {
+                installed: true,
+                problem_key: None,
+                fix_command: None
+            }
+        );
+        let kvm = snap(
+            json!([{"tool": "red_team", "installed": false, "host_problem": "kvm_not_accessible",
+                    "enable_offered": false, "fix_command": "sudo usermod -aG kvm \"$USER\""}]),
+            json!(true),
+        );
+        assert_eq!(
+            red_team_row(&kvm, true),
+            RedTeamRow::Row {
+                installed: false,
+                problem_key: Some("red_team_kvm_access"),
+                fix_command: Some("sudo usermod -aG kvm \"$USER\"".into()),
+            }
+        );
+        for (problem, key) in [
+            ("no_kvm", "red_team_no_kvm"),
+            ("no_user_session", "red_team_no_user_session"),
+        ] {
+            let row = snap(
+                json!([{"tool": "red_team", "installed": false, "host_problem": problem}]),
+                json!(true),
+            );
+            assert_eq!(
+                red_team_row(&row, true),
+                RedTeamRow::Row {
+                    installed: false,
+                    problem_key: Some(key),
+                    fix_command: None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_windows_problem_is_not_this_shells_to_explain() {
+        assert_eq!(red_team_problem_key("hyper_v_missing"), None);
+        assert_eq!(red_team_problem_key("home_edition"), None);
+    }
+
+    #[test]
+    fn a_sandboxed_daemon_sends_no_row_and_the_row_points_at_the_host_service() {
+        let sandboxed = snap(json!([{"tool": "claude", "installed": true}]), json!(false));
+        assert_eq!(red_team_row(&sandboxed, true), RedTeamRow::FlatpakHost);
+        // Not on aarch64, where there is no Red Team to install.
+        assert_eq!(red_team_row(&sandboxed, false), RedTeamRow::Hidden);
+    }
+
+    #[test]
+    fn a_host_daemon_or_an_older_one_without_a_row_shows_nothing() {
+        let host = snap(json!([{"tool": "claude", "installed": true}]), json!(true));
+        assert_eq!(red_team_row(&host, true), RedTeamRow::Hidden);
+        let older = json!({"tools": [], "capabilities": {}});
+        assert_eq!(red_team_row(&older, true), RedTeamRow::Hidden);
+    }
+
+    #[test]
+    fn start_is_the_sign_in_request_in_the_home_folder() {
+        let ready = snap(
+            json!([{"tool": "red_team", "installed": true}]),
+            json!(true),
+        );
+        let request = red_team_start_request(&ready, "req-1").unwrap();
+        assert_eq!(
+            request,
+            json!({"request_id": "req-1", "purpose": "coding", "tool": "red_team",
+                   "connection": "near_ai_signin", "account_id": "r",
+                   "expected_generation": 3, "save_default": false})
+        );
+        assert!(request.get("cwd").is_none());
+        let signed_out = json!({"sign_in_accounts": [], "generations": {}});
+        assert!(red_team_start_request(&signed_out, "x").is_none());
     }
 }
