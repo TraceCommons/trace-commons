@@ -220,14 +220,18 @@ public sealed class InsightsTests
     }
 
     [Fact]
-    public void FirstActivationDoesNotStartDaemonOrAskForRoots()
+    public void FirstActivationShowsInsightsAndReachesFirstRunOnlyThroughTheStartupGate()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt");
         string source = File.ReadAllText(path);
         int start = source.IndexOf("private void OnFirstActivated(", StringComparison.Ordinal);
         int end = source.IndexOf("private bool _contributionStartupAttempted", start, StringComparison.Ordinal);
         string activation = source[start..end];
-        Assert.Contains("ShowInsightsPane();", activation);
+        Assert.Contains("ShowInsightsPaneAsync()", activation);
+        // First run opens on its own for a device never set up, but only by
+        // way of the contribution startup's gate: the activation itself never
+        // starts the daemon or asks for roots.
+        Assert.Contains("OpenFirstRunOnFirstLaunchAsync()", activation);
         Assert.DoesNotContain("InitializeAsync", activation);
         Assert.DoesNotContain("ShowSessionRootsAsync", activation);
         Assert.DoesNotContain("ContinueStartupAsync", activation);
@@ -242,19 +246,21 @@ public sealed class InsightsTests
         var path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt");
         string source = File.ReadAllText(path);
         int start = source.IndexOf("private async Task<bool> StartContributionsAsync()", StringComparison.Ordinal);
-        int end = source.IndexOf("private async Task ContinueStartupAsync()", start, StringComparison.Ordinal);
-        string method = source[start..end];
-        int rootsCheck = method.IndexOf("if (ViewModel.NeedsSessionRoots)", StringComparison.Ordinal);
-        int rootsBranchEnd = method.IndexOf("return false;", rootsCheck, StringComparison.Ordinal);
-        string afterRootsBranch = method[rootsBranchEnd..];
-        // The session-roots-undeclared branch must remain unchanged: it
-        // shows the roots screen, not Queue.
-        Assert.DoesNotContain("ViewModel.ShowQueue()", method[..rootsBranchEnd]);
+        int body = source.IndexOf("private async Task<bool> RunContributionStartupAsync()", start, StringComparison.Ordinal);
+        int end = source.IndexOf("private async Task ContinueStartupAsync()", body, StringComparison.Ordinal);
+        string clicked = source[start..body];
+        string shared = source[body..end];
+        // The session-roots-undeclared branch shows the roots screen, not
+        // Queue, and the shared startup (also the automatic one at first
+        // launch) never navigates.
+        Assert.DoesNotContain("ViewModel.ShowQueue()", shared);
         // Any other start failure (for example "another instance may already
-        // be running") must navigate to Queue so ViewModel.StatusText, which
-        // is only rendered in the Queue pane's header chip, reaches the
-        // contributor regardless of which pane the click came from.
-        Assert.Contains("ViewModel.ShowQueue();", afterRootsBranch);
+        // be running") navigates to Queue from a click, so
+        // ViewModel.StatusText, which is only rendered in the Queue pane's
+        // header chip, reaches the contributor regardless of which pane the
+        // click came from; roots-undeclared does not.
+        Assert.Contains("!started && !ViewModel.NeedsSessionRoots", clicked);
+        Assert.Contains("ViewModel.ShowQueue();", clicked);
     }
 }
 

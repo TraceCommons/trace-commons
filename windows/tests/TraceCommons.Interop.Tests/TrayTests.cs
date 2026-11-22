@@ -509,7 +509,7 @@ public class AutostartCommandTests
         string app = App("App.xaml.cs");
         Assert.Contains("AutostartCommand.IsLoginLaunch(Environment.GetCommandLineArgs(), activation.Kind == ExtendedActivationKind.StartupTask)", app);
         Assert.Contains("AutostartCommand.OpensWindow(", app);
-        Assert.Contains("window.StartInTray();", app);
+        Assert.Contains("window.StartInTrayAsync()", app);
         Assert.Contains("RunAtLogin.Refresh();", app);
     }
 

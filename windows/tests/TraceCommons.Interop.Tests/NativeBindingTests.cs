@@ -52,10 +52,10 @@ public class NativeBindingTests
     /// after the merge of #2256: its one credential-store binding (138 in
     /// NativeMethods.cs, 14 in NativeMethods.Settings.cs, no entry point twice).
     /// </summary>
-    private const int BoundFunctions = 152;
+    private const int BoundFunctions = 153;
 
     /// <summary>How many functions the header declares (both copies are identical).</summary>
-    private const int HeaderFunctions = 188;
+    private const int HeaderFunctions = 189;
 
     private static string HeaderPath => Path.Combine(AppContext.BaseDirectory, "abi", "trace_commons.h.txt");
 
