@@ -2,6 +2,8 @@
 //! Windows and x86-64 Linux. One name for the list, so the gates in
 //! `managed::red_team*` do not each repeat it.
 
+#![forbid(unsafe_code)]
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(red_team_platform)");
     println!("cargo:rerun-if-changed=build.rs");
