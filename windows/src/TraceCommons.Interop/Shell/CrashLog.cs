@@ -22,8 +22,8 @@ namespace TraceCommons.Interop.Shell;
 /// carry a user name). An inner exception is its type and HResult.
 /// </para>
 /// <para>
-/// Each exception type is recorded once per run, so a fault in a draw loop
-/// cannot flood the file, and the file is capped by rotating to
+/// Each distinct fault (exception type and top stack frame) is recorded once
+/// per run, so a fault in a draw loop cannot flood the file, and the file is capped by rotating to
 /// <c>.1</c>. Recording is never a second failure: it returns false rather
 /// than throw.
 /// </para>
@@ -57,8 +57,8 @@ public sealed class CrashLog
     public string Path => System.IO.Path.Combine(_directory, FileName);
 
     /// <summary>
-    /// Appends <paramref name="exception"/> unless its type was recorded
-    /// already in this run. True when it was written.
+    /// Appends <paramref name="exception"/> unless that fault (its type and top
+    /// frame) was recorded already in this run. True when it was written.
     /// </summary>
     public bool Record(string where, Exception exception)
     {
@@ -71,7 +71,12 @@ public sealed class CrashLog
         {
             lock (_gate)
             {
-                if (string.IsNullOrEmpty(_directory) || !_seen.Add(exception.GetType().FullName ?? exception.GetType().Name))
+                // One entry per distinct fault in a run, not per type: the same
+                // type thrown from two places is two faults, the same place a
+                // hundred times is one. A failed write leaves it unrecorded, so
+                // the next occurrence tries again.
+                string key = (exception.GetType().FullName ?? exception.GetType().Name) + "|" + TopFrame(exception);
+                if (string.IsNullOrEmpty(_directory) || _seen.Contains(key))
                 {
                     return false;
                 }
@@ -80,6 +85,7 @@ public sealed class CrashLog
                 Directory.CreateDirectory(_directory);
                 Rotate(Encoding.UTF8.GetByteCount(entry));
                 File.AppendAllText(Path, entry, Encoding.UTF8);
+                _seen.Add(key);
                 return true;
             }
         }
@@ -88,6 +94,27 @@ public sealed class CrashLog
             // A log that cannot be written is not a reason to fail again.
             return false;
         }
+    }
+
+    /// <summary>
+    /// The first stack frame of <paramref name="exception"/>, or of the first
+    /// inner exception that has one (a task's fault arrives wrapped in an
+    /// AggregateException with no stack of its own); empty when there is none.
+    /// </summary>
+    private static string TopFrame(Exception exception)
+    {
+        for (Exception? e = exception; e is not null; e = e.InnerException)
+        {
+            foreach (string raw in (e.StackTrace ?? string.Empty).Split('\n'))
+            {
+                if (FrameLine(raw.TrimEnd('\r')) is string frame)
+                {
+                    return frame;
+                }
+            }
+        }
+
+        return string.Empty;
     }
 
     private void Rotate(long incoming)
@@ -128,6 +155,15 @@ public sealed class CrashLog
         for (int depth = 0; inner is not null && depth < 8; depth++, inner = inner.InnerException)
         {
             text.Append("  inner type=").Append(TypeName(inner)).Append(" hresult=").AppendLine(HResult(inner));
+            // A task's fault is an AggregateException with no stack of its own:
+            // the frames that name where it was thrown are the inner one's.
+            foreach (string raw in (inner.StackTrace ?? string.Empty).Split('\n'))
+            {
+                if (FrameLine(raw.TrimEnd('\r')) is string frame)
+                {
+                    text.Append("    ").AppendLine(frame);
+                }
+            }
         }
 
         return text.ToString();

@@ -2315,12 +2315,28 @@ public sealed class MainViewModel : INotifyPropertyChanged
         // async void because this is an event handler, which is the one place
         // it is correct. Exceptions are contained by RefreshAsync's own
         // handling of error frames; nothing it calls throws on a daemon error.
-        await RefreshAsync().ConfigureAwait(true);
+        // CoalescingRefresh does rethrow a refresh that failed, though, and an
+        // exception out of an async void ends the process: caught here.
+        try
+        {
+            await RefreshAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("queue-changed", exception);
+        }
     }
 
     private async void OnStatusChanged()
     {
-        await RefreshAsync().ConfigureAwait(true);
+        try
+        {
+            await RefreshAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("status-changed", exception);
+        }
     }
 
     private void OnLagged(int skipped)

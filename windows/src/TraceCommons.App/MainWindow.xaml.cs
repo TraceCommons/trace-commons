@@ -306,7 +306,9 @@ public sealed partial class MainWindow : Window
 
     private async Task ConfirmQuitAsync()
     {
-        if (_quitDialogOpen)
+        // Queued from the tray, so it can run after the window has closed,
+        // where reading its content would throw.
+        if (_quitDialogOpen || _closed)
         {
             return;
         }
@@ -334,10 +336,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (OpenRoot is not XamlRoot quitRoot)
+        {
+            return;
+        }
+
         BringForward();
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
-            XamlRoot = Content.XamlRoot,
+            XamlRoot = quitRoot,
             Title = prompt.Title,
             Content = prompt.Body,
             PrimaryButtonText = prompt.Confirm,
@@ -450,7 +457,9 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            await StartContributionsAsync();
+            // The core, not the wrapper: this start is automatic and a failed one
+            // must not move the person off Insights onto a blank Traces pane.
+            await StartContributionsCoreAsync();
         }
         catch (Exception exception)
         {
@@ -498,7 +507,30 @@ public sealed partial class MainWindow : Window
     /// launch's startup, which includes a network update check) joins it and
     /// gets its result; a flag that answered "false" to it dropped the click.
     /// </summary>
-    private Task<bool> StartContributionsAsync() => _contributionStartup.Run(RunContributionStartupAsync);
+    private Task<bool> StartContributionsCoreAsync() => _contributionStartup.Run(RunContributionStartupAsync);
+
+    /// <summary>
+    /// The contribution startup for a person's click: the start, and when it
+    /// failed for a reason other than undeclared roots, Queue is shown so its
+    /// header says why. (The automatic start at first launch uses
+    /// <see cref="StartContributionsCoreAsync"/> and never moves the person off
+    /// the pane they are on.)
+    /// </summary>
+    private async Task<bool> StartContributionsAsync()
+    {
+        bool started = await StartContributionsCoreAsync();
+        if (!started && !ViewModel.NeedsSessionRoots && !_closed)
+        {
+            // A start failure that is not "session roots undeclared" -- for
+            // example ViewModel.StatusText's "another instance may already be
+            // running" -- must still reach the contributor: Queue's header chip
+            // shows that message, so a click from any pane navigates there
+            // instead of doing nothing.
+            ViewModel.ShowQueue();
+        }
+
+        return started;
+    }
 
     private async Task<bool> RunContributionStartupAsync()
     {
@@ -516,19 +548,7 @@ public sealed partial class MainWindow : Window
             await ShowSessionRootsAsync();
             return false;
         }
-        bool started = !_closed && _host.IsRunning;
-        if (!started && !_closed)
-        {
-            // A start failure that is not "session roots undeclared" --
-            // for example ViewModel.StatusText's "another instance may
-            // already be running" -- must still reach the contributor.
-            // Before Insights became the default landing pane, Queue was
-            // already on screen and its header chip showed that message;
-            // navigate there now so a click from any pane still surfaces
-            // it instead of doing nothing.
-            ViewModel.ShowQueue();
-        }
-        return started;
+        return !_closed && _host.IsRunning;
     }
 
     /// <summary>
@@ -820,7 +840,7 @@ public sealed partial class MainWindow : Window
                 case NudgeDestination.History:
                     if (await StartContributionsAsync())
                     {
-                        HistoryPane.Content ??= new HistoryView(_host);
+                        HistoryPane.Content ??= NewHistoryView();
                         ViewModel.ShowHistory();
                     }
 
@@ -1006,7 +1026,17 @@ public sealed partial class MainWindow : Window
     private void OnTrayQuitRequested()
     {
         // ConfirmQuitAsync brings the window forward only when it asks.
-        _host.Dispatcher.TryEnqueue(async () => await ConfirmQuitAsync());
+        _host.Dispatcher.TryEnqueue(async () =>
+        {
+            try
+            {
+                await ConfirmQuitAsync();
+            }
+            catch (Exception exception)
+            {
+                CrashGuard.Log.Record("tray-quit", exception);
+            }
+        });
     }
 
     /// <summary>

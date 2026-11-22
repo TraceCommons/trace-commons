@@ -27,7 +27,7 @@ public sealed class ShellRobustnessWiringTests
         string window = Code(Shell("MainWindow.xaml.cs"));
         Assert.DoesNotContain("_contributionStartupBusy", window);
         Assert.Contains("private readonly SingleFlight<bool> _contributionStartup = new();", window);
-        Assert.Matches(@"private Task<bool> StartContributionsAsync\(\) => _contributionStartup\.Run\(RunContributionStartupAsync\);", window);
+        Assert.Matches(@"private Task<bool> StartContributionsCoreAsync\(\) => _contributionStartup\.Run\(RunContributionStartupAsync\);", window);
     }
 
     /// <summary>
@@ -127,5 +127,68 @@ public sealed class ShellRobustnessWiringTests
         string body = window[start..window.IndexOf("private async Task ShowSessionRootsAsync()", start, StringComparison.Ordinal)];
         Assert.DoesNotContain("await ViewModel.CheckForUpdateAsync()", body);
         Assert.Matches(@"OfferNextRedirectedInvite\(\);\s*_ = Observed\.Run\(ViewModel\.CheckForUpdateAsync\(\), ""update-check""\);\s*\}", body);
+    }
+
+    /// <summary>
+    /// The automatic start at first launch never navigates: a failed one moved
+    /// the person off Insights onto a blank Traces pane. A click's start still
+    /// shows Queue, whose header says why.
+    /// </summary>
+    [Fact]
+    public void OnlyAClicksStartNavigatesToQueueOnFailure()
+    {
+        string window = Code(Shell("MainWindow.xaml.cs"));
+        string auto = window[window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)..];
+        auto = auto[..auto.IndexOf("}\n    }", StringComparison.Ordinal)];
+        Assert.Contains("await StartContributionsCoreAsync();", auto);
+        Assert.DoesNotContain("StartContributionsAsync", auto);
+        // The shared body does not navigate; the clicked wrapper does, once.
+        string body = window[window.IndexOf("private async Task<bool> RunContributionStartupAsync", StringComparison.Ordinal)..];
+        body = body[..body.IndexOf("private async Task ContinueStartupAsync", StringComparison.Ordinal)];
+        Assert.DoesNotContain("ShowQueue", body);
+        Assert.Matches(@"private async Task<bool> StartContributionsAsync\(\)\s*\{\s*bool started = await StartContributionsCoreAsync\(\);\s*if \(!started && !ViewModel\.NeedsSessionRoots && !_closed\)\s*\{\s*ViewModel\.ShowQueue\(\);", window);
+    }
+
+    /// <summary>CoalescingRefresh rethrows a failed refresh; the daemon-event handlers catch it.</summary>
+    [Theory]
+    [InlineData("OnQueueChanged", "queue-changed")]
+    [InlineData("OnStatusChanged", "status-changed")]
+    public void TheDaemonEventHandlersCatchARefreshThatFailed(string handler, string label)
+    {
+        Assert.Matches(
+            @"private async void " + handler + @"\(\)\s*\{\s*(try\s*\{\s*await RefreshAsync\(\)\.ConfigureAwait\(true\);\s*\}\s*catch \(Exception exception\)\s*\{\s*CrashGuard\.Log\.Record\(""" + label + @""", exception\);\s*\})",
+            Code(Shell("ViewModels/MainViewModel.cs")));
+    }
+
+    /// <summary>A quit queued from the tray can run after the window closed.</summary>
+    [Fact]
+    public void ATrayQuitAfterTheWindowClosedDoesNothing()
+    {
+        string window = Code(Shell("MainWindow.xaml.cs"));
+        Assert.Matches(@"private async Task ConfirmQuitAsync\(\)\s*\{\s*if \(_quitDialogOpen \|\| _closed\)\s*\{\s*return;\s*\}", window);
+        Assert.Matches(@"if \(OpenRoot is not XamlRoot quitRoot\)\s*\{\s*return;\s*\}\s*BringForward\(\);\s*var dialog = new Microsoft\.UI\.Xaml\.Controls\.ContentDialog\s*\{\s*XamlRoot = quitRoot,", window);
+        Assert.Matches(@"_host\.Dispatcher\.TryEnqueue\(async \(\) =>\s*\{\s*try\s*\{\s*await ConfirmQuitAsync\(\);\s*\}\s*catch \(Exception exception\)\s*\{\s*CrashGuard\.Log\.Record\(""tray-quit"", exception\);", window);
+    }
+
+    /// <summary>A History view made anywhere is the wired one (rows open).</summary>
+    [Fact]
+    public void EveryHistoryViewIsTheWiredOne()
+    {
+        string window = Code(Shell("MainWindow.xaml.cs"));
+        Assert.DoesNotContain("new HistoryView(", window);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(window, @"HistoryPane\.Content \?\?= NewHistoryView\(\);").Count);
+    }
+
+    /// <summary>
+    /// First run's own entry points survive a failed render themselves; they do
+    /// not depend on the app-level handler, whose exception details XAML does
+    /// not guarantee. The handlers are installed before InitializeComponent.
+    /// </summary>
+    [Fact]
+    public void FirstRunRendersWithoutThrowingAndTheHandlersComeFirst()
+    {
+        string run = Code(Shell("FirstRunWindow.xaml.cs"));
+        Assert.Matches(@"private void Render\(\)\s*\{\s*try\s*\{\s*RenderCore\(\);\s*\}\s*catch \(Exception exception\)\s*\{\s*CrashGuard\.Log\.Record\(""first-run-render"", exception\);\s*\}\s*\}", run);
+        Assert.Matches(@"CrashGuard\.Install\(this\);\s*InitializeComponent\(\);", Code(Shell("App.xaml.cs")));
     }
 }
