@@ -149,7 +149,7 @@ public sealed class ShellRobustnessWiringTests
     public void OnlyAClicksStartNavigatesToQueueOnFailure()
     {
         string window = Code(Shell("MainWindow.xaml.cs"));
-        string auto = Between(window, "private async Task OpenFirstRunOnFirstLaunchAsync", "private bool _contributionStartupAttempted");
+        string auto = Between(window, "private async Task OpenFirstRunOnFirstLaunchAsync", "private void StartDaemonAtLaunch");
         Assert.Contains("await StartContributionsCoreAsync();", auto);
         Assert.DoesNotContain("StartContributionsAsync", auto);
         // The shared body does not navigate; the clicked wrapper does, once.
