@@ -215,4 +215,20 @@ public class WindowRootLatchTests
             @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*OutgoingStep\.Content = handedOver;",
             source);
     }
+
+    /// <summary>
+    /// A device that has never finished first run opens it on the first
+    /// activation; one that has keeps the quiet landing on Insights.
+    /// </summary>
+    [Fact]
+    public void FirstRunOpensOnItsOwnOnlyOnADeviceNeverSetUp()
+    {
+        Assert.True(TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(finishedBefore: false));
+        Assert.False(TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(finishedBefore: true));
+        string window = Shell("MainWindow.xaml.cs");
+        int activated = window.IndexOf("private void OnFirstActivated", StringComparison.Ordinal);
+        string handler = window[activated..window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)];
+        Assert.Matches(@"ShowInsightsPane\(\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
+        Assert.Contains("_ = OpenFirstRunOnFirstLaunchAsync();", handler);
+    }
 }
