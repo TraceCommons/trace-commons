@@ -14,8 +14,20 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public sealed class ShellRobustnessWiringTests
 {
+    // Line endings normalized: a CI checkout can be CRLF where a clone is LF, and
+    // these scans match on text, not on the platform's newline.
     private static string Shell(string file) => File.ReadAllText(Path.Combine(
-        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt"));
+        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt")).Replace("\r\n", "\n");
+
+    /// <summary>The text from <paramref name="start"/> up to <paramref name="end"/>, failing with the missing marker named.</summary>
+    private static string Between(string source, string start, string end)
+    {
+        int from = source.IndexOf(start, StringComparison.Ordinal);
+        Assert.True(from >= 0, "start marker not found: " + start);
+        int to = source.IndexOf(end, from, StringComparison.Ordinal);
+        Assert.True(to >= 0, "end marker not found after the start: " + end);
+        return source[from..to];
+    }
 
     private static string Code(string source) =>
         string.Join('\n', source.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
@@ -123,8 +135,7 @@ public sealed class ShellRobustnessWiringTests
     public void TheUpdateCheckRunsAfterTheStartupAndIsNotWaitedFor()
     {
         string window = Code(Shell("MainWindow.xaml.cs"));
-        int start = window.IndexOf("private async Task ContinueStartupAsync()", StringComparison.Ordinal);
-        string body = window[start..window.IndexOf("private async Task ShowSessionRootsAsync()", start, StringComparison.Ordinal)];
+        string body = Between(window, "private async Task ContinueStartupAsync()", "private async Task ShowSessionRootsAsync()");
         Assert.DoesNotContain("await ViewModel.CheckForUpdateAsync()", body);
         Assert.Matches(@"OfferNextRedirectedInvite\(\);\s*_ = Observed\.Run\(ViewModel\.CheckForUpdateAsync\(\), ""update-check""\);\s*\}", body);
     }
@@ -138,13 +149,11 @@ public sealed class ShellRobustnessWiringTests
     public void OnlyAClicksStartNavigatesToQueueOnFailure()
     {
         string window = Code(Shell("MainWindow.xaml.cs"));
-        string auto = window[window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)..];
-        auto = auto[..auto.IndexOf("}\n    }", StringComparison.Ordinal)];
+        string auto = Between(window, "private async Task OpenFirstRunOnFirstLaunchAsync", "private bool _contributionStartupAttempted");
         Assert.Contains("await StartContributionsCoreAsync();", auto);
         Assert.DoesNotContain("StartContributionsAsync", auto);
         // The shared body does not navigate; the clicked wrapper does, once.
-        string body = window[window.IndexOf("private async Task<bool> RunContributionStartupAsync", StringComparison.Ordinal)..];
-        body = body[..body.IndexOf("private async Task ContinueStartupAsync", StringComparison.Ordinal)];
+        string body = Between(window, "private async Task<bool> RunContributionStartupAsync", "private async Task ContinueStartupAsync");
         Assert.DoesNotContain("ShowQueue", body);
         Assert.Matches(@"private async Task<bool> StartContributionsAsync\(\)\s*\{\s*bool started = await StartContributionsCoreAsync\(\);\s*if \(!started && !ViewModel\.NeedsSessionRoots && !_closed\)\s*\{\s*ViewModel\.ShowQueue\(\);", window);
     }

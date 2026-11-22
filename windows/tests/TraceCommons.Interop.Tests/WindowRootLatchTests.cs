@@ -19,8 +19,10 @@ public class WindowRootLatchTests
     {
     }
 
+    // Line endings normalized: a CI checkout can be CRLF where a clone is LF, and
+    // these scans match on text, not on the platform's newline.
     private static string Shell(string file) => File.ReadAllText(Path.Combine(
-        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt"));
+        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt")).Replace("\r\n", "\n");
 
     [Fact]
     public void TheLastDeactivationOfAClosedWindowDoesNotReadIt()
