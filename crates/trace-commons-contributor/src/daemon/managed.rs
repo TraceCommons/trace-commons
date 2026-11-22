@@ -1146,11 +1146,19 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     }
 }
 
-/// Whether Red Team managed sessions are available on this build: every
-/// macOS and Windows build, no other OS. Whether this Windows host can run
-/// them (edition, Hyper-V, group) is the setup state, not availability.
+/// Whether Red Team managed sessions are available: every macOS and Windows
+/// build, and x86-64 Linux when the daemon runs on the host. A daemon inside a
+/// Flatpak sandbox has no KVM and no user session to bound a VM in, so it
+/// reports Red Team unavailable and the app points at the host service.
+/// Whether this host can run them (edition, Hyper-V, group, KVM) is the setup
+/// state, not availability.
 pub fn red_team_available(_shared: &DaemonShared) -> bool {
-    cfg!(any(target_os = "macos", windows))
+    red_team_available_on(cfg!(red_team_platform), super::host_link::runs_sandboxed())
+}
+
+/// [`red_team_available`] from its two facts, so a test can name them.
+pub(crate) fn red_team_available_on(platform_supported: bool, sandboxed: bool) -> bool {
+    platform_supported && !sandboxed
 }
 
 /// Whether `request` is Red Team's "Enable Red Team" setup action. It runs

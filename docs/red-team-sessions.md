@@ -1,6 +1,6 @@
 # Red Team Managed Sessions (CLI)
 
-Red Team sessions run OpenCode inside an isolated `rts` microVM: on Apple Silicon macOS, or in a Hyper-V virtual machine on Windows 11 Pro, Enterprise or Education. It is available in every macOS and Windows build with no feature flag; Linux reports it unavailable. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
+Red Team sessions run OpenCode inside an isolated `rts` microVM: on Apple Silicon macOS, in a Hyper-V virtual machine on Windows 11 Pro, Enterprise or Education, or in a Firecracker microVM on x86-64 Linux. It is available in every macOS, Windows and x86-64 Linux build with no feature flag. On Linux only the host daemon runs it: a daemon inside a Flatpak sandbox reports it unavailable. aarch64 Linux has no Red Team. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
 
 ## Launching a Red Team session
 
@@ -61,3 +61,31 @@ explains the change before the prompt with the `red_team_enable_explain` copy.
 The Windows runtime archive is pinned in `managed/red_team_release.rs`
 (`RTS_RELEASE_WINDOWS`); it holds a placeholder digest until the rts 0.1.7
 release exists, and a test fails while it does.
+
+## Linux host requirements
+
+The Linux backend needs `/dev/kvm` opened by the user and a systemd user
+session. The `red_team` row of `managed_snapshot` reports `installed: false`
+with `host_problem` while the host cannot run it:
+
+- `no_kvm`: there is no `/dev/kvm`. Explained only.
+- `kvm_not_accessible`: `/dev/kvm` exists but this user cannot read and write
+  it. The row carries `fix_command`, `sudo usermod -aG kvm "$USER"`. The app
+  shows it with "Copy command" and never runs it (no pkexec, no system
+  changes); the person signs out of every session and back in afterwards.
+- `no_user_session`: mvm bounds each VM in a `systemd-run` scope, which needs
+  `systemd-run` on `PATH` and a user session bus (`DBUS_SESSION_BUS_ADDRESS`,
+  or `$XDG_RUNTIME_DIR/bus`). Explained only. (mvm-core `spawn_scope`,
+  `mechanism_launcher`.)
+
+`enable_offered` is false on Linux; "Enable Red Team" is a Windows action.
+
+A daemon inside a Flatpak sandbox sends no `red_team` row and reports
+`capabilities.daemon_on_host: false`; the GTK app then says Red Team needs the
+host service and shows the background service's install command with "Copy
+command".
+
+The Linux runtime archive is pinned in `managed/red_team_release.rs`
+(`RTS_RELEASE_LINUX`, `rts-0.1.8-x86_64-unknown-linux-gnu.tar.gz`); it holds a
+placeholder digest until the rts 0.1.8 release exists, and a test fails while
+it does.

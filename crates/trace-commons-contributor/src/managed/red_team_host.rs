@@ -1,5 +1,5 @@
-//! Red Team's Windows host requirements and the one-click "Enable Red Team"
-//! elevation (owner decision, 2026-11-21).
+//! Red Team's host requirements on Windows and Linux, and on Windows the
+//! one-click "Enable Red Team" elevation (owner decision, 2026-11-21).
 //!
 //! Red Team on Windows runs in a Hyper-V virtual machine: the edition must
 //! have Hyper-V, the feature must be on, and the user must be in the
@@ -15,6 +15,10 @@
 use super::ManagedError;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+
+/// What a person on Linux runs, in their own terminal, to be allowed to open
+/// `/dev/kvm`. The shell expands `$USER`; the app only shows and copies it.
+pub const KVM_FIX_COMMAND: &str = "sudo usermod -aG kvm \"$USER\"";
 
 /// The script, shipped in the signed package beside the executable.
 pub const ENABLE_SCRIPT: &str = "enable-red-team.ps1";
@@ -39,12 +43,27 @@ pub enum HostProblem {
     /// The user is not in the Hyper-V Administrators group (or has not
     /// signed in again since being added).
     NotInHyperVAdministrators,
+    /// Linux: there is no `/dev/kvm`, so no hardware virtualization.
+    NoKvm,
+    /// Linux: `/dev/kvm` exists but this user cannot open it for reading and
+    /// writing. The row carries [`KVM_FIX_COMMAND`]; the app never runs it.
+    KvmNotAccessible,
+    /// Linux: mvm bounds each VM in a `systemd-run` scope, which needs the
+    /// `systemd-run` binary and a systemd user session bus.
+    NoUserSession,
 }
 
 impl HostProblem {
-    /// Whether the app offers "Enable Red Team": everything but Windows Home.
+    /// Whether the app offers "Enable Red Team": the Windows problems the
+    /// script fixes, which is everything but Windows Home. Never on Linux, where
+    /// the app changes nothing on the system.
     pub fn enable_offered(self) -> bool {
-        !matches!(self, Self::HomeEdition)
+        matches!(self, Self::HyperVMissing | Self::NotInHyperVAdministrators)
+    }
+
+    /// The one command the person runs themselves for this problem, if any.
+    pub fn fix_command(self) -> Option<&'static str> {
+        matches!(self, Self::KvmNotAccessible).then_some(KVM_FIX_COMMAND)
     }
 }
 
@@ -71,6 +90,54 @@ pub fn valid_user_sid(sid: &str) -> bool {
         && parts
             .iter()
             .all(|p| !p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The Linux KVM problem, from what the host has: whether `/dev/kvm` exists
+/// and whether this user can open it for reading and writing.
+pub fn kvm_problem(exists: bool, accessible: bool) -> Option<HostProblem> {
+    if !exists {
+        Some(HostProblem::NoKvm)
+    } else if !accessible {
+        Some(HostProblem::KvmNotAccessible)
+    } else {
+        None
+    }
+}
+
+/// The Linux user-session problem, from what mvm's scope launcher checks
+/// (mvm-core `spawn_scope`: `systemd-run` on `PATH`, and a session bus named by
+/// `DBUS_SESSION_BUS_ADDRESS` or present as `$XDG_RUNTIME_DIR/bus`).
+pub fn user_session_problem(
+    path: Option<&std::ffi::OsStr>,
+    dbus_session_bus_address: Option<&std::ffi::OsStr>,
+    xdg_runtime_dir: Option<&std::ffi::OsStr>,
+    is_file: impl Fn(&Path) -> bool,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<HostProblem> {
+    let has_systemd_run = path.is_some_and(|path| {
+        std::env::split_paths(path)
+            .any(|dir| dir.is_absolute() && is_file(&dir.join("systemd-run")))
+    });
+    let has_bus = dbus_session_bus_address.is_some_and(|v| !v.is_empty())
+        || xdg_runtime_dir
+            .filter(|v| !v.is_empty())
+            .is_some_and(|dir| exists(&Path::new(dir).join("bus")));
+    (!has_systemd_run || !has_bus).then_some(HostProblem::NoUserSession)
+}
+
+/// The Linux host problem on this machine: KVM first, then the user session.
+#[cfg(target_os = "linux")]
+pub fn linux_host_problem() -> Option<HostProblem> {
+    let kvm = Path::new("/dev/kvm");
+    kvm_problem(kvm.exists(), rts::backend::kvm::check_kvm(kvm).is_ok()).or_else(|| {
+        user_session_problem(
+            std::env::var_os("PATH").as_deref(),
+            std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            |p| p.is_file(),
+            |p| p.exists(),
+        )
+    })
 }
 
 /// The script beside `exe`: `<exe dir>\enable-red-team.ps1`, a regular file
@@ -143,6 +210,9 @@ pub fn enable_with(
     match problem {
         None => return Err(ManagedError::InvalidRequest),
         Some(HostProblem::HomeEdition) => return Ok(EnableOutcome::HomeUnsupported),
+        // The script fixes only Hyper-V and the group; Linux problems are the
+        // person's to fix with the command the row shows.
+        Some(problem) if !problem.enable_offered() => return Err(ManagedError::InvalidRequest),
         Some(_) => {}
     }
     let sid = sid()
@@ -488,5 +558,133 @@ mod tests {
         // One parameter only.
         assert_eq!(script.matches("[Parameter(").count(), 1);
         assert!(script.contains("$UserSid"));
+    }
+
+    #[test]
+    fn kvm_problems_are_ordered_missing_before_inaccessible() {
+        assert_eq!(kvm_problem(false, false), Some(HostProblem::NoKvm));
+        assert_eq!(
+            kvm_problem(true, false),
+            Some(HostProblem::KvmNotAccessible)
+        );
+        assert_eq!(kvm_problem(true, true), None);
+    }
+
+    #[test]
+    fn only_an_inaccessible_kvm_carries_a_fix_command_and_nothing_offers_enable_on_linux() {
+        assert_eq!(
+            HostProblem::KvmNotAccessible.fix_command(),
+            Some("sudo usermod -aG kvm \"$USER\"")
+        );
+        for p in [
+            HostProblem::NoKvm,
+            HostProblem::NoUserSession,
+            HostProblem::HomeEdition,
+            HostProblem::HyperVMissing,
+            HostProblem::NotInHyperVAdministrators,
+        ] {
+            assert_eq!(p.fix_command(), None, "{p:?}");
+        }
+        for p in [
+            HostProblem::NoKvm,
+            HostProblem::KvmNotAccessible,
+            HostProblem::NoUserSession,
+        ] {
+            assert!(!p.enable_offered(), "{p:?}");
+        }
+        assert_eq!(
+            serde_json::json!(HostProblem::NoUserSession),
+            "no_user_session"
+        );
+        assert_eq!(
+            serde_json::json!(HostProblem::KvmNotAccessible),
+            "kvm_not_accessible"
+        );
+    }
+
+    fn session(
+        path: Option<&str>,
+        bus: Option<&str>,
+        xdg: Option<&str>,
+        files: &[&str],
+    ) -> Option<HostProblem> {
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        user_session_problem(
+            path.map(std::ffi::OsStr::new),
+            bus.map(std::ffi::OsStr::new),
+            xdg.map(std::ffi::OsStr::new),
+            |p| files.iter().any(|f| f == p),
+            |p| files.iter().any(|f| f == p),
+        )
+    }
+
+    #[test]
+    fn a_user_session_needs_systemd_run_and_a_session_bus() {
+        let run = "/usr/bin/systemd-run";
+        assert_eq!(
+            session(Some("/usr/bin"), Some("unix:path=/x"), None, &[run]),
+            None
+        );
+        assert_eq!(
+            session(
+                Some("/bin:/usr/bin"),
+                None,
+                Some("/run/user/1000"),
+                &[run, "/run/user/1000/bus"]
+            ),
+            None
+        );
+        // No systemd-run on PATH.
+        assert_eq!(
+            session(Some("/bin"), Some("unix:path=/x"), None, &[run]),
+            Some(HostProblem::NoUserSession)
+        );
+        assert_eq!(
+            session(None, Some("unix:path=/x"), None, &[run]),
+            Some(HostProblem::NoUserSession)
+        );
+        // A relative PATH entry is not an identity.
+        assert_eq!(
+            session(
+                Some("usr/bin"),
+                Some("unix:path=/x"),
+                None,
+                &["usr/bin/systemd-run"]
+            ),
+            Some(HostProblem::NoUserSession)
+        );
+        // No bus: nothing named, empty values, no socket in the runtime dir.
+        assert_eq!(
+            session(Some("/usr/bin"), None, None, &[run]),
+            Some(HostProblem::NoUserSession)
+        );
+        assert_eq!(
+            session(Some("/usr/bin"), Some(""), Some(""), &[run]),
+            Some(HostProblem::NoUserSession)
+        );
+        assert_eq!(
+            session(Some("/usr/bin"), None, Some("/run/user/1000"), &[run]),
+            Some(HostProblem::NoUserSession)
+        );
+    }
+
+    #[test]
+    fn enabling_never_elevates_for_a_linux_problem() {
+        for problem in [
+            HostProblem::NoKvm,
+            HostProblem::KvmNotAccessible,
+            HostProblem::NoUserSession,
+        ] {
+            let out = enable_with(
+                Some(problem),
+                || Some(SID.into()),
+                || Ok(PathBuf::from("s.ps1")),
+                |_, _| panic!("must not elevate"),
+            );
+            assert!(
+                matches!(out, Err(ManagedError::InvalidRequest)),
+                "{problem:?}"
+            );
+        }
     }
 }

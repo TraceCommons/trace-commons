@@ -1161,6 +1161,10 @@ pub fn tools_with_red_team(
         if let Some(problem) = host_problem {
             row["host_problem"] = serde_json::json!(problem);
             row["enable_offered"] = serde_json::json!(problem.enable_offered());
+            // Linux: the command the person runs themselves (never the app).
+            if let Some(command) = problem.fix_command() {
+                row["fix_command"] = serde_json::json!(command);
+            }
         }
         rows.push(row);
     }
@@ -2152,6 +2156,17 @@ mod red_team_row_tests {
         let group = row(true, false, Some(HostProblem::NotInHyperVAdministrators)).unwrap();
         assert_eq!(group["host_problem"], "not_in_hyper_v_administrators");
         assert_eq!(group["enable_offered"], true);
+        let kvm = row(true, false, Some(HostProblem::KvmNotAccessible)).unwrap();
+        assert_eq!(kvm["host_problem"], "kvm_not_accessible");
+        assert_eq!(kvm["enable_offered"], false);
+        assert_eq!(kvm["fix_command"], "sudo usermod -aG kvm \"$USER\"");
+        let no_kvm = row(true, false, Some(HostProblem::NoKvm)).unwrap();
+        assert_eq!(no_kvm["host_problem"], "no_kvm");
+        assert!(no_kvm.get("fix_command").is_none());
+        assert_eq!(
+            row(true, false, Some(HostProblem::NoUserSession)).unwrap()["host_problem"],
+            "no_user_session"
+        );
         let home = row(true, false, Some(HostProblem::HomeEdition)).unwrap();
         assert_eq!(home["host_problem"], "home_edition");
         assert_eq!(home["enable_offered"], false);
