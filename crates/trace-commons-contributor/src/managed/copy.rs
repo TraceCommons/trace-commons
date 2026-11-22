@@ -22,6 +22,12 @@
 //!   `red_team_installed` and `red_team_not_installed` -- the Private AI
 //!   tab's dismissable Red Team setup card and Settings' Red Team row
 //!   (owner request 2026-11-19). DRAFT, NEEDS APPROVAL.
+//! - `red_team_enable_action` "Enable Red Team" and `red_team_enable_explain`
+//!   "Turns on Hyper-V and adds you to Hyper-V Administrators. Needs admin
+//!   once." are the owner's wording (2026-11-21, one-click enable on Windows);
+//!   `red_team_home_unsupported`, `red_team_enable_sign_out`,
+//!   `red_team_enable_restart`, `red_team_enable_declined` and
+//!   `red_team_enable_failed` are DRAFT, NEEDS APPROVAL.
 //! - `sign_in_title` "Start a Private AI session" -- the launch card's
 //!   title on the Private AI tab (approved 2026-10-28).
 //! - `sign_in_scope` "Uses your NEAR AI sign-in." Shortened and approved by
@@ -393,6 +399,13 @@ pub fn copy() -> serde_json::Value {
             "red_team_settings_line": "Sandboxed OpenCode sessions on NEAR AI.",
             "red_team_installed": "Installed",
             "red_team_not_installed": "Not installed",
+            "red_team_enable_action": "Enable Red Team",
+            "red_team_enable_explain": "Turns on Hyper-V and adds you to Hyper-V Administrators. Needs admin once.",
+            "red_team_home_unsupported": "Red Team needs Windows 11 Pro, Enterprise or Education. Windows Home has no Hyper-V.",
+            "red_team_enable_sign_out": "Red Team is enabled. Sign out of Windows and back in to finish.",
+            "red_team_enable_restart": "Hyper-V is on. Restart Windows to finish, then sign in again.",
+            "red_team_enable_declined": "Red Team was not enabled. Approve the Windows prompt to turn it on.",
+            "red_team_enable_failed": "Could not enable Red Team. Try again, or turn on Hyper-V in Windows Features.",
             "open_tool": "Open {tool}",
             "guide_title": "How Private AI works",
             "guide_body": "Pay for the AI you already use with credit from your traces.",
@@ -783,6 +796,13 @@ mod red_team_setup_copy_tests {
             "red_team_settings_line",
             "red_team_installed",
             "red_team_not_installed",
+            "red_team_enable_action",
+            "red_team_enable_explain",
+            "red_team_home_unsupported",
+            "red_team_enable_sign_out",
+            "red_team_enable_restart",
+            "red_team_enable_declined",
+            "red_team_enable_failed",
         ] {
             assert!(
                 copy[key].as_str().is_some_and(|w| !w.trim().is_empty()),

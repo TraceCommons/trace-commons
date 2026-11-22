@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub enum ToolSetupAction {
     Install,
     Update,
+    /// Red Team on Windows: turn on Hyper-V and join Hyper-V Administrators
+    /// through the shipped, elevated script. Never a terminal command.
+    Enable,
 }
 
 /// Whether a tool's local runtime prerequisites are ready or need setup.
@@ -115,6 +118,7 @@ pub fn command(
     let mut version = name(tool).to_owned();
     let setup = match action {
         ToolSetupAction::Install => installer(tool),
+        ToolSetupAction::Enable => return Err(ManagedError::InvalidRequest),
         ToolSetupAction::Update => {
             let native = native.ok_or(ManagedError::ToolUnavailable)?;
             if !native.is_absolute() || !native.is_file() {
@@ -238,6 +242,21 @@ mod tests {
             ToolSetupAction::Update
         );
         assert!(serde_json::from_str::<ToolSetupAction>("\"update; evil\"").is_err());
+        assert_eq!(
+            serde_json::from_str::<ToolSetupAction>("\"enable\"").unwrap(),
+            ToolSetupAction::Enable
+        );
+        for tool in [
+            ToolId::Claude,
+            ToolId::Codex,
+            ToolId::Opencode,
+            ToolId::RedTeam,
+        ] {
+            assert_eq!(
+                command(tool, ToolSetupAction::Enable, None),
+                Err(ManagedError::InvalidRequest)
+            );
+        }
     }
 
     #[test]

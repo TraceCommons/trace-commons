@@ -25,8 +25,15 @@ public sealed record ManagedSession(
 /// <summary>A terminal a managed session can open in, as the daemon names
 /// it: its wire id and the app's own name.</summary>
 public sealed record ManagedTerminalChoice(string Id, string Name);
+/// <param name="HostProblem">Windows Red Team only: why this host cannot run it
+/// (<c>home_edition</c>, <c>hyper_v_missing</c> or
+/// <c>not_in_hyper_v_administrators</c>); null when there is none.</param>
+/// <param name="EnableOffered">Whether the app offers "Enable Red Team" for that
+/// problem: everything but Windows Home.</param>
 public sealed record ManagedTool(string Tool, bool Installed,
-    [property: JsonPropertyName("install_url")] string InstallUrl);
+    [property: JsonPropertyName("install_url")] string InstallUrl,
+    [property: JsonPropertyName("host_problem")] string? HostProblem = null,
+    [property: JsonPropertyName("enable_offered")] bool EnableOffered = false);
 
 /// <param name="NearAiSignin">Whether the daemon holds a NEAR AI sign-in: a
 /// bool, never the credential. Absent from an older daemon, which reads as no.</param>
@@ -97,6 +104,17 @@ public sealed record ManagedSnapshot(
     public static string[] Connections(string tool, bool signedIn = false) =>
         tool == "opencode" ? ["api_key", "near_ai"] : ManagedSignIn.ConnectionOptions(signedIn);
     public string Text(string key) => Copy.GetValueOrDefault(key, string.Empty);
+
+    /// <summary>The daemon's Red Team row, null from a build without Red Team.</summary>
+    [JsonIgnore] public ManagedTool? RedTeamTool => Tools?.FirstOrDefault(t => t.Tool == "red_team");
+
+    /// <summary>Whether Red Team's setup shows "Enable Red Team" (with
+    /// <c>red_team_enable_explain</c> beside it, before the Windows prompt): Hyper-V
+    /// is off or the user is not in Hyper-V Administrators. Never on Windows Home.</summary>
+    [JsonIgnore] public bool OffersRedTeamEnable => RedTeamTool is { Installed: false, EnableOffered: true };
+
+    /// <summary>Whether Red Team is explained as unsupported (Windows Home) instead.</summary>
+    [JsonIgnore] public bool RedTeamUnsupportedEdition => RedTeamTool is { HostProblem: "home_edition" };
 
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;

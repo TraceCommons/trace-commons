@@ -147,6 +147,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Red Team's "Enable Red Team": run only by the daemon, elevated, beside near-ai.exe. -->
+    <None Include="$(MSBuildThisFileDirectory)../../packaging/enable-red-team.ps1"
+          Link="enable-red-team.ps1"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(TcFfiLibDir)/near-ai.exe"
           Condition="Exists('$(TcFfiLibDir)/near-ai.exe')"
           CopyToOutputDirectory="PreserveNewest" />

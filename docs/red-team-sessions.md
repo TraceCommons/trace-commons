@@ -1,6 +1,6 @@
 # Red Team Managed Sessions (CLI)
 
-Red Team sessions run OpenCode inside an isolated `rts` microVM on Apple Silicon macOS. It is available in every macOS build with no feature flag; other platforms report it unavailable. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
+Red Team sessions run OpenCode inside an isolated `rts` microVM: on Apple Silicon macOS, or in a Hyper-V virtual machine on Windows 11 Pro, Enterprise or Education. It is available in every macOS and Windows build with no feature flag; Linux reports it unavailable. Inference goes through NEAR AI via an embedded IronWire proxy with receipt capture; the NEAR AI key never enters OpenCode or the guest VM.
 
 ## Launching a Red Team session
 
@@ -37,3 +37,27 @@ trace-commons-contributor --json launch red-team \
 
 - `--prompt <TEXT>` / `--prompt-file <PATH>`: Mutually exclusive initial prompt (UTF-8, at most 64 KiB) passed to Claude Code (`-- <prompt>`), Codex (`-- <prompt>`), OpenCode (`--prompt <prompt>`), or Red Team (`LaunchSpec.initial_prompt`).
 - `--new-terminal`: Asks the running daemon to open the prepared session in a new terminal window and prints its session ID (or `{"session_id": "..."}` with `--json`). Required when stdin is not a TTY.
+
+## Windows host requirements and "Enable Red Team"
+
+The Windows backend needs the Hyper-V feature on and the user in the Hyper-V
+Administrators group (`S-1-5-32-578`). Windows Home has no Hyper-V and is
+unsupported. The `red_team` row of `managed_snapshot` reports `installed: false`
+with `host_problem` (`home_edition`, `hyper_v_missing` or
+`not_in_hyper_v_administrators`) and `enable_offered` (false only for Windows
+Home) while the host cannot run it.
+
+`managed_tool_setup {"tool":"red_team","action":"enable"}` runs the fixed
+`enable-red-team.ps1` that ships beside `near-ai.exe` in the signed package,
+elevated through a UAC prompt. The request carries no arguments. The daemon
+resolves the script beside its own executable (a regular file, not a link, under
+that directory) and passes only the user SID read from its own process token,
+validated as `S-1-5-21-` plus at least four decimal sub-authorities. The reply is
+`{"opened":true,"outcome":...}` with `sign_out_needed` (the group applies after
+signing out and back in), `restart_needed` (Hyper-V was turned on; restart
+Windows), `home_unsupported`, `declined` (UAC cancelled) or `failed`. The app
+explains the change before the prompt with the `red_team_enable_explain` copy.
+
+The Windows runtime archive is pinned in `managed/red_team_release.rs`
+(`RTS_RELEASE_WINDOWS`); it holds a placeholder digest until the rts 0.1.7
+release exists, and a test fails while it does.

@@ -5,12 +5,14 @@ use super::*;
 use crate::config::ConfigStore;
 use crate::daemon::ipc::{DaemonShared, Request};
 use crate::daemon::managed::handle;
+use crate::managed::red_team_host::HostProblem;
 use crate::managed::sandbox::SandboxSettings;
 use crate::managed::secrets::RedactedSecret;
 use crate::managed::sessions::{
     CollectionState, LaunchContext, LaunchPurpose, LaunchRequest, PreparedLaunch, SessionState,
     SessionView,
 };
+use crate::managed::tool_setup::ToolSetupState;
 use crate::managed::{AccountId, AccountView, ConnectionKind, Generation, ToolId};
 use serde_json::json;
 use uuid::Uuid;
@@ -396,17 +398,63 @@ fn route_config_is_unchanged_for_other_sessions() {
     assert_eq!(crate::managed::route::ironwire_config(false, url), expected);
 }
 
-#[test]
-fn red_team_setup_checks_inside_our_config_folder() {
+fn status(
+    check: Result<(), &str>,
+    membership: Option<HostProblem>,
+) -> (SetupStatus, Option<std::path::PathBuf>) {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
     let mut seen_prefix = None;
-    let state = setup_state_with(&store, |prefix, _sessions| {
-        seen_prefix = Some(prefix.to_path_buf());
-        true
-    });
-    assert_eq!(state, crate::managed::tool_setup::ToolSetupState::Ready);
-    assert_eq!(seen_prefix, Some(store.dir().join("red-team/runtime")));
+    let status = status_with(
+        &store,
+        |prefix, _sessions| {
+            seen_prefix = Some(prefix.to_path_buf());
+            check.map_err(str::to_owned)
+        },
+        || membership,
+    );
+    let expected = store.dir().join("red-team/runtime");
+    assert_eq!(seen_prefix, Some(expected.clone()));
+    (status, Some(expected))
+}
+
+#[test]
+fn red_team_setup_checks_inside_our_config_folder() {
+    let (status, _) = status(Ok(()), None);
+    assert_eq!(status.state, ToolSetupState::Ready);
+    assert_eq!(status.problem, None);
+}
+
+#[test]
+fn a_failed_check_needs_setup_without_a_host_problem_when_rts_names_none() {
+    let (status, _) = status(Err("the rts guest file x is missing"), None);
+    assert_eq!(status.state, ToolSetupState::NeedsSetup);
+    assert_eq!(status.problem, None);
+}
+
+#[test]
+fn windows_home_and_missing_hyper_v_are_host_problems() {
+    let (home, _) = status(Err("Windows Home is not supported: rts runs"), None);
+    assert_eq!(home.state, ToolSetupState::NeedsSetup);
+    assert_eq!(home.problem, Some(HostProblem::HomeEdition));
+    let (off, _) = status(Err("Hyper-V is not available on this computer (x)"), None);
+    assert_eq!(off.problem, Some(HostProblem::HyperVMissing));
+}
+
+#[test]
+fn a_user_outside_hyper_v_administrators_is_not_ready_even_with_everything_installed() {
+    let (status, _) = status(Ok(()), Some(HostProblem::NotInHyperVAdministrators));
+    assert_eq!(status.state, ToolSetupState::NeedsSetup);
+    assert_eq!(status.problem, Some(HostProblem::NotInHyperVAdministrators));
+}
+
+#[test]
+fn the_check_names_the_edition_before_the_group() {
+    let (status, _) = status(
+        Err("Windows Home is not supported: x"),
+        Some(HostProblem::NotInHyperVAdministrators),
+    );
+    assert_eq!(status.problem, Some(HostProblem::HomeEdition));
 }
 
 #[test]
