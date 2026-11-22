@@ -311,7 +311,9 @@ fn tool_of(body: &SessionBody) -> Option<BenchTool> {
     match body {
         SessionBody::Claude { .. } => Some(BenchTool::ClaudeCode),
         SessionBody::Codex { .. } => Some(BenchTool::Codex),
-        SessionBody::Unknown { .. } => None,
+        SessionBody::GeminiCli { .. }
+        | SessionBody::Antigravity { .. }
+        | SessionBody::Unknown { .. } => None,
     }
 }
 
@@ -376,7 +378,10 @@ fn entries(
                 &evidence.model_labels,
                 &evidence.series.turns,
             ),
-            SessionBody::Codex { series: None, .. } | SessionBody::Unknown { .. } => {
+            SessionBody::Codex { series: None, .. }
+            | SessionBody::GeminiCli { .. }
+            | SessionBody::Antigravity { .. }
+            | SessionBody::Unknown { .. } => {
                 bump(&mut left_out.no_model);
                 continue;
             }

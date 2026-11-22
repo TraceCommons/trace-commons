@@ -1833,7 +1833,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
     let items = parsed.as_array().expect("an array");
-    assert_eq!(items.len(), 5, "one candidate per known agent: {json}");
+    assert_eq!(items.len(), 6, "one candidate per known agent: {json}");
 
     let sources: Vec<&str> = items
         .iter()
@@ -1846,7 +1846,14 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     // to that gate would stop the daemon on every installed client.
     assert_eq!(
         sources,
-        vec!["claude-code", "codex", "gemini-cli", "cline", "opencode"]
+        vec![
+            "claude-code",
+            "codex",
+            "gemini-cli",
+            "cline",
+            "opencode",
+            "antigravity"
+        ]
     );
 
     for item in items {
@@ -1865,6 +1872,7 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
     assert_eq!(answers_at("claude-code"), serde_json::json!("Anthropic"));
     assert_eq!(answers_at("codex"), serde_json::json!("OpenAI"));
     assert_eq!(answers_at("gemini-cli"), serde_json::json!("Google"));
+    assert_eq!(answers_at("antigravity"), serde_json::json!("Google"));
     assert_eq!(
         answers_at("cline"),
         serde_json::Value::Null,
@@ -1874,7 +1882,8 @@ fn discovery_answers_without_a_handle_and_describes_every_source() {
 
 /// The Antigravity design decision: `~/.gemini/tmp` is Gemini CLI's own
 /// store, so it is reported under Gemini CLI's real name here, never
-/// relabelled `"antigravity"`. See issue #1118 decision #2.
+/// relabelled `"antigravity"`, while `"antigravity"` points at its own
+/// `brain` directory. See issue #1118 decision #2.
 #[test]
 fn the_gemini_store_is_never_relabelled_antigravity() {
     let out = tc_discover_sources();
@@ -1885,14 +1894,23 @@ fn the_gemini_store_is_never_relabelled_antigravity() {
     unsafe { tc_string_free(out) };
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-    let sources: Vec<&str> = parsed
-        .as_array()
-        .expect("an array")
+    let rows = parsed.as_array().expect("an array");
+    let gemini = rows
         .iter()
-        .map(|i| i["source"].as_str().unwrap())
-        .collect();
-    assert!(sources.contains(&"gemini-cli"));
-    assert!(!sources.contains(&"antigravity"));
+        .find(|i| i["source"].as_str() == Some("gemini-cli"))
+        .expect("gemini-cli row present");
+    assert!(
+        gemini["path"].as_str().unwrap().ends_with("tmp"),
+        "gemini-cli must keep ~/.gemini/tmp: {gemini}"
+    );
+    let antigravity = rows
+        .iter()
+        .find(|i| i["source"].as_str() == Some("antigravity"))
+        .expect("antigravity row present");
+    assert!(
+        antigravity["path"].as_str().unwrap().ends_with("brain"),
+        "antigravity must point at its own brain store, never ~/.gemini/tmp: {antigravity}"
+    );
 }
 
 /// An OpenCode export folder the contributor has already named is described

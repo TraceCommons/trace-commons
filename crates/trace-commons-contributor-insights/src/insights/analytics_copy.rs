@@ -272,6 +272,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     // "Claude" everywhere, never "Claude Code" (owner, 2026-10-28).
     ("analytics_credit_tool_claude_code", "Claude"),
     ("analytics_credit_tool_codex", "Codex"),
+    ("analytics_credit_tool_gemini_cli", "Gemini CLI"),
+    ("analytics_credit_tool_antigravity", "Antigravity"),
     ("analytics_subscriptions_default_login", "Default login"),
     ("analytics_subscriptions_session", "Session"),
     ("analytics_subscriptions_weekly", "Weekly"),
@@ -419,6 +421,14 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     (
         "analytics_source_codex",
         "Codex · total from first to last reading",
+    ),
+    (
+        "analytics_source_gemini_cli",
+        "Gemini CLI · counted per turn",
+    ),
+    (
+        "analytics_source_antigravity",
+        "Antigravity · counted per turn",
     ),
     (
         "analytics_codex_interval",

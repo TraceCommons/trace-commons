@@ -92,6 +92,7 @@ struct WatchedFoldersSection: View {
         case .geminiCli: return modes.gemini
         case .cline: return modes.cline
         case .opencode: return model.daemonSettings?.opencodeSourceMode ?? ""
+        case .antigravity: return model.daemonSettings?.antigravitySourceMode ?? ""
         }
     }
 

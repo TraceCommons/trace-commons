@@ -207,6 +207,9 @@ use crate::insights::analytics_constants::{
 };
 use crate::insights::codex_series::{CodexTurnSeriesEvidence, CodexTurnSeriesScan};
 use crate::insights::goals::WeekFigures;
+use crate::insights::google_series::{
+    AntigravityTurnSeriesScan, GoogleTurnSeriesEvidence, extract_gemini_turn_series,
+};
 use crate::insights::model_answers::ModelRoute;
 use crate::insights::session_facts::{ClaudeFactsScan, InferredTask, SessionFacts};
 use crate::insights::session_identity::HarnessSessionScan;
@@ -226,7 +229,7 @@ use crate::insights::week_rollup::{
     AnalyticsSource, CodexObserved, Feed, SessionBody, SessionInput, UnknownReason, WeekRollup,
     change_vs_last_week, comparable, local_week_start, week_rollup,
 };
-use crate::source::{SOURCE_CLAUDE_CODE, SOURCE_CODEX};
+use crate::source::{SOURCE_ANTIGRAVITY, SOURCE_CLAUDE_CODE, SOURCE_CODEX, SOURCE_GEMINI_CLI};
 
 /// The feed label every answer carries, so a shell can say which feed it
 /// shows.
@@ -292,6 +295,14 @@ enum RowBody {
         /// the file while false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         series_trimmed: bool,
+    },
+    GeminiCli {
+        model_labels: Vec<String>,
+        series: UsageSeries,
+    },
+    Antigravity {
+        model_labels: Vec<String>,
+        series: UsageSeries,
     },
     Unknown {
         source: AnalyticsSource,
@@ -559,15 +570,19 @@ impl CounterRow {
     /// series counts against its own budget (`codex_series_turns`).
     fn turns(&self) -> usize {
         match &self.body {
-            RowBody::Claude { series, .. } => series.turns.len(),
+            RowBody::Claude { series, .. }
+            | RowBody::GeminiCli { series, .. }
+            | RowBody::Antigravity { series, .. } => series.turns.len(),
             _ => 0,
         }
     }
 
-    /// Tool calls against the shared cap: Claude Code's series only.
+    /// Tool calls against the shared cap.
     fn tool_calls(&self) -> usize {
         match &self.body {
-            RowBody::Claude { series, .. } => series.tool_calls.len(),
+            RowBody::Claude { series, .. }
+            | RowBody::GeminiCli { series, .. }
+            | RowBody::Antigravity { series, .. } => series.tool_calls.len(),
             _ => 0,
         }
     }
@@ -603,7 +618,9 @@ impl CounterRow {
     /// decision D11) holds.
     fn listed_series(&self, codex_per_turn: bool) -> Option<&UsageSeries> {
         match &self.body {
-            RowBody::Claude { series, .. } => Some(series),
+            RowBody::Claude { series, .. }
+            | RowBody::GeminiCli { series, .. }
+            | RowBody::Antigravity { series, .. } => Some(series),
             RowBody::Codex {
                 series: Some(evidence),
                 ..
@@ -639,6 +656,20 @@ impl CounterRow {
                 } => SessionBody::Codex {
                     observed: *observed,
                     series: series.clone().filter(|_| codex_per_turn),
+                },
+                RowBody::GeminiCli {
+                    model_labels,
+                    series,
+                } => SessionBody::GeminiCli {
+                    series: series.clone(),
+                    model_labels: model_labels.clone(),
+                },
+                RowBody::Antigravity {
+                    model_labels,
+                    series,
+                } => SessionBody::Antigravity {
+                    series: series.clone(),
+                    model_labels: model_labels.clone(),
                 },
                 RowBody::Unknown { source, reason } => SessionBody::Unknown {
                     source: Some(*source),
@@ -3771,6 +3802,8 @@ fn analytics_source(adapter: &str) -> Option<AnalyticsSource> {
     match adapter {
         SOURCE_CLAUDE_CODE => Some(AnalyticsSource::ClaudeCode),
         SOURCE_CODEX => Some(AnalyticsSource::Codex),
+        SOURCE_GEMINI_CLI => Some(AnalyticsSource::GeminiCli),
+        SOURCE_ANTIGRAVITY => Some(AnalyticsSource::Antigravity),
         _ => None,
     }
 }
@@ -3780,6 +3813,7 @@ fn source_format(source: AnalyticsSource) -> SourceFormat {
     match source {
         AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
         AnalyticsSource::Codex => SourceFormat::Codex,
+        AnalyticsSource::GeminiCli | AnalyticsSource::Antigravity => SourceFormat::Trajectory,
     }
 }
 
@@ -3956,6 +3990,32 @@ fn read_body(
                 (None, None)
             }
         }
+    } else if source == AnalyticsSource::GeminiCli {
+        // Gemini CLI stores one multi-line JSON document per session, not JSONL.
+        let bytes = std::fs::metadata(&candidate.path)
+            .ok()
+            .map(|meta| meta.len());
+        let scanned = bytes
+            .filter(|&len| len <= crate::insights::MAX_SOURCE_BYTES)
+            .and_then(|_| std::fs::read(&candidate.path).ok())
+            .and_then(|raw| extract_gemini_turn_series(&raw, key))
+            .map(|evidence| {
+                let first_event_at = evidence.earliest;
+                let span = evidence.earliest.zip(evidence.latest);
+                ScannedSession {
+                    body: ScannedBody::GeminiCli(Some(evidence)),
+                    facts: None,
+                    skill_usage: None,
+                    harness_session_id: None,
+                    first_event_at,
+                    span,
+                    automation: Automation::Unknown,
+                    session_metas: 0,
+                    long_lines_skipped: 0,
+                    goals: Vec::new(),
+                }
+            });
+        (bytes, scanned)
     } else {
         let file = std::fs::File::open(&candidate.path).ok();
         // The one file's own size, as the analysis reads it: delegated
@@ -4036,7 +4096,26 @@ fn read_body(
                 series_trimmed: false,
             }
         }
-        ScannedBody::Claude(None) | ScannedBody::Codex(None, _) => {
+        ScannedBody::GeminiCli(Some(evidence)) => {
+            let mut series = evidence.series;
+            series.truncated |= skipped;
+            RowBody::GeminiCli {
+                model_labels: evidence.model_labels,
+                series,
+            }
+        }
+        ScannedBody::Antigravity(Some(evidence)) => {
+            let mut series = evidence.series;
+            series.truncated |= skipped;
+            RowBody::Antigravity {
+                model_labels: evidence.model_labels,
+                series,
+            }
+        }
+        ScannedBody::Claude(None)
+        | ScannedBody::Codex(None, _)
+        | ScannedBody::GeminiCli(None)
+        | ScannedBody::Antigravity(None) => {
             // An unknown row keeps no facts: there are no counters for
             // them to sit beside.
             facts = None;
@@ -4169,6 +4248,8 @@ enum ScannedBody {
         Option<Box<PersistedUsageEvidence>>,
         Option<CodexTurnSeriesEvidence>,
     ),
+    GeminiCli(Option<GoogleTurnSeriesEvidence>),
+    Antigravity(Option<GoogleTurnSeriesEvidence>),
 }
 
 /// One pass over a transcript, line by line, feeding every extractor the
@@ -4213,6 +4294,8 @@ fn scan_session(
     let mut claude =
         (source == AnalyticsSource::ClaudeCode).then(|| ClaudeTurnSeriesScan::new(key));
     let mut codex = (source == AnalyticsSource::Codex).then(CodexUsageScan::default);
+    let mut antigravity =
+        (source == AnalyticsSource::Antigravity).then(|| AntigravityTurnSeriesScan::new(key));
     // The facts scans see the same records; one that fails leaves the facts
     // (and Codex's per-turn series) `None` and the counters as they are.
     let mut claude_facts =
@@ -4313,6 +4396,12 @@ fn scan_session(
         {
             codex = None;
         }
+        if antigravity
+            .as_mut()
+            .is_some_and(|scan| !scan.observe(&record))
+        {
+            antigravity = None;
+        }
         if claude_facts
             .as_mut()
             .is_some_and(|scan| scan.observe(&record).is_err())
@@ -4356,10 +4445,23 @@ fn scan_session(
                 facts,
             )
         }
+        AnalyticsSource::GeminiCli => (ScannedBody::GeminiCli(None), None),
+        AnalyticsSource::Antigravity => {
+            let evidence = antigravity.and_then(AntigravityTurnSeriesScan::finish);
+            if first_event.is_none() {
+                first_event = evidence.as_ref().and_then(|e| e.earliest);
+            }
+            (ScannedBody::Antigravity(evidence), None)
+        }
     };
-    let span = time
-        .and_then(|scan| scan.finish(digest).ok())
-        .and_then(|evidence| Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at)));
+    let span = match &body {
+        ScannedBody::Antigravity(Some(evidence)) => evidence.earliest.zip(evidence.latest),
+        _ => time
+            .and_then(|scan| scan.finish(digest).ok())
+            .and_then(|evidence| {
+                Some((evidence.earliest?.recorded_at, evidence.latest?.recorded_at))
+            }),
+    };
     Some(ScannedSession {
         body,
         facts,
@@ -4978,6 +5080,8 @@ fn session_row_value(
     let source = match &row.body {
         RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
         RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::GeminiCli { .. } => AnalyticsSource::GeminiCli,
+        RowBody::Antigravity { .. } => AnalyticsSource::Antigravity,
         RowBody::Unknown { source, .. } => *source,
     };
     // The per-turn series, Claude Code's or Codex's (owner decision D11,
@@ -5312,11 +5416,15 @@ fn row_tool(row: &CounterRow) -> &'static str {
     let source = match &row.body {
         RowBody::Claude { .. } => AnalyticsSource::ClaudeCode,
         RowBody::Codex { .. } => AnalyticsSource::Codex,
+        RowBody::GeminiCli { .. } => AnalyticsSource::GeminiCli,
+        RowBody::Antigravity { .. } => AnalyticsSource::Antigravity,
         RowBody::Unknown { source, .. } => *source,
     };
     match source {
         AnalyticsSource::ClaudeCode => "claude_code",
         AnalyticsSource::Codex => "codex",
+        AnalyticsSource::GeminiCli => "gemini_cli",
+        AnalyticsSource::Antigravity => "antigravity",
     }
 }
 
@@ -6606,12 +6714,11 @@ mod tests {
     }
 
     #[test]
-    fn only_claude_code_and_codex_are_counted() {
+    fn only_supported_analytics_sources_are_counted() {
         let f = Fixture::new();
         let path = f.write("s.jsonl", &claude_bytes());
         for source in [
             crate::source::SOURCE_TRAJECTORY,
-            crate::source::SOURCE_GEMINI_CLI,
             crate::source::SOURCE_CLINE,
             crate::source::SOURCE_OPENCODE,
         ] {
@@ -7024,6 +7131,53 @@ mod tests {
                 },
                 Err(_) => unknown,
             },
+            AnalyticsSource::GeminiCli => match extract_gemini_turn_series(bytes, key) {
+                Some(evidence) => {
+                    let mut series = evidence.series;
+                    if group_member_count > 0 {
+                        series.truncated = true;
+                    }
+                    RowBody::GeminiCli {
+                        model_labels: evidence.model_labels,
+                        series,
+                    }
+                }
+                None => unknown,
+            },
+            AnalyticsSource::Antigravity => {
+                let mut scan = AntigravityTurnSeriesScan::new(key);
+                let mut ok = true;
+                for line in bytes.split(|byte| *byte == b'\n') {
+                    if line.iter().all(|b| b.is_ascii_whitespace()) {
+                        continue;
+                    }
+                    let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) else {
+                        ok = false;
+                        break;
+                    };
+                    if !scan.observe(&record) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    match scan.finish() {
+                        Some(evidence) => {
+                            let mut series = evidence.series;
+                            if group_member_count > 0 {
+                                series.truncated = true;
+                            }
+                            RowBody::Antigravity {
+                                model_labels: evidence.model_labels,
+                                series,
+                            }
+                        }
+                        None => unknown,
+                    }
+                } else {
+                    unknown
+                }
+            }
         };
         let first_event_at = bytes.split(|byte| *byte == b'\n').find_map(|line| {
             let record: serde_json::Value = serde_json::from_slice(line).ok()?;
@@ -7169,6 +7323,8 @@ mod tests {
             let adapter = match source {
                 AnalyticsSource::ClaudeCode => SOURCE_CLAUDE_CODE,
                 AnalyticsSource::Codex => SOURCE_CODEX,
+                AnalyticsSource::GeminiCli => SOURCE_GEMINI_CLI,
+                AnalyticsSource::Antigravity => SOURCE_ANTIGRAVITY,
             };
             let path = f.write(&format!("{}.jsonl", name.replace(' ', "-")), &bytes);
             for members in [0, 2] {

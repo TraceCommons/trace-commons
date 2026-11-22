@@ -311,6 +311,7 @@ struct TracesTree: Equatable {
         case .geminiCli: return settings.geminiSourceMode
         case .cline: return settings.clineSourceMode
         case .opencode: return settings.opencodeSourceMode
+        case .antigravity: return settings.antigravitySourceMode
         }
     }
 

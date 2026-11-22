@@ -93,6 +93,23 @@
         "inference_calls": null
       },
       "installed": true
+    },
+    {
+      "tool": "antigravity",
+      "name": "Antigravity",
+      "sessions": {
+        "watch": "not_watched",
+        "to": []
+      },
+      "model_calls": {
+        "to": "google",
+        "basis": "tool_default"
+      },
+      "counts": {
+        "sessions": 0,
+        "inference_calls": null
+      },
+      "installed": null
     }
   ],
   "managed_sessions": [],

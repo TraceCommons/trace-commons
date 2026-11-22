@@ -165,6 +165,13 @@ const TOOLS: &[ToolSpec] = &[
         endpoints: &[],
         name: "OpenCode",
     },
+    ToolSpec {
+        source: crate::source::SOURCE_ANTIGRAVITY,
+        harness: None,
+        family: None,
+        endpoints: &[],
+        name: "Antigravity",
+    },
 ];
 
 /// Where a tool answers when nothing here routes it: its default provider,
@@ -524,6 +531,10 @@ pub fn handle_destinations(shared: &DaemonShared, req: &Request) -> Response {
                 (crate::source::SOURCE_GEMINI_CLI, s.gemini_source.clone()),
                 (crate::source::SOURCE_CLINE, s.cline_source.clone()),
                 (crate::source::SOURCE_OPENCODE, s.opencode_source.clone()),
+                (
+                    crate::source::SOURCE_ANTIGRAVITY,
+                    s.antigravity_source.clone(),
+                ),
             ],
             s.ironwire_attested_bodies,
         )
@@ -1155,8 +1166,12 @@ mod tests {
             tool_display_name(crate::source::SOURCE_CODEX),
             Some("Codex")
         );
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_ANTIGRAVITY),
+            Some("Antigravity")
+        );
         assert_eq!(tool_display_name(crate::source::SOURCE_TRAJECTORY), None);
-        assert_eq!(tool_display_name("antigravity"), None);
+        assert_eq!(tool_display_name("unknown-tool"), None);
         for spec in TOOLS {
             assert_eq!(tool_display_name(spec.source), Some(spec.name));
         }

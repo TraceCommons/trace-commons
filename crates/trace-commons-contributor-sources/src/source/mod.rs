@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+pub mod antigravity;
 pub mod claude_code;
 pub mod cline;
 pub mod codex;
@@ -198,19 +199,12 @@ pub const SOURCE_TRAJECTORY: &str = "trajectory";
 pub const SOURCE_GEMINI_CLI: &str = "gemini-cli";
 pub const SOURCE_CLINE: &str = "cline";
 pub const SOURCE_OPENCODE: &str = "opencode";
+pub const SOURCE_ANTIGRAVITY: &str = "antigravity";
 
-/// What an imported Antigravity conversation calls itself: `meta.source` on
-/// the staged trajectory file, and `SessionRef::declared_source` once
-/// discovery has read that file (K13).
-///
-/// Deliberately not a `SOURCE_*` constant beside the ones above: those name
-/// adapters registered in [`NATIVE_SOURCES`], and Antigravity has none --
-/// `trace_commons_contributor::antigravity` is a one-shot import command, not a `TraceSource`,
-/// and its conversations are staged into and read back by the `trajectory`
-/// adapter (see [`SOURCE_TRAJECTORY`] and `SessionRef::declared_source`'s own
-/// doc). This constant exists only so [`source_default_family`] and this
-/// crate's tests spell the string once rather than repeating the literal.
-pub const DECLARED_SOURCE_ANTIGRAVITY: &str = "antigravity";
+/// Alias kept for imported Antigravity trajectory conversations (`meta.source`
+/// on staged trajectory files, K13). Now shares the same `"antigravity"` slug
+/// as the native [`SOURCE_ANTIGRAVITY`] adapter.
+pub const DECLARED_SOURCE_ANTIGRAVITY: &str = SOURCE_ANTIGRAVITY;
 
 /// The protocol family a native source's own tool answers with by default,
 /// before any Private AI redirection changes where a call actually goes.
@@ -822,6 +816,14 @@ static NATIVE_SOURCES: &[SourceSpec] = &[
         // codex and carries no cline field, so an absent declaration must
         // construct nothing rather than watch the contributor's real
         // `~/.cline`.
+        undeclared: Undeclared::Nothing,
+    },
+    SourceSpec {
+        name: SOURCE_ANTIGRAVITY,
+        conventional_root: Some(antigravity::conventional_root_this_machine),
+        build: antigravity::AntigravitySource::for_declared_path,
+        // Same fail-closed policy as Gemini and Cline: an absent declaration
+        // constructs no adapter until the contributor explicitly enables it.
         undeclared: Undeclared::Nothing,
     },
 ];
@@ -1749,7 +1751,8 @@ mod tests {
                 SOURCE_CLAUDE_CODE,
                 SOURCE_CODEX,
                 SOURCE_GEMINI_CLI,
-                SOURCE_CLINE
+                SOURCE_CLINE,
+                SOURCE_ANTIGRAVITY,
             ],
             "adding an adapter to the table must reach the CLI without a \
              call-site change"

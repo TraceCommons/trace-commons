@@ -311,11 +311,15 @@ fn tool_of(input: &SessionInput) -> Option<&'static str> {
     let source = match &input.body {
         SessionBody::Claude { .. } => Some(AnalyticsSource::ClaudeCode),
         SessionBody::Codex { .. } => Some(AnalyticsSource::Codex),
+        SessionBody::GeminiCli { .. } => Some(AnalyticsSource::GeminiCli),
+        SessionBody::Antigravity { .. } => Some(AnalyticsSource::Antigravity),
         SessionBody::Unknown { source, .. } => *source,
     };
     source.map(|source| match source {
         AnalyticsSource::ClaudeCode => TOOL_CLAUDE_CODE,
         AnalyticsSource::Codex => TOOL_CODEX,
+        AnalyticsSource::GeminiCli => "gemini_cli",
+        AnalyticsSource::Antigravity => "antigravity",
     })
 }
 
@@ -323,7 +327,9 @@ fn tool_of(input: &SessionInput) -> Option<&'static str> {
 /// Codex's first observed counter, else its placement.
 fn first_activity(input: &SessionInput) -> Option<DateTime<Utc>> {
     let turns = match &input.body {
-        SessionBody::Claude { series, .. } => Some(&series.turns),
+        SessionBody::Claude { series, .. }
+        | SessionBody::GeminiCli { series, .. }
+        | SessionBody::Antigravity { series, .. } => Some(&series.turns),
         SessionBody::Codex {
             series: Some(evidence),
             ..
@@ -365,6 +371,14 @@ fn in_week<'a>(
     let anchored = first_activity(input).is_some_and(|at| this_week(&at));
     match &input.body {
         SessionBody::Claude {
+            series,
+            model_labels,
+        }
+        | SessionBody::GeminiCli {
+            series,
+            model_labels,
+        }
+        | SessionBody::Antigravity {
             series,
             model_labels,
         } => {
