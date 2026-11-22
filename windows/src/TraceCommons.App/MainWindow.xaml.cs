@@ -432,7 +432,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        ShowInsightsPane();
+        _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
         // A device never set up opens first run on its own, over Insights;
         // one that has finished it keeps the quiet landing.
         if (global::TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(OnboardingState.Default().AnyComplete()))
@@ -587,12 +587,20 @@ public sealed partial class MainWindow : Window
 
     private async void OnSessionRootsDeclared()
     {
-        // The daemon is up now, so the queue window needs the first snapshot
-        // it could not load, and then the startup it did not finish.
-        _activationReady = false;
-        ViewModel.SessionRootsDeclared();
-        await ViewModel.RefreshAsync();
-        await ContinueStartupAsync();
+        // async void because this is an event handler; nothing may escape it.
+        try
+        {
+            // The daemon is up now, so the queue window needs the first snapshot
+            // it could not load, and then the startup it did not finish.
+            _activationReady = false;
+            ViewModel.SessionRootsDeclared();
+            await ViewModel.RefreshAsync();
+            await ContinueStartupAsync();
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("roots-declared", exception);
+        }
     }
 
     /// <summary>
@@ -882,7 +890,7 @@ public sealed partial class MainWindow : Window
     /// showing would start them; that showing, from the tray or a second
     /// launch, joins the start already made.
     /// </summary>
-    internal async void StartInTray()
+    internal async Task StartInTrayAsync()
     {
         SetHiddenToTray(true);
         bool started = await LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
@@ -1401,7 +1409,7 @@ public sealed partial class MainWindow : Window
     /// profile as soon as it loads, and a contributor who never opens
     /// Settings should not pay for that at launch.
     /// </remarks>
-    private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
+    private void OnShowInsights(object sender, RoutedEventArgs e) => _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
 
     private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
@@ -1424,7 +1432,7 @@ public sealed partial class MainWindow : Window
         if (InsightsPane.Content is InsightsView insights) insights.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
     }
 
-    private async void ShowInsightsPane()
+    private async Task ShowInsightsPaneAsync()
     {
         if (InsightsPane.Content is not InsightsView)
         {

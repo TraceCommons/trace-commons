@@ -75,7 +75,7 @@ public partial class App : Application
         }
         else
         {
-            window.StartInTray();
+            _ = Observed.Run(window.StartInTrayAsync(), "tray-start");
         }
     }
 }

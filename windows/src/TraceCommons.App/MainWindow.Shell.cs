@@ -299,7 +299,7 @@ public sealed partial class MainWindow
                 OnShowQueue(this, new RoutedEventArgs());
                 break;
             case MonitorTab.Insights:
-                ShowInsightsPane();
+                _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
                 break;
         }
 
@@ -980,6 +980,9 @@ public sealed partial class MainWindow
             _settingsWindow = new SettingsWindow(settings);
             _settingsWindow.Closed += async (_, _) =>
             {
+                // This view's view model stops listening to the daemon; the next
+                // Settings window builds its own.
+                settings.Settings.Dispose();
                 _settingsWindow = null;
                 _settingsView = null;
                 // A kind turned on in Settings ends its offer.
