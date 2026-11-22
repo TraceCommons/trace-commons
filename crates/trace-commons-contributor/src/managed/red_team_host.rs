@@ -618,6 +618,8 @@ mod tests {
         )
     }
 
+    // The probe is Linux's; these PATHs and absolute paths are Unix ones.
+    #[cfg(unix)]
     #[test]
     fn a_user_session_needs_systemd_run_and_a_session_bus() {
         let run = "/usr/bin/systemd-run";
