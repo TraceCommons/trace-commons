@@ -32,6 +32,7 @@
   "gemini_source_mode": "unset",
   "near_ai_session_retained": false,
   "cline_source_mode": "unset",
+  "antigravity_source_mode": "unset",
   "ironwire_attested_bodies": false,
   "token_distributions_contribution": false,
   "token_capture_enabled": null,
