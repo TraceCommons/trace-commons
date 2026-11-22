@@ -194,13 +194,23 @@ public sealed class SessionRootsViewModel : INotifyPropertyChanged
             // the contributor's, so it does not get the "answer both" hint.
             Error = exception.IsRootsNotDeclared
                 ? TraceCommons.Interop.Shell.MonitorWords.AppName + " could not record that answer. Please report this."
-                : $"Could not start. Another {TraceCommons.Interop.Shell.MonitorWords.AppName} instance may already be running.";
+                : StartFailedLine();
+        }
+        catch (Exception exception)
+        {
+            // Not the daemon's refusal (the state directory, the core library):
+            // the same line, and the type in the crash log.
+            CrashGuard.Log.Record("daemon-start", exception);
+            Error = TraceCommons.Interop.ShellFailureCopy.DaemonStartFailed ?? StartFailedLine();
         }
         finally
         {
             IsBusy = false;
         }
     }
+
+    private static string StartFailedLine() =>
+        $"Could not start. Another {TraceCommons.Interop.Shell.MonitorWords.AppName} instance may already be running.";
 
     private SessionRootsDeclaration Declaration() => new()
     {

@@ -44,11 +44,12 @@ use trace_commons_contributor_ffi::{
     tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
     tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
     tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
-    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
-    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
-    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
+    tc_session_detail_error_line, tc_session_notification_copy, tc_shell_failure_copy,
+    tc_skill_draft_validate, tc_skill_learning_copy, tc_skill_learning_error_line,
+    tc_source_check_line, tc_string_free, tc_subscribe, tc_unsubscribe, tc_witness_clear,
+    tc_witness_configure, tc_witness_copy, tc_witness_last_result_json,
+    tc_witness_last_result_line, tc_witness_last_result_tone, tc_witness_state_line,
+    tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{tc_count_figure, tc_credit_figure};
 use trace_commons_contributor_ffi::{
@@ -6518,4 +6519,23 @@ fn managed_session_actions_cross_tc_call_and_refuse_an_unknown_session() {
         );
     }
     stop(h);
+}
+
+/// What a shell says when the clipboard or the background service fails
+/// crosses the ABI as the crate's own payload, with no handle.
+#[test]
+fn the_shell_failure_copy_crosses_the_abi() {
+    use trace_commons_contributor::managed::copy;
+    let json = take_owned(tc_shell_failure_copy());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    assert_eq!(
+        parsed,
+        serde_json::to_value(copy::shell_failure_copy()).expect("the payload serialises")
+    );
+    assert_eq!(parsed["clipboard_failed"], "Couldn't copy. Try again.");
+    assert!(
+        parsed["daemon_start_failed"]
+            .as_str()
+            .is_some_and(|line| line.contains("couldn't start its background service"))
+    );
 }

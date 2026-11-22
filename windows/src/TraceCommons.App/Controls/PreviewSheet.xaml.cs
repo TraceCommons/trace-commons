@@ -8,7 +8,6 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.App.ViewModels;
 using TraceCommons.Interop;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
 using TraceCommons.App.Look;
@@ -526,9 +525,10 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             return;
         }
 
-        var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
-        package.SetText(_document.WholeText());
-        Clipboard.SetContent(package);
+        if (!ClipboardCopy.TryCopy(_document.WholeText(), sender, asCopyOperation: true))
+        {
+            return;
+        }
 
         if (sender is Button button)
         {

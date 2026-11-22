@@ -3920,6 +3920,23 @@ pub extern "C" fn tc_session_notification_copy() -> *mut c_char {
     })
 }
 
+/// What a shell says when something outside the daemon fails: the clipboard
+/// would not take a copy (`clipboard_failed`), or the background service did
+/// not start for a reason other than another copy holding its lock
+/// (`daemon_start_failed`). Approved by the owner 2026-11-22.
+///
+/// Needs no handle, because it is needed exactly when no daemon is there to
+/// send a copy table. Returns an owned JSON object with those two keys; free
+/// it with [`tc_string_free`]. NULL only on a caught panic.
+#[unsafe(no_mangle)]
+pub extern "C" fn tc_shell_failure_copy() -> *mut c_char {
+    guarded_string_no_err(|| {
+        let copy = trace_commons_contributor::managed::copy::shell_failure_copy();
+        let json = serde_json::to_string(&copy).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 /// Parse `arg` as JSON and hand it to `build`, returning its answer as an
 /// owned JSON string, or NULL for a NULL, non-UTF-8 or unparseable argument
 /// and whenever `build` answers `None`.

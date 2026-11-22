@@ -19,8 +19,10 @@ public class WindowRootLatchTests
     {
     }
 
+    // Line endings normalized: a CI checkout can be CRLF where a clone is LF, and
+    // these scans match on text, not on the platform's newline.
     private static string Shell(string file) => File.ReadAllText(Path.Combine(
-        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt"));
+        AppContext.BaseDirectory, "shell-source", "TraceCommons.App", file + ".txt")).Replace("\r\n", "\n");
 
     [Fact]
     public void TheLastDeactivationOfAClosedWindowDoesNotReadIt()
@@ -182,7 +184,7 @@ public class WindowRootLatchTests
         Assert.Contains("AppDomain.CurrentDomain.UnhandledException +=", guard);
         Assert.Contains("TaskScheduler.UnobservedTaskException +=", guard);
         Assert.Matches(@"if \(FirstRun\.Survives\(e\.Exception\)\)\s*\{\s*e\.Handled = true;", guard);
-        Assert.Equal(1, Regex.Matches(guard, @"Handled = true").Count);
+        Assert.Single(Regex.Matches(guard, @"Handled = true"));
         Assert.Contains("CrashGuard.Install(this);", Shell("App.xaml.cs"));
         Assert.Contains("CrashGuard.TrackFirstRun(this);", Shell("FirstRunWindow.xaml.cs"));
     }
@@ -204,15 +206,26 @@ public class WindowRootLatchTests
     /// The step that is leaving moves from the current presenter to the outgoing
     /// one. An element has one parent, so the current presenter lets go first;
     /// reading one presenter's content straight into the other's is the
-    /// re-parenting that throws E_INVALIDARG.
+    /// re-parenting that throws E_INVALIDARG. And the new step is built before
+    /// anything on screen or in the window's state changes, so one that throws
+    /// leaves the window where it was.
     /// </summary>
     [Fact]
-    public void FirstRunHandsTheLeavingStepOverOnlyAfterTheCurrentPresenterLetsGo()
+    public void FirstRunBuildsTheStepFirstAndHandsTheLeavingOneOverOnlyAfterThePresenterLetsGo()
     {
         string source = Shell("FirstRunWindow.xaml.cs");
         Assert.DoesNotContain("OutgoingStep.Content = first ? null : CurrentStep.Content", source);
         Assert.Matches(
-            @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*if \(handedOver is UIElement held && Microsoft\.UI\.Xaml\.Media\.VisualTreeHelper\.GetParent\(held\) is not null\)\s*\{\s*(//[^\n]*\n\s*)*CrashGuard\.Log\.Record\(""handover"", new StepStillParentedException\(\)\);\s*handedOver = null;\s*\}\s*OutgoingStep\.Content = handedOver;",
+            @"object\? previous = first \? null : CurrentStep\.Content;\s*object\? handedOver = previous;\s*try\s*\{\s*CurrentStep\.Content = null;\s*if \(handedOver is UIElement held && Microsoft\.UI\.Xaml\.Media\.VisualTreeHelper\.GetParent\(held\) is not null\)\s*\{\s*(//[^\n]*\n\s*)*CrashGuard\.Log\.Record\(""handover"", new StepStillParentedException\(\)\);\s*handedOver = null;\s*\}\s*OutgoingStep\.Content = handedOver;\s*CurrentStep\.Content = built;\s*\}\s*catch \(Exception\)\s*\{[\s\S]*?RestoreStep\(previous\);\s*throw;",
+            source);
+        // Built, then swapped, then marked shown: in that order.
+        int built = source.IndexOf("built = BuildStep(state.Step);", StringComparison.Ordinal);
+        int swapped = source.IndexOf("CurrentStep.Content = built;", StringComparison.Ordinal);
+        int shown = source.IndexOf("_shownStep = state.Step;", StringComparison.Ordinal);
+        Assert.True(built > 0 && built < swapped && swapped < shown, "build, then swap, then mark the step shown");
+        // The in-place rebuild also builds before it records the content as shown.
+        Assert.Matches(
+            @"UIElement rebuilt = BuildStep\(state\.Step\);\s*CurrentStep\.Content = rebuilt;\s*_shownKey = ContentKey\(state\);\s*_contentStale = false;",
             source);
     }
 
@@ -228,7 +241,7 @@ public class WindowRootLatchTests
         string window = Shell("MainWindow.xaml.cs");
         int activated = window.IndexOf("private void OnFirstActivated", StringComparison.Ordinal);
         string handler = window[activated..window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)];
-        Assert.Matches(@"ShowInsightsPane\(\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
+        Assert.Matches(@"_ = Observed\.Run\(ShowInsightsPaneAsync\(\), ""insights-pane""\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
         Assert.Contains("_ = OpenFirstRunOnFirstLaunchAsync();", handler);
     }
 }

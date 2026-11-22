@@ -22,7 +22,6 @@ using TraceCommons.App.FirstRun;
 using TraceCommons.Interop;
 using TraceCommons.Interop.FirstRun;
 using TraceCommons.Interop.Shell;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.UI.Text;
 using Windows.UI.ViewManagement;
 
@@ -148,6 +147,14 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
                 }
                 catch (TcException)
                 {
+                    return false;
+                }
+                catch (Exception exception)
+                {
+                    // The state directory could not be made or the core library
+                    // could not be loaded: the start did not happen, which is
+                    // what false says, rather than an exception into the click.
+                    CrashGuard.Log.Record("daemon-start", exception);
                     return false;
                 }
             },
@@ -636,7 +643,27 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
     }
 
     /// <summary>Rebuild the current step when it changes, and its footer each time.</summary>
+    /// <summary>
+    /// Renders, and never throws: every caller is a click, a queued callback or
+    /// an async continuation, where an exception that escapes ends the process.
+    /// A failure is recorded (type and frames, never the message) and the window
+    /// stays on what it showed, which <see cref="RenderCore"/> leaves untouched
+    /// when a step fails to build. Survival does not depend on the app-level
+    /// handler, whose exception details XAML does not guarantee.
+    /// </summary>
     private void Render()
+    {
+        try
+        {
+            RenderCore();
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("first-run-render", exception);
+        }
+    }
+
+    private void RenderCore()
     {
         if (_closed)
         {
@@ -661,6 +688,29 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         {
             double now = Now;
             bool first = (int)_shownStep < 0;
+            FirstRunStep? from = first ? null : _shownStep;
+            _model.SetStep(state.Step, now);
+            if (state.Step == FirstRunStep.Tools && _model.ToolsScanned)
+            {
+                _scanEndedAt ??= now;
+            }
+
+            // The step is built before anything on screen or in this window's
+            // state changes, so one that throws leaves the window on the step it
+            // was on, and the next render tries again: nothing is half-swapped
+            // (a presenter emptied, `_shownStep` already moved) when it does.
+            int motionsBefore = _motions.Count;
+            UIElement built;
+            try
+            {
+                built = BuildStep(state.Step);
+            }
+            catch (Exception)
+            {
+                _motions.RemoveRange(motionsBefore, _motions.Count - motionsBefore);
+                throw;
+            }
+
             // An element has one parent. ContentPresenter.set_Content answers
             // E_INVALIDARG ("Value does not fall within the expected range") for
             // one that still has another, which is what the step on screen was
@@ -670,28 +720,36 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             // and ended the process. The current presenter lets go first, and a
             // step that somehow still has a parent is not handed over (its
             // crossfade is skipped) rather than thrown.
-            object? handedOver = first ? null : CurrentStep.Content;
-            CurrentStep.Content = null;
-            if (handedOver is UIElement held && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(held) is not null)
+            object? previous = first ? null : CurrentStep.Content;
+            object? handedOver = previous;
+            try
             {
-                // Still parented after the current presenter let go: not handed
-                // over, and recorded once (a type, no content) so a build that
-                // reaches this says so in shell-crashes.log.
-                CrashGuard.Log.Record("handover", new StepStillParentedException());
-                handedOver = null;
+                CurrentStep.Content = null;
+                if (handedOver is UIElement held && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(held) is not null)
+                {
+                    // Still parented after the current presenter let go: not
+                    // handed over, and recorded once (a type, no content) so a
+                    // build that reaches this says so in shell-crashes.log.
+                    CrashGuard.Log.Record("handover", new StepStillParentedException());
+                    handedOver = null;
+                }
+
+                OutgoingStep.Content = handedOver;
+                CurrentStep.Content = built;
+            }
+            catch (Exception)
+            {
+                // Put the step that was on screen back, as it was.
+                _motions.RemoveRange(motionsBefore, _motions.Count - motionsBefore);
+                RestoreStep(previous);
+                throw;
             }
 
-            OutgoingStep.Content = handedOver;
+            // Only the new step's motions run from here; the old step's end with it.
+            List<(Action<double> Apply, Func<double, bool> Moving)> arrived = _motions.GetRange(motionsBefore, _motions.Count - motionsBefore);
             _motions.Clear();
-            _model.SetStep(state.Step, now);
-            if (state.Step == FirstRunStep.Tools && _model.ToolsScanned)
-            {
-                _scanEndedAt ??= now;
-            }
-
-            FirstRunStep? from = first ? null : _shownStep;
+            _motions.AddRange(arrived);
             _shownStep = state.Step;
-            CurrentStep.Content = BuildStep(state.Step);
             if (OutgoingStep.Content is UIElement leaving)
             {
                 _motions.Add((t => { double p = FirstRunMotion.Crossfade(t - now, false); leaving.Opacity = 1 - p; if (p >= 1) { OutgoingStep.Content = null; } }, t => t - now < FirstRunStageLayout.SpatialSettle));
@@ -732,15 +790,19 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             // running or ended, the sign-in waiting, a loaded document):
             // its content is built again in place, and the stage and the
             // thread keep their motion.
+            bool hadFocus = FocusWithin(CurrentStep);
+            // Built first: one that throws leaves the key and the stale flag as
+            // they were, so the next render builds it again instead of
+            // believing it is shown.
+            UIElement rebuilt = BuildStep(state.Step);
+            CurrentStep.Content = rebuilt;
             _shownKey = ContentKey(state);
             _contentStale = false;
-            bool hadFocus = FocusWithin(CurrentStep);
-            CurrentStep.Content = BuildStep(state.Step);
-            if (hadFocus && CurrentStep.Content is FrameworkElement rebuilt)
+            if (hadFocus && rebuilt is FrameworkElement focusable)
             {
                 // Focus goes back where it was, by its key, or to the
                 // heading (checklist O2, copy guide rule 13).
-                rebuilt.Loaded += RestoreFocusOnce;
+                focusable.Loaded += RestoreFocusOnce;
             }
 
             ApplyMotions(_reduceMotion ? Now + 1e6 : Now);
@@ -757,6 +819,20 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         AutomationProperties.SetName(BackButton, Copy.Frame.Back);
         Stage.Invalidate();
         Kick();
+    }
+
+    /// <summary>Puts the step that was on screen back after a swap failed part-way.</summary>
+    private void RestoreStep(object? previous)
+    {
+        try
+        {
+            OutgoingStep.Content = null;
+            CurrentStep.Content = previous;
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("restore", exception);
+        }
     }
 
     /// <summary>
@@ -1103,9 +1179,7 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary)
         {
-            var package = new DataPackage();
-            package.SetText(agent.Prompt);
-            Clipboard.SetContent(package);
+            ClipboardCopy.TryCopy(agent.Prompt);
         }
     }
 

@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace TraceCommons.App.Controls.Settings;
 
@@ -195,11 +194,16 @@ public sealed class ReferralsSection : UserControl
         if (ReferralSurface.CanCopy(row) && row.Code is { } shown)
         {
             string label = _flow.CopiedCodeId == row.CodeId ? surface.Copy["copied"] : surface.Copy["copy_button"];
-            actions.Children.Add(SettingsCards.Button(label, (_, _) =>
+            actions.Children.Add(SettingsCards.Button(label, (sender, _) =>
             {
-                var package = new DataPackage();
-                package.SetText(shown);
-                Clipboard.SetContent(package);
+                // A clipboard another process holds open is "not copied": the
+                // button says so, no "Copied" confirmation, and no exception
+                // into the click.
+                if (!ClipboardCopy.TryCopy(shown, sender))
+                {
+                    return;
+                }
+
                 _flow.Copied(row);
                 _copiedClear.Stop();
                 _copiedClear.Start();

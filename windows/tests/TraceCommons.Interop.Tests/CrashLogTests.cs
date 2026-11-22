@@ -38,7 +38,7 @@ public sealed class CrashLogTests : IDisposable
         Assert.Contains("where=first-run", entry);
         Assert.Contains("type=System.InvalidOperationException", entry);
         Assert.Contains("hresult=0x80131509", entry);
-        Assert.Contains(nameof(Thrower), entry);
+        Assert.Contains(nameof(Thrown), entry);
     }
 
     [Fact]
@@ -224,6 +224,64 @@ public sealed class CrashLogTests : IDisposable
         tracker.Enter();
         Exception outer = WithStack("at TraceCommons.App.MainWindow.Render", WithStack("at TraceCommons.App.FirstRunWindow.Render"));
         Assert.True(tracker.Survives(outer));
+    }
+
+    // Thrown from their own bodies, so each has its own top frame.
+    private static Exception ThrowerA()
+    {
+        try { throw new InvalidOperationException(); } catch (InvalidOperationException e) { return e; }
+    }
+
+    private static Exception ThrowerB()
+    {
+        try { throw new InvalidOperationException(); } catch (InvalidOperationException e) { return e; }
+    }
+
+    [Fact]
+    public void TheSameTypeFromTwoPlacesIsTwoFaults()
+    {
+        var log = new CrashLog(_dir, () => Now);
+        Assert.True(log.Record("xaml", ThrowerA()));
+        Assert.True(log.Record("xaml", ThrowerB()));
+        Assert.False(log.Record("xaml", ThrowerA()), "the same place again");
+        Assert.Equal(2, CountOf(File.ReadAllText(Path.Combine(_dir, CrashLog.FileName)), "type=System.InvalidOperationException"));
+    }
+
+    [Fact]
+    public void AFailedWriteIsTriedAgainNextTime()
+    {
+        string blocker = Path.Combine(Path.GetTempPath(), "tc-crashlog-block-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(blocker, "x");
+        try
+        {
+            var log = new CrashLog(blocker, () => Now);
+            Exception fault = Thrower();
+            Assert.False(log.Record("xaml", fault), "the directory is a file");
+            File.Delete(blocker);
+            Assert.True(log.Record("xaml", fault), "the same fault, once it can be written");
+            Assert.True(File.Exists(Path.Combine(blocker, CrashLog.FileName)));
+        }
+        finally
+        {
+            try { Directory.Delete(blocker, true); } catch (IOException) { }
+            if (File.Exists(blocker)) File.Delete(blocker);
+        }
+    }
+
+    [Fact]
+    public void ATasksFaultCarriesTheInnerExceptionsFrames()
+    {
+        Exception inner = Thrower();
+        var aggregate = new AggregateException("secret", inner);
+        string entry = CrashLog.Format("task", aggregate, Now);
+        Assert.Contains("type=System.AggregateException", entry);
+        Assert.Contains("inner type=System.InvalidOperationException", entry);
+        Assert.Contains(nameof(Thrown), entry);
+        Assert.DoesNotContain("secret", entry);
+        // The inner frames dedupe it: the same wrapped fault is one entry.
+        var log = new CrashLog(_dir, () => Now);
+        Assert.True(log.Record("task", new AggregateException(inner)));
+        Assert.False(log.Record("task", new AggregateException(inner)));
     }
 
     private static int CountOf(string text, string needle) =>

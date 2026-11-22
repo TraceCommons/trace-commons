@@ -98,6 +98,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherQueueTimer _visibilityDebounceTimer;
 
     private FirstRunWindow? _onboarding;
+    private SessionRootsWindow? _sessionRoots;
     private FirstRunWindow? _automaticOnboarding;
     private readonly PendingInviteActivation _redirectedInvite = new();
     private bool _activationDaemonAvailable;
@@ -305,7 +306,9 @@ public sealed partial class MainWindow : Window
 
     private async Task ConfirmQuitAsync()
     {
-        if (_quitDialogOpen)
+        // Queued from the tray, so it can run after the window has closed,
+        // where reading its content would throw.
+        if (_quitDialogOpen || _closed)
         {
             return;
         }
@@ -333,10 +336,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        if (OpenRoot is not XamlRoot quitRoot)
+        {
+            return;
+        }
+
         BringForward();
         var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
         {
-            XamlRoot = Content.XamlRoot,
+            XamlRoot = quitRoot,
             Title = prompt.Title,
             Content = prompt.Body,
             PrimaryButtonText = prompt.Confirm,
@@ -431,7 +439,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        ShowInsightsPane();
+        _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
         // A device never set up opens first run on its own, over Insights;
         // one that has finished it keeps the quiet landing.
         if (global::TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(OnboardingState.Default().AnyComplete()))
@@ -449,7 +457,9 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            await StartContributionsAsync();
+            // The core, not the wrapper: this start is automatic and a failed one
+            // must not move the person off Insights onto a blank Traces pane.
+            await StartContributionsCoreAsync();
         }
         catch (Exception exception)
         {
@@ -489,42 +499,56 @@ public sealed partial class MainWindow : Window
 #endif
 
     private bool _contributionStartupAttempted;
-    private bool _contributionStartupBusy;
+    private readonly SingleFlight<bool> _contributionStartup = new();
+
+    /// <summary>
+    /// The contribution startup, one at a time. A caller that arrives while it
+    /// runs (a click on Queue, History, Settings or Private AI during the first
+    /// launch's startup, which includes a network update check) joins it and
+    /// gets its result; a flag that answered "false" to it dropped the click.
+    /// </summary>
+    private Task<bool> StartContributionsCoreAsync() => _contributionStartup.Run(RunContributionStartupAsync);
+
+    /// <summary>
+    /// The contribution startup for a person's click: the start, and when it
+    /// failed for a reason other than undeclared roots, Queue is shown so its
+    /// header says why. (The automatic start at first launch uses
+    /// <see cref="StartContributionsCoreAsync"/> and never moves the person off
+    /// the pane they are on.)
+    /// </summary>
     private async Task<bool> StartContributionsAsync()
     {
-        if (_contributionStartupBusy) return false;
-        _contributionStartupBusy = true;
-        try
+        bool started = await StartContributionsCoreAsync();
+        if (!started && !ViewModel.NeedsSessionRoots && !_closed)
         {
-            if (!_contributionStartupAttempted)
-            {
-                await ViewModel.InitializeAsync();
-                _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
-                if (_closed) return false;
-                _activationReady = ViewModel.NeedsSessionRoots;
-                OfferNextRedirectedInvite();
-                if (_host.IsRunning) await ContinueStartupAsync();
-            }
-            if (ViewModel.NeedsSessionRoots)
-            {
-                await ShowSessionRootsAsync();
-                return false;
-            }
-            bool started = !_closed && _host.IsRunning;
-            if (!started && !_closed)
-            {
-                // A start failure that is not "session roots undeclared" --
-                // for example ViewModel.StatusText's "another instance may
-                // already be running" -- must still reach the contributor.
-                // Before Insights became the default landing pane, Queue was
-                // already on screen and its header chip showed that message;
-                // navigate there now so a click from any pane still surfaces
-                // it instead of doing nothing.
-                ViewModel.ShowQueue();
-            }
-            return started;
+            // A start failure that is not "session roots undeclared" -- for
+            // example ViewModel.StatusText's "another instance may already be
+            // running" -- must still reach the contributor: Queue's header chip
+            // shows that message, so a click from any pane navigates there
+            // instead of doing nothing.
+            ViewModel.ShowQueue();
         }
-        finally { _contributionStartupBusy = false; }
+
+        return started;
+    }
+
+    private async Task<bool> RunContributionStartupAsync()
+    {
+        if (!_contributionStartupAttempted)
+        {
+            await ViewModel.InitializeAsync();
+            _contributionStartupAttempted = _host.IsRunning || ViewModel.NeedsSessionRoots;
+            if (_closed) return false;
+            _activationReady = ViewModel.NeedsSessionRoots;
+            OfferNextRedirectedInvite();
+            if (_host.IsRunning) await ContinueStartupAsync();
+        }
+        if (ViewModel.NeedsSessionRoots)
+        {
+            await ShowSessionRootsAsync();
+            return false;
+        }
+        return !_closed && _host.IsRunning;
     }
 
     /// <summary>
@@ -532,17 +556,19 @@ public sealed partial class MainWindow : Window
     /// </summary>
     private async Task ContinueStartupAsync()
     {
-        // After the queue is on screen, not before. The update check is a
-        // network round trip through the deployment service and nothing
-        // about it should stand between a contributor and the sessions they
-        // opened the app to review.
-        await ViewModel.CheckForUpdateAsync();
         await RefreshNotifyOffersAsync();
 
         await RefreshTrayAsync();
         RefreshHomeIfShown();
         await ShowOnboardingIfNeededAsync();
         OfferNextRedirectedInvite();
+
+        // After the startup, and not waited for. The update check is a network
+        // round trip through the deployment service: nothing about it may stand
+        // between a contributor and the sessions they opened the app to review,
+        // and a click that joins this startup (SingleFlight) must not wait on it.
+        // Observed, so a failure is logged and never reaches the UI.
+        _ = Observed.Run(ViewModel.CheckForUpdateAsync(), "update-check");
     }
 
     /// <summary>
@@ -573,17 +599,30 @@ public sealed partial class MainWindow : Window
 
         var roots = new SessionRootsWindow(_host, candidates);
         roots.Declared += OnSessionRootsDeclared;
+        _sessionRoots = roots;
+        roots.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_sessionRoots, roots)) _sessionRoots = null;
+        };
         roots.Activate();
     }
 
     private async void OnSessionRootsDeclared()
     {
-        // The daemon is up now, so the queue window needs the first snapshot
-        // it could not load, and then the startup it did not finish.
-        _activationReady = false;
-        ViewModel.SessionRootsDeclared();
-        await ViewModel.RefreshAsync();
-        await ContinueStartupAsync();
+        // async void because this is an event handler; nothing may escape it.
+        try
+        {
+            // The daemon is up now, so the queue window needs the first snapshot
+            // it could not load, and then the startup it did not finish.
+            _activationReady = false;
+            ViewModel.SessionRootsDeclared();
+            await ViewModel.RefreshAsync();
+            await ContinueStartupAsync();
+        }
+        catch (Exception exception)
+        {
+            CrashGuard.Log.Record("roots-declared", exception);
+        }
     }
 
     /// <summary>
@@ -801,7 +840,7 @@ public sealed partial class MainWindow : Window
                 case NudgeDestination.History:
                     if (await StartContributionsAsync())
                     {
-                        HistoryPane.Content ??= new HistoryView(_host);
+                        HistoryPane.Content ??= NewHistoryView();
                         ViewModel.ShowHistory();
                     }
 
@@ -873,7 +912,7 @@ public sealed partial class MainWindow : Window
     /// showing would start them; that showing, from the tray or a second
     /// launch, joins the start already made.
     /// </summary>
-    internal async void StartInTray()
+    internal async Task StartInTrayAsync()
     {
         SetHiddenToTray(true);
         bool started = await LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
@@ -972,6 +1011,9 @@ public sealed partial class MainWindow : Window
         _automaticOnboarding = automatic ? onboarding : null;
         onboarding.Closed += async (_, _) =>
         {
+            // Closed because the app is quitting: nothing of this window's is
+            // left to offer or to redirect to.
+            if (_closed) return;
             await onboarding.CloseCompletion;
             if (ReferenceEquals(_onboarding, onboarding)) _onboarding = null;
             if (ReferenceEquals(_automaticOnboarding, onboarding)) _automaticOnboarding = null;
@@ -984,7 +1026,17 @@ public sealed partial class MainWindow : Window
     private void OnTrayQuitRequested()
     {
         // ConfirmQuitAsync brings the window forward only when it asks.
-        _host.Dispatcher.TryEnqueue(async () => await ConfirmQuitAsync());
+        _host.Dispatcher.TryEnqueue(async () =>
+        {
+            try
+            {
+                await ConfirmQuitAsync();
+            }
+            catch (Exception exception)
+            {
+                CrashGuard.Log.Record("tray-quit", exception);
+            }
+        });
     }
 
     /// <summary>
@@ -1389,7 +1441,7 @@ public sealed partial class MainWindow : Window
     /// profile as soon as it loads, and a contributor who never opens
     /// Settings should not pay for that at launch.
     /// </remarks>
-    private void OnShowInsights(object sender, RoutedEventArgs e) => ShowInsightsPane();
+    private void OnShowInsights(object sender, RoutedEventArgs e) => _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
 
     private async void OnShowMissionDrafts(object sender, RoutedEventArgs e)
     {
@@ -1412,7 +1464,7 @@ public sealed partial class MainWindow : Window
         if (InsightsPane.Content is InsightsView insights) insights.SetSkillsEnabled(_flags.IsEnabled(FeatureFlagGate.InsightsSkills));
     }
 
-    private async void ShowInsightsPane()
+    private async Task ShowInsightsPaneAsync()
     {
         if (InsightsPane.Content is not InsightsView)
         {
@@ -1969,6 +2021,10 @@ public sealed partial class MainWindow : Window
         StopCredit();
         CloseToolWindows();
         _aboutWindow?.Close();
+        // First run and the roots window are this window's: leaving them open
+        // would leave them running against a daemon host that is disposed below.
+        _onboarding?.Close();
+        _sessionRoots?.Close();
         (InsightsPane.Content as InsightsView)?.Dispose();
         (MissionDraftsPane.Content as MissionDraftsView)?.Dispose();
         _activationReady = false;
