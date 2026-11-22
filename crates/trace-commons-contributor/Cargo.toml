@@ -157,7 +157,7 @@ apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "prot
 # Red Team sandboxed sessions on NEAR AI Red SandBox (macOS, Windows and x86_64 Linux).
 # Pinned to a revision that resolves the same `nearai/ironwire` revision as above.
 [target.'cfg(any(target_os = "macos", windows, all(target_os = "linux", target_arch = "x86_64")))'.dependencies]
-rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "340e11a602efb23f6893faaad4131bc060a04d4a" }
+rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "cd2527508b20557a4d6ef09f7b53e84beb0c19fc" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }
