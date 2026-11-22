@@ -674,6 +674,10 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
             CurrentStep.Content = null;
             if (handedOver is UIElement held && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(held) is not null)
             {
+                // Still parented after the current presenter let go: not handed
+                // over, and recorded once (a type, no content) so a build that
+                // reaches this says so in shell-crashes.log.
+                CrashGuard.Log.Record("handover", new StepStillParentedException());
                 handedOver = null;
             }
 
@@ -2142,4 +2146,12 @@ internal static class Win32Dpi
         uint dpi = GetDpiForWindow(hwnd);
         return dpi == 0 ? 96 : dpi;
     }
+}
+
+/// <summary>
+/// Recorded, never thrown: the step on screen still had a parent after the
+/// presenter that held it let go, so it was not handed to the outgoing one.
+/// </summary>
+internal sealed class StepStillParentedException : Exception
+{
 }
