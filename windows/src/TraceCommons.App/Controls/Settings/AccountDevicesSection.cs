@@ -157,9 +157,9 @@ public sealed class AccountDevicesSection : UserControl
                 panel.Children.Add(commandText);
                 string copyLabel = _flow.CopiedCode == waiting.Code.CodeId ? surface.Copy.Copied : surface.Copy.CopyButton;
                 panel.Children.Add(SettingsCards.Row(
-                    SettingsCards.Button(copyLabel, (_, _) =>
+                    SettingsCards.Button(copyLabel, (sender, _) =>
                     {
-                        if (ClipboardCopy.TryCopy(command))
+                        if (ClipboardCopy.TryCopy(command, sender))
                         {
                             _flow.Copied(waiting.Code);
                         }

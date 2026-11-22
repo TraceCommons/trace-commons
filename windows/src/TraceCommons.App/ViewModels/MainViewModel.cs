@@ -1623,7 +1623,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             // exception ends the process. Same line, the one the person can
             // act on; the type goes to the crash log, never its message.
             CrashGuard.Log.Record("daemon-start", exception);
-            StatusText = StartFailedLine();
+            StatusText = ShellFailureCopy.DaemonStartFailed ?? StartFailedLine();
             return;
         }
 

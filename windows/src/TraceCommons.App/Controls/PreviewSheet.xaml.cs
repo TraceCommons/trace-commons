@@ -525,7 +525,7 @@ public sealed partial class PreviewSheet : UserControl, IDisposable
             return;
         }
 
-        if (!ClipboardCopy.TryCopy(_document.WholeText(), asCopyOperation: true))
+        if (!ClipboardCopy.TryCopy(_document.WholeText(), sender, asCopyOperation: true))
         {
             return;
         }
