@@ -661,13 +661,22 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         {
             double now = Now;
             bool first = (int)_shownStep < 0;
-            // An element has one parent. The step on screen goes to the outgoing
-            // presenter only after the current one has let go of it; handing it
-            // over while it was still the current step's child is the one place
-            // here where an element could have two (E_INVALIDARG, "Value does
-            // not fall within the expected range").
+            // An element has one parent. ContentPresenter.set_Content answers
+            // E_INVALIDARG ("Value does not fall within the expected range") for
+            // one that still has another, which is what the step on screen was
+            // while it was handed from the current presenter to the outgoing one:
+            // on a fresh Windows 11 VM that threw out of Render at the first step
+            // change (Welcome to Tools) and again from the render queued behind it,
+            // and ended the process. The current presenter lets go first, and a
+            // step that somehow still has a parent is not handed over (its
+            // crossfade is skipped) rather than thrown.
             object? handedOver = first ? null : CurrentStep.Content;
             CurrentStep.Content = null;
+            if (handedOver is UIElement held && Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(held) is not null)
+            {
+                handedOver = null;
+            }
+
             OutgoingStep.Content = handedOver;
             _motions.Clear();
             _model.SetStep(state.Step, now);
