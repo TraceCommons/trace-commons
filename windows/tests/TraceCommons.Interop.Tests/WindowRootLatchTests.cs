@@ -212,7 +212,7 @@ public class WindowRootLatchTests
         string source = Shell("FirstRunWindow.xaml.cs");
         Assert.DoesNotContain("OutgoingStep.Content = first ? null : CurrentStep.Content", source);
         Assert.Matches(
-            @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*if \(handedOver is UIElement held && Microsoft\.UI\.Xaml\.Media\.VisualTreeHelper\.GetParent\(held\) is not null\)\s*\{\s*(//[^\n]*\n\s*)*CrashGuard\.Log\.Record\("handover", new StepStillParentedException\(\)\);\s*handedOver = null;\s*\}\s*OutgoingStep\.Content = handedOver;",
+            @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*if \(handedOver is UIElement held && Microsoft\.UI\.Xaml\.Media\.VisualTreeHelper\.GetParent\(held\) is not null\)\s*\{\s*(//[^\n]*\n\s*)*CrashGuard\.Log\.Record\(""handover"", new StepStillParentedException\(\)\);\s*handedOver = null;\s*\}\s*OutgoingStep\.Content = handedOver;",
             source);
     }
 
