@@ -1738,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "dcap-qvl"
 version = "0.7.0"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=eba374381f4180f68b9b74bdb317e712699ef7a8#eba374381f4180f68b9b74bdb317e712699ef7a8"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c#fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c"
 dependencies = [
  "anyhow",
  "asn1_der",
@@ -6593,8 +6593,8 @@ dependencies = [
 
 [[package]]
 name = "rts"
-version = "0.1.6"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=eba374381f4180f68b9b74bdb317e712699ef7a8#eba374381f4180f68b9b74bdb317e712699ef7a8"
+version = "0.1.7"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c#fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.23.1",
@@ -6623,6 +6623,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+ "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
  "zeroize",
 ]

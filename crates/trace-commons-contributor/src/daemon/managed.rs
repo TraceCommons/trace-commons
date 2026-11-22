@@ -674,11 +674,14 @@ impl ManagedService {
                 let opens_in = launch_destination(terminal.herdr, destination);
                 let store = ConfigStore::open(self.config_dir.clone())
                     .map_err(|_| ManagedError::StorageUnavailable)?;
-                let red_team_installed = red_team
-                    && crate::managed::red_team::setup_state(&store)
-                        == crate::managed::tool_setup::ToolSetupState::Ready;
+                let red_team_status =
+                    red_team.then(|| crate::managed::red_team::setup_status(&store));
+                let red_team_installed = red_team_status.is_some_and(|status| {
+                    status.state == crate::managed::tool_setup::ToolSetupState::Ready
+                });
+                let red_team_problem = red_team_status.and_then(|status| status.problem);
                 Ok(
-                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, red_team_installed),"cli_options":crate::managed::options::snapshot(&store)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
+                    json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, red_team_installed, red_team_problem),"cli_options":crate::managed::options::snapshot(&store)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
                 )
             }
             "managed_tool_setup" => {
@@ -1144,9 +1147,52 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
 }
 
 /// Whether Red Team managed sessions are available on this build: every
-/// macOS build, no other OS.
+/// macOS and Windows build, no other OS. Whether this Windows host can run
+/// them (edition, Hyper-V, group) is the setup state, not availability.
 pub fn red_team_available(_shared: &DaemonShared) -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", windows))
+}
+
+/// Whether `request` is Red Team's "Enable Red Team" setup action. It runs
+/// outside the managed service's lock: the UAC prompt and the elevated script
+/// can take minutes, and a snapshot must not wait behind them.
+fn is_red_team_enable(request: &Request) -> bool {
+    request.method == "managed_tool_setup"
+        && request.params["tool"] == "red_team"
+        && request.params["action"] == "enable"
+}
+
+/// `managed_tool_setup` `{"tool":"red_team","action":"enable"}`: on Windows,
+/// run the shipped enable script elevated and report how it ended. The request
+/// carries nothing but the two words above; the SID comes from the daemon's
+/// own token.
+fn red_team_enable(shared: &DaemonShared, request: &Request) -> Response {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Params {
+        #[allow(dead_code)]
+        tool: ToolId,
+        #[allow(dead_code)]
+        action: ToolSetupAction,
+    }
+    let result = (|| -> Result<Value, ManagedError> {
+        let _: Params = parse(request)?;
+        if !red_team_available(shared) {
+            return Err(ManagedError::RedTeamUnavailable);
+        }
+        #[cfg(windows)]
+        {
+            let status = crate::managed::red_team::setup_status(&shared.store);
+            let outcome = crate::daemon::run_blocking(|| {
+                crate::managed::red_team_host::enable(status.problem)
+            })?;
+            Ok(json!({"opened": true, "outcome": outcome}))
+        }
+        // Nothing to enable on macOS: no elevation, no script.
+        #[cfg(not(windows))]
+        Err(ManagedError::InvalidRequest)
+    })();
+    respond(request, result.map_err(Refusal::from))
 }
 
 /// Synchronous entry. A proxy whose session ended is dropped, which
@@ -1160,6 +1206,9 @@ pub fn handle(shared: &DaemonShared, request: &Request) -> Response {
     }
     if request.method == "managed_session_focus" {
         return session_focus(shared, request);
+    }
+    if is_red_team_enable(request) {
+        return red_team_enable(shared, request);
     }
     let sign_in = sign_in_present(shared);
     let choice = terminal_choice(shared);
@@ -1194,6 +1243,9 @@ where
 {
     if request.method == "managed_launch_redeem" {
         return redeem_async(shared, request).await;
+    }
+    if is_red_team_enable(request) {
+        return red_team_enable(shared, request);
     }
     if request.method == "managed_model_catalogue" {
         return model_catalogue(shared, request).await;

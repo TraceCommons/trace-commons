@@ -397,6 +397,10 @@ pub(crate) fn private_directory(path: &Path) -> Result<(), ManagedError> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| ManagedError::StorageUnavailable)?;
     }
+    // Owner-only: a protected DACL with one entry, full access for the
+    // current user, which the directory's files and folders inherit.
+    #[cfg(windows)]
+    rts::sys::fs::restrict_dir(path).map_err(|_| ManagedError::StorageUnavailable)?;
     Ok(())
 }
 
@@ -1130,12 +1134,16 @@ fn executable_file(path: &Path) -> bool {
 /// Discovery reads filesystem metadata only; it never runs a tool or scans traces.
 /// `install_url` is the tool's setup guide from `crate::install_guides`.
 pub fn tools() -> serde_json::Value {
-    tools_with_red_team(false, false)
+    tools_with_red_team(false, false, None)
 }
 
 /// Like [`tools`], optionally appending the `red_team` row when it is supported on
 /// this OS.
-pub fn tools_with_red_team(include_red_team: bool, red_team_installed: bool) -> serde_json::Value {
+pub fn tools_with_red_team(
+    include_red_team: bool,
+    red_team_installed: bool,
+    host_problem: Option<super::red_team_host::HostProblem>,
+) -> serde_json::Value {
     use crate::install_guides::install_guide;
     let mut rows = vec![
         serde_json::json!({"tool": "claude", "installed": installed("claude"), "install_url": install_guide("claude-code")}),
@@ -1143,11 +1151,18 @@ pub fn tools_with_red_team(include_red_team: bool, red_team_installed: bool) -> 
         serde_json::json!({"tool": "opencode", "installed": installed("opencode"), "install_url": install_guide("opencode")}),
     ];
     if include_red_team {
-        rows.push(serde_json::json!({
+        let mut row = serde_json::json!({
             "tool": "red_team",
             "installed": red_team_installed,
             "install_url": serde_json::Value::Null,
-        }));
+        });
+        // Windows only: why this host cannot run Red Team, and whether the
+        // app offers "Enable Red Team" (everything but Windows Home).
+        if let Some(problem) = host_problem {
+            row["host_problem"] = serde_json::json!(problem);
+            row["enable_offered"] = serde_json::json!(problem.enable_offered());
+        }
+        rows.push(row);
     }
     serde_json::Value::Array(rows)
 }
@@ -2095,5 +2110,74 @@ CODEX_HOME = "/personal-profile"
             .map(|handle| handle.join().unwrap())
             .collect();
         assert!(results.iter().all(Result::is_ok), "{results:?}");
+    }
+}
+
+#[cfg(test)]
+mod red_team_row_tests {
+    use super::*;
+    use crate::managed::red_team_host::HostProblem;
+
+    fn row(
+        include: bool,
+        installed: bool,
+        problem: Option<HostProblem>,
+    ) -> Option<serde_json::Value> {
+        tools_with_red_team(include, installed, problem)
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["tool"] == "red_team")
+            .cloned()
+    }
+
+    #[test]
+    fn no_row_when_red_team_is_not_offered() {
+        assert!(row(false, false, None).is_none());
+    }
+
+    #[test]
+    fn the_row_carries_no_host_fields_without_a_problem() {
+        let row = row(true, true, None).unwrap();
+        assert_eq!(row["installed"], true);
+        assert!(row.get("host_problem").is_none());
+        assert!(row.get("enable_offered").is_none());
+    }
+
+    #[test]
+    fn the_row_names_the_host_problem_and_whether_enable_is_offered() {
+        let off = row(true, false, Some(HostProblem::HyperVMissing)).unwrap();
+        assert_eq!(off["host_problem"], "hyper_v_missing");
+        assert_eq!(off["enable_offered"], true);
+        let group = row(true, false, Some(HostProblem::NotInHyperVAdministrators)).unwrap();
+        assert_eq!(group["host_problem"], "not_in_hyper_v_administrators");
+        assert_eq!(group["enable_offered"], true);
+        let home = row(true, false, Some(HostProblem::HomeEdition)).unwrap();
+        assert_eq!(home["host_problem"], "home_edition");
+        assert_eq!(home["enable_offered"], false);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_private_directory_tests {
+    use super::*;
+
+    #[test]
+    fn a_private_directory_gets_a_protected_dacl_for_the_user_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("red-team");
+        private_directory(&path).unwrap();
+        rts::sys::fs::check_owner_only_dir(&path).unwrap();
+        // Again, over a directory that already exists.
+        private_directory(&path).unwrap();
+        rts::sys::fs::check_owner_only_dir(&path).unwrap();
+    }
+
+    #[test]
+    fn a_link_or_a_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(private_directory(&file).is_err());
     }
 }

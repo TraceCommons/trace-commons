@@ -143,16 +143,21 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "protected"] }
-# Red Team sandboxed sessions on NEAR AI Red SandBox (macOS only). Pinned to
-# a revision that resolves the same `nearai/ironwire` revision as above.
-rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "eba374381f4180f68b9b74bdb317e712699ef7a8" }
 # `security-framework` moved to trace-commons-contributor-platform with
 # `os_secret_store`, whose `storage_error` is its only user here.
+
+# Red Team sandboxed sessions on NEAR AI Red SandBox (macOS and Windows).
+# Pinned to a revision that resolves the same `nearai/ironwire` revision as above.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }

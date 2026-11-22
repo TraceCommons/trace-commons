@@ -3,7 +3,7 @@
 #![cfg_attr(not(target_os = "macos"), allow(unused_imports, dead_code))]
 use super::*;
 use crate::daemon::ipc::Request;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(windows))]
 use crate::managed::RED_TEAM_UNAVAILABLE_LABEL;
 use crate::managed::sessions::{LaunchPurpose, LaunchRequest};
 use crate::managed::{ConnectionKind, Generation, RED_TEAM_NEEDS_NEAR_AI_LABEL, ToolId};
@@ -56,9 +56,9 @@ fn red_team_launch_request(
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 #[test]
-fn the_snapshot_offers_red_team_on_macos_without_any_flag() {
+fn the_snapshot_offers_red_team_on_macos_and_windows_without_any_flag() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     assert!(red_team_available(&shared));
@@ -72,9 +72,9 @@ fn the_snapshot_offers_red_team_on_macos_without_any_flag() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[test]
-fn the_snapshot_omits_red_team_off_macos() {
+fn the_snapshot_omits_red_team_off_macos_and_windows() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     assert!(!red_team_available(&shared));
@@ -88,9 +88,9 @@ fn the_snapshot_omits_red_team_off_macos() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 #[test]
-fn launch_prepare_refuses_red_team_off_macos() {
+fn launch_prepare_refuses_red_team_off_macos_and_windows() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     let account_id = signin::account_id(ToolId::RedTeam).unwrap();
@@ -138,4 +138,41 @@ fn launch_prepare_refuses_red_team_on_a_subscription_or_api_key_account() {
             .expect("non-NEAR AI connection must be refused for red_team");
         assert_eq!(err.code, RED_TEAM_NEEDS_NEAR_AI_LABEL);
     }
+}
+
+/// "Enable Red Team" elevates only on Windows; here it is refused outright
+/// (and never reaches the managed service or a script).
+#[cfg(not(windows))]
+#[test]
+fn enable_is_refused_off_windows_without_elevating() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = test_shared(dir.path());
+    let resp = handle(
+        &shared,
+        &req(
+            "managed_tool_setup",
+            json!({"tool": "red_team", "action": "enable"}),
+        ),
+    );
+    let err = resp.error.expect("enable must be refused off Windows");
+    let expected = if cfg!(target_os = "macos") {
+        "managed-invalid-request"
+    } else {
+        RED_TEAM_UNAVAILABLE_LABEL
+    };
+    assert_eq!(err.code, expected);
+}
+
+#[test]
+fn enable_takes_no_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = test_shared(dir.path());
+    let resp = handle(
+        &shared,
+        &req(
+            "managed_tool_setup",
+            json!({"tool": "red_team", "action": "enable", "sid": "S-1-5-21-1-2-3-500"}),
+        ),
+    );
+    assert!(resp.error.is_some(), "{resp:?}");
 }
