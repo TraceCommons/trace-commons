@@ -56,9 +56,9 @@ fn red_team_launch_request(
     })
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(red_team_platform)]
 #[test]
-fn the_snapshot_offers_red_team_on_macos_and_windows_without_any_flag() {
+fn the_snapshot_offers_red_team_on_supported_hosts_without_any_flag() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     assert!(red_team_available(&shared));
@@ -72,9 +72,9 @@ fn the_snapshot_offers_red_team_on_macos_and_windows_without_any_flag() {
     );
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 #[test]
-fn the_snapshot_omits_red_team_off_macos_and_windows() {
+fn the_snapshot_omits_red_team_on_unsupported_platforms() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     assert!(!red_team_available(&shared));
@@ -88,9 +88,9 @@ fn the_snapshot_omits_red_team_off_macos_and_windows() {
     );
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(red_team_platform))]
 #[test]
-fn launch_prepare_refuses_red_team_off_macos_and_windows() {
+fn launch_prepare_refuses_red_team_on_unsupported_platforms() {
     let dir = tempfile::tempdir().unwrap();
     let shared = test_shared(dir.path());
     let account_id = signin::account_id(ToolId::RedTeam).unwrap();
@@ -155,7 +155,7 @@ fn enable_is_refused_off_windows_without_elevating() {
         ),
     );
     let err = resp.error.expect("enable must be refused off Windows");
-    let expected = if cfg!(target_os = "macos") {
+    let expected = if cfg!(red_team_platform) {
         "managed-invalid-request"
     } else {
         RED_TEAM_UNAVAILABLE_LABEL
@@ -175,4 +175,14 @@ fn enable_takes_no_arguments() {
         ),
     );
     assert!(resp.error.is_some(), "{resp:?}");
+}
+
+/// Red Team is offered on a supported platform, and not from a daemon inside a
+/// Flatpak sandbox (no KVM, no user session there): the host service runs it.
+#[test]
+fn red_team_is_unavailable_from_a_sandboxed_daemon_and_on_unsupported_platforms() {
+    assert!(red_team_available_on(true, false));
+    assert!(!red_team_available_on(true, true));
+    assert!(!red_team_available_on(false, false));
+    assert!(!red_team_available_on(false, true));
 }
