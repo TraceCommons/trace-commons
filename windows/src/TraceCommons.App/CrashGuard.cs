@@ -15,8 +15,10 @@ namespace TraceCommons.App;
 /// <para>
 /// While a first-run window is open, a fault whose stack runs through the
 /// first-run window or flow is also survived
-/// (<see cref="UnhandledExceptionEventArgs.Handled"/>), so a screen that fails
-/// to build leaves the person on Welcome to try again. Any other fault, the
+/// (<see cref="UnhandledExceptionEventArgs.Handled"/>), so the window stays open
+/// on the step it was on. The window builds a step before it changes anything
+/// on screen (<c>FirstRunWindow.Render</c>), so a step that fails to build
+/// leaves that step as it was and the next render tries again. Any other fault, the
 /// main window's included, is logged and surfaces as it always did.
 /// </para>
 /// </summary>

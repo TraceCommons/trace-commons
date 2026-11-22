@@ -15,9 +15,10 @@ namespace TraceCommons.App.ViewModels;
 /// The device settings that are not public-profile state: connection facts,
 /// startup, consent scopes, and per-project ask/ignore choices.
 /// </summary>
-public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
+public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly DaemonHost _host;
+    private bool _disposed;
     private readonly HashSet<string> _preservedNonDataScopes = new(StringComparer.Ordinal);
     private bool _isBusy;
     private bool _isLoaded;
@@ -125,8 +126,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         // lag and resync frames too, so a missed delta repaints this surface
         // as well. No timer is added: the event path already exists.
         //
-        // Never unsubscribed, matching MainViewModel. SettingsView is built
-        // once with `??=` and lives as long as the window.
+        // Unsubscribed by Dispose, which the main window calls when the
+        // Settings window closes: a new view model is built each time Settings
+        // opens, so one left subscribed would keep answering daemon events for a
+        // window that is gone, and one more for every time Settings was opened.
         _host.StatusChanged += OnDaemonStatusChanged;
 
         // F10: one driver for the three entry points, so they can never
@@ -2082,6 +2085,11 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     /// </remarks>
     private async void OnDaemonStatusChanged()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         await RefreshRoutingAsync().ConfigureAwait(true);
 
         // The route disclosure too, as GTK does on every status event: a
@@ -2089,10 +2097,25 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         // sessions go, and this section must not keep saying the old route.
         // Nothing here is a knob the contributor is holding, so it is not
         // skipped while a write is in flight.
-        if (IsLoaded)
+        if (IsLoaded && !_disposed)
         {
             await RefreshDisclosureAsync().ConfigureAwait(true);
         }
+    }
+
+    /// <summary>
+    /// Stops listening to the daemon: the Settings window this belongs to has
+    /// closed. Safe to call twice.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        _host.StatusChanged -= OnDaemonStatusChanged;
     }
 
     /// <summary>
