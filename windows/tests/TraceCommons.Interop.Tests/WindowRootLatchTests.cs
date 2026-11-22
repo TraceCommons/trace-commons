@@ -169,4 +169,33 @@ public class WindowRootLatchTests
         Assert.Equal(latched, Regex.Matches(code, @"window\.Content\?\.XamlRoot").Count);
         Assert.Contains(".ForActivation(", code);
     }
+
+    /// <summary>
+    /// An exception nothing caught is recorded, not left to end the process with
+    /// no trace; it is survived only while a secondary window is open.
+    /// </summary>
+    [Fact]
+    public void TheAppRecordsUnhandledExceptionsAndSurvivesThemOnlyInSecondaryWindows()
+    {
+        string guard = Shell("CrashGuard.cs");
+        Assert.Contains("app.UnhandledException +=", guard);
+        Assert.Contains("AppDomain.CurrentDomain.UnhandledException +=", guard);
+        Assert.Contains("TaskScheduler.UnobservedTaskException +=", guard);
+        Assert.Matches(@"if \(Secondary\.Any\)\s*\{\s*e\.Handled = true;", guard);
+        Assert.Equal(1, Regex.Matches(guard, @"Handled = true").Count);
+        Assert.Contains("CrashGuard.Install(this);", Shell("App.xaml.cs"));
+        Assert.Contains("CrashGuard.Track(window);", Shell("WindowClocks.cs"));
+    }
+
+    /// <summary>Every window but the main one is watched, so it counts as secondary.</summary>
+    [Theory]
+    [InlineData("FirstRunWindow.xaml.cs")]
+    [InlineData("SettingsWindow.xaml.cs")]
+    [InlineData("AboutWindow.cs")]
+    [InlineData("SessionRootsWindow.xaml.cs")]
+    [InlineData("PreviewWindow.cs")]
+    public void EachSecondaryWindowIsWatchedAndSoCounted(string file)
+    {
+        Assert.Contains("WindowClocks.Watch(this);", Shell(file));
+    }
 }
