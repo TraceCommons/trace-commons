@@ -661,7 +661,14 @@ public sealed partial class FirstRunWindow : Window, IFirstRunSheets
         {
             double now = Now;
             bool first = (int)_shownStep < 0;
-            OutgoingStep.Content = first ? null : CurrentStep.Content;
+            // An element has one parent. The step on screen goes to the outgoing
+            // presenter only after the current one has let go of it; handing it
+            // over while it was still the current step's child is the one place
+            // here where an element could have two (E_INVALIDARG, "Value does
+            // not fall within the expected range").
+            object? handedOver = first ? null : CurrentStep.Content;
+            CurrentStep.Content = null;
+            OutgoingStep.Content = handedOver;
             _motions.Clear();
             _model.SetStep(state.Step, now);
             if (state.Step == FirstRunStep.Tools && _model.ToolsScanned)

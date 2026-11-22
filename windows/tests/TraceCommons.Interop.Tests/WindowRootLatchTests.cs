@@ -199,4 +199,20 @@ public class WindowRootLatchTests
     {
         Assert.DoesNotContain("CrashGuard.TrackFirstRun", Shell(file));
     }
+
+    /// <summary>
+    /// The step that is leaving moves from the current presenter to the outgoing
+    /// one. An element has one parent, so the current presenter lets go first;
+    /// reading one presenter's content straight into the other's is the
+    /// re-parenting that throws E_INVALIDARG.
+    /// </summary>
+    [Fact]
+    public void FirstRunHandsTheLeavingStepOverOnlyAfterTheCurrentPresenterLetsGo()
+    {
+        string source = Shell("FirstRunWindow.xaml.cs");
+        Assert.DoesNotContain("OutgoingStep.Content = first ? null : CurrentStep.Content", source);
+        Assert.Matches(
+            @"object\? handedOver = first \? null : CurrentStep\.Content;\s*CurrentStep\.Content = null;\s*OutgoingStep\.Content = handedOver;",
+            source);
+    }
 }
