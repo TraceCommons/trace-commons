@@ -507,24 +507,49 @@ public static class BalanceArrival
     public static TimeSpan CoinsStay(bool reduceMotion) => reduceMotion ? Hold : TimeSpan.FromSeconds(CoinBurst.Duration);
 
     /// <summary>
-    /// Live credit arrivals for the tray and taskbar animations
-    /// (<c>BalanceArrival.Tracker</c>, BalanceArrival.swift:72-133): the first
-    /// reading is the baseline, an unknown reading keeps it, a fall resets
-    /// it, and a rise of at least $1.00 of NEAR AI credit or 1 credit of
-    /// settled Trace credit celebrates.
+    /// Credit arrivals for the tray and taskbar animations
+    /// (<c>BalanceArrival.Tracker</c>, BalanceArrival.swift): the first reading
+    /// for an account is its baseline, an unknown reading keeps it, a fall
+    /// resets it, and any real rise celebrates. The baseline is saved per
+    /// account, so credit that arrived while the app was closed or signed out
+    /// plays once on the next reading.
     /// </summary>
     public sealed class Tracker
     {
-        /// <summary>BalanceArrival.swift:79-82.</summary>
-        public const double MinimumCreditFinal = 1.0;
-        public const long MinimumReceivedNanos = 1_000_000_000;
-        private const double CreditEpsilon = 1e-6;
+        /// <summary>The daemon sums single-precision values, so a re-read can differ in its last digits.</summary>
+        public const double CreditNoiseFloor = 0.001;
+
+        public Tracker()
+        {
+        }
+
+        public Tracker(long? lastReceivedNanos, double? lastCreditFinal)
+        {
+            LastReceivedNanos = lastReceivedNanos;
+            LastCreditFinal = lastCreditFinal;
+        }
 
         public long? LastReceivedNanos { get; private set; }
 
         public double? LastCreditFinal { get; private set; }
 
-        /// <summary>BalanceArrival.swift:94-107.</summary>
+        /// <summary>The baseline saved for <paramref name="scope"/>, or an empty tracker.</summary>
+        public static Tracker Stored(string? scope, ShellPreferences preferences)
+        {
+            ArgumentNullException.ThrowIfNull(preferences);
+            return preferences.CreditBaseline(scope) is { } saved
+                ? new Tracker(saved.ReceivedNanos, saved.CreditFinal is double credit && double.IsFinite(credit) ? credit : null)
+                : new Tracker();
+        }
+
+        /// <summary>Saves this baseline for <paramref name="scope"/>. Without a scope nothing is saved.</summary>
+        public void Save(string? scope, ShellPreferences preferences)
+        {
+            ArgumentNullException.ThrowIfNull(preferences);
+            preferences.SetCreditBaseline(scope, LastReceivedNanos, LastCreditFinal);
+        }
+
+        /// <summary>Records NEAR AI's received total and says whether it rose.</summary>
         public bool Observe(long? receivedTotalNanos)
         {
             if (receivedTotalNanos is not long now)
@@ -538,22 +563,16 @@ public static class BalanceArrival
                 return false;
             }
 
-            if (now < before)
-            {
-                LastReceivedNanos = now;
-                return false;
-            }
-
-            if (now - before < MinimumReceivedNanos)
+            if (now == before)
             {
                 return false;
             }
 
             LastReceivedNanos = now;
-            return true;
+            return now > before;
         }
 
-        /// <summary>BalanceArrival.swift:112-125.</summary>
+        /// <summary>Records settled Trace credit and says whether it rose by more than rounding noise.</summary>
         public bool ObserveCreditFinal(double? creditFinal)
         {
             if (creditFinal is not double now || !double.IsFinite(now))
@@ -567,19 +586,13 @@ public static class BalanceArrival
                 return false;
             }
 
-            if (now < before - CreditEpsilon)
-            {
-                LastCreditFinal = now;
-                return false;
-            }
-
-            if (now - before < MinimumCreditFinal - CreditEpsilon)
+            if (Math.Abs(now - before) < CreditNoiseFloor)
             {
                 return false;
             }
 
             LastCreditFinal = now;
-            return true;
+            return now > before;
         }
     }
 

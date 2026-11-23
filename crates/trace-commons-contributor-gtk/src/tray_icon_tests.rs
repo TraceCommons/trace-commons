@@ -299,8 +299,7 @@ fn the_credit_burst_is_the_macs() {
         "public static let framesPerSecond: Double = 24",
         "public static let stillAt: Double = 0.45",
         "public static let reduceMotionHold: Duration = .milliseconds(1600)",
-        "public static let minimumReceivedNanos: Int64 = 1_000_000_000",
-        "public static let minimumCreditFinal: Double = 1.0",
+        "static let creditNoiseFloor: Double = 0.001",
     ] {
         assert!(arrival.contains(line), "{line}");
     }

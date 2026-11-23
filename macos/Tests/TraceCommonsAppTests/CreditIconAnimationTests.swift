@@ -68,13 +68,12 @@ final class CreditIconAnimationTests: XCTestCase {
         model.recordHistoryRollup(rollup(1.0))
         XCTAssertEqual(model.creditArrivalCount, 0)
 
-        // Sub-threshold credit increase does not fire yet.
-        model.recordHistoryRollup(rollup(1.5))
-        XCTAssertEqual(model.creditArrivalCount, 0)
-
-        // Reaching >= 1.0 settled Trace Commons credit fires even with no NEAR AI balance.
-        model.recordHistoryRollup(rollup(2.5))
+        // Any settled credit fires, even with no NEAR AI balance.
+        model.recordHistoryRollup(rollup(1.1))
         XCTAssertEqual(model.creditArrivalCount, 1)
+
+        model.recordHistoryRollup(rollup(1.2))
+        XCTAssertEqual(model.creditArrivalCount, 2)
     }
 
     func testDockAnimatorRunsFramesBouncesAndRestores() async {

@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using TraceCommons.Interop.Shell;
 using Xunit;
@@ -166,17 +167,53 @@ public class CreditMotionTests
         Assert.Equal(new BalanceArrival.Effect(BalanceArrival.EffectKind.CountUp, 50, 60), BalanceArrival.EffectOf(shown, new(200, 60), false));
     }
 
-    /// <summary>BalanceArrival.swift:72-133, the probe's two runs: a baseline first, an unknown keeps it, a fall resets it, $1 or 1 credit celebrates.</summary>
+    /// <summary>Credit that lands while away plays once; another account's total is not new credit.</summary>
+    [Fact]
+    public void ASavedBaselineBelongsToItsAccountAndPlaysOnce()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "tc-credit-baseline-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string path = Path.Combine(dir, "shell-preferences.json");
+            var before = new BalanceArrival.Tracker();
+            Assert.False(before.Observe(4_000_000_000));
+            Assert.False(before.ObserveCreditFinal(10));
+            before.Save("sha256:a", new ShellPreferences(path));
+
+            var relaunched = BalanceArrival.Tracker.Stored("sha256:a", new ShellPreferences(path));
+            Assert.True(relaunched.Observe(5_000_000_000));
+            Assert.True(relaunched.ObserveCreditFinal(10.1));
+            relaunched.Save("sha256:a", new ShellPreferences(path));
+
+            var again = BalanceArrival.Tracker.Stored("sha256:a", new ShellPreferences(path));
+            Assert.False(again.Observe(5_000_000_000));
+            Assert.False(again.ObserveCreditFinal(10.1));
+
+            var other = BalanceArrival.Tracker.Stored("sha256:b", new ShellPreferences(path));
+            Assert.Null(other.LastReceivedNanos);
+            Assert.False(other.Observe(9_000_000_000));
+            Assert.Null(BalanceArrival.Tracker.Stored(null, new ShellPreferences(path)).LastReceivedNanos);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>The Mac's tracker: a baseline first, an unknown keeps it, a fall resets it, any real rise celebrates.</summary>
     [Fact]
     public void TheTrackerCelebratesAsTheMacs()
     {
         var tracker = new BalanceArrival.Tracker();
         Assert.Equal(
-            new[] { false, false, true, false, false, true },
-            new[] { tracker.Observe(5_000_000_000), tracker.Observe(5_900_000_000), tracker.Observe(6_000_000_000), tracker.Observe(null), tracker.Observe(4_000_000_000), tracker.Observe(5_000_000_000) });
+            new[] { false, false, true, false, false, false, true },
+            new[] { tracker.Observe(5_000_000_000), tracker.Observe(5_000_000_000), tracker.Observe(5_000_000_001), tracker.Observe(null), tracker.Observe(5_000_000_001), tracker.Observe(4_000_000_000), tracker.Observe(5_000_000_000) });
         var credit = new BalanceArrival.Tracker();
         Assert.Equal(
             new[] { false, false, true, false, false, true },
-            new[] { credit.ObserveCreditFinal(10), credit.ObserveCreditFinal(10.5), credit.ObserveCreditFinal(10.9999995), credit.ObserveCreditFinal(9), credit.ObserveCreditFinal(double.NaN), credit.ObserveCreditFinal(10) });
+            new[] { credit.ObserveCreditFinal(10), credit.ObserveCreditFinal(10.00001), credit.ObserveCreditFinal(10.1), credit.ObserveCreditFinal(9), credit.ObserveCreditFinal(double.NaN), credit.ObserveCreditFinal(9.1) });
     }
 }

@@ -20,7 +20,8 @@ public sealed partial class MainWindow
 {
     private readonly HomeView _home = new();
     private readonly ShellPreferences _prefs = ShellPreferences.Shared;
-    private readonly BalanceArrival.Tracker _creditTracker = new();
+    private BalanceArrival.Tracker _creditTracker = new();
+    private string? _creditScope;
     private readonly CreditCelebration.Player _creditPlayer = new();
     private readonly LocalInsights _homeInsights = new();
     private DispatcherQueueTimer? _creditTimer;
@@ -211,6 +212,11 @@ public sealed partial class MainWindow
                 ? null
                 : InferenceLedger.ParseNetworkSummary(summary) is NetworkInferenceSummary { Readable: true } readable ? readable : null;
             _homeStatus = status.Result.ResultAs<DaemonStatus>();
+            if (_homeStatus is { } reported)
+            {
+                NoteCreditScope(reported.AccountScope);
+            }
+
             _homeRollup = rollup.Result.ResultAs<HistoryRollup>();
             _homePending = pending.Result.ResultAs<PendingList>()?.Pending;
             _homeCredit = credit.Result.IsError ? null : CommonsCredit.Parse(credit.Result.Result);
@@ -344,7 +350,32 @@ public sealed partial class MainWindow
             _prefs.BalanceShown = now;
         }
 
-        if (_creditTracker.Observe(received))
+        NoteCreditReading(tracker => tracker.Observe(received));
+    }
+
+    /// <summary>The account the daemon reports: a change loads that account's baseline, so its total is never read as new credit.</summary>
+    private void NoteCreditScope(string? scope)
+    {
+        if (scope == _creditScope)
+        {
+            return;
+        }
+
+        _creditScope = scope;
+        _creditTracker = BalanceArrival.Tracker.Stored(scope, _prefs);
+    }
+
+    /// <summary>One credit reading: keeps the account's baseline across launches and celebrates an arrival.</summary>
+    private void NoteCreditReading(Func<BalanceArrival.Tracker, bool> observe)
+    {
+        (long? received, double? credit) = (_creditTracker.LastReceivedNanos, _creditTracker.LastCreditFinal);
+        bool arrived = observe(_creditTracker);
+        if (received != _creditTracker.LastReceivedNanos || credit != _creditTracker.LastCreditFinal)
+        {
+            _creditTracker.Save(_creditScope, _prefs);
+        }
+
+        if (arrived)
         {
             Celebrate();
         }
@@ -366,10 +397,7 @@ public sealed partial class MainWindow
     /// <summary>Settled Trace credit (<c>AppModel.recordHistoryRollup</c>, AppModel.swift:2166-2171), even when not signed in to NEAR AI.</summary>
     private void ObserveCreditFinal(double creditFinal)
     {
-        if (_creditTracker.ObserveCreditFinal(creditFinal))
-        {
-            Celebrate();
-        }
+        NoteCreditReading(tracker => tracker.ObserveCreditFinal(creditFinal));
     }
 
     /// <summary>

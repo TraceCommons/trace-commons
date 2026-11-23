@@ -78,6 +78,28 @@ public sealed class ShellPreferences
         set => Write(_values with { BalanceShownReceived = value?.ReceivedNanos, BalanceShownRemaining = value?.RemainingNanos });
     }
 
+    /// <summary>The credit-arrival baseline saved for <paramref name="scope"/>, or null for no scope or another account's.</summary>
+    public (long? ReceivedNanos, double? CreditFinal)? CreditBaseline(string? scope) =>
+        scope is not null && _values.CreditBaselineScope == scope
+            ? (_values.CreditBaselineReceived, _values.CreditBaselineFinal)
+            : null;
+
+    /// <summary>Keeps the credit-arrival baseline for <paramref name="scope"/>. Without a scope nothing is kept.</summary>
+    public void SetCreditBaseline(string? scope, long? receivedNanos, double? creditFinal)
+    {
+        if (scope is null)
+        {
+            return;
+        }
+
+        Write(_values with
+        {
+            CreditBaselineScope = scope,
+            CreditBaselineReceived = receivedNanos,
+            CreditBaselineFinal = creditFinal,
+        });
+    }
+
     private void Write(Values values)
     {
         bool changed = values != _values;
@@ -140,5 +162,14 @@ public sealed class ShellPreferences
 
         [JsonPropertyName("balance_shown_remaining")]
         public long? BalanceShownRemaining { get; init; }
+
+        [JsonPropertyName("credit_baseline_scope")]
+        public string? CreditBaselineScope { get; init; }
+
+        [JsonPropertyName("credit_baseline_received")]
+        public long? CreditBaselineReceived { get; init; }
+
+        [JsonPropertyName("credit_baseline_final")]
+        public double? CreditBaselineFinal { get; init; }
     }
 }

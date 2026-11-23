@@ -698,6 +698,7 @@ public sealed partial class MainWindow : Window
 
             // Settled Trace credit arriving live (BalanceArrival.Tracker,
             // AppModel.swift:2168): even when not signed in to NEAR AI.
+            NoteCreditScope(status.AccountScope);
             if (rollupTask.Result.ResultAs<HistoryRollup>() is { } settled)
             {
                 ObserveCreditFinal(settled.CreditFinal);
