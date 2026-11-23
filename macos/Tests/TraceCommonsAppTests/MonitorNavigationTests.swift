@@ -456,10 +456,35 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(main.components(separatedBy: "@main").count - 1, 1)
     }
 
-    /// Before the core has said whether onboarding is required, a request
-    /// (a cold-start invite link or notification) opens the Monitor, which
-    /// waits on the core and then applies its own gate; it is never routed
-    /// from the placeholder status, which reads as onboarding required.
+    /// The Launcher holds a request made before the core has said, and
+    /// opens its window when the core answers or the deadline passes.
+    func test_theLauncherHoldsARequestUntilTheCoreAnswers() throws {
+        let main = try Self.text("TraceCommonsAppMain.swift")
+        XCTAssertTrue(main.contains("""
+                if LaunchRouting.holdsForCore(destination, onboardingKnown: model.onboardingKnown) {
+                    navigation.leave(destination)
+                    holdForCore()
+                    return
+                }
+        """), "a request before the core answers must wait, keeping its destination")
+        XCTAssertTrue(main.contains("""
+                    .onChange(of: model.onboardingKnown) { _, known in
+                        if known { releaseHeldRequest() }
+                    }
+        """), "the core's answer must release a held request")
+        XCTAssertTrue(main.contains("""
+                    try? await Task.sleep(for: LaunchRouting.coreAnswerDeadline)
+                    guard heldForCore else { return }
+                    heldForCore = false
+                    openWindow(id: WindowID.monitor)
+        """), "a slow core must still put a window on screen")
+    }
+
+    /// Before the core has said whether onboarding is required, the routing
+    /// answer is the Monitor, which waits on the core and then applies its
+    /// own gate; it is never routed from the placeholder status, which reads
+    /// as onboarding required. The Launcher holds most of these requests
+    /// first (`LaunchRouting.holdsForCore`).
     func test_aRequestBeforeTheCoreAnswersOpensTheMonitor() {
         for destination: MonitorDestination? in [nil, .traces(entryId: nil), .traces(entryId: "entry-7"),
                                                   .home(.history), .inference, .settings(.compute)] {

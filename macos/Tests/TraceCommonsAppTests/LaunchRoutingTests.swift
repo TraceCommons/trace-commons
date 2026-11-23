@@ -191,6 +191,32 @@ final class LaunchRoutingTests: XCTestCase {
         }
     }
 
+    /// A request made before the core has said waits for it, so a person
+    /// who still needs first run does not see the Monitor open and close.
+    /// Inference and Settings are open before onboarding, so they never wait.
+    func test_aRequestBeforeTheCoreAnswersIsHeld() {
+        for destination: MonitorDestination? in [nil, .home(.overview), .home(.history), .insights,
+                                                  .traces(entryId: nil), .traces(entryId: "entry-7"), .idleSessions] {
+            XCTAssertTrue(LaunchRouting.holdsForCore(destination, onboardingKnown: false), String(describing: destination))
+            XCTAssertFalse(LaunchRouting.holdsForCore(destination, onboardingKnown: true), String(describing: destination))
+        }
+        for destination: MonitorDestination in [.inference, .settings(.compute)] {
+            XCTAssertFalse(LaunchRouting.holdsForCore(destination, onboardingKnown: false), String(describing: destination))
+        }
+    }
+
+    /// Where a held request goes once the core has said. A failed status
+    /// read is known for the gates but is still the placeholder, so it
+    /// opens the Monitor and never sends an onboarded person to first run.
+    func test_aHeldRequestOpensTheWindowTheCoreChose() {
+        XCTAssertEqual(LaunchRouting.windowAfterHold(startup: .running, statusAnswered: true, requiresOnboarding: true), .firstRun)
+        XCTAssertEqual(LaunchRouting.windowAfterHold(startup: .needsRoots, statusAnswered: false, requiresOnboarding: true), .firstRun)
+        XCTAssertEqual(LaunchRouting.windowAfterHold(startup: .running, statusAnswered: true, requiresOnboarding: false), .monitor)
+        XCTAssertEqual(LaunchRouting.windowAfterHold(startup: .running, statusAnswered: false, requiresOnboarding: true), .monitor,
+                       "a failed status read is not an answer")
+        XCTAssertEqual(LaunchRouting.windowAfterHold(startup: .refused("locked"), statusAnswered: false, requiresOnboarding: true), .monitor)
+    }
+
     /// I1: the Monitor takes only a destination it can show. While
     /// onboarding is required, or before the core has said, Home and
     /// Traces stay pending for first run to hand off.

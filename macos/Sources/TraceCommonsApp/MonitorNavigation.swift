@@ -139,7 +139,9 @@ enum LaunchRouting {
 
     /// Before the core has said whether onboarding is required, the
     /// Monitor: it waits on the core and then applies its own gate, so a
-    /// cold-start request is never routed from the placeholder status.
+    /// cold-start request is never routed from the placeholder status. The
+    /// Launcher holds most such requests first (`holdsForCore`), so this
+    /// answer reaches the screen for Inference alone.
     static func window(
         for destination: MonitorDestination?, startup: AppModel.Startup, requiresOnboarding: Bool, onboardingKnown: Bool
     ) -> Window {
@@ -252,6 +254,31 @@ enum LaunchRouting {
             window: window(for: destination, startup: startup, requiresOnboarding: requiresOnboarding,
                            onboardingKnown: onboardingKnown),
             settings: nil)
+    }
+
+    /// How long a held request waits for the core before the Monitor opens
+    /// in its waiting state, so a slow daemon never leaves a launch with no
+    /// window.
+    static let coreAnswerDeadline: Duration = .seconds(2)
+
+    /// Whether a request waits for the core before opening a window, so a
+    /// person who still needs first run does not see the Monitor open and
+    /// close. Inference and Settings are open before onboarding and go at
+    /// once.
+    static func holdsForCore(_ destination: MonitorDestination?, onboardingKnown: Bool) -> Bool {
+        !onboardingKnown && destination != .inference && destination?.settingsSection == nil
+    }
+
+    /// The window a held request opens once the core has said. A failed
+    /// status read counts as known for the gates, but its status is still
+    /// the placeholder, so it opens the Monitor rather than sending someone
+    /// who may have finished onboarding to first run.
+    static func windowAfterHold(startup: AppModel.Startup, statusAnswered: Bool, requiresOnboarding: Bool) -> Window {
+        switch startup {
+        case .needsRoots: .firstRun
+        case .running: statusAnswered && requiresOnboarding ? .firstRun : .monitor
+        case .starting, .refused: .monitor
+        }
     }
 
     /// Whether the Monitor takes a pending destination now. Only one it can
