@@ -1933,11 +1933,15 @@ impl App {
             .iter()
             .map(|s| s.reason_label.as_str())
             .collect();
-        let rendered = crate::toast::toast(
+        let rendered = crate::toast::approve_toast(
             approve.approved,
             approve.total_redactions(),
             approve.flagged,
             &skipped,
+            approve
+                .excluded_ineligible
+                .unwrap_or(0)
+                .saturating_add(approve.excluded_held.unwrap_or(0)),
         );
         // What a group selector left out for being ineligible, said after
         // the press as the folder said it before.

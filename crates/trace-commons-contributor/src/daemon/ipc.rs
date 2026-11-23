@@ -2405,6 +2405,26 @@ impl DaemonShared {
         super::contribution_eligibility::applies(cfg, self.account_admission.current(cfg))
     }
 
+    /// [`Self::eligibility_applies`] with whether ingest has answered, for
+    /// the surfaces that publish a row's state.
+    pub(crate) fn eligibility_view(&self) -> super::contribution_eligibility::EligibilityView {
+        match self.store.load_config() {
+            Ok(cfg) => self.eligibility_view_for(cfg.as_ref()),
+            Err(_) => None.into(),
+        }
+    }
+
+    /// [`Self::eligibility_view`] for a config the caller already read.
+    pub(crate) fn eligibility_view_for(
+        &self,
+        cfg: Option<&crate::config::ContributorConfig>,
+    ) -> super::contribution_eligibility::EligibilityView {
+        super::contribution_eligibility::EligibilityView {
+            applies: Some(self.eligibility_applies_for(cfg)),
+            awaiting_answer: self.account_admission.awaiting_answer(cfg),
+        }
+    }
+
     /// Whether this device sends every session through a redaction witness
     /// before it is sent (`second_look::RedactionWitness`). A config that
     /// cannot be read is `Absent`, which keeps every second-look reason.
@@ -3527,7 +3547,7 @@ impl DaemonShared {
     }
 
     fn snapshot_value(&self) -> serde_json::Value {
-        let admission_evidence = self.eligibility_applies();
+        let admission_evidence = self.eligibility_view();
         let witness = self.redaction_witness();
         let pending: Vec<serde_json::Value> = {
             let queue = self.queue.lock().expect("queue lock");
@@ -3705,7 +3725,7 @@ pub fn entry_value(
 /// published `second_look` leaves out nothing matched.
 pub fn entry_value_with(
     e: &super::queue::QueueEntry,
-    admission_evidence: Option<bool>,
+    admission_evidence: impl Into<super::contribution_eligibility::EligibilityView>,
     witness: super::second_look::RedactionWitness,
 ) -> serde_json::Value {
     let mut value = serde_json::json!({
@@ -3781,18 +3801,24 @@ pub fn entry_value_with(
     // A config that could not be read answers `None` here and is treated the
     // same way, for the same reason: it is not known that the question
     // applies, and `unknown` would assert that it does.
-    if admission_evidence == Some(true) {
+    let view = admission_evidence.into();
+    if view.applies == Some(true) {
         // A row the daemon never evaluated -- written before these fields
         // existed, or re-offered after its content moved -- is `unknown`
         // rather than absent. Not evaluated is a different fact from not
         // asked, and degrading "could not tell" into "no" invites a
         // contributor to conclude something false about their own work.
-        value["eligibility"] = serde_json::Value::from(
-            e.eligibility
-                .clone()
-                .unwrap_or_else(|| super::contribution_eligibility::STATE_UNKNOWN.to_string()),
+        //
+        // Likewise a recorded "cannot be sent" while ingest has not answered
+        // whether it admits this account without evidence: see
+        // `contribution_eligibility::published`.
+        let (state, reason) = super::contribution_eligibility::published(
+            e.eligibility.as_deref(),
+            e.eligibility_reason.as_deref(),
+            view.awaiting_answer,
         );
-        if let Some(reason) = e.eligibility_reason.as_deref() {
+        value["eligibility"] = serde_json::Value::from(state);
+        if let Some(reason) = reason {
             value["eligibility_reason"] = serde_json::Value::from(reason);
         }
     }
@@ -4469,7 +4495,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     serde_json::json!({
                         "entry": entry_value_with(
                             e,
-                            shared.eligibility_applies(),
+                            shared.eligibility_view(),
                             shared.redaction_witness(),
                         ),
                         "preview_requires_async": true,
@@ -4795,7 +4821,7 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // Read once for the whole list, and outside the queue lock: it reads the
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
-    let admission_evidence = shared.eligibility_applies();
+    let admission_evidence = shared.eligibility_view();
     let witness = shared.redaction_witness();
     // How many matched contribution missions each pending entry fits, worked
     // out before any lock below is taken: it reads the history file and
@@ -5047,7 +5073,7 @@ async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> R
 /// K5: every session kept on this Mac, in the `list_pending` entry shape,
 /// so a shell can show them and offer the undo. See `queue::REASON_KEPT`.
 fn handle_list_kept(shared: &DaemonShared, req: &Request) -> Response {
-    let admission_evidence = shared.eligibility_applies();
+    let admission_evidence = shared.eligibility_view();
     let witness = shared.redaction_witness();
     let queue = shared.queue.lock().expect("queue lock");
     let entries: Vec<serde_json::Value> = queue
@@ -9034,7 +9060,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
                 // Re-read: the build above recorded its counts on the pinned
                 // entry, and the entry this response describes should say so.
                 let entry = entry_by_id(shared, req, id).unwrap_or(entry);
-                value["entry"] = entry_value_with(&entry, shared.eligibility_applies(), witness);
+                value["entry"] = entry_value_with(&entry, shared.eligibility_view(), witness);
                 Response::ok(req.id, value)
             }
             Err(label) => Response::err(req.id, ERR_UNAVAILABLE, label),
@@ -9078,7 +9104,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
             // just named, while a cached summary outlives that state.
             let witness = shared.redaction_witness();
             let mut value = preview_card_value(&summary, witness);
-            value["entry"] = entry_value_with(&entry, shared.eligibility_applies(), witness);
+            value["entry"] = entry_value_with(&entry, shared.eligibility_view(), witness);
             Response::ok(req.id, value)
         }
         Err(error) => Response::err(
@@ -18106,6 +18132,68 @@ mod tests {
         let v = entry_value(&e, Some(true));
         assert_eq!(v["eligibility"], ce::STATE_INELIGIBLE_PERMANENT);
         assert_eq!(v["eligibility_reason"], ce::REASON_NO_CALL);
+    }
+
+    /// An expired session must not tell someone their work can never be sent.
+    #[test]
+    fn an_unanswered_row_is_not_published_as_permanently_ineligible() {
+        use super::super::contribution_eligibility as ce;
+        let mut e = card_entry();
+        e.eligibility = Some(ce::STATE_INELIGIBLE_PERMANENT.to_string());
+        e.eligibility_reason = Some(ce::REASON_NO_CALL.to_string());
+
+        let v = entry_value_with(
+            &e,
+            ce::EligibilityView {
+                applies: Some(true),
+                awaiting_answer: true,
+            },
+            super::super::second_look::RedactionWitness::Absent,
+        );
+        assert_eq!(v["eligibility"], ce::STATE_STATUS_UNAVAILABLE);
+        assert!(!v.as_object().unwrap().contains_key("eligibility_reason"));
+    }
+
+    /// With no answer, a group still leaves those rows out: nothing is sent
+    /// that a refusal would strand. An explicit `legacy_evidence` shows the
+    /// recorded verdict again.
+    #[tokio::test]
+    async fn no_answer_withholds_rows_without_calling_them_unsendable() {
+        use super::super::contribution_eligibility as ce;
+        let s = shared();
+        admit_on_evidence(&s);
+        seed_mixed_project(&s, "/tmp/mixedproj");
+        let states = |listed: &serde_json::Value| -> Vec<String> {
+            listed["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["eligibility"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let listed = handle_request_async(&s, &req("list_pending", serde_json::json!({})))
+            .await
+            .result
+            .unwrap();
+        let unanswered = states(&listed);
+        assert!(unanswered.iter().any(|x| x == ce::STATE_STATUS_UNAVAILABLE));
+        assert!(
+            !unanswered
+                .iter()
+                .any(|x| x == ce::STATE_INELIGIBLE_PERMANENT)
+        );
+
+        ingest_says(&s, "legacy_evidence", false);
+        let listed = handle_request_async(&s, &req("list_pending", serde_json::json!({})))
+            .await
+            .result
+            .unwrap();
+        assert!(
+            states(&listed)
+                .iter()
+                .any(|x| x == ce::STATE_INELIGIBLE_PERMANENT)
+        );
     }
 
     /// An eligible row carries no reason: there is nothing to explain, and a

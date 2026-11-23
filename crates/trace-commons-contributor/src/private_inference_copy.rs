@@ -1822,6 +1822,7 @@ pub fn eligibility_state_line(label: &str) -> &'static str {
         ELIGIBILITY_STATE_ELIGIBLE => ELIGIBILITY_ELIGIBLE,
         ELIGIBILITY_STATE_INELIGIBLE_PERMANENT => ELIGIBILITY_INELIGIBLE_PERMANENT,
         ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION => ELIGIBILITY_INELIGIBLE_CONFIGURATION,
+        ELIGIBILITY_STATE_STATUS_UNAVAILABLE => STATE_UNKNOWN,
         _ => ELIGIBILITY_UNKNOWN,
     }
 }
@@ -3327,6 +3328,7 @@ pub use crate::daemon::contribution_eligibility::{
     STATE_ELIGIBLE as ELIGIBILITY_STATE_ELIGIBLE,
     STATE_INELIGIBLE_CONFIGURATION as ELIGIBILITY_STATE_INELIGIBLE_CONFIGURATION,
     STATE_INELIGIBLE_PERMANENT as ELIGIBILITY_STATE_INELIGIBLE_PERMANENT,
+    STATE_STATUS_UNAVAILABLE as ELIGIBILITY_STATE_STATUS_UNAVAILABLE,
     // Aliased, all four, because this module already has a `STATE_UNKNOWN`:
     // the listener's. Two constants named for two different unknowns, one
     // import away from each other, is a collision waiting to be resolved the
@@ -3377,6 +3379,24 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+
+    /// The state ingest has not answered for: the approved wording, no send
+    /// control, and no tone that reads as settled.
+    #[test]
+    fn status_unavailable_says_so_and_offers_no_send() {
+        assert_eq!(
+            eligibility_state_line(ELIGIBILITY_STATE_STATUS_UNAVAILABLE),
+            "Status unavailable."
+        );
+        assert_eq!(
+            eligibility_control(ELIGIBILITY_STATE_STATUS_UNAVAILABLE),
+            ContributionControl::None
+        );
+        assert_eq!(
+            eligibility_state_tone(ELIGIBILITY_STATE_STATUS_UNAVAILABLE),
+            PrivateInferenceTone::Neutral
+        );
+    }
 
     #[test]
     fn the_24_hour_change_is_signed_and_never_rounds_up() {

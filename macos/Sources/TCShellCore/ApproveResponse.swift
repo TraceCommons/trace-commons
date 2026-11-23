@@ -128,9 +128,9 @@ public struct ApproveResponse: Decodable, Equatable, Sendable {
         // A group can exclude every entry before previewing any of them.
         // Its empty redactions map then says no scrub ran, not that a scrub
         // ran and matched nothing. Keep ordinary processed outcomes intact.
-        let heldOnly = (excludedHeld ?? 0) > 0 && approved == 0 && flagged == 0
-            && redactions.isEmpty && skipped.isEmpty
-        let base = heldOnly
+        let excludedOnly = ((excludedHeld ?? 0) > 0 || (excludedIneligible ?? 0) > 0)
+            && approved == 0 && flagged == 0 && redactions.isEmpty && skipped.isEmpty
+        let base = excludedOnly
             ? SubmitToast(line: SubmitToast.approvedClause(approved), offerUndo: false) : toast
         guard let held = excludedHeld, held > 0, let undoCopy else { return base }
         let template = held == 1 ? undoCopy.heldForReviewOne : undoCopy.heldForReview

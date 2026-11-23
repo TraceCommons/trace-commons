@@ -99,6 +99,8 @@ struct Answer {
     admission: AccountAdmission,
     /// Not asked again before this, for a spent allowance.
     hold_until: Option<DateTime<Utc>>,
+    /// Ingest actually said this, rather than the read failing.
+    answered: bool,
 }
 
 /// The account session between passes, and whether a credential-store read
@@ -147,6 +149,9 @@ pub struct AccountAdmissionState {
     /// Taken by the supervisor, which starts a renewal off the pass
     /// (`account_session_renewal::renew_off_pass`).
     session_missing: AtomicBool,
+    /// Ingest refused an upload for account admission and has not answered
+    /// since. Survives a failed status read: the refusal is still its word.
+    ingest_refused: AtomicBool,
 }
 
 /// The fields of the status body this client reads. Everything else is
@@ -233,14 +238,37 @@ impl AccountAdmissionState {
                 key: held,
                 admission: AccountAdmission::AllowanceSpent,
                 hold_until,
+                ..
             }) if *held == key => *hold_until,
             _ => None,
         }
     }
 
+    /// Whether ingest has yet to say how it admits `cfg`'s account: nothing
+    /// read, no usable session, or a failed read. Decides only how a row is
+    /// described. The automatic gate reads [`Self::current`], where no answer
+    /// stays a no. A tenant outside the anchored namespaces is never asked,
+    /// so it is not waiting for anything.
+    pub fn awaiting_answer(&self, cfg: Option<&ContributorConfig>) -> bool {
+        let Some(cfg) = cfg else {
+            return false;
+        };
+        if !trace_commons_protocol::admission::is_anchored_tenant(&cfg.tenant_id)
+            || self.ingest_refused.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let key = AnswerKey::of(cfg);
+        !matches!(
+            &*self.answer.lock().expect("account admission lock"),
+            Some(answer) if answer.key == key && answer.answered
+        )
+    }
+
     /// An admission refusal from ingest: whatever it said before, it does not
     /// admit this account by account now.
     pub fn refused(&self) {
+        self.ingest_refused.store(true, Ordering::SeqCst);
         if let Some(answer) = self.answer.lock().expect("account admission lock").as_mut() {
             answer.admission = AccountAdmission::NotAdvertised;
         }
@@ -258,6 +286,10 @@ impl AccountAdmissionState {
     }
 
     fn record(&self, key: AnswerKey, body: Option<StatusBody>, now: DateTime<Utc>) {
+        let answered = body.is_some();
+        if answered {
+            self.ingest_refused.store(false, Ordering::SeqCst);
+        }
         let (admission, hold_until) = match body {
             Some(body) => (
                 AccountAdmission::from_status(&body.authority, body.ready),
@@ -272,6 +304,7 @@ impl AccountAdmissionState {
             key,
             admission,
             hold_until,
+            answered,
         });
     }
 
@@ -310,6 +343,7 @@ impl AccountAdmissionState {
     }
 
     fn forget(&self) {
+        self.ingest_refused.store(false, Ordering::SeqCst);
         *self.answer.lock().expect("account admission lock") = None;
     }
 
@@ -440,9 +474,9 @@ pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
     // The answer also decides whether queue rows read "cannot be sent"
     // (`contribution_eligibility::applies`), so a change in what that rule
     // says is a change to every row: shells are told to read the queue again.
-    let rows_before = shared.eligibility_applies_for(Some(&cfg));
+    let rows_before = shared.eligibility_view_for(Some(&cfg));
     read_answer(shared, &cfg, now, dry_run).await;
-    if shared.eligibility_applies_for(Some(&cfg)) != rows_before {
+    if shared.eligibility_view_for(Some(&cfg)) != rows_before {
         shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
     }
 }
@@ -1314,5 +1348,70 @@ mod tests {
             1,
             "its read was used"
         );
+    }
+
+    /// Only something ingest said ends the wait: a status body, or a refusal
+    /// on an upload. A failed read after an answer is a wait again, except
+    /// after a refusal, which stands until ingest next answers.
+    #[test]
+    fn only_ingest_saying_something_ends_the_wait_for_an_answer() {
+        let anchored = format!("nearai-{}", "a".repeat(64));
+        let s = AccountAdmissionState::default();
+        let a = cfg("https://a.invalid", &anchored);
+        assert!(s.awaiting_answer(Some(&a)), "nothing read yet");
+
+        s.record(AnswerKey::of(&a), None, now());
+        assert!(s.awaiting_answer(Some(&a)), "a failed read is no answer");
+
+        s.record(
+            AnswerKey::of(&a),
+            body("legacy_evidence", false, None),
+            now(),
+        );
+        assert!(!s.awaiting_answer(Some(&a)), "ingest said evidence");
+        assert!(
+            s.awaiting_answer(Some(&cfg("https://b.invalid", &anchored))),
+            "an answer belongs to its ingest"
+        );
+
+        s.record(AnswerKey::of(&a), None, now());
+        assert!(s.awaiting_answer(Some(&a)), "the session ran out");
+
+        s.refused();
+        assert!(!s.awaiting_answer(Some(&a)), "ingest refused an upload");
+        s.record(AnswerKey::of(&a), None, now());
+        assert!(
+            !s.awaiting_answer(Some(&a)),
+            "a refusal outlives a failed read"
+        );
+
+        s.record(AnswerKey::of(&a), body("bounded", true, None), now());
+        s.record(AnswerKey::of(&a), None, now());
+        assert!(s.awaiting_answer(Some(&a)), "a later answer replaced it");
+        assert_eq!(
+            s.current(Some(&a)),
+            AccountAdmission::NotAdvertised,
+            "the automatic gate still reads no answer as no"
+        );
+    }
+
+    /// A refusal with no earlier answer still counts, and unenrolling drops it.
+    #[test]
+    fn a_first_refusal_counts_and_unenrolling_forgets_it() {
+        let anchored = format!("nearai-{}", "a".repeat(64));
+        let s = AccountAdmissionState::default();
+        let a = cfg("https://a.invalid", &anchored);
+        s.refused();
+        assert!(!s.awaiting_answer(Some(&a)));
+        s.forget_enrollment();
+        assert!(s.awaiting_answer(Some(&a)));
+    }
+
+    /// Only the anchored namespaces are ever asked, so no other tenant waits.
+    #[test]
+    fn a_tenant_that_is_never_asked_is_not_waiting() {
+        let s = AccountAdmissionState::default();
+        assert!(!s.awaiting_answer(Some(&cfg("https://a.invalid", "tenant-1"))));
+        assert!(!s.awaiting_answer(None));
     }
 }

@@ -61,9 +61,54 @@ pub fn toast(approved: u64, redactions: u64, flagged: u64, skipped: &[&str]) -> 
     }
 }
 
+/// [`toast`] for a whole `approve` response. `excluded` is how many pending
+/// entries a group selector left out before processing any of them.
+pub fn approve_toast(
+    approved: u64,
+    redactions: u64,
+    flagged: u64,
+    skipped: &[&str],
+    excluded: u64,
+) -> SubmitToast {
+    // Excluded entries were never previewed, so no scrub ran on them.
+    if excluded > 0 && approved == 0 && flagged == 0 && redactions == 0 && skipped.is_empty() {
+        return SubmitToast {
+            line: copy::submit_approved_clause(0),
+            offer_undo: false,
+        };
+    }
+    toast(approved, redactions, flagged, skipped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A group that excluded everything scrubbed nothing, so it must not say
+    /// scrubbing ran and matched nothing.
+    #[test]
+    fn a_group_that_excluded_everything_makes_no_scrub_claim() {
+        let all_out = approve_toast(0, 0, 0, &[], 3);
+        assert_eq!(all_out.line, "Nothing approved.");
+        assert!(!all_out.offer_undo);
+    }
+
+    /// Anything actually processed keeps its scrub result.
+    #[test]
+    fn a_group_that_processed_something_keeps_its_scrub_clause() {
+        assert_eq!(
+            approve_toast(2, 0, 0, &[], 3).line,
+            "Approved 2. Scrubbing matched nothing."
+        );
+        assert_eq!(
+            approve_toast(0, 0, 0, &["not-pending"], 3).line,
+            "Nothing approved. Scrubbing matched nothing. 1 not approved: already decided."
+        );
+        assert_eq!(
+            approve_toast(0, 0, 0, &[], 0).line,
+            "Nothing approved. Scrubbing matched nothing."
+        );
+    }
 
     #[test]
     fn the_spec_worked_examples_render_exactly() {

@@ -73,6 +73,11 @@ pub const STATE_INELIGIBLE_PERMANENT: &str = "ineligible_permanent";
 pub const STATE_INELIGIBLE_CONFIGURATION: &str = "ineligible_configuration";
 /// Not evaluated. Never a silent default -- see the module docs.
 pub const STATE_UNKNOWN: &str = "unknown";
+/// A row recorded as ineligible, while ingest has not answered whether it
+/// admits this account without per-session evidence. Published, never stored:
+/// the recorded verdict returns or goes away with the answer. Not sendable,
+/// because a refused send is not offered again.
+pub const STATE_STATUS_UNAVAILABLE: &str = "status_unavailable";
 
 /// The fourteen reason labels, owned by [`attestation_mark`] and re-exported
 /// here unchanged.
@@ -202,6 +207,48 @@ pub fn contributable_in_a_group(eligibility: Option<&str>) -> bool {
         eligibility,
         None | Some(STATE_ELIGIBLE) | Some(STATE_UNKNOWN)
     )
+}
+
+/// What a surface needs to publish a row's eligibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EligibilityView {
+    /// [`applies`], or `None` for a config that could not be read.
+    pub applies: Option<bool>,
+    /// Ingest has given no answer about account admission for this account.
+    pub awaiting_answer: bool,
+}
+
+impl From<Option<bool>> for EligibilityView {
+    fn from(applies: Option<bool>) -> Self {
+        Self {
+            applies,
+            awaiting_answer: false,
+        }
+    }
+}
+
+/// The state and reason a row publishes.
+///
+/// While ingest has not answered, a recorded ineligibility is not a fact about
+/// this session: an account admitted without evidence could send it. It is
+/// published as [`STATE_STATUS_UNAVAILABLE`], with no reason, and stays out of
+/// group submits through its stored state. Every other state is unchanged.
+#[must_use]
+pub fn published<'a>(
+    state: Option<&'a str>,
+    reason: Option<&'a str>,
+    awaiting_answer: bool,
+) -> (&'a str, Option<&'a str>) {
+    let state = state.unwrap_or(STATE_UNKNOWN);
+    if awaiting_answer
+        && matches!(
+            state,
+            STATE_INELIGIBLE_PERMANENT | STATE_INELIGIBLE_CONFIGURATION
+        )
+    {
+        return (STATE_STATUS_UNAVAILABLE, None);
+    }
+    (state, reason)
 }
 
 /// Classify one session.
@@ -608,5 +655,42 @@ mod tests {
             eligibility_control(STATE_INELIGIBLE_PERMANENT),
             ContributionControl::None
         );
+    }
+
+    /// No answer from ingest is not a verdict on the session, so a recorded
+    /// "cannot be sent" is not repeated, and neither is its reason.
+    #[test]
+    fn an_unanswered_ineligible_row_publishes_status_unavailable() {
+        for state in [STATE_INELIGIBLE_PERMANENT, STATE_INELIGIBLE_CONFIGURATION] {
+            assert_eq!(
+                published(Some(state), Some(REASON_NO_CALL), true),
+                (STATE_STATUS_UNAVAILABLE, None)
+            );
+            assert_eq!(
+                published(Some(state), Some(REASON_NO_CALL), false),
+                (state, Some(REASON_NO_CALL)),
+                "an answer keeps the recorded verdict"
+            );
+        }
+    }
+
+    /// Rows that can already be sent stay sendable without an answer.
+    #[test]
+    fn an_unanswered_sendable_row_keeps_its_state() {
+        assert_eq!(
+            published(Some(STATE_ELIGIBLE), None, true),
+            (STATE_ELIGIBLE, None)
+        );
+        assert_eq!(
+            published(Some(STATE_UNKNOWN), Some(REASON_RECEIPT_UNAVAILABLE), true),
+            (STATE_UNKNOWN, Some(REASON_RECEIPT_UNAVAILABLE))
+        );
+        assert_eq!(published(None, None, true), (STATE_UNKNOWN, None));
+    }
+
+    /// The group filter must never pick up the published-only state.
+    #[test]
+    fn status_unavailable_is_not_contributable_in_a_group() {
+        assert!(!contributable_in_a_group(Some(STATE_STATUS_UNAVAILABLE)));
     }
 }

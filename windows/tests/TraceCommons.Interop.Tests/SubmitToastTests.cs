@@ -22,6 +22,30 @@ namespace TraceCommons.Interop.Tests;
 /// </summary>
 public sealed class SubmitToastTests
 {
+    [Theory]
+    [InlineData("{\"approved\":0,\"excluded_ineligible\":3}")]
+    [InlineData("{\"approved\":0,\"excluded_held\":2}")]
+    public void AGroupThatExcludedEverythingMakesNoScrubClaim(string json)
+    {
+        var hold = System.Text.Json.JsonSerializer.Deserialize<ApprovalHold>(json)!;
+        Assert.Equal("Nothing approved.", hold.Toast.Line);
+        Assert.False(hold.Toast.OfferUndo);
+    }
+
+    [Fact]
+    public void AGroupThatProcessedSomethingKeepsItsScrubClause()
+    {
+        Assert.Equal(
+            "Approved 2. Scrubbing matched nothing.",
+            SubmitToast.RenderApproval(2, 0, 0, new List<string>(), 3).Line);
+        Assert.Equal(
+            "Nothing approved. Scrubbing matched nothing. 1 not approved: already decided.",
+            SubmitToast.RenderApproval(0, 0, 0, new List<string> { "not-pending" }, 3).Line);
+        Assert.Equal(
+            "Nothing approved. Scrubbing matched nothing.",
+            SubmitToast.RenderApproval(0, 0, 0, new List<string>(), 0).Line);
+    }
+
     [Fact]
     public void TheSpecWorkedExamplesRenderExactly()
     {
