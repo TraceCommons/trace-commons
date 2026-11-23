@@ -50,8 +50,8 @@ fn skills_is_live_default_off_and_remotely_supported_in_nonproduction() {
     }
 }
 #[test]
-fn production_blocks_skills_and_desktop_overrides() {
-    let flags = ["insights_skills", "claude_desktop_private_ai"];
+fn production_blocks_skills_overrides() {
+    let flags = ["insights_skills"];
     let registry = registry().unwrap();
     let profile =
         super::test_signing::pin(profile_for_environment(Environment::Production).unwrap());
@@ -204,7 +204,11 @@ fn desktop_ships_disabled_in_each_capable_environment() {
             .required_capabilities
             .contains("claude_desktop_private_ai_v1")
     );
-    for environment in [Environment::Staging, Environment::Testing] {
+    for environment in [
+        Environment::Production,
+        Environment::Staging,
+        Environment::Testing,
+    ] {
         let profile = profile_for_environment(environment).unwrap();
         registry.validate(&profile).unwrap();
         assert!(
@@ -215,6 +219,23 @@ fn desktop_ships_disabled_in_each_capable_environment() {
         assert!(profile.remote_enable.contains("claude_desktop_private_ai"));
         let decisions = evaluate(&registry, &profile, None, Utc::now());
         assert!(!decisions["claude_desktop_private_ai"].enabled);
+        let pinned = super::test_signing::pin(profile);
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::open(registry.clone(), pinned, dir.path(), now()).unwrap();
+        assert!(!runtime.snapshot().is_enabled("claude_desktop_private_ai"));
+        let manifest = sign(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "environment": environment,
+                "revision": 1,
+                "issued_at": now(),
+                "expires_at": now() + Duration::hours(1),
+                "flags": {"claude_desktop_private_ai": true}
+            }))
+            .unwrap(),
+        );
+        runtime.accept(&manifest, now()).unwrap();
+        assert!(runtime.snapshot().is_enabled("claude_desktop_private_ai"));
     }
 }
 
