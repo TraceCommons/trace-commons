@@ -562,7 +562,7 @@ impl App {
             let shown = tray.clone();
             let attention = window.downgrade();
             credit_arrival::clear_attention_when_active(window.upcast_ref());
-            credit_arrival::CreditArrival::new(
+            credit_arrival::CreditArrival::with_store(
                 crate::home_cards::HomePrefs::load().animates_credit_icon,
                 credit_arrival::Hooks {
                     reduce_motion: Box::new(|| !glass_motion::animations_enabled()),
@@ -576,6 +576,7 @@ impl App {
                         glib::timeout_add_local_once(std::time::Duration::from_millis(ms), frame);
                     }),
                 },
+                crate::shell_state_file("credit-arrival-baseline.json"),
             )
         };
         let app = Rc::new(Self {
@@ -1083,6 +1084,8 @@ impl App {
                 app.shell
                     .set_requires_onboarding(onboarding::requires_onboarding(&status));
                 onboarding::present_if_needed(app, &status);
+                app.credit_arrival
+                    .set_scope(status.account_scope.as_deref());
                 *app.status.borrow_mut() = Some(status);
                 queue::render_badge(app);
             } else {
@@ -1194,7 +1197,7 @@ impl App {
                 home_rollup.as_ref(),
                 app.credit_condition.borrow().as_deref(),
             );
-            // A whole Trace credit settled while the app runs celebrates on
+            // Trace credit settling celebrates on
             // the tray (`AppModel.recordHistoryRollup`), signed in to NEAR
             // AI or not.
             if let Some(rollup) = home_rollup.as_ref() {

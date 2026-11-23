@@ -5,8 +5,8 @@
 //! menu-bar item's gleam, hop and mini coins, and the window the Dock's
 //! informational bounce, both behind Settings' credit-arrival switch.
 //!
-//! - **What fires it** is `credit_arrival::Tracker`: a whole credit
-//!   arriving while the app runs, never one from before it started.
+//! - **What fires it** is `credit_arrival::Tracker`: any real increase,
+//!   against a baseline saved per account.
 //! - **Frames** are the Mac's schedule: 41 frames at k/24 s, 42 ms apart,
 //!   then the icon at rest. Under reduced motion, one frame at 0.45 s held
 //!   1.6 s and no attention request, as the Mac skips the bounce when
@@ -28,7 +28,8 @@
 //! Nothing here ticks at rest: each frame schedules the next, and the last
 //! schedules nothing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use crate::credit_arrival::{Tracker, icon_animation};
@@ -63,6 +64,10 @@ pub fn plan(still: bool) -> Vec<(Option<f64>, u64)> {
 
 pub struct CreditArrival {
     tracker: Cell<Tracker>,
+    /// The account the baseline belongs to, once the daemon has said.
+    scope: RefCell<Option<String>>,
+    /// Where the baseline is kept; `None` keeps it for this run only.
+    store: Option<PathBuf>,
     enabled: Cell<bool>,
     /// Bumped by every start and stop, so a frame scheduled by an earlier
     /// celebration finds it is no longer current and does nothing.
@@ -72,29 +77,50 @@ pub struct CreditArrival {
 
 impl CreditArrival {
     pub fn new(enabled: bool, hooks: Hooks) -> Rc<Self> {
+        Self::with_store(enabled, hooks, None)
+    }
+
+    /// [`Self::new`], keeping the baseline in `store` across launches.
+    pub fn with_store(enabled: bool, hooks: Hooks, store: Option<PathBuf>) -> Rc<Self> {
         Rc::new(Self {
             tracker: Cell::new(Tracker::default()),
+            scope: RefCell::new(None),
+            store,
             enabled: Cell::new(enabled),
             generation: Cell::new(0),
             hooks,
         })
     }
 
-    /// A NEAR AI balance read: celebrates a whole credit received.
-    pub fn observe_received(self: &Rc<Self>, received_total_nanos: Option<i64>) {
-        let mut tracker = self.tracker.get();
-        let fired = tracker.observe(received_total_nanos);
-        self.tracker.set(tracker);
-        if fired {
-            self.celebrate();
+    /// The account the daemon reports: a change loads that account's
+    /// baseline, so another account's total is never read as new credit.
+    pub fn set_scope(&self, scope: Option<&str>) {
+        if self.scope.borrow().as_deref() == scope {
+            return;
         }
+        *self.scope.borrow_mut() = scope.map(str::to_string);
+        self.tracker
+            .set(Tracker::stored(self.store.as_deref(), scope));
     }
 
-    /// A history rollup read: celebrates a whole Trace credit settled.
+    /// A NEAR AI balance read: celebrates any credit received.
+    pub fn observe_received(self: &Rc<Self>, received_total_nanos: Option<i64>) {
+        self.note(|tracker| tracker.observe(received_total_nanos));
+    }
+
+    /// A history rollup read: celebrates any Trace credit settled.
     pub fn observe_credit_final(self: &Rc<Self>, credit_final: Option<f64>) {
-        let mut tracker = self.tracker.get();
-        let fired = tracker.observe_credit_final(credit_final);
+        self.note(|tracker| tracker.observe_credit_final(credit_final));
+    }
+
+    fn note(self: &Rc<Self>, observe: impl FnOnce(&mut Tracker) -> bool) {
+        let before = self.tracker.get();
+        let mut tracker = before;
+        let fired = observe(&mut tracker);
         self.tracker.set(tracker);
+        if tracker != before {
+            tracker.save(self.store.as_deref(), self.scope.borrow().as_deref());
+        }
         if fired {
             self.celebrate();
         }
