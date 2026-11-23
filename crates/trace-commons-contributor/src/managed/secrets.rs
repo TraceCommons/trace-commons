@@ -37,10 +37,13 @@ impl RedactedSecret {
         Self(value)
     }
 
-    // Its callers are macOS and Windows only; a test build elsewhere compiles
-    // it with no caller, which -D warnings fails.
-    #[cfg(any(target_os = "macos", windows, test))]
-    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    // Its callers are Apple silicon macOS and Windows only; a test build
+    // elsewhere compiles it with no caller, which -D warnings fails.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
+    #[cfg_attr(
+        not(any(all(target_os = "macos", target_arch = "aarch64"), windows)),
+        allow(dead_code)
+    )]
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }

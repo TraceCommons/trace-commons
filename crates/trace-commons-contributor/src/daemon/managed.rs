@@ -1146,11 +1146,16 @@ fn respond(request: &Request, result: Result<Value, Refusal>) -> Response {
     }
 }
 
-/// Whether Red Team managed sessions are available on this build: every
-/// macOS and Windows build, no other OS. Whether this Windows host can run
-/// them (edition, Hyper-V, group) is the setup state, not availability.
+/// Whether Red Team managed sessions are available on this build: Apple
+/// silicon macOS and Windows, no other target. Intel macOS has no pinned
+/// `rts` runtime archive (`RTS_RELEASE` is `aarch64-apple-darwin` only).
+/// Whether a Windows host can run them (edition, Hyper-V, group) is the
+/// setup state, not availability.
 pub fn red_team_available(_shared: &DaemonShared) -> bool {
-    cfg!(any(target_os = "macos", windows))
+    cfg!(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        windows
+    ))
 }
 
 /// Whether `request` is Red Team's "Enable Red Team" setup action. It runs

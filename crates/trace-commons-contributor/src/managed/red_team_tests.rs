@@ -1,6 +1,9 @@
-// The tests here are macOS-only; elsewhere their shared imports and helpers
-// are unused, which -D warnings turns into a build failure (Linux and Windows CI).
-#![cfg_attr(not(target_os = "macos"), allow(unused_imports, dead_code))]
+// Some tests here are Apple silicon macOS-only; elsewhere their shared imports
+// and helpers are unused, which -D warnings turns into a build failure.
+#![cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(unused_imports, dead_code)
+)]
 use super::*;
 use crate::config::ConfigStore;
 use crate::daemon::ipc::{DaemonShared, Request};
@@ -64,7 +67,7 @@ fn test_context(cwd: &Path, inputs: Vec<PathBuf>, key: &str) -> LaunchContext {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[tokio::test]
 async fn redeem_returns_the_key_only_for_red_team() {
     use crate::daemon::managed::handle_async_with;
@@ -205,7 +208,7 @@ async fn redeem_returns_the_key_only_for_red_team() {
     assert!(!format!("{:?}", rt_ctx.red_team_key).contains("sk-red-team-secret"));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_key_is_never_in_the_spec_environment() {
     let dir = tempfile::tempdir().unwrap();
@@ -226,7 +229,7 @@ fn the_key_is_never_in_the_spec_environment() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_spec_captures_receipts_into_the_managed_route_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,7 +245,7 @@ fn the_spec_captures_receipts_into_the_managed_route_home() {
     assert!(!spec.ironwire.capture.logprobs);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_spec_targets_the_builds_near_ai_environment() {
     use rts::inference::NearEnvironment;
@@ -263,7 +266,7 @@ fn the_spec_targets_the_builds_near_ai_environment() {
 /// build does not require its compose hash to be pinned (staging 0.24.68:
 /// 10d29b73 pinned in the morning, 4c544d60 live by the afternoon). Every
 /// other check stays on, and production stays strictly pinned.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn only_staging_accepts_an_unpinned_compose_that_the_tee_measured() {
     use rts::attest::{AttestOptions, ComposePolicy};
@@ -287,7 +290,7 @@ fn only_staging_accepts_an_unpinned_compose_that_the_tee_measured() {
 /// rts and the daemon must never disagree about which NEAR AI the key is for:
 /// the environment rts attests and proxies to is the channel's own inference
 /// base, the one the model catalogue is read from.
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_near_environment_is_the_channels_inference_base() {
     assert_eq!(
@@ -296,7 +299,7 @@ fn the_near_environment_is_the_channels_inference_base() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_tool_command_is_this_executable() {
     let dir = tempfile::tempdir().unwrap();
@@ -539,7 +542,7 @@ fn collection_off_publishes_nothing() {
     ));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn the_ledger_is_in_the_managed_route_home() {
     let dir = tempfile::tempdir().unwrap();

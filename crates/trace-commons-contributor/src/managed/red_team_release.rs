@@ -20,7 +20,7 @@ impl ReleasePin {
         true
     }
 
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
     pub fn to_archive(self) -> rts::setup::ReleaseArchive {
         rts::setup::ReleaseArchive {
             url: self.url.to_owned(),
