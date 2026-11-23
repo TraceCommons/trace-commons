@@ -88,6 +88,37 @@ echo "profile expires $EXPIRES ($DAYS_LEFT days)"
 test "$DAYS_LEFT" -gt 180 \
   || { echo "FAIL: under 180 days left; renew the profile or the certificate"; exit 1; }
 
+echo "--- every architecture slice links only portable libraries"
+BIN="$APP/Contents/MacOS/$EXECUTABLE"
+test -x "$BIN" || { echo "FAIL: $BIN is missing or not executable"; exit 1; }
+check_portable_macho() {
+  local target="$1"
+  local archs arch deps dep
+  archs="$(lipo -archs "$target" 2>/dev/null)" \
+    || { echo "FAIL: could not read architectures of $target"; exit 1; }
+  for arch in $archs; do
+    deps="$(otool -arch "$arch" -L "$target" | awk 'NR > 1 && /^[[:space:]]+/ { sub(/^[[:space:]]+/, ""); sub(/ \(compatibility version .*/, ""); print }')"
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      case "$dep" in
+        /System/Library/*|/usr/lib/*|@rpath/*|@executable_path/*|@loader_path/*) ;;
+        *)
+          echo "FAIL: $target ($arch) links non-portable library: $dep"
+          exit 1
+          ;;
+      esac
+    done <<EOF
+$deps
+EOF
+  done
+}
+check_portable_macho "$BIN"
+if [ -d "$APP/Contents/Frameworks" ]; then
+  while IFS= read -r -d '' dylib; do
+    check_portable_macho "$dylib"
+  done < <(find "$APP/Contents/Frameworks" -maxdepth 2 -type f -name '*.dylib' -print0)
+fi
+
 # PR CI runs everything above against an ad-hoc-signed fixture bundle (see
 # test-verify-macos-entitlements.sh). An ad-hoc signature can never be granted
 # the access group, so the launch below means something only on a release
@@ -97,37 +128,58 @@ if [ "${TC_VERIFY_STATIC_ONLY:-}" = 1 ]; then
   exit 0
 fi
 
-echo "--- the signed app can actually reach its store"
-BIN="$APP/Contents/MacOS/$EXECUTABLE"
-# A backgrounded job's failure does not trip `set -e`, so a wrong executable
-# name produces output byte-identical to a kernel kill at exec. Name it here.
-test -x "$BIN" || { echo "FAIL: $BIN is missing or not executable"; exit 1; }
-OUT="$(mktemp)"
-TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT="$OUT" "$BIN" &
-PID=$!
-for _ in $(seq 1 30); do
-  [ -s "$OUT" ] && break
-  sleep 1
-done
-# "Produced nothing" has two causes and they are not the same failure. A
-# kernel kill at exec -- the case this check exists for -- leaves no process.
-# A first notarized launch waiting on Gatekeeper's online ticket check leaves
-# one running, and reporting that as a launch failure would block a healthy
-# ship. The timeout is not tuned; distinguishing the two is what makes it safe.
-if kill -0 "$PID" 2>/dev/null; then ALIVE=yes; else ALIVE=no; fi
-kill "$PID" 2>/dev/null || true
-if [ ! -s "$OUT" ]; then
-  if [ "$ALIVE" = yes ]; then
-    echo "FAIL: the signed app was still running after 30s and wrote nothing."
-    echo "      It launched, so this is not the entitlement kill. Suspect a"
-    echo "      slow first-launch Gatekeeper check; re-run before raising the"
-    echo "      timeout, and do not treat this as a signature failure."
-  else
-    echo "FAIL: the signed app exited without writing anything; it may not"
-    echo "      have launched at all. That is what a kernel kill for an"
-    echo "      entitlement the profile does not grant looks like from here."
+probe_credential_store() {
+  local label="$1"
+  shift
+  local out pid alive
+  out="$(mktemp)"
+  TRACE_COMMONS_CREDENTIAL_STORE_CHECK_OUT="$out" "$@" &
+  pid=$!
+  for _ in $(seq 1 30); do
+    [ -s "$out" ] && break
+    sleep 1
+  done
+  # "Produced nothing" has two causes and they are not the same failure. A
+  # kernel kill at exec or a dyld missing-library abort leaves no process.
+  # A first notarized launch waiting on Gatekeeper's online ticket check leaves
+  # one running, and reporting that as a launch failure would block a healthy
+  # ship. The timeout is not tuned; distinguishing the two is what makes it safe.
+  if kill -0 "$pid" 2>/dev/null; then alive=yes; else alive=no; fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  if [ ! -s "$out" ]; then
+    rm -f "$out"
+    if [ "$alive" = yes ]; then
+      echo "FAIL: the signed app ($label) was still running after 30s and wrote nothing."
+      echo "      It launched, so this is not the entitlement kill. Suspect a"
+      echo "      slow first-launch Gatekeeper check; re-run before raising the"
+      echo "      timeout, and do not treat this as a signature failure."
+    else
+      echo "FAIL: the signed app ($label) exited without writing anything; it may not"
+      echo "      have launched at all. That is what a kernel kill for an"
+      echo "      entitlement the profile does not grant, or a dyld missing-library"
+      echo "      abort, looks like from here."
+    fi
+    exit 1
   fi
-  exit 1
+  if ! grep -q "^reachable" "$out"; then
+    echo "FAIL: ($label) $(cat "$out")"
+    rm -f "$out"
+    exit 1
+  fi
+  rm -f "$out"
+  echo "PASS: signed app ($label) reached the data-protection keychain"
+}
+
+echo "--- the signed app can actually reach its store"
+probe_credential_store "native" "$BIN"
+
+EXEC_ARCHS="$(lipo -archs "$BIN" 2>/dev/null || true)"
+if [ "$(uname -m)" = "arm64" ] && [[ " $EXEC_ARCHS " == *" x86_64 "* ]]; then
+  if arch -x86_64 /usr/bin/true 2>/dev/null; then
+    echo "--- the signed app's x86_64 slice can actually reach its store (Rosetta)"
+    probe_credential_store "x86_64" arch -x86_64 "$BIN"
+  else
+    echo "note: Rosetta 2 is not installed on this runner; skipping x86_64 launch probe (static otool check passed)"
+  fi
 fi
-grep -q "^reachable" "$OUT" || { echo "FAIL: $(cat "$OUT")"; exit 1; }
-echo "PASS: signed app reached the data-protection keychain"

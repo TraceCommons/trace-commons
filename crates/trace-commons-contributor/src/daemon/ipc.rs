@@ -16693,8 +16693,11 @@ mod tests {
         let r = handle_request_async(&s, &req("managed_snapshot", serde_json::json!({}))).await;
         let body = r.result.expect("snapshot");
         assert_eq!(body["capabilities"]["near_ai_signin"], true);
-        // The three coding tools, plus Red Team on macOS and Windows.
-        let tools = if cfg!(any(target_os = "macos", windows)) {
+        // The three coding tools, plus Red Team on Apple silicon macOS and Windows.
+        let tools = if cfg!(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            windows
+        )) {
             4
         } else {
             3

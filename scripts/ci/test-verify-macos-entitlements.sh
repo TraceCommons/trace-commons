@@ -137,4 +137,62 @@ echo "$OUT"
 printf '%s' "$OUT" | grep -qx 'FAIL: keychain access group absent from keychain-access-groups' \
   || { echo "FAIL: the refusal was not the keychain group"; exit 1; }
 
-echo "PASS: verify-macos-entitlements.sh passes the entitled fixtures and refuses the bare and mismatched ones"
+# Universal Mach-O load-path regression: reproduce the Intel launch crash where
+# the arm64 slice links @rpath/... while the x86_64 slice still embeds an
+# absolute build-directory path. Signing succeeds, arm64 launches, Intel aborts
+# in dyld. verify-macos-entitlements.sh must refuse it even in static mode, and
+# accept the fixed universal binary where both slices use @rpath.
+cat > "$WORK/lib.c" <<'C'
+int fake_symbol(void) { return 0; }
+C
+cat > "$WORK/main.c" <<'C'
+int fake_symbol(void);
+int main(void) { return fake_symbol(); }
+C
+mkdir -p "$WORK/libs"
+cc -arch arm64 -dynamiclib -install_name "@rpath/libfake.dylib" \
+  "$WORK/lib.c" -o "$WORK/libs/libfake-arm64.dylib"
+cc -arch x86_64 -dynamiclib -install_name "/Users/runner/target/x86_64-apple-darwin/release/libfake.dylib" \
+  "$WORK/lib.c" -o "$WORK/libs/libfake-x86_64-bad.dylib"
+cc -arch x86_64 -dynamiclib -install_name "@rpath/libfake.dylib" \
+  "$WORK/lib.c" -o "$WORK/libs/libfake-x86_64-good.dylib"
+
+cc -arch arm64 "$WORK/main.c" "$WORK/libs/libfake-arm64.dylib" \
+  -Wl,-rpath,@executable_path/../Frameworks -o "$WORK/main-arm64"
+cc -arch x86_64 "$WORK/main.c" "$WORK/libs/libfake-x86_64-bad.dylib" \
+  -Wl,-rpath,@executable_path/../Frameworks -o "$WORK/main-x86_64-bad"
+cc -arch x86_64 "$WORK/main.c" "$WORK/libs/libfake-x86_64-good.dylib" \
+  -Wl,-rpath,@executable_path/../Frameworks -o "$WORK/main-x86_64-good"
+
+BAD_X86="$WORK/bad-x86/Near.ai.app"
+make_bundle "$BAD_X86"
+mkdir -p "$BAD_X86/Contents/Frameworks"
+lipo -create "$WORK/main-arm64" "$WORK/main-x86_64-bad" \
+  -output "$BAD_X86/Contents/MacOS/TraceCommonsApp"
+lipo -create "$WORK/libs/libfake-arm64.dylib" "$WORK/libs/libfake-x86_64-good.dylib" \
+  -output "$BAD_X86/Contents/Frameworks/libfake.dylib"
+codesign --force --sign - "$BAD_X86/Contents/Frameworks/libfake.dylib"
+codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$BAD_X86"
+echo "=== fixture: universal bundle with non-portable x86_64 dylib path must be refused"
+if OUT="$(TC_VERIFY_STATIC_ONLY=1 /bin/bash "$VERIFY" "$BAD_X86" 2>&1)"; then
+  echo "$OUT"
+  echo "FAIL: the script passed a bundle whose x86_64 slice links a /Users/ path"
+  exit 1
+fi
+echo "$OUT"
+printf '%s' "$OUT" | grep -q 'FAIL: .*(x86_64) links non-portable library: /Users/runner/target/x86_64-apple-darwin/release/libfake.dylib' \
+  || { echo "FAIL: the refusal did not identify the non-portable x86_64 dylib path"; exit 1; }
+
+GOOD_UNIVERSAL="$WORK/good-universal/Near.ai.app"
+make_bundle "$GOOD_UNIVERSAL"
+mkdir -p "$GOOD_UNIVERSAL/Contents/Frameworks"
+lipo -create "$WORK/main-arm64" "$WORK/main-x86_64-good" \
+  -output "$GOOD_UNIVERSAL/Contents/MacOS/TraceCommonsApp"
+lipo -create "$WORK/libs/libfake-arm64.dylib" "$WORK/libs/libfake-x86_64-good.dylib" \
+  -output "$GOOD_UNIVERSAL/Contents/Frameworks/libfake.dylib"
+codesign --force --sign - "$GOOD_UNIVERSAL/Contents/Frameworks/libfake.dylib"
+codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$GOOD_UNIVERSAL"
+echo "=== fixture: universal bundle with portable @rpath links on both slices"
+TC_VERIFY_STATIC_ONLY=1 /bin/bash "$VERIFY" "$GOOD_UNIVERSAL"
+
+echo "PASS: verify-macos-entitlements.sh passes the entitled fixtures and refuses the bare, mismatched and non-portable ones"

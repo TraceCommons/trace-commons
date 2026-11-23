@@ -76,6 +76,27 @@ verify_universal() {
   echo "verified universal ($archs): $label"
 }
 
+verify_portable_macho() {
+  local label="$1" bin="$2"
+  local arch dep deps
+  for arch in arm64 x86_64; do
+    deps="$(otool -arch "$arch" -L "$bin" | awk 'NR > 1 && /^[[:space:]]+/ { sub(/^[[:space:]]+/, ""); sub(/ \(compatibility version .*/, ""); print }')"
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      case "$dep" in
+        /System/Library/*|/usr/lib/*|@rpath/*|@executable_path/*|@loader_path/*) ;;
+        *)
+          echo "FATAL: $label ($bin) [$arch] links non-portable library: $dep" >&2
+          echo "A build-machine or Homebrew path in any slice passes codesign and" >&2
+          echo "notarization, then aborts in dyld on launch on that architecture." >&2
+          exit 1
+          ;;
+      esac
+    done <<< "$deps"
+  done
+  echo "verified portable load paths (arm64 x86_64): $label"
+}
+
 echo "--- building the FFI dylib for ${RUST_TARGETS[*]}"
 DYLIB_PATHS=()
 NEAR_AI_PATHS=()
@@ -92,6 +113,12 @@ done
 
 lipo -create "${DYLIB_PATHS[@]}" -output "$STAGING_DIR/$DYLIB_NAME"
 verify_universal "FFI dylib" "$STAGING_DIR/$DYLIB_NAME"
+# cargo stamps each per-target dylib with a different absolute install name
+# under target/<triple>/. Rewrite the staged universal dylib's install name to
+# @rpath BEFORE swift build links against it, so both the arm64 and x86_64
+# slices of TraceCommonsApp record @rpath/$DYLIB_NAME directly instead of
+# embedding two different build-machine paths.
+install_name_tool -id "@rpath/$DYLIB_NAME" "$STAGING_DIR/$DYLIB_NAME" 2>/dev/null
 lipo -create "${NEAR_AI_PATHS[@]}" -output "$STAGING_DIR/near-ai"
 verify_universal "NEAR AI CLI" "$STAGING_DIR/near-ai"
 
@@ -154,11 +181,16 @@ done
 ./scripts/make-icon-document.sh "$REPO_ROOT/$TC_ICON_SOURCE" \
   "$APP/Contents/Resources" "$TC_CHANNEL"
 
-# cargo stamps the dylib with an absolute install name under target/. Repoint
-# it inside the bundle so the app does not depend on this checkout's path.
+# Belt-and-braces: the staged universal dylib already has @rpath/$DYLIB_NAME
+# before swift build links against it, so fresh links record @rpath directly
+# in both slices. Rewrite any lingering per-target absolute install name from
+# an incremental build too, across every target slice rather than only the
+# first, and add the bundle Frameworks rpath.
 install_name_tool -id "@rpath/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME" 2>/dev/null
-OLD_ID="$(otool -D "${DYLIB_PATHS[0]}" | tail -1)"
-install_name_tool -change "$OLD_ID" "@rpath/$DYLIB_NAME" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
+for dylib_path in "${DYLIB_PATHS[@]}"; do
+  OLD_ID="$(otool -D "$dylib_path" | tail -1)"
+  install_name_tool -change "$OLD_ID" "@rpath/$DYLIB_NAME" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
+done
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/TraceCommonsApp" 2>/dev/null || true
 
 # --- Sparkle ---------------------------------------------------------------
@@ -235,9 +267,33 @@ if [ "${TC_SKIP_ADHOC_SIGN:-0}" != "1" ]; then
   codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || true
 fi
 
-echo "--- verifying the final bundle is universal"
+echo "--- verifying the final bundle is universal and portable"
 verify_universal "app executable" "$APP/Contents/MacOS/TraceCommonsApp"
 verify_universal "embedded dylib" "$APP/Contents/Frameworks/$DYLIB_NAME"
+verify_universal "bundled CLI" "$APP/Contents/MacOS/near-ai"
+verify_portable_macho "app executable" "$APP/Contents/MacOS/TraceCommonsApp"
+verify_portable_macho "embedded dylib" "$APP/Contents/Frameworks/$DYLIB_NAME"
+verify_portable_macho "bundled CLI" "$APP/Contents/MacOS/near-ai"
+verify_portable_macho "Sparkle framework" "$SPARKLE_FRAMEWORK/Versions/B/Sparkle"
+for arch in arm64 x86_64; do
+  DYLIB_ID="$(otool -arch "$arch" -D "$APP/Contents/Frameworks/$DYLIB_NAME" | tail -1)"
+  if [ "$DYLIB_ID" != "@rpath/$DYLIB_NAME" ]; then
+    echo "FATAL: embedded dylib [$arch] install name is '$DYLIB_ID', expected '@rpath/$DYLIB_NAME'" >&2
+    exit 1
+  fi
+  APP_DEPS="$(otool -arch "$arch" -L "$APP/Contents/MacOS/TraceCommonsApp")"
+  for need in "@rpath/$DYLIB_NAME" "@rpath/Sparkle.framework/Versions/B/Sparkle"; do
+    if ! printf '%s\n' "$APP_DEPS" | grep -qF "$need"; then
+      echo "FATAL: app executable [$arch] does not link $need" >&2
+      exit 1
+    fi
+  done
+  if ! otool -arch "$arch" -l "$APP/Contents/MacOS/TraceCommonsApp" | grep -qF "path @executable_path/../Frameworks "; then
+    echo "FATAL: app executable [$arch] is missing LC_RPATH @executable_path/../Frameworks" >&2
+    exit 1
+  fi
+done
+echo "verified @rpath links and LC_RPATH (arm64 x86_64): app executable and embedded dylib"
 
 echo "--- verifying the bundle's channel"
 assert_bundle_channel "$APP"

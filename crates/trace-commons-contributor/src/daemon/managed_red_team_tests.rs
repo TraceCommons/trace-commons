@@ -1,6 +1,9 @@
-// The tests here are macOS-only; elsewhere their shared imports and helpers
-// are unused, which -D warnings turns into a build failure (Linux and Windows CI).
-#![cfg_attr(not(target_os = "macos"), allow(unused_imports, dead_code))]
+// Some tests here are Apple silicon macOS-only; elsewhere their shared imports
+// and helpers are unused, which -D warnings turns into a build failure.
+#![cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(unused_imports, dead_code)
+)]
 use super::*;
 use crate::daemon::ipc::Request;
 #[cfg(not(windows))]
@@ -56,7 +59,7 @@ fn red_team_launch_request(
     })
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 #[test]
 fn the_snapshot_offers_red_team_on_macos_and_windows_without_any_flag() {
     let dir = tempfile::tempdir().unwrap();
@@ -68,11 +71,11 @@ fn the_snapshot_offers_red_team_on_macos_and_windows_without_any_flag() {
     let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
     assert!(
         tools.iter().any(|t| t["tool"] == "red_team"),
-        "tools must include red_team on macOS: {tools:?}"
+        "tools must include red_team on supported platforms: {tools:?}"
     );
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 #[test]
 fn the_snapshot_omits_red_team_off_macos_and_windows() {
     let dir = tempfile::tempdir().unwrap();
@@ -84,11 +87,11 @@ fn the_snapshot_omits_red_team_off_macos_and_windows() {
     let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
     assert!(
         !tools.iter().any(|t| t["tool"] == "red_team"),
-        "tools must omit red_team off macOS: {tools:?}"
+        "tools must omit red_team on unsupported platforms: {tools:?}"
     );
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 #[test]
 fn launch_prepare_refuses_red_team_off_macos_and_windows() {
     let dir = tempfile::tempdir().unwrap();
@@ -101,11 +104,13 @@ fn launch_prepare_refuses_red_team_off_macos_and_windows() {
             red_team_launch_request(ConnectionKind::NearAiSignIn, account_id, dir.path()),
         ),
     );
-    let err = resp.error.expect("off macOS must refuse red_team launch");
+    let err = resp
+        .error
+        .expect("unsupported platform must refuse red_team launch");
     assert_eq!(err.code, RED_TEAM_UNAVAILABLE_LABEL);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn launch_prepare_refuses_red_team_on_a_subscription_or_api_key_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -155,7 +160,7 @@ fn enable_is_refused_off_windows_without_elevating() {
         ),
     );
     let err = resp.error.expect("enable must be refused off Windows");
-    let expected = if cfg!(target_os = "macos") {
+    let expected = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "managed-invalid-request"
     } else {
         RED_TEAM_UNAVAILABLE_LABEL

@@ -1096,6 +1096,29 @@ fn macos_app_bundle_builds_and_lipos_both_architectures() {
          executable is universal, not just the dylib it links"
     );
 
+    // cargo stamps each per-target dylib with its own target/<triple>/...
+    // install name. Setting @rpath on the staged universal dylib before
+    // `swift build` links it ensures both slices record @rpath rather than
+    // leaving x86_64 pointing at the CI runner's build directory.
+    let set_staged_id = script
+        .find("install_name_tool -id \"@rpath/$DYLIB_NAME\" \"$STAGING_DIR/$DYLIB_NAME\"")
+        .expect("make-app-bundle.sh must set @rpath install name on the staged universal dylib");
+    let swift_build = script
+        .find("swift build --configuration")
+        .expect("make-app-bundle.sh must invoke swift build");
+    assert!(
+        set_staged_id < swift_build,
+        "staged universal dylib install name must be set to @rpath BEFORE swift build links it"
+    );
+    assert!(
+        !script.contains("DYLIB_PATHS[0]"),
+        "make-app-bundle.sh must never inspect only DYLIB_PATHS[0] when rewriting install names"
+    );
+    assert!(
+        script.contains("otool -arch \"$arch\" -L"),
+        "make-app-bundle.sh must verify dynamic library paths on every architecture slice"
+    );
+
     let workflow = read(".github/workflows/release-apps.yml");
     assert!(
         workflow.contains("Gateway-${SHORT_VERSION}.dmg") && !workflow.contains("-arm64.dmg"),

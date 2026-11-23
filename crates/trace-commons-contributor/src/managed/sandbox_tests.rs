@@ -1,6 +1,9 @@
-// The tests here are macOS-only; elsewhere their shared imports and helpers
-// are unused, which -D warnings turns into a build failure (Linux and Windows CI).
-#![cfg_attr(not(target_os = "macos"), allow(unused_imports, dead_code))]
+// Some tests here are Apple silicon macOS-only; elsewhere their shared imports
+// and helpers are unused, which -D warnings turns into a build failure.
+#![cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(unused_imports, dead_code)
+)]
 use super::*;
 use crate::config::ConfigStore;
 use crate::daemon::ipc::Request;
@@ -83,7 +86,7 @@ fn the_home_folder_is_refused_as_an_input() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn a_loopback_host_is_refused() {
     let settings = SandboxSettings {
@@ -102,7 +105,7 @@ fn a_loopback_host_is_refused() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn packages_adds_the_preset() {
     let settings = SandboxSettings {
@@ -132,7 +135,7 @@ fn packages_adds_the_preset() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn inputs_are_remembered_per_folder_and_hosts_are_not() {
     let dir = tempfile::tempdir().unwrap();

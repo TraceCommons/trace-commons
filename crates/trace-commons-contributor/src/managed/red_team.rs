@@ -2,12 +2,12 @@
 //! running the sandboxed session on a blocking thread, and handling the
 //! `red-team tool <name>` bridge subcommand.
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 use super::ToolId;
 use super::{ManagedError, sessions::LaunchContext};
 use crate::config::ConfigStore;
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 use uuid::Uuid;
 
 /// Relative path under the config directory where Red Team session outputs
@@ -90,7 +90,7 @@ fn host_membership_problem() -> Option<super::red_team_host::HostProblem> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
     let fetch = rts::setup::HttpsFetch::new().map_err(|e| e.to_string())?;
     let defaults = rts::config::Defaults::for_prefix(prefix, sessions_dir);
@@ -144,9 +144,9 @@ fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 fn run_setup_check(_prefix: &Path, _sessions_dir: &Path) -> Result<(), String> {
-    Err("Red Team sessions are not available on this OS".into())
+    Err("Red Team sessions are not available on this platform".into())
 }
 
 /// What `rts::setup::run_in_prefix` needs on Windows, which uses only the
@@ -207,7 +207,7 @@ fn windows_setup_context(prefix: &Path, sessions_dir: &Path) -> Result<WindowsSe
 /// `<config>/red-team/runtime`. On Windows this also installs OpenCode and the
 /// Hyper-V guest files, and refuses before downloading anything when the host
 /// cannot run the sandbox.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     let prefix = runtime_prefix(store);
     if let Some(parent) = prefix.parent() {
@@ -228,7 +228,7 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
             .map(|_| ())
             .map_err(|_| ManagedError::ToolUnavailable)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         let defaults = rts::config::Defaults::for_prefix(&prefix, &sessions_dir);
         let supervisor = rts::install::prefix_supervisor(&prefix);
@@ -273,7 +273,7 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
     Err(ManagedError::RedTeamUnavailable)
 }
@@ -281,7 +281,7 @@ pub fn setup_install(_store: &ConfigStore) -> Result<(), ManagedError> {
 /// Copy each validated input file or directory into
 /// `<config>/red-team/<session_id>/in/`. Never symlinks; editing a staged copy
 /// never mutates the original.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 pub(crate) fn stage_inputs(
     store: &ConfigStore,
     session_id: Uuid,
@@ -340,13 +340,13 @@ pub(crate) fn stage_inputs(
 }
 
 /// Beside `in/` (never inside it): the symlinks staging skipped.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 pub(crate) const SKIPPED_SYMLINKS_FILE: &str = "skipped-symlinks.txt";
 
 /// Copies `src` to `dst`. A symlink inside a folder is never followed or
 /// copied: it is recorded in `skipped` (a project's node_modules/.bin is
 /// full of them). The selected input itself is checked by `stage_inputs`.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyhow::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
@@ -383,7 +383,7 @@ fn copy_no_symlinks(src: &Path, dst: &Path, skipped: &mut Vec<PathBuf>) -> anyho
 /// gateway several times a day, so staging accepts any compose the TEE
 /// measured (mr_config_id == sha256(app_compose)); the TDX quote, TCB status,
 /// nonce binding and GPU checks still apply.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub(crate) fn attest_options() -> rts::attest::AttestOptions {
     let mut options = rts::attest::AttestOptions::default();
     if cfg!(feature = "near-ai-staging") {
@@ -392,7 +392,7 @@ pub(crate) fn attest_options() -> rts::attest::AttestOptions {
     options
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     if cfg!(feature = "near-ai-staging") {
         rts::inference::NearEnvironment::Staging
@@ -401,7 +401,7 @@ pub(crate) const fn near_environment() -> rts::inference::NearEnvironment {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub(crate) fn spec_for(
     store: &ConfigStore,
     context: &LaunchContext,
@@ -500,7 +500,7 @@ pub struct RunOutcome {
 
 /// Publish the preserved OpenCode store when `collect_traces` is set and
 /// compute the final `(SessionState, Option<CollectionState>)` for the row.
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 pub(crate) fn finalize_outcome(
     store: &ConfigStore,
     context: &LaunchContext,
@@ -544,7 +544,7 @@ pub(crate) fn finalize_outcome(
 /// Copy exported files from `<session_dir>/out` into the operator's chosen
 /// output folder. Symlinks are skipped rather than followed. Only `run`
 /// calls it, so it is built where `run` is.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::Result<()> {
     let out_dir = session_dir.join("out");
     if !out_dir.is_dir() {
@@ -565,7 +565,7 @@ pub(crate) fn export_outputs(session_dir: &Path, output_dir: &Path) -> anyhow::R
 }
 
 /// Run a Red Team managed session through `rts::launch::run`.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     let spec = spec_for(store, context, context.initial_prompt.clone())?;
     let outcome = tokio::task::spawn_blocking(move || rts::launch::run(spec))
@@ -587,14 +587,14 @@ pub async fn run(store: &ConfigStore, context: &LaunchContext) -> anyhow::Result
     ))
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 pub async fn run(_store: &ConfigStore, _context: &LaunchContext) -> anyhow::Result<RunOutcome> {
     Err(ManagedError::RedTeamUnavailable.into())
 }
 
 /// Handle the hidden `red-team tool <name>` subcommand invoked by OpenCode's
 /// plugin shim inside a Red Team session.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 pub fn run_tool(name: &str) -> i32 {
     use std::io::Write;
     let outcome = rts::bridge::run(name);
@@ -607,9 +607,9 @@ pub fn run_tool(name: &str) -> i32 {
     outcome.code
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
 pub fn run_tool(_name: &str) -> i32 {
-    eprintln!("Red Team sessions are only supported on macOS and Windows.");
+    eprintln!("Red Team sessions are only supported on Apple silicon Macs and Windows.");
     1
 }
 

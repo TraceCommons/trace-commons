@@ -147,13 +147,13 @@ pub(crate) fn validate_with_home(
     }))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn expand_hosts(written: &[String]) -> Result<Vec<String>, ManagedError> {
     let entries = rts::network::expand(written).map_err(ManagedError::SandboxHostRefused)?;
     Ok(entries.iter().map(rts::network::Entry::display).collect())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 fn expand_hosts(written: &[String]) -> Result<Vec<String>, ManagedError> {
     Ok(written.to_vec())
 }
