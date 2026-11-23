@@ -452,12 +452,17 @@ private struct Launcher: View {
 
     /// Whether the launch has made its one `OpenMonitor` request.
     @State private var openedAtLaunch = false
+    /// Whether a request is waiting for the core (`LaunchRouting.holdsForCore`).
+    @State private var heldForCore = false
 
     var body: some View {
         MenuBarStripLabel(model: model, store: menuPanel)
             .task { launch() }
             .onChange(of: model.launchOpening, initial: true) { _, opening in
                 openAtLaunch(opening)
+            }
+            .onChange(of: model.onboardingKnown) { _, known in
+                if known { releaseHeldRequest() }
             }
             .onChange(of: model.creditArrivalCount) { _, count in
                 if count > 0 { DockCreditAnimator.shared.celebrate() }
@@ -581,9 +586,9 @@ private struct Launcher: View {
     /// core has said enough. An onboarded install opens nothing on a quiet
     /// launch (R-44), and the Monitor, in front, on one the person started.
     /// First run opens activated, alone: the Monitor SwiftUI may have
-    /// opened at launch (macOS 14), or that an opener opened before the
-    /// core answered (a cold-start invite link or notification), is
-    /// closed. A destination such an opener left keeps waiting in
+    /// opened at launch (macOS 14), or that opened before the core answered
+    /// (Inference, or a held request past its deadline), is closed. A
+    /// destination an earlier opener left keeps waiting in
     /// `navigation.pending` for first run's hand-off: this plain request
     /// does not clear it (`MainWindowNavigation.leave`). A refused daemon
     /// opens the Monitor at the refusal, without taking focus.
@@ -611,13 +616,47 @@ private struct Launcher: View {
         }
     }
 
+    /// Waits for the core before opening a window, up to the deadline, after
+    /// which the Monitor opens in its waiting state.
+    @MainActor
+    private func holdForCore() {
+        guard !heldForCore else { return }
+        heldForCore = true
+        Task { @MainActor in
+            try? await Task.sleep(for: LaunchRouting.coreAnswerDeadline)
+            guard heldForCore else { return }
+            heldForCore = false
+            openWindow(id: WindowID.monitor)
+        }
+    }
+
+    /// Opens the window a held request was waiting for. Its destination is
+    /// already in `navigation.pending`.
+    @MainActor
+    private func releaseHeldRequest() {
+        guard heldForCore else { return }
+        heldForCore = false
+        switch LaunchRouting.windowAfterHold(
+            startup: model.startup, statusAnswered: model.status.answered,
+            requiresOnboarding: model.requiresOnboarding)
+        {
+        case .firstRun: openWindow(id: WindowID.firstRun)
+        case .monitor: openWindow(id: WindowID.monitor)
+        }
+    }
+
     /// One `OpenMonitor` request: first run while onboarding is required,
-    /// the Monitor otherwise (and before the core has said, which the
-    /// Monitor waits on, and over a refused daemon), which consumes
+    /// the Monitor otherwise (and over a refused daemon), which consumes
     /// `navigation.pending` once it can show it; a Settings destination
-    /// opens the Monitor's Settings modal alone, at its section.
+    /// opens the Monitor's Settings modal alone, at its section. A request
+    /// made before the core has said waits for it (`holdForCore`).
     @MainActor
     private func open(_ destination: MonitorDestination?) {
+        if LaunchRouting.holdsForCore(destination, onboardingKnown: model.onboardingKnown) {
+            navigation.leave(destination)
+            holdForCore()
+            return
+        }
         navigation.leave(destination)
         let opening = LaunchRouting.opening(
             destination, startup: model.startup, requiresOnboarding: model.requiresOnboarding,
