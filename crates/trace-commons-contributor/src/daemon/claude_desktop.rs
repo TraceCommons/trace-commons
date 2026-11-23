@@ -186,20 +186,20 @@ fn copy() -> Value {
         "instructions":"In Claude Desktop’s Code tab, create a Local saved environment, select a folder, and paste these variables. Start a new session with that environment. Only sessions using it route through Private AI. Do not set ANTHROPIC_AUTH_TOKEN.",
         "error":"Setup unavailable. Check Private AI, sign-in, and model availability, then try again.",
         // The Private AI tab's notice while Claude Desktop is installed and
-        // not set up; its action is "setup". DRAFT, NEEDS APPROVAL.
+        // not set up; its action is "setup". Approved by owner 2026-11-23.
         "prompt_title":"Use Claude Desktop with Private AI",
         "prompt_line":"Claude Desktop is on this Mac. Set it up to run its Code sessions on Private AI.",
         "prompt_dismiss":"Not now",
         // The setup sheet: an intro, then the steps in order (owner request
-        // 2026-11-19: explain the setup where it is done). DRAFT, NEEDS
-        // APPROVAL. `instructions` stays for shells without them.
+        // 2026-11-19: explain the setup where it is done; approved 2026-11-23).
+        // `instructions` stays for shells without them.
         "sheet_intro":"Run Claude Desktop’s Code sessions on Private AI.",
         "sheet_step_models":"Choose a main model, and a background model if you want one.",
         "sheet_step_copy":"Save, then Copy the variables.",
         "sheet_step_environment":"In Claude Desktop’s Code tab, create a Local saved environment and choose a folder.",
         "sheet_step_session":"Paste the variables into that environment and start a new session with it. Only sessions using it go through Private AI. Do not set ANTHROPIC_AUTH_TOKEN.",
         // The sheet's button that opens Claude Desktop's Code tab once the
-        // variables are copied. DRAFT, NEEDS APPROVAL.
+        // variables are copied. Approved by owner 2026-11-23.
         "open_desktop":"Open Claude Desktop"
     })
 }

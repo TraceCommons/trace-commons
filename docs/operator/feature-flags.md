@@ -26,7 +26,7 @@ identity changes, and run `bash scripts/ci/test-macos-channel-plist.sh` alongsid
 flags default false.
 
 The shipped registry includes `claude_desktop_private_ai` (live, default false),
-requiring `claude_desktop_private_ai_v1`. Staging and testing can accept a
+requiring `claude_desktop_private_ai_v1`. All three build profiles can accept a
 reviewed remote enable; the checked-in example manifests keep it false. This
 gates native setup and the dedicated daemon listener. Disable/expiry stops new
 requests while accepted streams drain, and preserves the saved connection for
@@ -41,9 +41,9 @@ disabled. The dated example manifests keep it false; these files have not been
 published.
 
 The production profile omits the capabilities and remote-enable entries for
-Skills Insights and Claude Desktop.
-A signed manifest, a local choice, and a process override cannot enable these
-features in that build.
+Skills Insights.
+A signed manifest, a local choice, and a process override cannot enable that
+feature in that build.
 
 Skills checks the daemon decision at its inventory, publisher-follow and
 background-refresh entry points, and throughout skill usage extraction. Reads

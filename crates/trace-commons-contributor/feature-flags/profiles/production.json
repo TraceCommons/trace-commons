@@ -3,9 +3,11 @@
   "registry_version": 6,
   "environment": "production",
   "capabilities": [
+    "claude_desktop_private_ai_v1",
     "skills_server_catalog_v1"
   ],
   "remote_enable": [
+    "claude_desktop_private_ai",
     "skills_server_catalog"
   ],
   "signing_keys": [
