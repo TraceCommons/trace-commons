@@ -83,6 +83,13 @@ public sealed class ApprovalHold
     [JsonPropertyName("excluded_ineligible")]
     public long? ExcludedIneligible { get; set; }
 
+    /// <summary>
+    /// How many pending sessions a group approve left out because they are
+    /// held for a person's review. Null when the key was absent.
+    /// </summary>
+    [JsonPropertyName("excluded_held")]
+    public long? ExcludedHeld { get; set; }
+
     [JsonPropertyName("hold_secs")]
     public long HoldSecs { get; set; }
 
@@ -163,11 +170,12 @@ public sealed class ApprovalHold
     /// wording contract; this is the only place that assembles its inputs
     /// from an actual daemon response.
     /// </summary>
-    public SubmitToast Toast => SubmitToast.Render(
+    public SubmitToast Toast => SubmitToast.RenderApproval(
         Approved,
         RedactionsTotal,
         Flagged,
-        Skipped.Select(skip => skip.ReasonLabel).ToList());
+        Skipped.Select(skip => skip.ReasonLabel).ToList(),
+        (ulong)Math.Max(ExcludedIneligible ?? 0, 0) + (ulong)Math.Max(ExcludedHeld ?? 0, 0));
 
     /// <summary>
     /// Which of <paramref name="candidateEntryIds"/> this call actually

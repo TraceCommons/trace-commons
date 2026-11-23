@@ -84,6 +84,26 @@ public sealed class SubmitToast
         return new SubmitToast(string.Join(" ", clauses), approved > 0);
     }
 
+    /// <summary>
+    /// <see cref="Render"/> for a whole <c>approve</c> response.
+    /// <paramref name="excluded"/> is how many pending entries a group
+    /// selector left out before processing any of them.
+    /// </summary>
+    public static SubmitToast RenderApproval(
+        ulong approved,
+        ulong redactions,
+        ulong flagged,
+        IReadOnlyList<string> skipped,
+        ulong excluded)
+    {
+        ArgumentNullException.ThrowIfNull(skipped);
+
+        // Excluded entries were never previewed, so no scrub ran on them.
+        return excluded > 0 && approved == 0 && flagged == 0 && redactions == 0 && skipped.Count == 0
+            ? new SubmitToast(ApprovedClause(0), false)
+            : Render(approved, redactions, flagged, skipped);
+    }
+
     // --- The clauses ---------------------------------------------------
 
     /// <summary>

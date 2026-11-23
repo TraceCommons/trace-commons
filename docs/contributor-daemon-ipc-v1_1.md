@@ -6765,7 +6765,7 @@ from some other path.
 
 | Field | Meaning |
 |---|---|
-| `eligibility` | `eligible` \| `ineligible_permanent` \| `ineligible_configuration` \| `unknown` |
+| `eligibility` | `eligible` \| `ineligible_permanent` \| `ineligible_configuration` \| `unknown` \| `status_unavailable` |
 | `eligibility_reason` | a stable label naming why, or absent |
 
 **`eligibility` is ABSENT -- not `unknown`, not null -- whenever the
@@ -6788,6 +6788,7 @@ not offered, and carries its reason.
 | `ineligible_permanent` | nothing the contributor changes will alter this | `eligibility_ineligible_permanent` | **none** |
 | `ineligible_configuration` | this session stays ineligible; a setting decides future ones | `eligibility_ineligible_configuration` | **none** |
 | `unknown` | not evaluated | `eligibility_unknown` | **none** |
+| `status_unavailable` | recorded as ineligible, but ingest has not answered whether it admits this account without per-session evidence (no usable account session, or a failed status read). Published only, never stored, and carries no `eligibility_reason` | "Status unavailable." | **none** |
 | anything else | the state could not be read | `eligibility_unknown` | **none** |
 
 The sentence, the tone and the control come from the shared Rust tables --

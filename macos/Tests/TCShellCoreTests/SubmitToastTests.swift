@@ -14,6 +14,20 @@ import XCTest
 /// Nothing here needs a display, a bundle or the FFI dylib, which is why the
 /// renderer lives in `TCShellCore`.
 final class SubmitToastTests: XCTestCase {
+    func testAGroupThatExcludedEveryIneligibleTraceMakesNoScrubClaim() {
+        let response = ApproveResponse(approved: 0, flagged: 0, redactions: [:], skipped: [],
+                                       holdSecs: 10, holdUntil: nil, excludedIneligible: 3)
+        let toast = response.toast(undoCopy: nil)
+        XCTAssertEqual(toast.line, "Nothing approved.")
+        XCTAssertFalse(toast.offerUndo)
+    }
+
+    func testAGroupThatProcessedSomethingKeepsItsScrubClause() {
+        let approved = ApproveResponse(approved: 2, flagged: 0, redactions: [:], skipped: [],
+                                       holdSecs: 10, holdUntil: nil, excludedIneligible: 3)
+        XCTAssertEqual(approved.toast(undoCopy: nil).line, "Approved 2. Scrubbing matched nothing.")
+    }
+
     func testGroupOutcomeExplainsHeldTracesWithoutClaimingApproval() throws {
         let words = try JSONDecoder().decode(MonitorUndoCopy.self, from: Data(#"{"approval_saved":"APPROVAL SAVED","approved":"{label} approved","unavailable":"Undo unavailable","within":"Undo within {seconds}s","may_have_started":"Upload may already have started.","undoing":"Undoing","redaction_begun":"Data redaction has begun.","held_for_review_one":"1 trace needs individual review.","held_for_review":"{count} traces need individual review."}"#.utf8))
         for approved: UInt64 in [0, 2] {

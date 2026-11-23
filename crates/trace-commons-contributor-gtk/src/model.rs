@@ -757,6 +757,10 @@ pub struct ApproveResult {
     /// both draw nothing without this shell branching on the count.
     #[serde(default)]
     pub excluded_ineligible: Option<u64>,
+    /// How many pending entries a group selector left out because they are
+    /// held for a person's review. Absent on a single-entry call.
+    #[serde(default)]
+    pub excluded_held: Option<u64>,
 }
 
 /// One entry `approve` could not send, from the `skipped` list in its
