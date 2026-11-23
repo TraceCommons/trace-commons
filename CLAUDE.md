@@ -358,7 +358,7 @@ names exactly: renaming a required job drops it from the gate.
 
 `.github/workflows/clients.yml` holds the client jobs: `macOS app tests`,
 `macOS contributor crates and Tauri desktop`, `macOS 15 fallback tests`, `windows contributor crates (tests, named-pipe
-ACL, update conformance)`, `install.ps1 against the real release`, `windows contributor app`, `linux-shell desktop entry and metainfo`,
+ACL, update conformance)`, `install.ps1 against the real release`, `windows contributor app`, `windows contributor app (arm64)`, `linux-shell desktop entry and metainfo`,
 `linux-shell desktop integration (weston + portal)`. It runs on every push to
 `main`, on `workflow_dispatch`, and on a pull request only when it touches a
 client path (its `paths:` filter). None of its jobs is a required status
@@ -383,6 +383,11 @@ client regression surfaces on `main` after the merge.
   the sole access control on the daemon IPC socket on Windows, and it is not
   observable from a cross-compile, so this job is the only thing standing
   behind the claim that it works. Do not weaken it to a smoke test.
+- `windows contributor app (arm64)` — builds the cdylib, `near-ai.exe` and
+  the WinUI app natively on `windows-11-arm`, runs the interop tests there,
+  checks every binary we build is Arm64 (PE machine 0xAA64) and uploads the
+  unsigned self-contained app as `windows-app-arm64-unpackaged` for hand
+  testing on a Snapdragon laptop. The release workflow still ships x64 only.
 - `linux-shell desktop entry and metainfo` — runs
   `crates/trace-commons-contributor-gtk/scripts/validate-desktop-entry.sh`
   (`desktop-file-validate`, `appstreamcli validate`, the icon-name pair, the

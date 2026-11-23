@@ -952,3 +952,116 @@ jobs:
             if ($built.Count -ne 1) { throw "make-msix.ps1 under $shell wrote $($built.Count) packages" }
             Write-Host "$shell built $($built[0].Name)"
           }
+
+  # The same app built natively for Arm64 (Snapdragon X, Copilot+ PCs), on
+  # GitHub's Windows 11 Arm runner. Every other Windows job and the release
+  # workflow build x64 only, so on an Arm laptop the app, its core and
+  # near-ai.exe run under x64 emulation and nothing has ever checked them as
+  # native Arm64 code. This job is that check, and its artifact is the build
+  # to put on an Arm laptop by hand. It is not a release: Debug Rust, unsigned,
+  # kept for a week, and not a required check.
+  windows-contributor-app-arm64:
+    name: windows contributor app (arm64)
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      # Static C runtime, as windows-contributor-crates and the release
+      # workflow build it, so the binaries load on a machine without the
+      # Visual C++ Redistributable. The target is named explicitly so the
+      # output is Arm64 whatever the host toolchain resolves to.
+      - name: Build the contributor FFI cdylib and near-ai.exe for Arm64
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        run: |
+          cargo build -p trace-commons-contributor-ffi --target aarch64-pc-windows-msvc --target-dir target/crt-static
+          cargo build -p trace-commons-contributor --bin near-ai --bin trace-commons-contributor --target aarch64-pc-windows-msvc --target-dir target/crt-static
+
+      - name: Check the Arm64 binaries need no Visual C++ runtime
+        run: >-
+          python -I scripts/ci/check-no-vc-runtime.py
+          target/crt-static/aarch64-pc-windows-msvc/debug/trace_commons_contributor_ffi.dll
+          target/crt-static/aarch64-pc-windows-msvc/debug/near-ai.exe
+          target/crt-static/aarch64-pc-windows-msvc/debug/trace-commons-contributor.exe
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '8.0.427'
+
+      # The interop tests drive a real daemon through the real cdylib. Here
+      # the test host is Arm64 .NET loading the Arm64 cdylib, so this is the
+      # binding exercised natively on Arm.
+      - name: Run interop tests against the Arm64 cdylib
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\crt-static\aarch64-pc-windows-msvc\debug
+        run: >-
+          dotnet test tests/TraceCommons.Interop.Tests/TraceCommons.Interop.Tests.csproj
+          --configuration Release
+          --blame-hang
+          --blame-hang-timeout 2m
+
+      # MSBuild from Visual Studio, not `dotnet publish`; see
+      # windows-contributor-app for why. Self-contained and unpackaged, like
+      # the release workflow's x64 publish, so the folder runs on a clean
+      # Arm laptop with nothing installed.
+      - uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
+      - name: Publish the WinUI app (self-contained, win-arm64)
+        shell: pwsh
+        working-directory: windows
+        env:
+          TC_FFI_LIB_DIR: ${{ github.workspace }}\target\crt-static\aarch64-pc-windows-msvc\debug
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publishDir = "$env:GITHUB_WORKSPACE/app-publish-arm64"
+          msbuild src/TraceCommons.App/TraceCommons.App.csproj `
+            -restore `
+            -t:Publish `
+            -p:Configuration=Release `
+            -p:Platform=ARM64 `
+            -p:RuntimeIdentifier=win-arm64 `
+            -p:SelfContained=true `
+            -p:PublishDir=$publishDir/
+          if ($LASTEXITCODE -ne 0) { throw "msbuild publish failed with exit code $LASTEXITCODE" }
+
+      # The point of the job: every binary this repository builds in the
+      # publish tree is Arm64 code (PE machine 0xAA64), not x64 that would
+      # quietly run under emulation.
+      - name: Check the published binaries are native Arm64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $publishDir = (Resolve-Path "$env:GITHUB_WORKSPACE/app-publish-arm64").Path
+          $names = @("TraceCommons.exe", "trace_commons_contributor_ffi.dll", "near-ai.exe")
+          foreach ($name in $names) {
+            $path = Join-Path $publishDir $name
+            if (-not (Test-Path $path -PathType Leaf)) { throw "$name is missing from the Arm64 publish output" }
+            $bytes = [System.IO.File]::ReadAllBytes($path)
+            $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($machine -ne 0xAA64) {
+              throw ("{0} has PE machine 0x{1:X4}, expected 0xAA64 (Arm64)" -f $name, $machine)
+            }
+            Write-Host "$name is Arm64"
+          }
+
+      - name: Verify the Arm64 app reaches the Windows Credential Manager
+        shell: pwsh
+        run: |
+          & ./scripts/windows/verify-credential-store.ps1 -App "$env:GITHUB_WORKSPACE/app-publish-arm64/TraceCommons.exe"
+          exit $LASTEXITCODE
+
+      - name: Keep the unpackaged Arm64 app for manual testing
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-app-arm64-unpackaged
+          path: app-publish-arm64
+          if-no-files-found: warn
+          retention-days: 7
