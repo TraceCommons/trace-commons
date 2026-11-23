@@ -371,6 +371,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var status: DaemonStatus = .unknown {
         didSet {
             if status.accountScope != oldValue.accountScope {
+                creditArrivalTracker = .stored(forScope: status.accountScope)
                 accountScopedReadsAwaitStatus = false
                 invalidateAccountScopedReads()
                 refreshHistory()
@@ -847,8 +848,8 @@ final class AppModel: ObservableObject {
     /// money made before anything was read.
     @Published private(set) var balanceStatus: BalanceStatus = .unreported
     @Published private(set) var balanceRefreshing = false
-    /// Incremented each time `balanceStatus.receivedTotalNanos` increases
-    /// during this session; drives the Dock and menu-bar icon animations.
+    /// Incremented for each credit arrival `creditArrivalTracker` reports;
+    /// drives the Dock and menu-bar icon animations.
     @Published private(set) var creditArrivalCount = 0
     private var creditArrivalTracker = BalanceArrival.Tracker()
     private var balanceReadGeneration = 0
@@ -1038,9 +1039,18 @@ final class AppModel: ObservableObject {
     /// for the Dock and menu-bar icon animations.
     func recordBalanceStatus(_ status: BalanceStatus) {
         publishIfChanged(\.balanceStatus, status)
-        if creditArrivalTracker.observe(status.receivedTotalNanos) {
-            creditArrivalCount &+= 1
+        noteCreditReading { $0.observe(status.receivedTotalNanos) }
+    }
+
+    /// Applies one credit reading, keeps the account's baseline across
+    /// launches, and counts an arrival.
+    private func noteCreditReading(_ observe: (inout BalanceArrival.Tracker) -> Bool) {
+        let before = creditArrivalTracker
+        let arrived = observe(&creditArrivalTracker)
+        if creditArrivalTracker != before {
+            creditArrivalTracker.save(forScope: status.accountScope)
         }
+        if arrived { creditArrivalCount &+= 1 }
     }
 
     // MARK: - The organization Private AI spends from
@@ -2168,9 +2178,7 @@ final class AppModel: ObservableObject {
     /// not signed into NEAR AI).
     func recordHistoryRollup(_ rollup: HistoryRollup) {
         publishIfChanged(\.rollup, rollup)
-        if creditArrivalTracker.observeCreditFinal(rollup.creditFinal) {
-            creditArrivalCount &+= 1
-        }
+        noteCreditReading { $0.observeCreditFinal(rollup.creditFinal) }
     }
 
     @discardableResult

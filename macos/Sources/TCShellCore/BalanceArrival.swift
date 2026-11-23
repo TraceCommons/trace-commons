@@ -56,69 +56,83 @@ public enum BalanceArrival {
         return steps
     }
 
-    /// Tracks live credit arrivals during a running app session, for the Dock
-    /// and menu-bar icon animations.
+    /// Tracks credit arrivals for the Dock and menu-bar icon animations.
     ///
-    /// Unlike `BalanceArrivalFlourish` (which persists in UserDefaults so the
-    /// Balance tile marks credit that arrived while the app was closed), the
-    /// Dock and menu-bar icons only celebrate credit that arrives while the app
-    /// is running: the first known reading establishes the baseline, transient
-    /// unavailable readings (`nil`) preserve it, and any strictly larger
-    /// Trace Commons `credit_final` or NEAR AI `received_total_nanos` triggers
-    /// a celebration. Tracking `credit_final` ensures icon animations still
-    /// fire when the contributor is not signed into NEAR AI.
+    /// Every real increase in Trace Commons `credit_final` or NEAR AI
+    /// `received_total_nanos` is celebrated. The baseline is saved per account
+    /// (`save(forScope:in:)`), so credit that arrived while the app was closed
+    /// or signed out plays once on the next reading. An account's first
+    /// reading only sets its baseline, a transient unavailable reading (`nil`)
+    /// preserves it, and a smaller total moves it down silently. Tracking
+    /// `credit_final` keeps the animations working without a NEAR AI sign-in.
     public struct Tracker: Equatable, Sendable {
         public private(set) var lastReceivedNanos: Int64?
         public private(set) var lastCreditFinal: Double?
 
-        /// Minimum Trace Commons credit increase (1 credit) required since the
-        /// last celebration before animating the Dock and menu-bar icons.
-        public static let minimumCreditFinal: Double = 1.0
-        /// Minimum NEAR AI received increase ($1.00 = 1e9 nanos) required since
-        /// the last celebration before animating the Dock and menu-bar icons.
-        public static let minimumReceivedNanos: Int64 = 1_000_000_000
+        /// The smallest `credit_final` change that counts as an arrival.
+        /// The daemon sums single-precision values, so re-reading an unchanged
+        /// total can differ in its last digits.
+        static let creditNoiseFloor: Double = 0.001
 
-        static let creditEpsilon: Double = 1e-6
+        /// `UserDefaults` key for the saved baseline. Holds the account's
+        /// hashed scope and its two totals.
+        public static let baselineKey = "CreditIconArrivalBaseline"
+        private static let scopeField = "scope"
+        private static let receivedField = "received_nanos"
+        private static let creditField = "credit_final"
 
         public init(lastReceivedNanos: Int64? = nil, lastCreditFinal: Double? = nil) {
             self.lastReceivedNanos = lastReceivedNanos
             self.lastCreditFinal = lastCreditFinal
         }
 
-        /// Records `receivedTotalNanos` and returns `true` once at least
-        /// `minimumReceivedNanos` of new credit has accumulated since the
-        /// previous celebrated baseline.
+        /// The baseline saved for `scope`, or an empty tracker when there is
+        /// no scope or the saved baseline belongs to another account.
+        public static func stored(forScope scope: String?, in defaults: UserDefaults = .standard) -> Tracker {
+            guard let scope,
+                  let saved = defaults.dictionary(forKey: baselineKey),
+                  saved[scopeField] as? String == scope
+            else { return Tracker() }
+            return Tracker(
+                lastReceivedNanos: (saved[receivedField] as? String).flatMap(Int64.init),
+                lastCreditFinal: (saved[creditField] as? Double).flatMap { $0.isFinite ? $0 : nil }
+            )
+        }
+
+        /// Saves this baseline for `scope`. Without a scope nothing is saved:
+        /// there is no account to attribute it to.
+        public func save(forScope scope: String?, in defaults: UserDefaults = .standard) {
+            guard let scope else { return }
+            var saved: [String: Any] = [Self.scopeField: scope]
+            if let lastReceivedNanos { saved[Self.receivedField] = String(lastReceivedNanos) }
+            if let lastCreditFinal { saved[Self.creditField] = lastCreditFinal }
+            defaults.set(saved, forKey: Self.baselineKey)
+        }
+
+        /// Records `receivedTotalNanos` and returns `true` when it is larger
+        /// than the baseline.
         public mutating func observe(_ receivedTotalNanos: Int64?) -> Bool {
             guard let now = receivedTotalNanos else { return false }
             guard let before = lastReceivedNanos else {
                 lastReceivedNanos = now
                 return false
             }
-            if now < before {
-                lastReceivedNanos = now
-                return false
-            }
-            guard now - before >= Self.minimumReceivedNanos else { return false }
+            guard now != before else { return false }
             lastReceivedNanos = now
-            return true
+            return now > before
         }
 
         /// Records Trace Commons settled `credit_final` from `history_rollup`
-        /// and returns `true` once at least `minimumCreditFinal` (1 credit)
-        /// has accumulated since the previous celebrated baseline.
+        /// and returns `true` when it rose by more than rounding noise.
         public mutating func observeCreditFinal(_ creditFinal: Double?) -> Bool {
             guard let now = creditFinal, now.isFinite else { return false }
             guard let before = lastCreditFinal else {
                 lastCreditFinal = now
                 return false
             }
-            if now < before - Self.creditEpsilon {
-                lastCreditFinal = now
-                return false
-            }
-            guard now - before >= Self.minimumCreditFinal - Self.creditEpsilon else { return false }
+            guard abs(now - before) >= Self.creditNoiseFloor else { return false }
             lastCreditFinal = now
-            return true
+            return now > before
         }
     }
 

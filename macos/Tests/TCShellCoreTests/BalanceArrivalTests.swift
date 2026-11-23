@@ -125,7 +125,7 @@ final class BalanceArrivalTests: XCTestCase {
         XCTAssertEqual(note?.actions.count, 2)
     }
 
-    func testIconArrivalTrackerFiresOnlyOnLiveIncreases() {
+    func testIconArrivalTrackerFiresOnAnyRealIncrease() {
         var tracker = BalanceArrival.Tracker()
         // Nil before any reading does nothing.
         XCTAssertFalse(tracker.observe(nil))
@@ -138,43 +138,101 @@ final class BalanceArrivalTests: XCTestCase {
         // Transient unavailable preserves the baseline.
         XCTAssertFalse(tracker.observe(nil))
         XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
-        XCTAssertFalse(tracker.observe(4 * dollar))
-        // Sub-threshold NEAR AI increases accumulate until reaching 1 credit.
-        XCTAssertFalse(tracker.observe(4 * dollar + 400_000_000))
-        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
-        XCTAssertFalse(tracker.observe(4 * dollar + 900_000_000))
-        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar)
-        // Reaching >= 1 credit fires and advances the baseline.
-        XCTAssertTrue(tracker.observe(6 * dollar))
-        XCTAssertEqual(tracker.lastReceivedNanos, 6 * dollar)
-        XCTAssertFalse(tracker.observe(6 * dollar))
-        // Smaller total (e.g. switched organization) updates baseline without firing.
+        // The smallest real increase fires and advances the baseline.
+        XCTAssertTrue(tracker.observe(4 * dollar + 1))
+        XCTAssertEqual(tracker.lastReceivedNanos, 4 * dollar + 1)
+        XCTAssertFalse(tracker.observe(4 * dollar + 1))
+        // A smaller total (e.g. switched organization) re-baselines silently.
         XCTAssertFalse(tracker.observe(2 * dollar))
         XCTAssertEqual(tracker.lastReceivedNanos, 2 * dollar)
-        // Subsequent increase of 1 credit from the new baseline fires.
         XCTAssertTrue(tracker.observe(3 * dollar))
 
-        // Trace Commons settled credits work independently (even without NEAR AI sign-in)
-        // and accumulate until at least 1.0 credit has arrived.
+        // Trace Commons settled credit works without a NEAR AI sign-in.
         XCTAssertFalse(tracker.observeCreditFinal(nil))
         XCTAssertFalse(tracker.observeCreditFinal(1.5))
         XCTAssertEqual(tracker.lastCreditFinal, 1.5)
         XCTAssertFalse(tracker.observeCreditFinal(1.5))
         XCTAssertFalse(tracker.observeCreditFinal(nil))
-        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
-        // +0.4 then +0.4 does not fire yet, keeping baseline at 1.5.
-        XCTAssertFalse(tracker.observeCreditFinal(1.9))
-        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
-        XCTAssertFalse(tracker.observeCreditFinal(2.3))
-        XCTAssertEqual(tracker.lastCreditFinal, 1.5)
-        // +0.2 more reaches 2.5 (+1.0 total) -> fires and advances baseline.
-        XCTAssertTrue(tracker.observeCreditFinal(2.5))
-        XCTAssertEqual(tracker.lastCreditFinal, 2.5)
-        // Smaller total resets baseline without firing.
+        XCTAssertTrue(tracker.observeCreditFinal(1.6))
+        XCTAssertEqual(tracker.lastCreditFinal, 1.6)
         XCTAssertFalse(tracker.observeCreditFinal(1.0))
         XCTAssertEqual(tracker.lastCreditFinal, 1.0)
-        XCTAssertFalse(tracker.observeCreditFinal(1.5))
-        XCTAssertTrue(tracker.observeCreditFinal(2.0))
+        XCTAssertTrue(tracker.observeCreditFinal(1.1))
+    }
+
+    /// The Dock fires exactly when the edge rail's Balance tile does, for
+    /// every reading of the NEAR AI total.
+    func testTheDockFiresWhenTheBalanceTileDoes() {
+        let readings: [Int64?] = [
+            nil, 4 * dollar, 4 * dollar, nil, 4 * dollar + 1, 4 * dollar + 1,
+            2 * dollar, nil, 3 * dollar, 3 * dollar + 500_000_000, 9 * dollar,
+        ]
+        var tracker = BalanceArrival.Tracker()
+        var shown: BalanceArrival.Reading?
+        for received in readings {
+            let now = BalanceArrival.Reading(receivedNanos: received, remainingNanos: nil)
+            let tile = BalanceArrival.effect(shown: shown, now: now, reduceMotion: false) != .none
+            if received != nil { shown = now }
+            XCTAssertEqual(tracker.observe(received), tile, "at \(String(describing: received))")
+        }
+    }
+
+    /// The daemon sums single-precision credit, so a re-read can differ in
+    /// the last digits. That is not an arrival.
+    func testIconArrivalTrackerIgnoresFloatingPointNoise() {
+        var tracker = BalanceArrival.Tracker()
+        XCTAssertFalse(tracker.observeCreditFinal(40.77798080444336))
+        XCTAssertFalse(tracker.observeCreditFinal(40.77798080444336 + 0.00001))
+        XCTAssertEqual(tracker.lastCreditFinal, 40.77798080444336)
+    }
+
+    private func scratchDefaults() throws -> UserDefaults {
+        let suite = "BalanceArrivalTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults().removePersistentDomain(forName: suite) }
+        return defaults
+    }
+
+    /// Credit that lands while the app is closed or signed out plays once on
+    /// the next reading, and not again.
+    func testASavedBaselineCelebratesWhatArrivedWhileAway() throws {
+        let defaults = try scratchDefaults()
+        var before = BalanceArrival.Tracker()
+        XCTAssertFalse(before.observe(4 * dollar))
+        XCTAssertFalse(before.observeCreditFinal(10))
+        before.save(forScope: "sha256:a", in: defaults)
+
+        var relaunched = BalanceArrival.Tracker.stored(forScope: "sha256:a", in: defaults)
+        XCTAssertEqual(relaunched, before)
+        XCTAssertTrue(relaunched.observe(5 * dollar))
+        XCTAssertTrue(relaunched.observeCreditFinal(10.1))
+        relaunched.save(forScope: "sha256:a", in: defaults)
+
+        var again = BalanceArrival.Tracker.stored(forScope: "sha256:a", in: defaults)
+        XCTAssertFalse(again.observe(5 * dollar))
+        XCTAssertFalse(again.observeCreditFinal(10.1))
+    }
+
+    /// Another account's larger total is not new credit.
+    func testASavedBaselineBelongsToItsAccount() throws {
+        let defaults = try scratchDefaults()
+        var first = BalanceArrival.Tracker()
+        XCTAssertFalse(first.observe(1 * dollar))
+        first.save(forScope: "sha256:a", in: defaults)
+
+        var other = BalanceArrival.Tracker.stored(forScope: "sha256:b", in: defaults)
+        XCTAssertEqual(other, BalanceArrival.Tracker())
+        XCTAssertFalse(other.observe(9 * dollar), "the first reading is a baseline")
+    }
+
+    /// With no account there is nothing to key a baseline to.
+    func testNoAccountScopeNeverSavesOrLoads() throws {
+        let defaults = try scratchDefaults()
+        var tracker = BalanceArrival.Tracker()
+        XCTAssertFalse(tracker.observe(1 * dollar))
+        tracker.save(forScope: nil, in: defaults)
+        XCTAssertEqual(BalanceArrival.Tracker.stored(forScope: nil, in: defaults), BalanceArrival.Tracker())
+        XCTAssertNil(defaults.object(forKey: BalanceArrival.Tracker.baselineKey))
     }
 
     func testIconAnimationFrameSchedule() {
