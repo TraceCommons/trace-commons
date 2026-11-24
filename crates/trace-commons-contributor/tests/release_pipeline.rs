@@ -2076,7 +2076,10 @@ fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
     let publish_job = extract_job(&workflow, "publish");
 
     assert!(
-        publish_job.contains("needs: [version, macos, windows, windows-app, linux-flatpak]"),
+        publish_job
+            .lines()
+            .find(|line| line.trim_start().starts_with("needs:"))
+            .is_some_and(|line| line.contains("windows-app,")),
         "the publish job must depend on windows-app"
     );
     assert!(
@@ -2096,6 +2099,31 @@ fn windows_msix_job_is_wired_into_the_release_job_gate_and_artifacts() {
         publish_job.contains("NearAIGateway.appinstaller"),
         "the release notes must point contributors at the .appinstaller feed"
     );
+}
+
+#[test]
+fn live_attestation_is_required_before_app_publication() {
+    let workflow = executable_text(&read(".github/workflows/release-apps.yml"));
+    let gate = extract_job(&workflow, "release-attestation");
+    assert!(gate.contains("open(\"Cargo.lock\", \"rb\")"));
+    assert!(gate.contains("ref: ${{ steps.rts.outputs.revision }}"));
+    assert!(gate.contains("RTS_LIVE_COMPOSE_POLICY: pinned"));
+    assert!(gate.contains("for environment in production staging"));
+    assert!(gate.contains("cargo test --locked --test live_attest -- --ignored"));
+
+    // The GitHub Release supports partial platform success, so all platform
+    // results together still cannot stand in for successful attestation.
+    let publish = extract_job(&workflow, "publish");
+    assert!(publish.contains("needs.release-attestation.result == 'success' &&"));
+    // The MSIX and Flatpak jobs both contain a direct bucket publish step.
+    for platform in ["windows-app", "linux-flatpak"] {
+        let job = extract_job(&workflow, platform);
+        assert!(job.contains("needs: [version, release-config, release-attestation]"));
+    }
+
+    // The appcast and manifest require the gated GitHub Release to exist.
+    let updates = extract_job(&workflow, "publish-updates");
+    assert!(updates.contains("needs.publish.result == 'success' &&"));
 }
 
 #[test]

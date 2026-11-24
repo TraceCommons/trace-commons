@@ -1,6 +1,6 @@
 [package]
 name = "trace-commons-contributor-ffi"
-version = "1.0.19"
+version = "1.0.20"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
