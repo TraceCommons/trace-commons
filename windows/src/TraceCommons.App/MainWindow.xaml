@@ -42,7 +42,7 @@
 
         <Grid.Resources>
             <!-- The toolbar's toggles and the gear: a quiet button, the
-                 checked state a scrim, as the Mac's capsule draws it. -->
+                 checked state a scrim. -->
             <Style x:Key="TcToolbarToggleStyle" TargetType="ToggleButton" BasedOn="{StaticResource DefaultToggleButtonStyle}">
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderThickness" Value="0" />
@@ -71,13 +71,12 @@
         <!--
             The toolbar row, extended into the title bar (decided for W2): the
             Mac's top row of the main pane (MonitorWindowView.swift:919-971),
-            the staging tag, the capsule of pane toggles and the Settings
+            the staging tag, the pane toggles and the Settings
             button, with the N where Windows puts a window's mark. The system
             draws the caption buttons in the right inset; this row keeps that
             room free (RightInsetColumn, set from the title bar's own
-            RightInset). The toggles and the gear take the pointer through
-            passthrough regions set from code; the rest of the row drags the
-            window.
+            RightInset). The mark, spacer and staging tag sit over the
+            draggable area. The toggles and gear sit outside it.
         -->
         <Grid x:Name="AppTitleBar"
               Grid.Row="0"
@@ -92,6 +91,11 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition x:Name="RightInsetColumn" Width="138" />
             </Grid.ColumnDefinitions>
+
+            <Border x:Name="TitleBarDragArea"
+                    Grid.Column="1"
+                    Grid.ColumnSpan="3"
+                    Background="Transparent" />
 
             <!-- The NEAR AI N (G-3 (a)), from the Mac's path data
                  (NearMarkPath). Decorative: not a tab stop, no name. -->
@@ -115,18 +119,14 @@
                        Foreground="{ThemeResource TcGoldTextBrush}"
                        Visibility="Collapsed" />
 
-            <!-- One capsule of the Graph, Map and Inspector toggles
-                 (MonitorWindowView.swift:923-940). The graph footer and the
-                 map land with their content; until then their toggles are
-                 collapsed, not drawn as dead controls. -->
-            <Border x:Name="ToolbarCapsule"
-                    Grid.Column="4"
+            <!-- The Graph, Map and Inspector toggles share a frame. -->
+            <Border Grid.Column="4"
                     VerticalAlignment="Center"
                     Margin="0,0,6,0"
                     Padding="2"
                     BorderBrush="{ThemeResource TcHairlineBrush}"
                     BorderThickness="1"
-                    CornerRadius="{StaticResource TcPillCornerRadius}">
+                    CornerRadius="{StaticResource TcControlCornerRadius}">
                 <StackPanel Orientation="Horizontal" Spacing="2">
                     <StackPanel.Resources>
                         <!-- Per theme, so a live theme or high contrast switch draws the
