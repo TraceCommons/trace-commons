@@ -29,28 +29,28 @@ impl ReleasePin {
     }
 }
 
-/// Pinned `nearai/nearai-red-sandbox` release archive (`v0.1.7`, aarch64-apple-darwin).
-/// SHA-256 from the release's `SHA256SUMS` (`3de16682...`), checked against the
+/// Pinned `nearai/nearai-red-sandbox` release archive (`v0.1.10`, aarch64-apple-darwin).
+/// SHA-256 from the release's `SHA256SUMS` (`9098b444...`), checked against the
 /// downloaded archive.
 pub const RTS_RELEASE: ReleasePin = ReleasePin {
-    url: "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.7/rts-0.1.7-aarch64-apple-darwin.tar.gz",
+    url: "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.10/rts-0.1.10-aarch64-apple-darwin.tar.gz",
     sha256: [
-        0x3d, 0xe1, 0x66, 0x82, 0x7c, 0x4c, 0x40, 0x13, 0x5d, 0x09, 0x03, 0x36, 0x06, 0x64, 0xd9,
-        0xc0, 0x9f, 0x30, 0x34, 0x3c, 0x47, 0x77, 0xbb, 0xc9, 0x1f, 0x37, 0x4b, 0xbc, 0x84, 0x78,
-        0x3d, 0x6d,
+        0x90, 0x98, 0xb4, 0x44, 0x5a, 0x43, 0x1c, 0x8c, 0x21, 0xcf, 0xf1, 0x3f, 0xef, 0x0c, 0x0d,
+        0x70, 0x96, 0x33, 0x86, 0xdb, 0x67, 0x12, 0x1e, 0x97, 0x6a, 0x94, 0xe3, 0xa4, 0xbb, 0x15,
+        0xdb, 0xdc,
     ],
 };
 
 /// Pinned release archive for Windows (`x86_64-pc-windows-msvc`: `rts.exe`,
 /// `rts-egress.exe` and the plugin), from the same `nearai/nearai-red-sandbox`
-/// `v0.1.7` release as the macOS one. SHA-256 from the release's `SHA256SUMS`
-/// (`2b898e2c...`), checked against the downloaded archive.
+/// `v0.1.10` release as the macOS one. SHA-256 from the release's `SHA256SUMS`
+/// (`d76da1e6...`), checked against the downloaded archive.
 pub const RTS_RELEASE_WINDOWS: ReleasePin = ReleasePin {
-    url: "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.7/rts-0.1.7-x86_64-pc-windows-msvc.tar",
+    url: "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.10/rts-0.1.10-x86_64-pc-windows-msvc.tar",
     sha256: [
-        0x2b, 0x89, 0x8e, 0x2c, 0xad, 0x41, 0xca, 0x1f, 0xbf, 0xf1, 0xd1, 0x06, 0x97, 0x35, 0x36,
-        0x6c, 0x92, 0x47, 0x6b, 0x90, 0xb9, 0xde, 0xb8, 0x70, 0x48, 0xc8, 0x44, 0x30, 0xe6, 0xf3,
-        0xd8, 0x23,
+        0xd7, 0x6d, 0xa1, 0xe6, 0x8e, 0xe7, 0xfb, 0x98, 0xc4, 0x6a, 0xf7, 0xed, 0xe7, 0xaa, 0xe5,
+        0x99, 0xf9, 0xd9, 0x16, 0x8a, 0x0f, 0x91, 0x9e, 0xca, 0xbd, 0x19, 0x32, 0x45, 0x2a, 0x34,
+        0x63, 0x7d,
     ],
 };
 
@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[test]
-    fn both_pins_are_the_verified_0_1_7_digests() {
+    fn both_pins_are_the_verified_0_1_10_digests() {
         let hex = |pin: &ReleasePin| {
             pin.sha256
                 .iter()
@@ -90,16 +90,16 @@ mod tests {
         };
         assert_eq!(
             hex(&RTS_RELEASE),
-            "3de166827c4c40135d0903360664d9c09f30343c4777bbc91f374bbc84783d6d"
+            "9098b4445a431c8c21cff13fef0c0d70963386db67121e976a94e3a4bb15dbdc"
         );
         assert_eq!(
             hex(&RTS_RELEASE_WINDOWS),
-            "2b898e2cad41ca1fbff1d1069735366c92476b90b9deb87048c84430e6f3d823"
+            "d76da1e68ee7fb98c46af7ede7aae599f9d9168a0f919ecabd1932452a34637d"
         );
         assert!(
             RTS_RELEASE
                 .url
-                .ends_with("v0.1.7/rts-0.1.7-aarch64-apple-darwin.tar.gz")
+                .ends_with("v0.1.10/rts-0.1.10-aarch64-apple-darwin.tar.gz")
         );
     }
 
@@ -127,13 +127,13 @@ mod tests {
     fn the_windows_pin_names_the_msvc_tar_of_the_same_release() {
         assert!(
             RTS_RELEASE_WINDOWS.url.starts_with(
-                "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.7/"
+                "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.10/"
             )
         );
         assert!(
             RTS_RELEASE_WINDOWS
                 .url
-                .ends_with("rts-0.1.7-x86_64-pc-windows-msvc.tar")
+                .ends_with("rts-0.1.10-x86_64-pc-windows-msvc.tar")
         );
     }
 

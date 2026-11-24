@@ -935,7 +935,7 @@ dependencies = [
 [[package]]
 name = "dcap-qvl"
 version = "0.7.0"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c#fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=d10b305807a4b745c37b72c3b96eed02cc05b04a#d10b305807a4b745c37b72c3b96eed02cc05b04a"
 dependencies = [
  "anyhow",
  "asn1_der",
@@ -3791,8 +3791,8 @@ dependencies = [
 
 [[package]]
 name = "rts"
-version = "0.1.7"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c#fe4fba3eaf8c16dbbfe73aab45a248ccf3d5388c"
+version = "0.1.10"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=d10b305807a4b745c37b72c3b96eed02cc05b04a#d10b305807a4b745c37b72c3b96eed02cc05b04a"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.23.1",
@@ -4846,7 +4846,7 @@ version = "0.1.0"
 
 [[package]]
 name = "trace-commons-contributor"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-gtk"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4920,7 +4920,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-insights"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4940,7 +4940,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-platform"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -4956,7 +4956,7 @@ dependencies = [
 
 [[package]]
 name = "trace-commons-contributor-sources"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "chrono",
