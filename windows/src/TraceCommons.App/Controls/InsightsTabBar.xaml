@@ -15,10 +15,8 @@
     xmlns:local="using:TraceCommons.App.Controls"
     IsTabStop="False">
     <!--
-        The tabs, as the Mac draws them (GlassSegmentedTabs,
-        TCDesign/Components/Navigation.swift:84-150): one button per
-        tab in a well, the selected one filled, each its own keyboard
-        stop named by its title. A Pivot's headers could not take the
+        One button per tab in a well, the selected one filled, each
+        its own keyboard stop named by its title. A Pivot's headers could not take the
         keyboard at all (box tab walk, 2026-11-19: Tab went from the
         window's tabs straight into the page), and a focusable Pivot is
         a nameless stop that draws no focus. The pages below are plain
@@ -30,7 +28,7 @@
     <Border Margin="16,8,16,0"
             Padding="2"
             MinHeight="{StaticResource TcGlassSizeSegmentedTrack}"
-            CornerRadius="{StaticResource TcGlassRadiusPill}"
+            CornerRadius="{StaticResource TcGlassRadiusTile}"
             Background="{ThemeResource TcGlassWellBrush}">
         <Grid x:Name="Track" ColumnSpacing="2">
             <Grid.Resources>
@@ -86,7 +84,7 @@
                         <Setter Property="Padding" Value="8,0,8,0" />
                         <Setter Property="FontSize" Value="{StaticResource TcGlassTypeLabelFontSize}" />
                         <Setter Property="FontWeight" Value="Medium" />
-                        <Setter Property="CornerRadius" Value="{StaticResource TcGlassRadiusPill}" />
+                        <Setter Property="CornerRadius" Value="{StaticResource TcGlassRadiusTile}" />
                     </Style>
                 </ResourceDictionary>
             </Grid.Resources>

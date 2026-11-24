@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using TraceCommons.Interop;
@@ -222,13 +223,15 @@ public sealed class ManagedSessionsView : UserControl
         if (_snapshot is null) return;
         _root.Children.Clear();
         RenderSignIn();
-        _root.Children.Add(new TextBlock { Text = T("title"), FontSize = 22 });
-        _root.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var sessions = new StackPanel { Spacing = 6 };
+        sessions.Children.Add(SectionTitle("title"));
+        sessions.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Any(a => _snapshot.CanLaunch(a.Tool))));
         // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
         if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
-        _root.Children.Add(actions);
+        sessions.Children.Add(actions);
+        _root.Children.Add(sessions);
         // Signed in, the card above holds the Install links (box,
         // 2026-11-19: both drew them); signed out, this block stands in for
         // the Mac's setup row (ManagedSessionsView.swift:34-36).
@@ -236,7 +239,7 @@ public sealed class ManagedSessionsView : UserControl
         {
             // One bare refresh glyph beside the heading; no per-tool copies.
             var heading = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-            heading.Children.Add(new TextBlock { Text = T("tools_title"), FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
+            heading.Children.Add(SectionTitle("tools_title"));
             heading.Children.Add(RefreshGlyph());
             _root.Children.Add(heading);
             _root.Children.Add(new TextBlock { Text = T("tools_empty"), TextWrapping = TextWrapping.Wrap });
@@ -307,8 +310,23 @@ public sealed class ManagedSessionsView : UserControl
         }
         if (_snapshot.Sessions.Length == 0) _rows.Children.Add(new TextBlock { Text = T("empty") });
         _root.Children.Add(_error);
-        _root.Children.Add(new TextBlock { Text = T("global_title"), FontSize = 20 });
-        _root.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
+        var global = new StackPanel { Spacing = 4 };
+        global.Children.Add(SectionTitle("global_title"));
+        global.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
+        _root.Children.Add(global);
+    }
+
+    private TextBlock SectionTitle(string key)
+    {
+        var title = new TextBlock
+        {
+            Text = T(key),
+            Style = (Style)Application.Current.Resources["TcTitleCardTextStyle"],
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level2);
+        return title;
     }
 
     /// <summary>How the last "Enable Red Team" ended (a copy key), shown under the
@@ -330,7 +348,7 @@ public sealed class ManagedSessionsView : UserControl
         if (_snapshot?.RedTeamState is not RedTeamSetup setup) return;
         if (setup == RedTeamSetup.Installed) _redTeamOutcomeKey = null;
         var section = new StackPanel { Spacing = 4 };
-        section.Children.Add(new TextBlock { Text = T("red_team"), FontSize = 20 });
+        section.Children.Add(SectionTitle("red_team"));
         section.Children.Add(new TextBlock { Text = T(setup == RedTeamSetup.Installed ? "red_team_installed" : "red_team_not_installed") });
         section.Children.Add(new TextBlock { Text = T("red_team_settings_line"), TextWrapping = TextWrapping.Wrap });
         if (_snapshot.RedTeamUnsupportedEdition)
@@ -387,7 +405,7 @@ public sealed class ManagedSessionsView : UserControl
     {
         if (_snapshot is null || !_snapshot.NearAiSignedIn) return;
         var section = new StackPanel { Spacing = 6 };
-        section.Children.Add(new TextBlock { Text = T("sign_in_title"), FontSize = 20 });
+        section.Children.Add(SectionTitle("sign_in_title"));
         section.Children.Add(new TextBlock
         {
             Text = ManagedSignIn.Scope(T("sign_in_scope"), _snapshot.Capabilities.SessionDestination, T("terminal")),

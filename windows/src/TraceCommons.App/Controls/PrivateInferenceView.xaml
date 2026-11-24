@@ -32,8 +32,8 @@
 
     <Grid>
 
-        <ScrollViewer Padding="22,16,22,16">
-            <StackPanel Spacing="10" MaxWidth="640" HorizontalAlignment="Left">
+        <ScrollViewer Padding="16,0,16,12" HorizontalScrollMode="Disabled">
+            <StackPanel Spacing="10">
                 <!--
                     How Private AI works (spec W19, PrivateAIGuideCard,
                     InferenceViews.swift:369-405): first on the tab until it is
@@ -207,23 +207,36 @@
                     <TextBlock Text="{x:Bind Ledger.WindowLine, Mode=OneWay}"
                                Style="{StaticResource TcCaptionTextStyle}"
                                Foreground="{ThemeResource TcInkTertiaryBrush}" />
-                    <StackPanel Orientation="Horizontal" Spacing="6">
-                        <StackPanel Spacing="2" MinWidth="72">
+                    <Grid ColumnDefinitions="*,*,*" ColumnSpacing="6">
+                        <Grid.Resources>
+                            <Style x:Key="LedgerTotalCellStyle" TargetType="Grid">
+                                <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
+                                <Setter Property="CornerRadius" Value="{StaticResource TcControlCornerRadius}" />
+                                <Setter Property="Padding" Value="10,4" />
+                                <Setter Property="MinHeight" Value="28" />
+                                <Setter Property="ColumnSpacing" Value="8" />
+                            </Style>
+                        </Grid.Resources>
+                        <Grid ColumnDefinitions="*,Auto" Style="{StaticResource LedgerTotalCellStyle}">
                             <TextBlock Text="{x:Bind Ledger.CallsWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
-                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
-                            <TextBlock Text="{x:Bind Ledger.CallsFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
-                        </StackPanel>
-                        <StackPanel Spacing="2" MinWidth="72">
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Ledger.CallsFigure, Mode=OneWay}"
+                                       Style="{StaticResource TcBodyDenseTextStyle}" VerticalAlignment="Center" />
+                        </Grid>
+                        <Grid Grid.Column="1" ColumnDefinitions="*,Auto" Style="{StaticResource LedgerTotalCellStyle}">
                             <TextBlock Text="{x:Bind Ledger.VerifiedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
-                                       Foreground="{ThemeResource TcStatusOnTextBrush}" />
-                            <TextBlock Text="{x:Bind Ledger.VerifiedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
-                        </StackPanel>
-                        <StackPanel Spacing="2" MinWidth="72">
+                                       Foreground="{ThemeResource TcStatusOnTextBrush}"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Ledger.VerifiedFigure, Mode=OneWay}"
+                                       Style="{StaticResource TcBodyDenseTextStyle}" VerticalAlignment="Center" />
+                        </Grid>
+                        <Grid Grid.Column="2" ColumnDefinitions="*,Auto" Style="{StaticResource LedgerTotalCellStyle}">
                             <TextBlock Text="{x:Bind Ledger.PricedWord, Mode=OneWay}" Style="{StaticResource TcCaptionTextStyle}"
-                                       Foreground="{ThemeResource TcInkSecondaryBrush}" />
-                            <TextBlock Text="{x:Bind Ledger.PricedFigure, Mode=OneWay}" Style="{StaticResource TcMetricValueTextStyle}" />
-                        </StackPanel>
-                    </StackPanel>
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind Ledger.PricedFigure, Mode=OneWay}"
+                                       Style="{StaticResource TcBodyDenseTextStyle}" VerticalAlignment="Center" />
+                        </Grid>
+                    </Grid>
                 </StackPanel>
                 <Border Background="{ThemeResource TcSurfaceCardBrush}"
                         BorderBrush="{ThemeResource TcHairlineBrush}"
@@ -236,7 +249,7 @@
                         <ItemsControl ItemsSource="{x:Bind Ledger.Calls, Mode=OneWay}" IsTabStop="False">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="interop:LedgerCallRow">
-                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Padding="0,6"
+                                    <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Padding="0,4"
                                           BorderBrush="{ThemeResource TcHairlineDividerBrush}" BorderThickness="0,1,0,0"
                                           AutomationProperties.Name="{x:Bind AccessibleName}">
                                         <TextBlock Text="{x:Bind Time}" MinWidth="56"
@@ -292,9 +305,9 @@
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12"
                         Visibility="{x:Bind ViewModel.ShowAccountBalance, Mode=OneWay}">
-                    <StackPanel Spacing="10">
+                    <StackPanel Spacing="6">
                         <TextBlock Text="{x:Bind ViewModel.BalanceTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
                                    TextWrapping="Wrap" />
                         <!--
                             The figure the heading just named. No Foreground
@@ -384,7 +397,7 @@
                                 IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
                                 HorizontalAlignment="Left"
                                 Click="OnBalanceAction" />
-                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleSectionTextStyle}" TextWrapping="Wrap" />
+                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
                         <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
@@ -452,9 +465,9 @@
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12"
                         Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
-                    <StackPanel Spacing="10">
+                    <StackPanel Spacing="6">
                         <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
                                    TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.HasCredentialWhat, Mode=OneWay}"
@@ -539,10 +552,10 @@
                         CornerRadius="{StaticResource TcCardCornerRadius}"
                         Padding="14,12"
                         Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
-                    <StackPanel Spacing="10">
+                    <StackPanel Spacing="6">
                         <TextBlock Text="{x:Bind ViewModel.HarnessesTitle, Mode=OneWay}"
                                    ToolTipService.ToolTip="{x:Bind ViewModel.HarnessesPrecedenceTooltip, Mode=OneWay}"
-                                   Style="{StaticResource TcTitleSectionTextStyle}"
+                                   Style="{StaticResource TcTitleCardTextStyle}"
                                    TextWrapping="Wrap" />
                         <TextBlock Text="{x:Bind ViewModel.HarnessesWhat, Mode=OneWay}"
                                    Visibility="{x:Bind ViewModel.HasHarnessesWhat, Mode=OneWay}"
@@ -587,20 +600,24 @@
                                    Foreground="{ThemeResource TcGoldTextBrush}"
                                    TextWrapping="Wrap" />
                         <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><StackPanel Spacing="6" /></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:HarnessRowViewModel">
-                                    <StackPanel Spacing="12" Margin="0,12,0,0" Padding="20"
+                                    <StackPanel Spacing="6" Padding="12,8"
                                                 Background="{ThemeResource TcSurfaceInsetBrush}"
                                                 CornerRadius="{StaticResource TcCardCornerRadius}">
-                                        <Grid ColumnSpacing="12">
+                                        <Grid ColumnSpacing="8">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
-                                            <Border Padding="12" Background="{ThemeResource TcSurfaceCardBrush}"
+                                            <Border Width="28" Height="28" VerticalAlignment="Center"
+                                                    Background="{ThemeResource TcSurfaceCardBrush}"
                                                     CornerRadius="{StaticResource TcCardCornerRadius}">
-                                                <FontIcon Glyph="&#xE756;" FontSize="20"
+                                                <FontIcon Glyph="&#xE756;" FontSize="14"
                                                           Foreground="{ThemeResource TcGreenTextBrush}"
                                                           AutomationProperties.AccessibilityView="Raw" />
                                             </Border>
@@ -636,7 +653,7 @@
                                                   IsExpanded="{x:Bind IsSettingsExpanded, Mode=TwoWay}"
                                                   HorizontalAlignment="Stretch"
                                                   HorizontalContentAlignment="Stretch">
-                                            <StackPanel Spacing="12">
+                                            <StackPanel Spacing="6">
                                                 <TextBlock Text="{x:Bind ConfigPath}"
                                                            Visibility="{x:Bind HasConfigPath}"
                                                            Style="{StaticResource TcMonoCodeTextStyle}"
