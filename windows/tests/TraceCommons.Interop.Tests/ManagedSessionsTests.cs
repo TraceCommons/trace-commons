@@ -54,6 +54,37 @@ public sealed class ManagedSessionsTests
         Assert.False((session with { State = "exited" }).HoldsAccount);
     }
 
+    [Theory]
+    [InlineData("running", true, true, false, false, false, null, "Show,Stop")]
+    [InlineData("running", false, true, false, false, false, null, "Stop")]
+    [InlineData("starting", true, true, false, false, false, null, "")]
+    [InlineData("unknown", false, false, false, false, true, "Dismiss", "")]
+    [InlineData("exited", false, false, true, true, false, "Resume", "StartAgain,CopyResumeCommand,Dismiss")]
+    [InlineData("failed", false, false, true, false, false, "StartAgain", "Dismiss")]
+    [InlineData("exited", false, false, false, false, false, "Dismiss", "")]
+    public void SessionActionsFollowTheDaemon(
+        string state, bool focus, bool stop, bool start, bool resume, bool dismiss, string? primary, string menu)
+    {
+        string json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            revision = 1,
+            accounts = System.Array.Empty<object>(),
+            sessions = new[] { new
+            {
+                id = "s", tool = "claude", connection = "near_ai", account_id = "a",
+                account_label = "Work", project_label = "Project", state, purpose = "coding",
+                can_focus = focus, can_stop = stop, can_start_again = start, can_resume = resume, can_dismiss = dismiss,
+            } },
+            generations = new { },
+            capabilities = new { terminal_launch = true, resume = true },
+            copy = new { },
+        });
+        var snapshot = ManagedSnapshot.Parse(json)!;
+        var actions = ManagedSessionActions.For(Assert.Single(snapshot.Sessions), snapshot.Capabilities, configDirectoryKnown: true);
+        Assert.Equal(primary, actions.Primary?.ToString());
+        Assert.Equal(menu, string.Join(",", actions.Menu));
+    }
+
     [Fact]
     public void SnapshotKeepsCliSessionIdentityAndTerminalCapability()
     {

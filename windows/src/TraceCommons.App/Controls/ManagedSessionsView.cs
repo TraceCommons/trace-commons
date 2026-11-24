@@ -15,14 +15,16 @@ using TraceCommons.App.Look;
 namespace TraceCommons.App.Controls;
 
 /// <summary>Shared daemon accounts and sessions; all fixed copy comes from its snapshot.</summary>
-public sealed class ManagedSessionsView : UserControl
+public sealed partial class ManagedSessionsView : UserControl
 {
     private readonly DaemonHost _host;
     private readonly StackPanel _root = new() { Spacing = 10 };
-    private readonly StackPanel _rows = new() { Spacing = 8 };
     private readonly TextBlock _error = new() { TextWrapping = TextWrapping.Wrap };
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(10) };
     private ManagedSnapshot? _snapshot;
+    private string? _snapshotJson;
+    private readonly Dictionary<string, ManagedLaunchCatalogue> _modelCatalogues = new();
+    private readonly HashSet<string> _modelCatalogueReads = new();
     private bool _busy;
     private bool _reading;
     private bool _unsupportedVersion;
@@ -53,13 +55,17 @@ public sealed class ManagedSessionsView : UserControl
         {
             WindowClocks.Changed -= OnClocksChanged;
             WindowClocks.Changed += OnClocksChanged;
+            ThemeBrushes.Changed -= Render;
+            ThemeBrushes.Changed += Render;
             await RefreshAsync();
             if (WindowClocks.Running) _timer.Start();
         };
         Unloaded += (_, _) =>
         {
             WindowClocks.Changed -= OnClocksChanged;
+            ThemeBrushes.Changed -= Render;
             _timer.Stop();
+            _modelCatalogueReads.Clear();
         };
         _timer.Tick += async (_, _) => await RefreshAsync();
     }
@@ -93,17 +99,26 @@ public sealed class ManagedSessionsView : UserControl
         return response.Result.Value.Clone();
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(bool forceRender = false)
     {
         if (_reading) return;
         _reading = true;
         try
         {
             var value = await CallAsync("managed_snapshot", new { });
-            var next = ManagedSnapshot.Parse(value.GetRawText());
+            string json = value.GetRawText();
+            if (!forceRender && json == _snapshotJson)
+            {
+                if (_snapshot is not null) _ = LoadSessionModelNamesAsync(_snapshot);
+                return;
+            }
+
+            var next = ManagedSnapshot.Parse(json);
             if (next is null || (_snapshot is not null && next.Revision < _snapshot.Revision)) return;
             _snapshot = next;
             Render();
+            _snapshotJson = json;
+            _ = LoadSessionModelNamesAsync(next);
         }
         catch { _error.Text = T("action_failed"); }
         finally { _reading = false; }
@@ -131,7 +146,7 @@ public sealed class ManagedSessionsView : UserControl
     private Button RefreshGlyph()
     {
         var glyph = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 }, Background = null, BorderThickness = new Thickness(0), IsEnabled = !_busy };
-        glyph.Click += async (_, _) => await RefreshAsync();
+        glyph.Click += async (_, _) => await RefreshAsync(forceRender: true);
         ToolTipService.SetToolTip(glyph, T("refresh"));
         AutomationProperties.SetName(glyph, T("refresh"));
         return glyph;
@@ -162,26 +177,26 @@ public sealed class ManagedSessionsView : UserControl
             if (_fromCard) _failure.Refuse("action_failed", fromCard: true);
             else _error.Text = T("action_failed");
         }
-        finally { _busy = false; _fromCard = false; await RefreshAsync(); }
+        finally { _busy = false; _fromCard = false; await RefreshAsync(forceRender: true); }
     }
 
     /// <summary>
-    /// Rebuilds the view, keeping keyboard focus on the same button: every
-    /// read rebuilds it, so without this the 10 s poll, or closing the launch
-    /// dialog, dropped focus to the window's first control (box, 2026-11-19).
+    /// Preserves the focused button when a snapshot changes or a dialog closes.
     /// </summary>
     private void Render()
     {
         if (_snapshot is null) return;
         // While a dialog is open (busy) a poll's rebuild keeps the return.
+        bool returningFromDialog = !_busy && _returnFocus is not null;
         var (target, keep) = ManagedFocus.Rebuild(FocusedButtonKey(), _busy, _returnFocus);
         _returnFocus = keep;
         RenderContent();
-        if (target is { } key) RestoreFocus(key);
+        if (target is { } key) RestoreFocus(key, returningFromDialog);
     }
 
     private static string ButtonName(Button button) =>
-        AutomationProperties.GetName(button) is { Length: > 0 } name ? name : button.Content as string ?? string.Empty;
+        AutomationProperties.GetAutomationId(button) is { Length: > 0 } id ? id :
+            AutomationProperties.GetName(button) is { Length: > 0 } name ? name : button.Content as string ?? string.Empty;
 
     private static IEnumerable<Button> Buttons(Panel panel)
     {
@@ -189,6 +204,7 @@ public sealed class ManagedSessionsView : UserControl
         {
             if (child is Button button) yield return button;
             else if (child is Panel inner) foreach (var nested in Buttons(inner)) yield return nested;
+            else if (child is Border { Child: Panel body }) foreach (var nested in Buttons(body)) yield return nested;
         }
     }
 
@@ -200,7 +216,7 @@ public sealed class ManagedSessionsView : UserControl
         return ManagedFocus.KeyOf(buttons.Select(ButtonName).ToList(), buttons.IndexOf(focused));
     }
 
-    private void RestoreFocus((string Name, int Index) key)
+    private void RestoreFocus((string Name, int Index) key, bool bringIntoView)
     {
         var buttons = Buttons(_root).ToList();
         int at = ManagedFocus.Find(buttons.Select(ButtonName).ToList(), key);
@@ -214,13 +230,14 @@ public sealed class ManagedSessionsView : UserControl
         DispatcherQueue?.TryEnqueue(() =>
         {
             match.Focus(FocusState.Programmatic);
-            section.StartBringIntoView();
+            if (bringIntoView) section.StartBringIntoView();
         });
     }
 
     private void RenderContent()
     {
         if (_snapshot is null) return;
+        if (_error.Parent is Panel previousCard) previousCard.Children.Remove(_error);
         _root.Children.Clear();
         RenderSignIn();
         var sessions = new StackPanel { Spacing = 6 };
@@ -231,7 +248,6 @@ public sealed class ManagedSessionsView : UserControl
         // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
         if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
         sessions.Children.Add(actions);
-        _root.Children.Add(sessions);
         // Signed in, the card above holds the Install links (box,
         // 2026-11-19: both drew them); signed out, this block stands in for
         // the Mac's setup row (ManagedSessionsView.swift:34-36).
@@ -265,10 +281,16 @@ public sealed class ManagedSessionsView : UserControl
             }
         }
         RenderRedTeam();
-        _root.Children.Add(new TextBlock { Text = _snapshot.Capabilities.SessionDestination is string destination
-            ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable"), TextWrapping = TextWrapping.Wrap });
-        _root.Children.Add(_rows);
-        _rows.Children.Clear();
+        sessions.Children.Add(SessionCaption(_snapshot.Capabilities.SessionDestination is string destination
+            ? T("terminal_scope").Replace("{destination}", destination) : T("terminal_unavailable")));
+        var rows = new StackPanel { Spacing = 8 };
+        sessions.Children.Add(rows);
+        _root.Children.Add(new Border
+        {
+            Child = sessions, Padding = new Thickness(12), BorderThickness = new Thickness(1),
+            CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"), BorderBrush = ThemeBrushes.Get("TcHairlineBrush"),
+        });
         foreach (var account in _snapshot.Accounts)
         {
             bool held = _snapshot.Sessions.Any(s => s.AccountId == account.Id && s.HoldsAccount);
@@ -297,19 +319,14 @@ public sealed class ManagedSessionsView : UserControl
                 if (await dialog.ShowAsync() == ContentDialogResult.Primary) await CallAsync("managed_account_remove", new { account_id = account.Id });
             }, !held));
             row.Children.Add(controls);
-            _rows.Children.Add(row);
+            rows.Children.Add(row);
         }
         foreach (var session in _snapshot.Sessions)
         {
-            var row = new StackPanel { Spacing = 4 };
-            row.Children.Add(new TextBlock { Text = $"{(session.Purpose == "login" ? T("sign_in") : session.ProjectLabel)} · {T(session.Tool)} · {session.AccountLabel} · {T(session.Connection)} · {session.State}" });
-            if (session.Model is string model) row.Children.Add(new TextBlock { Text = $"{T("model")}: {model}" });
-            if (session.Tool == "opencode") row.Children.Add(new TextBlock { Text = T($"collection_{session.Collection}") });
-            if (!session.HoldsAccount) row.Children.Add(Button("dismiss", async () => { await CallAsync("managed_session_dismiss", new { session_id = session.Id }); }));
-            _rows.Children.Add(row);
+            rows.Children.Add(SessionRow(session, _snapshot.Capabilities));
         }
-        if (_snapshot.Sessions.Length == 0) _rows.Children.Add(new TextBlock { Text = T("empty") });
-        _root.Children.Add(_error);
+        if (_snapshot.Sessions.Length == 0) rows.Children.Add(new TextBlock { Text = T("empty") });
+        sessions.Children.Add(_error);
         var global = new StackPanel { Spacing = 4 };
         global.Children.Add(SectionTitle("global_title"));
         global.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
@@ -503,11 +520,6 @@ public sealed class ManagedSessionsView : UserControl
             ToolTipService.SetToolTip(shown, path);
             clear.Visibility = path is null ? Visibility.Collapsed : Visibility.Visible;
         }
-        clear.Click += (_, _) => { path = null; ShowFolder(); };
-        pick.Click += async (_, _) =>
-        {
-            if (await PickFolderAsync() is string chosen && ManagedLaunchFolder.IsAcceptable(chosen)) { path = chosen; ShowFolder(); }
-        };
         ShowFolder();
         Grid.SetColumn(tile, 0); Grid.SetColumn(shown, 1); Grid.SetColumn(clear, 2); Grid.SetColumn(pick, 3);
         folderRow.Children.Add(tile); folderRow.Children.Add(shown); folderRow.Children.Add(clear); folderRow.Children.Add(pick);
@@ -517,10 +529,26 @@ public sealed class ManagedSessionsView : UserControl
         if (terminal is not null) form.Children.Add(terminal);
         var dialog = new ContentDialog
         {
-            XamlRoot = XamlRoot, Title = T(startKey), Content = form,
+            XamlRoot = XamlRoot, Title = T(startKey), Content = new ScrollViewer { Content = form },
             PrimaryButtonText = ManagedSignIn.OpenLabel(T("open_tool"), T(tool)),
             CloseButtonText = T("cancel"), DefaultButton = ContentDialogButton.Primary,
         };
+        var fields = new LaunchFields(this, _snapshot.Capabilities);
+        fields.Changed += Validate;
+        void Validate() => dialog.IsPrimaryButtonEnabled = fields.Ready;
+        form.Children.Add(fields.Panel);
+        Task LoadAsync() => fields.LoadAsync(tool, "near_ai_signin", path);
+        clear.Click += async (_, _) => { path = null; ShowFolder(); await LoadAsync(); };
+        pick.Click += async (_, _) =>
+        {
+            if (await PickFolderAsync() is string chosen && ManagedLaunchFolder.IsAcceptable(chosen))
+            {
+                path = chosen;
+                ShowFolder();
+                await LoadAsync();
+            }
+        };
+        _ = LoadAsync();
         // Open is the default action (ManagedFolderExplainer.swift:62,
         // isDefault): focus starts on it, so Enter opens the tool rather than
         // the folder picker.
@@ -538,9 +566,11 @@ public sealed class ManagedSessionsView : UserControl
         dialog.Opened += (_, _) => FocusPrimary(dialog);
         ContentDialogResult result = await dialog.ShowAsync();
         art.Release();
+        var choices = fields.Choices;
+        fields.Close();
         if (result != ContentDialogResult.Primary) return;
         // Decided from the folder and the snapshot at send time (L4).
-        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString()) is not { } request) return;
+        if (_snapshot?.SignInLaunchParams(tool, path, Guid.NewGuid().ToString(), choices) is not { } request) return;
         if (terminal is not null) await SaveTerminalAsync(terminal.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }
@@ -658,16 +688,6 @@ public sealed class ManagedSessionsView : UserControl
         var project = new TextBox { Header = T("project_placeholder") };
         var form = new StackPanel { Spacing = 10 };
         form.Children.Add(account); form.Children.Add(project);
-        var model = new TextBox { Header = T("model") };
-        var collect = new CheckBox { Content = T("collect_traces"), IsChecked = false };
-        var scope = new TextBlock { Text = T("opencode_scope") + " " + T("collection_scope"), TextWrapping = TextWrapping.Wrap };
-        void UpdateOpenCode() {
-            var visible = account.SelectedIndex >= 0 && accounts[account.SelectedIndex].Tool == "opencode" ? Visibility.Visible : Visibility.Collapsed;
-            model.Visibility = collect.Visibility = scope.Visibility = visible;
-            collect.IsChecked = false;
-        }
-        account.SelectionChanged += (_, _) => UpdateOpenCode();
-        UpdateOpenCode(); form.Children.Add(model); form.Children.Add(collect); form.Children.Add(scope);
         var choose = new Button { Content = T("choose_folder") };
         choose.Click += async (_, _) => {
             if (await PickFolderAsync() is string path) project.Text = path;
@@ -676,14 +696,39 @@ public sealed class ManagedSessionsView : UserControl
         var terminalPicker = _snapshot.AsksForTerminal ? TerminalPicker() : null;
         if (terminalPicker is not null) form.Children.Add(terminalPicker);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
-        var launchDialog = Dialog("launch_title", form, "launch_short");
-        void ValidateLaunch() => launchDialog.IsPrimaryButtonEnabled = account.SelectedIndex >= 0 && ManagedLaunchFolder.IsAcceptable(project.Text) && (accounts[account.SelectedIndex].Tool != "opencode" || !string.IsNullOrWhiteSpace(model.Text));
-        account.SelectionChanged += (_, _) => ValidateLaunch();
-        model.TextChanged += (_, _) => ValidateLaunch(); project.TextChanged += (_, _) => ValidateLaunch(); ValidateLaunch();
-        if (await launchDialog.ShowAsync() != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
+        var launchDialog = Dialog("launch_title", new ScrollViewer { Content = form }, "launch_short");
+        var fields = new LaunchFields(this, _snapshot.Capabilities);
+        fields.Changed += ValidateLaunch;
+        form.Children.Insert(form.Children.IndexOf(choose) + 1, fields.Panel);
+        void ValidateLaunch()
+        {
+            launchDialog.IsPrimaryButtonEnabled = fields.Ready && account.SelectedIndex >= 0
+                && ManagedLaunchFolder.IsAcceptable(project.Text)
+                && (ManagedLaunchOptions.ModelMode(accounts[account.SelectedIndex].Tool, accounts[account.SelectedIndex].Connection)
+                    != ManagedModelMode.Text || !string.IsNullOrWhiteSpace(fields.Choices?.Model));
+        }
+        async Task LoadAsync(bool typing = false)
+        {
+            ValidateLaunch();
+            if (account.SelectedIndex < 0 || !ManagedLaunchFolder.IsAcceptable(project.Text))
+            {
+                fields.Close();
+                fields.Panel.Children.Clear();
+                return;
+            }
+            var selected = accounts[account.SelectedIndex];
+            await fields.LoadAsync(selected.Tool, selected.Connection, project.Text, waitForTyping: typing);
+        }
+        account.SelectionChanged += async (_, _) => await LoadAsync();
+        project.TextChanged += async (_, _) => await LoadAsync(typing: true);
+        ValidateLaunch();
+        var result = await launchDialog.ShowAsync();
+        var choices = fields.Choices;
+        fields.Close();
+        if (result != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
         // Decided from the typed folder at send time (L4).
-        if (_snapshot.AccountLaunchParams(selected, project.Text, model.Text, collect.IsChecked == true, Guid.NewGuid().ToString()) is not { } request) return;
+        if (_snapshot.AccountLaunchParams(selected, project.Text, null, false, Guid.NewGuid().ToString(), choices) is not { } request) return;
         if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }

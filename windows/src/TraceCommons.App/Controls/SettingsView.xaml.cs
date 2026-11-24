@@ -33,6 +33,7 @@ public sealed partial class SettingsView : UserControl
         BuildSections(host, updateChecks);
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
+        ManagedFavoritesHost.Content = new ManagedFavoritesCard(host);
         InitializeShellSwitches();
 
         // The Traces map's style (W6-D1), its card in General after the edge

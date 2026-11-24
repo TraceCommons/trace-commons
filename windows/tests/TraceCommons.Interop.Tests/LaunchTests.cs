@@ -142,6 +142,61 @@ public sealed class LaunchTests
         Assert.Null(Snapshot().AccountLaunchParams(account, @"C:\p", model: "  ", collectTraces: false, "r"));
     }
 
+    [Theory]
+    [InlineData("claude")]
+    [InlineData("codex")]
+    [InlineData("opencode")]
+    public void APrivateStartSendsTheChosenModelAndTraceCapture(string tool)
+    {
+        var snapshot = Snapshot("""
+            [{"tool":"claude","installed":true},{"tool":"codex","installed":true},{"tool":"opencode","installed":true}]
+            """);
+        var choices = new ManagedLaunchOptions(" provider/model ", true, "--example");
+        var request = snapshot.SignInLaunchParams(tool, null, "r", choices)!;
+        Assert.Equal("provider/model", request["model"]);
+        Assert.Equal(true, request["collect_traces"]);
+        Assert.Equal("--example", request["cli_options"]);
+        Assert.False(request.ContainsKey("cwd"));
+    }
+
+    [Fact]
+    public void APrivateSavedAccountCanCollectAndKeepAnUnavailableModel()
+    {
+        var snapshot = Snapshot() with { Capabilities = Snapshot().Capabilities with { KeepSavedModel = true } };
+        var account = new ManagedAccount("a", "claude", "near_ai", "Work", "ready");
+        var choices = new ManagedLaunchOptions(null, true, "", KeepSavedModel: true);
+        var request = snapshot.AccountLaunchParams(account, @"C:\p", null, false, "r", choices)!;
+        Assert.Null(request["model"]);
+        Assert.Equal(true, request["collect_traces"]);
+        Assert.Equal(true, request["keep_saved_model"]);
+    }
+
+    [Fact]
+    public void ModelOptionsKeepFavoritesInCatalogueOrderAheadOfPrivacyGroups()
+    {
+        var catalogue = new ManagedLaunchCatalogue(
+            [new("outside", " Outside ", "incognito"), new("private", "Private", "near_ai"),
+             new("preferred", "Preferred", "incognito"), new("unknown", null, null)],
+            "private", ["preferred", "outside"], ["near_ai", "incognito"], null, null, null);
+        Assert.Equal(["outside", "preferred", "private", "unknown"], catalogue.OrderedModels().Select(model => model.Id));
+        Assert.Equal("Outside", catalogue.ModelDisplayName("outside"));
+        Assert.Equal("missing", catalogue.ModelDisplayName("missing"));
+        Assert.Equal(["private", "outside", "preferred", "unknown"],
+            (catalogue with { Favorites = [] }).OrderedModels().Select(model => model.Id));
+    }
+
+    [Fact]
+    public void SettingsMarksOnlyFavoritesTheDaemonConfirmsAreUnavailable()
+    {
+        var catalogue = new ManagedLaunchCatalogue(
+            [new("second", "Second", null), new("first", "First", null)],
+            null, null, null, null, null, null, ["removed"]);
+        var rows = ManagedLaunchCatalogue.FavoriteRows(["removed", "first", "other-tool", "second"], catalogue);
+        Assert.Equal(["second", "first", "other-tool", "removed"], rows.Select(row => row.Id));
+        Assert.Equal(["removed"], rows.Where(row => row.Unavailable).Select(row => row.Id));
+        Assert.False(Assert.Single(ManagedLaunchCatalogue.FavoriteRows(["removed"], null)).Unavailable);
+    }
+
     [Fact]
     public void TheOpenButtonNamesTheTool()
     {

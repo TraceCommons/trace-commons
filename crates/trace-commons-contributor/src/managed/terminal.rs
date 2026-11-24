@@ -1090,7 +1090,7 @@ fn terminal_args(app: TerminalApp, cwd: Option<&Path>) -> Option<Vec<std::ffi::O
             args.extend(["--wait-after-command=true".into(), "-e".into()]);
         }
         TerminalApp::WindowsTerminal => {
-            args.extend(["new-tab".into(), "--title".into(), "NEAR AI".into()]);
+            args.push("new-tab".into());
             if let Some(cwd) = cwd {
                 args.extend(["-d".into(), cwd.as_os_str().to_owned()]);
             }
@@ -1208,7 +1208,28 @@ fn plan(
     }
     let mut command = vec![helper.as_os_str().to_owned()];
     command.extend(helper_args(config, session, ticket));
-    program_plan(app, program, cwd, command)
+    let mut plan = program_plan(app, program, cwd, command)?;
+    if app == TerminalApp::WindowsTerminal {
+        // Each managed session has a top-level window to activate. Keep its
+        // title stable even when the tool sends its own title to the terminal.
+        plan.args.splice(
+            ..1,
+            [
+                "--window".into(),
+                "new".into(),
+                "new-tab".into(),
+                "--title".into(),
+                windows_terminal_title(session).into(),
+                "--suppressApplicationTitle".into(),
+            ],
+        );
+    }
+    Ok(plan)
+}
+
+#[cfg(any(windows, target_os = "linux", test))]
+fn windows_terminal_title(session: Uuid) -> String {
+    format!("NEAR AI — {session}")
 }
 
 /// The variables Windows PowerShell reads the helper's path, the config
@@ -1437,6 +1458,8 @@ pub enum TerminalHandle {
         #[serde(deserialize_with = "herdr_terminal")]
         terminal: String,
     },
+    /// A dedicated Windows Terminal window, titled with its managed session id.
+    WindowsTerminal { session: Uuid },
 }
 
 fn checked<'de, D: serde::Deserializer<'de>>(
@@ -1485,8 +1508,7 @@ fn tty_path<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
     }
 }
 
-/// The tab a launch opened, as its script printed it: the tab's tty, and
-/// the id of the window that held it then, when that could be read.
+/// The terminal a launch opened, with the platform's handle for Show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalTab {
     pub handle: TerminalHandle,
@@ -1554,7 +1576,41 @@ pub fn focus(handle: &TerminalHandle) -> Result<(), ManagedError> {
         #[cfg(not(target_os = "macos"))]
         TerminalHandle::Rex { .. } => Err(ManagedError::UnsupportedVersion),
         TerminalHandle::Herdr { terminal } => super::herdr::focus(terminal),
+        #[cfg(windows)]
+        TerminalHandle::WindowsTerminal { session } => focus_windows_terminal(*session),
+        #[cfg(not(windows))]
+        TerminalHandle::WindowsTerminal { .. } => Err(ManagedError::UnsupportedVersion),
     }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn focus_windows_terminal(session: Uuid) -> Result<(), ManagedError> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, IsIconic, IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindowAsync,
+    };
+
+    let class: Vec<u16> = "CASCADIA_HOSTING_WINDOW_CLASS\0".encode_utf16().collect();
+    let title: Vec<u16> = windows_terminal_title(session)
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both strings are NUL-terminated and live through the call.
+    let window = unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) };
+    if window.is_null() {
+        return Err(ManagedError::NotFound);
+    }
+    // SAFETY: these APIs take an HWND by value. If the window closes in
+    // between, the APIs can fail without dereferencing a caller pointer.
+    unsafe {
+        if IsIconic(window) != 0 || IsWindowVisible(window) == 0 {
+            ShowWindowAsync(window, SW_RESTORE);
+        }
+        if SetForegroundWindow(window) == 0 {
+            return Err(ManagedError::TerminalCallFailed);
+        }
+    }
+    Ok(())
 }
 
 pub fn shell_command(
@@ -1797,6 +1853,13 @@ pub fn launch(
             .ok_or(ManagedError::TerminalNotFound)?;
         let plan = plan(app, &program, &helper_path()?, config, cwd, session, ticket)?;
         spawn_plan(&plan)?;
+        #[cfg(windows)]
+        if app == TerminalApp::WindowsTerminal {
+            return Ok(Some(TerminalTab {
+                handle: TerminalHandle::WindowsTerminal { session },
+                window: None,
+            }));
+        }
         Ok(None)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
@@ -3192,9 +3255,12 @@ mod tests {
         assert_eq!(
             head(TerminalApp::WindowsTerminal),
             [
+                "--window",
+                "new",
                 "new-tab",
                 "--title",
-                "NEAR AI",
+                &format!("NEAR AI — {}", Uuid::nil()),
+                "--suppressApplicationTitle",
                 "-d",
                 "/home/x/My Projects/app"
             ]
