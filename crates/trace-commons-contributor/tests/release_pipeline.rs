@@ -2107,6 +2107,8 @@ fn live_attestation_is_required_before_app_publication() {
     let gate = extract_job(&workflow, "release-attestation");
     assert!(gate.contains("open(\"Cargo.lock\", \"rb\")"));
     assert!(gate.contains("ref: ${{ steps.rts.outputs.revision }}"));
+    assert!(gate.contains(r#"cp -R release-red-sandbox "$RUNNER_TEMP/release-red-sandbox""#));
+    assert!(gate.contains("working-directory: ${{ runner.temp }}/release-red-sandbox"));
     assert!(gate.contains("RTS_LIVE_COMPOSE_POLICY: pinned"));
     assert!(gate.contains("for environment in production staging"));
     assert!(gate.contains("cargo test --locked --test live_attest -- --ignored"));

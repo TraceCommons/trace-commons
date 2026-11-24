@@ -125,11 +125,9 @@ mod tests {
 
     #[test]
     fn the_windows_pin_names_the_msvc_tar_of_the_same_release() {
-        assert!(
-            RTS_RELEASE_WINDOWS.url.starts_with(
-                "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.10/"
-            )
-        );
+        assert!(RTS_RELEASE_WINDOWS.url.starts_with(
+            "https://github.com/nearai/nearai-red-sandbox/releases/download/v0.1.10/"
+        ));
         assert!(
             RTS_RELEASE_WINDOWS
                 .url
