@@ -17,9 +17,48 @@ public sealed record ManagedSession(
     [property: JsonPropertyName("project_label")] string ProjectLabel,
     string State, string Purpose, string? Model = null,
     [property: JsonPropertyName("collect_traces")] bool CollectTraces = false,
-    string Collection = "off")
+    string Collection = "off",
+    [property: JsonPropertyName("can_focus")] bool CanFocus = false,
+    [property: JsonPropertyName("can_stop")] bool CanStop = false,
+    [property: JsonPropertyName("can_start_again")] bool CanStartAgain = false,
+    [property: JsonPropertyName("can_resume")] bool CanResume = false,
+    [property: JsonPropertyName("can_dismiss")] bool CanDismiss = false,
+    [property: JsonPropertyName("started_at")] DateTimeOffset? StartedAt = null,
+    [property: JsonPropertyName("resumed_from")] DateTimeOffset? ResumedFrom = null,
+    [property: JsonPropertyName("exit_code")] int? ExitCode = null)
 {
     [JsonIgnore] public bool HoldsAccount => State != "exited" && State != "failed";
+}
+
+public enum ManagedSessionAction { Show, Stop, Resume, StartAgain, CopyResumeCommand, Dismiss }
+
+/// <summary>The session row's primary button and menu, following the Mac's action order.</summary>
+public sealed record ManagedSessionActions(ManagedSessionAction? Primary, IReadOnlyList<ManagedSessionAction> Menu)
+{
+    public static ManagedSessionActions For(ManagedSession session, ManagedCapabilities capabilities, bool configDirectoryKnown)
+    {
+        var menu = new List<ManagedSessionAction>();
+        if (session.State == "running")
+        {
+            if (session.CanFocus) menu.Add(ManagedSessionAction.Show);
+            if (session.CanStop) menu.Add(ManagedSessionAction.Stop);
+            return new(null, menu);
+        }
+
+        if (session.HoldsAccount)
+        {
+            return new(session.CanDismiss ? ManagedSessionAction.Dismiss : null, menu);
+        }
+
+        bool startAgain = session.CanStartAgain && capabilities.TerminalLaunch;
+        bool resume = session.CanResume && capabilities.TerminalLaunch && capabilities.Resume;
+        ManagedSessionAction primary = resume ? ManagedSessionAction.Resume :
+            startAgain ? ManagedSessionAction.StartAgain : ManagedSessionAction.Dismiss;
+        if (resume && startAgain) menu.Add(ManagedSessionAction.StartAgain);
+        if (session.CanResume && configDirectoryKnown) menu.Add(ManagedSessionAction.CopyResumeCommand);
+        if (primary != ManagedSessionAction.Dismiss) menu.Add(ManagedSessionAction.Dismiss);
+        return new(primary, menu);
+    }
 }
 
 /// <summary>A terminal a managed session can open in, as the daemon names
@@ -55,7 +94,11 @@ public sealed record ManagedCapabilities(
     [property: JsonPropertyName("terminal_current")] string? TerminalCurrent = null,
     [property: JsonPropertyName("terminal_choices")] ManagedTerminalChoice[]? TerminalChoices = null,
     [property: JsonPropertyName("launch_destination")] string? LaunchDestination = null,
-    [property: JsonPropertyName("terminal_chosen")] bool? TerminalChosen = null)
+    [property: JsonPropertyName("terminal_chosen")] bool? TerminalChosen = null,
+    bool Resume = false,
+    [property: JsonPropertyName("folder_settings")] bool FolderSettings = false,
+    [property: JsonPropertyName("keep_saved_model")] bool KeepSavedModel = false,
+    [property: JsonPropertyName("background_model")] bool BackgroundModel = false)
 {
     /// <summary>Where a session opens, for the launch lines and a launch's
     /// refusal: <see cref="LaunchDestination"/>, or the chosen terminal from
@@ -189,17 +232,19 @@ public sealed record ManagedSnapshot(
     /// (owner, 2026-10-29; ManagedSessionsSurface.swift:1100-1114). A folder
     /// that is not fully qualified is refused here (null), never sent.
     /// </summary>
-    public Dictionary<string, object>? SignInLaunchParams(string tool, string? cwd, string requestId)
+    public Dictionary<string, object?>? SignInLaunchParams(string tool, string? cwd, string requestId,
+        ManagedLaunchOptions? options = null)
     {
         if (!SignInStartTools.Contains(tool) || SignInEntry(tool) is not { } entry) return null;
         if (cwd is not null && !ManagedLaunchFolder.IsAcceptable(cwd)) return null;
-        var request = new Dictionary<string, object>
+        var request = new Dictionary<string, object?>
         {
             ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = entry.Tool,
             ["connection"] = entry.Connection, ["account_id"] = entry.Id,
             ["expected_generation"] = Generations.GetValueOrDefault(entry.Tool), ["save_default"] = false,
         };
         if (cwd is not null) request["cwd"] = cwd;
+        options?.Apply(request, entry, Capabilities);
         return request;
     }
 
@@ -207,25 +252,27 @@ public sealed record ManagedSnapshot(
     /// The <c>managed_launch_prepare</c> request the saved-account Launch
     /// dialog sends: <paramref name="account"/> in <paramref name="cwd"/>,
     /// decided at send time. Null when the folder is not fully qualified, or
-    /// for OpenCode without a model (checklist L4, the sibling of
-    /// <see cref="SignInLaunchParams"/>). The wire shape is the one the
-    /// dialog sent before: <c>model</c> null and no collection for any other
-    /// tool.
+    /// when the selected account requires a model ID and none was entered.
     /// </summary>
     public Dictionary<string, object?>? AccountLaunchParams(
-        ManagedAccount account, string? cwd, string? model, bool collectTraces, string requestId)
+        ManagedAccount account, string? cwd, string? model, bool collectTraces, string requestId,
+        ManagedLaunchOptions? options = null)
     {
         if (!ManagedLaunchFolder.IsAcceptable(cwd)) return null;
         bool openCode = account.Tool == "opencode";
         string? trimmed = openCode ? model?.Trim() : null;
-        if (openCode && string.IsNullOrEmpty(trimmed)) return null;
-        return new Dictionary<string, object?>
+        if (options is null && openCode && string.IsNullOrEmpty(trimmed)) return null;
+        if (options is not null && ManagedLaunchOptions.ModelMode(account.Tool, account.Connection) == ManagedModelMode.Text
+            && string.IsNullOrWhiteSpace(options.Model)) return null;
+        var request = new Dictionary<string, object?>
         {
             ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = account.Tool,
             ["connection"] = account.Connection, ["account_id"] = account.Id, ["cwd"] = cwd,
             ["expected_generation"] = Generations.GetValueOrDefault(account.Tool), ["save_default"] = false,
             ["model"] = trimmed, ["collect_traces"] = openCode && collectTraces,
         };
+        options?.Apply(request, account, Capabilities);
+        return request;
     }
 
     /// <summary>What the sign-in card holds at its foot (ManagedSessionsView.swift:119-129).</summary>

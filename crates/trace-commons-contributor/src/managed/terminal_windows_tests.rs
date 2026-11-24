@@ -68,9 +68,12 @@ fn windows_terminal_gets_the_folder_and_the_helper_as_argv() {
     assert_eq!(
         strings(&plan.args),
         [
+            "--window",
+            "new",
             "new-tab",
             "--title",
-            "NEAR AI",
+            "NEAR AI — 00000000-0000-0000-0000-000000000000",
+            "--suppressApplicationTitle",
             "-d",
             r"C:\Users\x\My Projects\app",
             r"C:\Program Files\NEAR AI\near-ai.exe",
@@ -92,13 +95,21 @@ fn a_hostile_windows_folder_is_one_verbatim_argument() {
         let args = strings(&plan.args);
         // The folder is the `-d` value, whole, and nowhere else.
         assert_eq!(
-            &args[..4],
-            ["new-tab", "--title", "NEAR AI", "-d"],
+            &args[..7],
+            [
+                "--window",
+                "new",
+                "new-tab",
+                "--title",
+                "NEAR AI — 00000000-0000-0000-0000-000000000000",
+                "--suppressApplicationTitle",
+                "-d",
+            ],
             "{cwd:?}"
         );
-        assert_eq!(Path::new(args[4]), cwd, "{cwd:?}");
-        assert_eq!(args[5], HELPER, "{cwd:?}");
-        assert_eq!(args.len(), 13, "{cwd:?}: {args:?}");
+        assert_eq!(Path::new(args[7]), cwd, "{cwd:?}");
+        assert_eq!(args[8], HELPER, "{cwd:?}");
+        assert_eq!(args.len(), 16, "{cwd:?}: {args:?}");
     }
 }
 
