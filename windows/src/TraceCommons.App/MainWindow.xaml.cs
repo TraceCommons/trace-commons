@@ -1559,20 +1559,25 @@ public sealed partial class MainWindow : Window
         ShowPrivateInferencePane();
     }
 
-    private void ShowPrivateInferencePane()
+    private PrivateInferenceView EnsurePrivateInferencePage()
     {
-        if (PrivateInferencePane.Content is null)
+        if (PrivateInferencePane.Content is PrivateInferenceView existing)
         {
-            var page = new PrivateInferenceView(_host, SpendOrganizations);
-            // The Private AI Settings card opens Settings; the spending
-            // prompt's action opens it at the organization picker (W19-D2).
-            page.OpenSettingsRequested += (_, _) => ShowSettingsWindow();
-            page.ChooseSpendOrganizationRequested += (_, _) => ShowSpendOrganizationSettings();
-            PrivateInferencePane.Content = page;
+            return existing;
         }
 
+        var page = new PrivateInferenceView(_host, SpendOrganizations);
+        page.OpenSettingsRequested += (_, _) => ShowPrivateAISettings();
+        page.ChooseSpendOrganizationRequested += (_, _) => ShowSpendOrganizationSettings();
+        PrivateInferencePane.Content = page;
+        return page;
+    }
+
+    private void ShowPrivateInferencePane()
+    {
+        PrivateInferenceView page = EnsurePrivateInferencePage();
         ViewModel.ShowPrivateInference();
-        (PrivateInferencePane.Content as PrivateInferenceView)?.ActivateMacSections();
+        page.ActivateMacSections();
     }
 
     /// <summary>

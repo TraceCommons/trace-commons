@@ -791,52 +791,8 @@
                 </StackPanel>
                 <TextBlock x:Name="RulePrivateAI" Style="{StaticResource TcTitleSectionTextStyle}" Margin="0,12,0,0" />
                 <StackPanel x:Name="BodyPrivateAI" Spacing="12">
-                <!--
-                    Answering model calls on this computer.
-
-                    The switch, the exposure sentence and the line saying what
-                    the listener actually did all live on the model-calls
-                    destination now: that is the one place that can show the
-                    state beside the control, and it was five cards down this
-                    list before.
-
-                    The card stays rather than going. Somebody who learned
-                    where the switch was should find a sentence and a way
-                    there, not a hole.
-
-                    Nothing on it is painted as working, because nothing on it
-                    reports a state: the indicator belongs beside the switch,
-                    on the page that has both.
-
-                    Every string in this block is bound. Not one is typed
-                    here: the wording lives once, in
-                    crates/trace-commons-contributor/src/private_inference_copy.rs,
-                    and reaches this shell across the C ABI. The whole card is
-                    collapsed when those words did not arrive.
-                -->
-                <TextBlock Text="{x:Bind Settings.PrivateInferenceTitle, Mode=OneWay}"
-                           Visibility="{x:Bind Settings.PrivateInferenceAvailable, Mode=OneWay}"
-                           Style="{StaticResource TcEyebrowTextStyle}" />
-                <Border Background="{ThemeResource TcSurfaceCardBrush}"
-                        BorderBrush="{ThemeResource TcHairlineBrush}"
-                        BorderThickness="1"
-                        CornerRadius="{StaticResource TcCardCornerRadius}"
-                        Padding="14,12"
-                        Visibility="{x:Bind Settings.PrivateInferenceAvailable, Mode=OneWay}">
-                    <StackPanel Spacing="10">
-                        <TextBlock Text="{x:Bind Settings.PrivateInferenceMoved, Mode=OneWay}"
-                                   Style="{StaticResource TcCaptionTextStyle}"
-                                   TextWrapping="Wrap" />
-                        <!--
-                            The button carries the destination's own label, so
-                            the rail and this pointer can never name it
-                            differently.
-                        -->
-                        <Button Content="{x:Bind Settings.PrivateInferenceDestination, Mode=OneWay}"
-                                HorizontalAlignment="Left"
-                                Click="OnOpenPrivateInference" />
-                    </StackPanel>
-                </Border>
+                <ContentControl x:Name="PrivateInferenceSettingsHost" IsTabStop="False"
+                                HorizontalContentAlignment="Stretch" />
 
                 <!--
                     Which organization Private AI spends from (W19,

@@ -611,7 +611,7 @@ public class NearAiCredentialTests
             "HarnessSurface.CredentialNotice(listing)", viewModel, StringComparison.Ordinal);
         Assert.DoesNotContain("DestinationCredentialed", viewModel, StringComparison.Ordinal);
 
-        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml");
+        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml");
         Assert.Single(Regex.Matches(markup, Regex.Escape("ViewModel.HarnessesCredentialNotice")));
 
         // Above the rows rather than inside the row template, which is what
@@ -748,7 +748,7 @@ public class NearAiCredentialTests
     [Fact]
     public void TheCredentialCardIsDrawnFromTheSharedSentences()
     {
-        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml");
+        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml");
         foreach (string bound in new[]
         {
             "ViewModel.CredentialTitle",
@@ -818,7 +818,7 @@ public class NearAiCredentialTests
         // The one branch on the action lives in the view model, off the ABI's
         // answer, and the view holds no arm of it: a press is handed to the
         // view model, which decides what it was.
-        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
+        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml.cs");
         Assert.Contains("ViewModel.PressCredentialAsync()", codeBehind, StringComparison.Ordinal);
         Assert.DoesNotContain("CredentialAction.", codeBehind, StringComparison.Ordinal);
         Assert.DoesNotContain("NearAiCredentialSurface.Action", codeBehind, StringComparison.Ordinal);
@@ -831,7 +831,7 @@ public class NearAiCredentialTests
     [Fact]
     public void OnlyAStartedCeremonyOpensABrowser()
     {
-        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml.cs");
+        string codeBehind = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml.cs");
         Assert.Contains("ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync())", codeBehind, StringComparison.Ordinal);
         string continuation = ShellSource("TraceCommons.App/ViewModels/CredentialBrowser.cs");
         Assert.Contains("started.BrowserUrl", continuation, StringComparison.Ordinal);

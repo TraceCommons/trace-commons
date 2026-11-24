@@ -932,14 +932,7 @@ public sealed partial class MainWindow
         if (_settingsWindow is null)
         {
             var settings = new SettingsView(_host, ViewModel.LegacyOffer, ViewModel.UpdateChecks);
-            // Settings no longer holds the model-calls switch; it holds a
-            // pointer at the destination that does, and this is what turns
-            // that pointer into navigation.
-            settings.OpenPrivateInferenceRequested += (_, _) =>
-            {
-                ShowPrivateInferencePane();
-                BringForward();
-            };
+            settings.ShowPrivateAIControls(EnsurePrivateInferencePage());
             // Set up again unenrolled this device: the first run starts,
             // with a fresh NEAR AI sign-in, as on a device never set up.
             settings.SetUpAgainRequested += async (_, _) =>
@@ -972,6 +965,12 @@ public sealed partial class MainWindow
         // the kept window was first built.
         _settingsView?.RefreshUpdates();
         _settingsWindow.ShowNearOwner(AppWindow);
+    }
+
+    private void ShowPrivateAISettings()
+    {
+        ShowSettingsWindow();
+        _settingsView?.BringPrivateAIIntoView();
     }
 
     // ---- Notices -----------------------------------------------------------

@@ -112,7 +112,7 @@ public class AccountLoginChangeShellWiringTests
     [Fact]
     public void ThePrivateAiCardSaysTheMismatchInTheApprovedWords()
     {
-        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml");
+        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml");
         Assert.Contains("{x:Bind ViewModel.LoginMismatchLine, Mode=OneWay}", markup, StringComparison.Ordinal);
         Assert.Contains("{x:Bind ViewModel.HasLoginMismatchLine, Mode=OneWay}", markup, StringComparison.Ordinal);
 
@@ -124,7 +124,7 @@ public class AccountLoginChangeShellWiringTests
     [Fact]
     public void NoXamlCommentAddedHereHoldsADoubleHyphen()
     {
-        foreach (string file in new[] { "TraceCommons.App/Controls/SettingsView.xaml", "TraceCommons.App/Controls/PrivateInferenceView.xaml" })
+        foreach (string file in new[] { "TraceCommons.App/Controls/SettingsView.xaml", "TraceCommons.App/Controls/PrivateInferenceView.xaml", "TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml" })
         {
             string text = ShellSource(file);
             foreach (Match comment in Regex.Matches(text, "<!--(?<body>.*?)-->", RegexOptions.Singleline))

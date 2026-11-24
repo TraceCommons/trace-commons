@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="TraceCommons.App.Controls.PrivateInferenceSettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:TraceCommons.App.ViewModels">
+    <StackPanel Spacing="10">
+        <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                BorderBrush="{ThemeResource TcHairlineBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource TcCardCornerRadius}"
+                Padding="14,12"
+                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+            <StackPanel Spacing="10">
+                <TextBlock Text="{x:Bind ViewModel.Title, Mode=OneWay}"
+                           Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    What turning it on exposes. Here as well as in the
+                    first run offer: a contributor who declined and
+                    came back later is making the same decision and is
+                    owed the same sentence.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Exposure, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <ToggleSwitch Header="{x:Bind ViewModel.ToggleText, Mode=OneWay}"
+                              IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
+                              IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                              Toggled="OnToggled" />
+                <!--
+                    One line per tone, chosen from the tone and never
+                    from the text: three of the sentences begin with
+                    the same two words, so a colour picked by reading
+                    the sentence would be picked by matching a prefix.
+                    Only the clear one is green.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsNeutral, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsHeld, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcBlueBrandBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsClear, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGreenTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsAttention, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGoldTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsRefused, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.ServingText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasServingText, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.AppliesAtOnce, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    A write the daemon did not confirm. The payload's
+                    sentence, and absent when there is nothing to say.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                BorderBrush="{ThemeResource TcHairlineBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource TcCardCornerRadius}"
+                Padding="14,12"
+                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+            <StackPanel Spacing="6">
+                <TextBlock Text="{x:Bind ViewModel.HarnessesTitle, Mode=OneWay}"
+                           ToolTipService.ToolTip="{x:Bind ViewModel.HarnessesPrecedenceTooltip, Mode=OneWay}"
+                           Style="{StaticResource TcTitleCardTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.HarnessesWhat, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasHarnessesWhat, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    What today's calls cost, and what that figure
+                    leaves out. Both are shown or neither is: an
+                    amount nobody could read draws no line, and the
+                    scope sentence alone would qualify a number that
+                    is not on screen.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.HarnessesSpend, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasHarnessesSpend, Mode=OneWay}"
+                           Style="{StaticResource TcBodyTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.HarnessesSpendScope, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasHarnessesSpend, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    Nothing found, said in terms of what was looked for.
+                    Drawn only once a list has actually come back, so an
+                    unread list is not reported as an empty machine.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.HarnessesNoneFound, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNoHarnesses, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    Why a connect is not on offer. Once, above the
+                    rows, because the fact is about the destination
+                    this app would answer from and not about any one
+                    tool, and absent entirely on a daemon that does
+                    not gate connects: telling somebody to sign in
+                    before connecting a tool they can connect right
+                    now would be false.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.HarnessesCredentialNotice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasHarnessesCredentialNotice, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGoldTextBrush}"
+                           TextWrapping="Wrap" />
+                <ItemsControl IsTabStop="False" ItemsSource="{x:Bind ViewModel.Harnesses, Mode=OneWay}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><StackPanel Spacing="6" /></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:HarnessRowViewModel">
+                            <StackPanel Spacing="6" Padding="12,8"
+                                        Background="{ThemeResource TcSurfaceInsetBrush}"
+                                        CornerRadius="{StaticResource TcCardCornerRadius}">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Border Width="28" Height="28" VerticalAlignment="Center"
+                                            Background="{ThemeResource TcSurfaceCardBrush}"
+                                            CornerRadius="{StaticResource TcCardCornerRadius}">
+                                        <FontIcon Glyph="&#xE756;" FontSize="14"
+                                                  Foreground="{ThemeResource TcGreenTextBrush}"
+                                                  AutomationProperties.AccessibilityView="Raw" />
+                                    </Border>
+                                    <TextBlock Grid.Column="1" Text="{x:Bind Name}"
+                                               VerticalAlignment="Center"
+                                               Style="{StaticResource TcTitleCardTextStyle}"
+                                               TextWrapping="Wrap" />
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8"
+                                                VerticalAlignment="Center">
+                                        <Button Content="{x:Bind ConnectText}"
+                                                Style="{StaticResource TcPrimaryButtonStyle}"
+                                                Visibility="{x:Bind CanConnect}"
+                                                Tag="{x:Bind Id}" Click="OnConnectHarness" />
+                                        <Button Content="{x:Bind DisconnectText}"
+                                                Visibility="{x:Bind CanDisconnect}"
+                                                Tag="{x:Bind Id}" Click="OnDisconnectHarness" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Text="{x:Bind StateText}"
+                                           Visibility="{x:Bind StateIsPlain}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind StateText}"
+                                           Visibility="{x:Bind ReadsAsWorking}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           Foreground="{ThemeResource TcGreenTextBrush}"
+                                           TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind LastCallText}"
+                                           Visibility="{x:Bind HasLastCallText}"
+                                           Style="{StaticResource TcCaptionTextStyle}"
+                                           TextWrapping="Wrap" />
+                                <Expander Header="{x:Bind SettingsTitle}"
+                                          IsExpanded="{x:Bind IsSettingsExpanded, Mode=TwoWay}"
+                                          HorizontalAlignment="Stretch"
+                                          HorizontalContentAlignment="Stretch">
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Text="{x:Bind ConfigPath}"
+                                                   Visibility="{x:Bind HasConfigPath}"
+                                                   Style="{StaticResource TcMonoCodeTextStyle}"
+                                                   IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind ConnectCommand}"
+                                                   Visibility="{x:Bind HasConnectCommand}"
+                                                   Style="{StaticResource TcMonoCodeTextStyle}"
+                                                   IsTextSelectionEnabled="True" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Expander>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!--
+                    A tool holding an old setting in a process that is
+                    still running. Shown only once a write has actually
+                    happened, and in the plain colour: nothing went
+                    wrong here.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Restart, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasRestart, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                BorderBrush="{ThemeResource TcHairlineBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource TcCardCornerRadius}"
+                Padding="14,12"
+                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+            <StackPanel Spacing="6">
+                <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
+                           Style="{StaticResource TcTitleCardTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.CredentialWhat, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasCredentialWhat, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    One line per tone, chosen from the tone and never
+                    from the text, exactly as the listener row below
+                    is. Only the clear one, which is the one meaning a
+                    key is kept here, is green.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.CredentialIsNeutral, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.CredentialIsHeld, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcBlueBrandBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.CredentialIsClear, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGreenTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.CredentialStateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.CredentialIsRefused, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+                <!--
+                    F10: the last NEAR AI sign-in was refused as
+                    another account, in the approved mismatch words.
+                    The account section in Settings offers what to do.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.LoginMismatchLine, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasLoginMismatchLine, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+                <!--
+                    What pressing the button below costs, or what
+                    forgetting does not do. Bound to the same action
+                    the button is, so neither can be drawn without
+                    the other.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.CredentialActionPreamble, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasCredentialActionPreamble, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                        Visibility="{x:Bind ViewModel.ShowCredentialSignIn, Mode=OneWay}"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.SignInTooltip, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                        Style="{StaticResource TcPrimaryButtonStyle}"
+                        HorizontalAlignment="Left"
+                        Click="OnCredentialAction" />
+                <Button Content="{x:Bind ViewModel.CredentialActionText, Mode=OneWay}"
+                        Visibility="{x:Bind ViewModel.ShowCredentialOtherAction, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                        HorizontalAlignment="Left"
+                        Click="OnCredentialAction" />
+                <!--
+                    The way back in, and it is the sign-in card's own
+                    action: the same words, the same cost sentence and
+                    the same ceremony. Withheld while that card is
+                    already offering one, because two buttons that
+                    mint the same key are one button too many.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.BalanceActionPreamble, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasBalanceActionPreamble, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <Button Content="{x:Bind ViewModel.BalanceActionText, Mode=OneWay}"
+                        Visibility="{x:Bind ViewModel.HasBalanceAction, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CredentialControlsEnabled, Mode=OneWay}"
+                        HorizontalAlignment="Left"
+                        Click="OnBalanceAction" />
+            </StackPanel>
+        </Border>
+    </StackPanel>
+</UserControl>

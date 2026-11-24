@@ -528,7 +528,7 @@ public class PrivateInferenceTests
             StringComparison.Ordinal);
 
         string markup = File.ReadAllText(
-            Path.Combine(AppContext.BaseDirectory, "PrivateInferenceView.xaml.txt"));
+            Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml.txt"));
 
         // The refusal wears the refusal colour, and the exposure sentence is
         // beside the switch as well as in the offer.
@@ -676,8 +676,7 @@ public class PrivateInferenceTests
     }
 
     /// <summary>
-    /// Not one string literal lives in either view model's private-inference
-    /// region.
+    /// No product wording lives in the main view model's Private AI offer.
     ///
     /// The surface scan above covers PrivateInferenceSurface.cs, and a
     /// paraphrase would never go there -- it would go where the sentence is
@@ -686,7 +685,7 @@ public class PrivateInferenceTests
     /// here"</c>. That renders, it is friendlier, it is wrong, and it passes
     /// every other test in this file.
     ///
-    /// Both regions legitimately contain NO literals at all -- they are
+    /// The region contains no literals. It uses
     /// nameof, payload reads and shared-surface calls -- so the allowed set is
     /// empty rather than curated. Comments are stripped first: the prose in
     /// them quotes words on purpose.
@@ -696,10 +695,6 @@ public class PrivateInferenceTests
         "MainViewModel.cs.txt",
         "// --- The offer to answer model calls on this computer",
         "// Approved sessions held because the privacy witness is busy.")]
-    [InlineData(
-        "ContributorSettingsViewModel.cs.txt",
-        "// Answering model calls on this computer. The switch, the exposure",
-        "<summary>Whether the witness actions may be pressed.</summary>")]
     public void NoWordingIsAuthoredInThePrivateInferenceViewModels(
         string file, string opens, string closes)
     {
