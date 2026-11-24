@@ -35,7 +35,7 @@ internal sealed class EdgeRailWindow : Window
     private readonly IntPtr _hwnd;
     private readonly EdgeRailHover _hover = new();
     private readonly DispatcherQueueTimer _closeTimer;
-    private readonly Grid _root = new();
+    private readonly Grid _root = new() { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
     private Rectangle? _handle;
     private Microsoft.UI.Xaml.Shapes.Path? _mark;
     private readonly Grid _closed = new();
@@ -61,7 +61,7 @@ internal sealed class EdgeRailWindow : Window
         _tracesTiles = tracesTiles;
         _openApp = openApp;
         Title = WindowTitles.EdgeRail;
-        _hwnd = ToolWindows.Prepare(this, OnWindowMessage);
+        _hwnd = ToolWindows.Prepare(this, OnWindowMessage, transparent: true);
 
         // The window the keyboard goes back to is the last one other than
         // the rail in the foreground, followed as it changes: a press on the
@@ -92,7 +92,6 @@ internal sealed class EdgeRailWindow : Window
 
         BuildClosed();
         BuildOpen();
-        ThemeBrushes.Bind(_root, Panel.BackgroundProperty, "TcWindowBackgroundBrush");
         // The handle and the mark pick their own colours: again on a change
         // of theme or high contrast while the rail lives.
         ThemeBrushes.Changed += TintMarks;
@@ -154,6 +153,8 @@ internal sealed class EdgeRailWindow : Window
         };
         AutomationProperties.SetName(_root, MonitorShellCopy.Section("edge_rail", "rail_label"));
         Content = _root;
+        // The root still receives hover across the gap between the two panes.
+        ToolWindows.ClearBackdrop(this);
         Place(open: false);
     }
 
@@ -346,8 +347,15 @@ internal sealed class EdgeRailWindow : Window
             _openApp(null);
         };
         icons.Children.Add(app);
-        Grid.SetColumn(icons, 1);
-        _open.Children.Add(icons);
+        var iconPane = new Border
+        {
+            Child = icons,
+            CornerRadius = new CornerRadius(HomeTrayInks.Measures.CardRadius),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        ThemeBrushes.Bind(iconPane, Border.BackgroundProperty, "TcGlassPaneBrush");
+        Grid.SetColumn(iconPane, 1);
+        _open.Children.Add(iconPane);
     }
 
     /// <summary>One icon: hovering or clicking shows its peek (EdgeRailView.swift:136-160).</summary>

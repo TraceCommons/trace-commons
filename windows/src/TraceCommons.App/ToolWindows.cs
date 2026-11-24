@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.Graphics;
+using WinRT;
 
 namespace TraceCommons.App;
 
@@ -20,6 +21,8 @@ namespace TraceCommons.App;
 internal static class ToolWindows
 {
     private static readonly Dictionary<IntPtr, Action<uint, long>> Listeners = new();
+    private static Windows.UI.Composition.Compositor? _backdropCompositor;
+    private static Windows.System.DispatcherQueueController? _compositionQueue;
 
     /// <summary>
     /// Makes <paramref name="window"/> a tool window: no frame, always on top,
@@ -27,7 +30,7 @@ internal static class ToolWindows
     /// <paramref name="onMessage"/>, when given, sees every message the
     /// window procedure gets (the rail re-places itself on display changes).
     /// </summary>
-    public static IntPtr Prepare(Window window, Action<uint, long>? onMessage = null)
+    public static IntPtr Prepare(Window window, Action<uint, long>? onMessage = null, bool transparent = false)
     {
         AppWindow app = window.AppWindow;
         var presenter = OverlappedPresenter.Create();
@@ -49,8 +52,13 @@ internal static class ToolWindows
         // The presenter keeps a dialog frame on the window whatever its style
         // is set to, so the whole window is made client area instead: no
         // frame is laid out or drawn, and the rail's 4 px zone is all XAML.
-        SetWindowSubclass(hwnd, NoFrameProc, NoFrameSubclassId, IntPtr.Zero);
+        SetWindowSubclass(hwnd, NoFrameProc, NoFrameSubclassId, transparent ? new IntPtr(1) : IntPtr.Zero);
         Frameless(hwnd, keepActivation: false);
+        if (transparent)
+        {
+            EnableTransparentBackground(hwnd);
+        }
+
         return hwnd;
     }
 
@@ -64,6 +72,35 @@ internal static class ToolWindows
         // The presenter puts its frame back as it shows the window, so the
         // frame comes off again here, keeping whether it may activate.
         Frameless(hwnd, keepActivation: true);
+    }
+
+    /// <summary>Lets the desktop show through where XAML draws no background.</summary>
+    public static void ClearBackdrop(Window window)
+    {
+        // The backdrop interface uses the system compositor, which needs a
+        // Windows.System dispatcher queue on the WinUI thread.
+        if (_compositionQueue is null && Windows.System.DispatcherQueue.GetForCurrentThread() is null)
+        {
+            var options = new DispatcherQueueOptions
+            {
+                Size = Marshal.SizeOf<DispatcherQueueOptions>(),
+                ThreadType = 2, // Current thread.
+                ApartmentType = 2, // STA.
+            };
+            Marshal.ThrowExceptionForHR(CreateDispatcherQueueController(options, out IntPtr controller));
+            try
+            {
+                _compositionQueue = MarshalInterface<Windows.System.DispatcherQueueController>.FromAbi(controller);
+            }
+            finally
+            {
+                Marshal.Release(controller);
+            }
+        }
+
+        _backdropCompositor ??= new Windows.UI.Composition.Compositor();
+        window.As<Microsoft.UI.Composition.ICompositionSupportsSystemBackdrop>().SystemBackdrop =
+            _backdropCompositor.CreateColorBrush(Microsoft.UI.Colors.Transparent);
     }
 
     /// <summary>
@@ -280,6 +317,8 @@ internal static class ToolWindows
     }
 
     private const uint WM_NCCALCSIZE = 0x0083;
+    private const uint WM_ERASEBKGND = 0x0014;
+    private const uint WM_DWMCOMPOSITIONCHANGED = 0x031E;
     private static readonly UIntPtr NoFrameSubclassId = new(0x7463);
 
     /// <summary>Rooted for the life of the process: native code holds a raw pointer to it.</summary>
@@ -290,6 +329,21 @@ internal static class ToolWindows
             return IntPtr.Zero;
         }
 
+        if (data != IntPtr.Zero)
+        {
+            if (message == WM_ERASEBKGND && GetClientRect(hwnd, out RECT client))
+            {
+                // GDI black clears the backing pixels to zero alpha.
+                FillRect(wParam, ref client, GetStockObject(BlackBrush));
+                return new IntPtr(1);
+            }
+
+            if (message == WM_DWMCOMPOSITIONCHANGED)
+            {
+                EnableTransparentBackground(hwnd);
+            }
+        }
+
         if (Listeners.TryGetValue(hwnd, out Action<uint, long>? listener))
         {
             listener(message, wParam.ToInt64());
@@ -297,6 +351,70 @@ internal static class ToolWindows
 
         return DefSubclassProc(hwnd, message, wParam, lParam);
     };
+
+    private const int BlackBrush = 4;
+    private const uint DwmBlurEnableAndRegion = 0x3;
+    private const uint DwmBorderColor = 34;
+    private const uint DwmColorNone = 0xFFFFFFFE;
+
+    private static void EnableTransparentBackground(IntPtr hwnd)
+    {
+        // An empty blur region lets DWM composite the client area's alpha
+        // without blurring the desktop around the rail's panes.
+        IntPtr region = CreateRectRgn(-2, -2, -1, -1);
+        if (region != IntPtr.Zero)
+        {
+            var blur = new DwmBlurBehind { Flags = DwmBlurEnableAndRegion, Enable = 1, Region = region };
+            DwmEnableBlurBehindWindow(hwnd, ref blur);
+            DeleteObject(region);
+        }
+
+        // Windows 11 can still draw a border around a frameless HWND.
+        uint noBorder = DwmColorNone;
+        DwmSetWindowAttribute(hwnd, DwmBorderColor, ref noBorder, sizeof(uint));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DispatcherQueueOptions
+    {
+        public int Size;
+        public int ThreadType;
+        public int ApartmentType;
+    }
+
+    [DllImport("CoreMessaging.dll")]
+    private static extern int CreateDispatcherQueueController(DispatcherQueueOptions options, out IntPtr controller);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DwmBlurBehind
+    {
+        public uint Flags;
+        public int Enable;
+        public IntPtr Region;
+        public int TransitionOnMaximized;
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmEnableBlurBehindWindow(IntPtr hwnd, ref DwmBlurBehind blur);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, uint attribute, ref uint value, int size);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
+
+    [DllImport("gdi32.dll")]
+    private static extern int DeleteObject(IntPtr gdiObject);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr GetStockObject(int index);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    private static extern int FillRect(IntPtr hdc, ref RECT rect, IntPtr brush);
 
     private delegate IntPtr SubclassProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, UIntPtr id, IntPtr data);
 
