@@ -92,4 +92,25 @@ public sealed class RedTeamEnableTests
     {
         Assert.Equal(key, ManagedSignIn.EnableOutcomeKey(outcome));
     }
+
+    [Theory]
+    [InlineData("restart_needed", RedTeamSetupStep.Restart)]
+    [InlineData("sign_out_needed", RedTeamSetupStep.SignOut)]
+    [InlineData("failed", RedTeamSetupStep.Enable)]
+    [InlineData("declined", RedTeamSetupStep.Enable)]
+    [InlineData(null, RedTeamSetupStep.Enable)]
+    public void TheHostStepFollowsTheEnableResult(string? outcome, RedTeamSetupStep step)
+    {
+        var blocked = Snapshot("""{"tool":"red_team","installed":false,"host_problem":"not_in_hyper_v_administrators","enable_offered":true}""");
+        Assert.Equal(step, blocked.RedTeamStep(outcome));
+    }
+
+    [Fact]
+    public void TheCurrentDaemonStatusWinsOverAnOldRestartInstruction()
+    {
+        Assert.Equal(RedTeamSetupStep.Install, Snapshot("""{"tool":"red_team","installed":false}""").RedTeamStep("restart_needed"));
+        Assert.Equal(RedTeamSetupStep.Ready, Snapshot("""{"tool":"red_team","installed":true}""").RedTeamStep("sign_out_needed"));
+        Assert.Equal(RedTeamSetupStep.Unsupported, Snapshot("""{"tool":"red_team","installed":false,"host_problem":"home_edition"}""").RedTeamStep("restart_needed"));
+        Assert.Null(Snapshot("""{"tool":"claude","installed":true}""").RedTeamStep("restart_needed"));
+    }
 }

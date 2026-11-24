@@ -71,6 +71,16 @@ public sealed class ShellPreferences
         set => Write(_values with { ShowsPromotions = value });
     }
 
+    /// <summary>The setup instruction still owed in this Windows logon.</summary>
+    public string? RedTeamFollowUp(string? logon) => logon is not null && _values.RedTeamFollowUpLogon == logon
+        ? _values.RedTeamFollowUp : null;
+
+    public void SetRedTeamFollowUp(string? logon, string? outcome)
+    {
+        if (logon is not null)
+            Write(_values with { RedTeamFollowUpLogon = outcome is null ? null : logon, RedTeamFollowUp = outcome });
+    }
+
     /// <summary>What the Balance tile last drew, so credit that arrived while the app was closed is marked next time.</summary>
     public BalanceArrival.Reading? BalanceShown
     {
@@ -156,6 +166,12 @@ public sealed class ShellPreferences
 
         [JsonPropertyName("shows_promotions")]
         public bool? ShowsPromotions { get; init; }
+
+        [JsonPropertyName("red_team_follow_up")]
+        public string? RedTeamFollowUp { get; init; }
+
+        [JsonPropertyName("red_team_follow_up_logon")]
+        public string? RedTeamFollowUpLogon { get; init; }
 
         [JsonPropertyName("balance_shown_received")]
         public long? BalanceShownReceived { get; init; }

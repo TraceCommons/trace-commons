@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using System.Collections.Generic;
+using System.Security.Principal;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
@@ -46,6 +47,7 @@ public sealed partial class ManagedSessionsView : UserControl
     public ManagedSessionsView(DaemonHost host)
     {
         _host = host;
+        _redTeamOutcome = ShellPreferences.Shared.RedTeamFollowUp(_redTeamLogon);
         Content = _root;
         // The 10 s poll stops while the window is hidden to the tray or
         // minimised (WindowClocks), and resumes with a read when it is back.
@@ -101,7 +103,11 @@ public sealed partial class ManagedSessionsView : UserControl
 
     private async Task RefreshAsync(bool forceRender = false)
     {
-        if (_reading) return;
+        if (_reading)
+        {
+            if (forceRender) Render();
+            return;
+        }
         _reading = true;
         try
         {
@@ -348,7 +354,15 @@ public sealed partial class ManagedSessionsView : UserControl
 
     /// <summary>How the last "Enable Red Team" ended (a copy key), shown under the
     /// row until Red Team is ready.</summary>
-    private string? _redTeamOutcomeKey;
+    private readonly string? _redTeamLogon = CurrentWindowsLogon();
+    private string? _redTeamOutcome;
+    private bool _redTeamWorking;
+
+    private static string? CurrentWindowsLogon()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return identity.Groups?.FirstOrDefault(group => group.Value.StartsWith("S-1-5-5-", StringComparison.Ordinal))?.Value;
+    }
 
     /// <summary>
     /// Red Team's setup row, as the Mac's Settings row (RedTeamSetup.swift):
@@ -362,50 +376,70 @@ public sealed partial class ManagedSessionsView : UserControl
     /// </summary>
     private void RenderRedTeam()
     {
-        if (_snapshot?.RedTeamState is not RedTeamSetup setup) return;
-        if (setup == RedTeamSetup.Installed) _redTeamOutcomeKey = null;
+        if (_snapshot?.RedTeamStep(_redTeamOutcome) is not RedTeamSetupStep step) return;
+        if (step is RedTeamSetupStep.Ready or RedTeamSetupStep.Install or RedTeamSetupStep.Unsupported
+            && _redTeamOutcome is "restart_needed" or "sign_out_needed")
+        {
+            _redTeamOutcome = null;
+            ShellPreferences.Shared.SetRedTeamFollowUp(_redTeamLogon, null);
+        }
         var section = new StackPanel { Spacing = 4 };
         section.Children.Add(SectionTitle("red_team"));
-        section.Children.Add(new TextBlock { Text = T(setup == RedTeamSetup.Installed ? "red_team_installed" : "red_team_not_installed") });
+        section.Children.Add(new TextBlock { Text = T(step == RedTeamSetupStep.Ready ? "red_team_installed" : "red_team_not_installed") });
         section.Children.Add(new TextBlock { Text = T("red_team_settings_line"), TextWrapping = TextWrapping.Wrap });
-        if (_snapshot.RedTeamUnsupportedEdition)
+        if (step is RedTeamSetupStep.Restart or RedTeamSetupStep.SignOut or RedTeamSetupStep.Unsupported)
         {
-            section.Children.Add(new TextBlock { Text = T("red_team_home_unsupported"), TextWrapping = TextWrapping.Wrap });
+            string key = step switch
+            {
+                RedTeamSetupStep.Restart => "red_team_enable_restart",
+                RedTeamSetupStep.SignOut => "red_team_enable_sign_out",
+                _ => "red_team_home_unsupported",
+            };
+            section.Children.Add(new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap });
         }
-        else if (_snapshot.OffersRedTeamEnable)
+        else if (step == RedTeamSetupStep.Enable)
         {
             section.Children.Add(new TextBlock { Text = T("red_team_enable_explain"), TextWrapping = TextWrapping.Wrap });
-            var enable = Button("red_team_enable_action", EnableRedTeamAsync);
+            var enable = Button("red_team_enable_action", () => SetUpRedTeamAsync("enable"));
             AutomationProperties.SetName(enable, T("red_team_enable_action"));
             section.Children.Add(enable);
         }
-        else if (setup == RedTeamSetup.NotInstalled)
+        else if (step == RedTeamSetupStep.Install)
         {
-            var install = Button("install", InstallRedTeamAsync);
+            var install = Button("install", () => SetUpRedTeamAsync("install"));
             AutomationProperties.SetName(install, $"{T("install")} {T("red_team")}");
             section.Children.Add(install);
         }
-        if (_redTeamOutcomeKey is string key)
-            section.Children.Add(new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap });
+        if (_redTeamWorking)
+            section.Children.Add(new ProgressRing { IsActive = true, Width = 20, Height = 20, HorizontalAlignment = HorizontalAlignment.Left });
+        else if (step == RedTeamSetupStep.Enable && _redTeamOutcome is not null)
+            section.Children.Add(new TextBlock { Text = T(ManagedSignIn.EnableOutcomeKey(_redTeamOutcome)), TextWrapping = TextWrapping.Wrap });
+        else if (step == RedTeamSetupStep.Install && _redTeamOutcome == "install_failed")
+            section.Children.Add(new TextBlock { Text = T("action_failed"), TextWrapping = TextWrapping.Wrap });
         _root.Children.Add(section);
     }
 
-    /// <summary>Installs the pinned runtime; the daemon answers when done and the
-    /// next snapshot says Installed.</summary>
-    private async Task InstallRedTeamAsync()
+    private async Task SetUpRedTeamAsync(string action)
     {
-        await CallAsync("managed_tool_setup", new { tool = "red_team", action = "install" });
-    }
-
-    /// <summary>
-    /// "Enable Red Team": the daemon runs its fixed script elevated (the Windows
-    /// prompt), with no arguments from here, and answers how it ended.
-    /// </summary>
-    private async Task EnableRedTeamAsync()
-    {
-        var result = await CallAsync("managed_tool_setup", new { tool = "red_team", action = "enable" });
-        _redTeamOutcomeKey = ManagedSignIn.EnableOutcomeKey(
-            result.TryGetProperty("outcome", out var outcome) ? outcome.GetString() : null);
+        bool enable = action == "enable";
+        _redTeamOutcome = null;
+        _redTeamWorking = true;
+        Render();
+        try
+        {
+            var result = await CallAsync("managed_tool_setup", new { tool = "red_team", action });
+            if (enable)
+            {
+                _redTeamOutcome = result.TryGetProperty("outcome", out var outcome) ? outcome.GetString() : "failed";
+                if (_redTeamOutcome is "restart_needed" or "sign_out_needed")
+                    ShellPreferences.Shared.SetRedTeamFollowUp(_redTeamLogon, _redTeamOutcome);
+            }
+        }
+        catch (Exception)
+        {
+            _redTeamOutcome = enable ? "failed" : "install_failed";
+        }
+        finally { _redTeamWorking = false; }
     }
 
     /// <summary>

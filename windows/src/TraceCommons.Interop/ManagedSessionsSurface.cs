@@ -169,6 +169,17 @@ public sealed record ManagedSnapshot(
     /// <summary>Whether Red Team is explained as unsupported (Windows Home) instead.</summary>
     [JsonIgnore] public bool RedTeamUnsupportedEdition => RedTeamTool is { HostProblem: "home_edition" };
 
+    public RedTeamSetupStep? RedTeamStep(string? enableOutcome) => RedTeamState switch
+    {
+        null => null,
+        RedTeamSetup.Installed => RedTeamSetupStep.Ready,
+        _ when RedTeamUnsupportedEdition => RedTeamSetupStep.Unsupported,
+        _ when !OffersRedTeamEnable => RedTeamSetupStep.Install,
+        _ when enableOutcome == "restart_needed" => RedTeamSetupStep.Restart,
+        _ when enableOutcome == "sign_out_needed" => RedTeamSetupStep.SignOut,
+        _ => RedTeamSetupStep.Enable,
+    };
+
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
 
@@ -306,6 +317,7 @@ public sealed record ManagedSnapshot(
 
 /// <summary>Whether Red Team's runtime is installed (the Mac's <c>RedTeamSetup</c>).</summary>
 public enum RedTeamSetup { NotInstalled, Installed }
+public enum RedTeamSetupStep { Enable, Restart, SignOut, Install, Ready, Unsupported }
 
 /// <summary>Copy keys for the NEAR AI sign-in launch. Every word is in the
 /// shared table (<c>managed/copy.rs</c>); this only picks the key.</summary>
