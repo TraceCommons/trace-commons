@@ -421,7 +421,7 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts with local Insights, and starts the daemon quietly beside it.
+    /// Opens Home while the daemon starts in the background.
     /// The contribution screens keep the existing source declaration and
     /// enrollment gates: a daemon refused for undeclared sources is asked
     /// for them when one of those screens opens.
@@ -439,8 +439,8 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
-        // A device never set up opens first run on its own, over Insights;
+        OpenTab(MonitorTab.Home);
+        // A device never set up opens first run on its own, over Home;
         // one that has finished it keeps the quiet landing.
         if (global::TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(OnboardingState.Default().AnyComplete()))
         {
@@ -449,7 +449,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Runs the contribution startup's gates without leaving Insights: a daemon
+    /// Runs the contribution startup's gates without leaving Home: a daemon
     /// refused for undeclared sources opens first run, a started daemon that is
     /// not set up opens it too.
     /// </summary>
@@ -458,7 +458,7 @@ public sealed partial class MainWindow : Window
         try
         {
             // The core, not the wrapper: this start is automatic and a failed one
-            // must not move the person off Insights onto a blank Traces pane.
+            // must not move the person off Home onto a blank Traces pane.
             await StartContributionsCoreAsync();
         }
         catch (Exception exception)
