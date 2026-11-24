@@ -86,28 +86,36 @@ public sealed partial class SettingsView : UserControl
         await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync());
     }
 
-    /// <summary>
-    /// Asks the window for the model-calls destination, which owns the
-    /// switch now.
-    ///
-    /// <para>
-    /// Raised as an event rather than navigating from here: this control is
-    /// one pane's content and knows nothing about the rail it sits in, and a
-    /// reference back to the window would be the only one in the file.
-    /// </para>
-    /// </summary>
-    public event EventHandler? OpenPrivateInferenceRequested;
-
-    private void OnOpenPrivateInference(object sender, RoutedEventArgs e)
+    internal void ShowPrivateAIControls(PrivateInferenceView page)
     {
-        OpenPrivateInferenceRequested?.Invoke(this, EventArgs.Empty);
+        var controls = new PrivateInferenceSettingsView(page.ViewModel);
+        controls.Loaded += async (_, _) => await page.EnsureLoadedAsync();
+        PrivateInferenceSettingsHost.Content = controls;
+    }
+
+    internal void BringPrivateAIIntoView()
+    {
+        void ScrollWhenArranged() => DispatcherQueue.TryEnqueue(
+            Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => ScrollTo(SettingsSection.PrivateAI));
+
+        if (IsLoaded)
+        {
+            ScrollWhenArranged();
+            return;
+        }
+
+        Loaded += OnLoaded;
+        void OnLoaded(object sender, RoutedEventArgs e)
+        {
+            Loaded -= OnLoaded;
+            ScrollWhenArranged();
+        }
     }
 
     /// <summary>
     /// Asks the window to start the first run once "Set up again" unenrolled
-    /// this device. Raised as an event for the reason
-    /// <see cref="OpenPrivateInferenceRequested"/> is: this control knows
-    /// nothing about the onboarding window.
+    /// this device. The window owns the onboarding navigation.
     /// </summary>
     public event EventHandler? SetUpAgainRequested;
 

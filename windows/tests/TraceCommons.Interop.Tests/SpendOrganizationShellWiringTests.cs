@@ -55,7 +55,7 @@ public sealed class SpendOrganizationShellWiringTests
         string xaml = ShellSource("TraceCommons.App/Controls/SettingsView.xaml");
         int host = xaml.IndexOf("x:Name=\"SpendOrganizationHost\"", StringComparison.Ordinal);
         int terminal = xaml.IndexOf("x:Name=\"ManagedTerminalHost\"", StringComparison.Ordinal);
-        int privateAi = xaml.IndexOf("Settings.PrivateInferenceMoved", StringComparison.Ordinal);
+        int privateAi = xaml.IndexOf("x:Name=\"PrivateInferenceSettingsHost\"", StringComparison.Ordinal);
         Assert.True(privateAi > 0 && host > privateAi && terminal > host, $"{privateAi} < {host} < {terminal}");
         string card = Code("TraceCommons.App/Controls/Settings/SpendOrganizationCard.cs");
         // The picker's echo of the selection the card set is not a pick.

@@ -936,8 +936,11 @@ jobs:
       - name: Build the contributor FFI cdylib
         run: cargo build --locked -p trace-commons-contributor-ffi --release
 
-      - name: Check the FFI cdylib needs no Visual C++ runtime
-        run: python -I scripts/ci/check-no-vc-runtime.py target/release/trace_commons_contributor_ffi.dll
+      - name: Build the managed-session helper
+        run: cargo build --locked -p trace-commons-contributor --bin near-ai --release
+
+      - name: Check the FFI cdylib and helper need no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/release/trace_commons_contributor_ffi.dll target/release/near-ai.exe
 
       # Compile first, package later. The publisher the package must carry is
       # not known until a certificate has actually signed something, so the
@@ -1033,6 +1036,15 @@ jobs:
           $found = @(Get-ChildItem -Recurse -Filter *.msix -Path windows\dist\msix)
           if ($found.Count -ne 1) {
             throw "expected exactly 1 .msix, found $($found.Count): $($found.Name -join ', ')"
+          }
+          $archive = [IO.Compression.ZipFile]::OpenRead($found[0].FullName)
+          try {
+            $helper = $archive.GetEntry("near-ai.exe")
+            if ($null -eq $helper -or $helper.Length -eq 0) {
+              throw "The MSIX must contain near-ai.exe beside TraceCommons.exe."
+            }
+          } finally {
+            $archive.Dispose()
           }
           "path=$($found[0].FullName)" >> $env:GITHUB_OUTPUT
           "name=$($found[0].Name)" >> $env:GITHUB_OUTPUT

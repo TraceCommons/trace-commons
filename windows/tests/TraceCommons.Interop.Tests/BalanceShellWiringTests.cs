@@ -220,7 +220,7 @@ public class BalanceShellWiringTests
                 + @"&& !HasCredentialAction\s*&& _copy is not null;"),
             source);
 
-        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceView.xaml");
+        string markup = ShellSource("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml");
         Assert.Contains(
             "Visibility=\"{x:Bind ViewModel.HasBalanceAction, Mode=OneWay}\"",
             markup,

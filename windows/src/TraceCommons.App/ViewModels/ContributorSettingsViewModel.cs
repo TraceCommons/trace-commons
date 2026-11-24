@@ -889,35 +889,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         }
     }
 
-    // Answering model calls on this computer. The switch, the exposure
-    // sentence and the line saying what the listener actually did all live on
-    // the model-calls destination now -- PrivateInferenceViewModel owns them,
-    // beside each other, which is the only place they can be read together.
-    //
-    // What stays here is a pointer. Somebody who learned where the switch was
-    // should find a sentence and a way there, not a hole.
-
-    /// <summary>
-    /// The whole block is collapsed when the words did not arrive, rather
-    /// than rendered as a card with nothing on it.
-    /// </summary>
-    public bool PrivateInferenceAvailable => _privateInferenceCopy is not null;
-
-    public string PrivateInferenceTitle => _privateInferenceCopy?.SettingsTitle ?? string.Empty;
-
-    /// <summary>
-    /// The sentence saying where the switch went. The Rust's, like every
-    /// other word on this surface.
-    /// </summary>
-    public string PrivateInferenceMoved => _privateInferenceCopy?.SettingsMoved ?? string.Empty;
-
-    /// <summary>
-    /// The label on the way out, which is the destination's own: the rail and
-    /// this pointer read one definition, so they cannot name it differently.
-    /// </summary>
-    public string PrivateInferenceDestination =>
-        _privateInferenceCopy?.Destination ?? string.Empty;
-
     /// <summary>Whether the witness actions may be pressed.</summary>
     public bool WitnessControlsEnabled => !_isBusy && _witnessCopy is not null;
 

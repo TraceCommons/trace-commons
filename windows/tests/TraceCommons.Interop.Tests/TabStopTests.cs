@@ -24,7 +24,7 @@ public class TabStopTests
     [Theory]
     [InlineData("TraceCommons.App/MainWindow.xaml", "ItemsControl", "ViewModel.CertificateHeld")]
     [InlineData("TraceCommons.App/Controls/PrivateInferenceView.xaml", "ContentControl", "x:Name=\"ManagedContent\"")]
-    [InlineData("TraceCommons.App/Controls/PrivateInferenceView.xaml", "ItemsControl", "ViewModel.Harnesses")]
+    [InlineData("TraceCommons.App/Controls/PrivateInferenceSettingsView.xaml", "ItemsControl", "ViewModel.Harnesses")]
     public void ContainersTabPastThemselves(string file, string element, string marker)
     {
         string markup = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", file + ".txt"));
