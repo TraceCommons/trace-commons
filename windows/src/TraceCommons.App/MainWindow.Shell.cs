@@ -8,7 +8,6 @@ using Microsoft.UI;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Composition.SystemBackdrops;
 using Microsoft.UI.Dispatching;
-using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -113,12 +112,11 @@ public sealed partial class MainWindow
         // shown, and would otherwise never ask for its flags after a wake.
         WindowMinimumSize.Watch(WinRT.Interop.WindowNative.GetWindowHandle(this));
 
-        // The toolbar row is the title bar: the window owns the bar, the
-        // caption buttons stay the system's (snap layouts, window menu, their
-        // own accessibility), on a transparent ground so the chrome colour
-        // runs behind them.
+        // Keep the system caption buttons and reserve the draggable region
+        // for the space before the toolbar controls. WinUI tracks that
+        // region as the row moves, so the controls receive pointer input.
         ExtendsContentIntoTitleBar = true;
-        SetTitleBar(AppTitleBar);
+        SetTitleBar(TitleBarDragArea);
         AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         AppWindow.TitleBar.ButtonBackgroundColor = Colors.Transparent;
         AppWindow.TitleBar.ButtonInactiveBackgroundColor = Colors.Transparent;
@@ -144,9 +142,8 @@ public sealed partial class MainWindow
         RegisterAccelerators();
         ApplyWindowMaterial();
 
-        AppTitleBar.SizeChanged += (_, _) => UpdateTitleBarRegions();
-        AppTitleBar.Loaded += (_, _) => UpdateTitleBarRegions();
-        ToolbarCapsule.SizeChanged += (_, _) => UpdateTitleBarRegions();
+        AppTitleBar.SizeChanged += (_, _) => UpdateTitleBarInsets();
+        AppTitleBar.Loaded += (_, _) => UpdateTitleBarInsets();
         AppWindow.Changed += OnAppWindowChanged;
         _clockGate.Changed += OnClocksChanged;
         WindowClocks.FollowFocus(this);
@@ -777,15 +774,13 @@ public sealed partial class MainWindow
         ApplyDemand();
     }
 
-    // ---- Title bar regions -------------------------------------------------
+    // ---- Title bar insets --------------------------------------------------
 
     /// <summary>
-    /// The caption buttons' room, from the title bar itself, and the regions
-    /// that take the pointer instead of dragging the window, in physical
-    /// pixels (InputNonClientPointerSource). Recomputed on every size,
-    /// layout and DPI change of the row.
+    /// Reserves the caption buttons' room, converting the system insets
+    /// from physical pixels to XAML units.
     /// </summary>
-    private void UpdateTitleBarRegions()
+    private void UpdateTitleBarInsets()
     {
         if (_closed || OpenRoot is null)
         {
@@ -794,7 +789,7 @@ public sealed partial class MainWindow
 
         // While a minimised window is restored the title bar reports a
         // negative inset and the scale can be unusable: the last good widths
-        // and regions are kept rather than moving the toolbar under the
+        // are kept rather than moving the toolbar under the
         // caption buttons (TitleBarRegions.InsetDips).
         double scale = Scale;
         if (!TitleBarRegions.IsUsableScale(scale))
@@ -805,23 +800,6 @@ public sealed partial class MainWindow
         RightInsetColumn.Width = new GridLength(TitleBarRegions.InsetDips(AppWindow.TitleBar.RightInset, scale, RightInsetColumn.Width.Value));
         LeftInsetColumn.Width = new GridLength(TitleBarRegions.InsetDips(AppWindow.TitleBar.LeftInset, scale, LeftInsetColumn.Width.Value));
 
-        var rects = new List<LayoutRect>();
-        foreach (FrameworkElement element in new FrameworkElement[] { ToolbarCapsule, SettingsGear })
-        {
-            if (element.Visibility != Visibility.Visible || element.ActualWidth <= 0)
-            {
-                continue;
-            }
-
-            Windows.Foundation.Rect bounds = element.TransformToVisual(null)
-                .TransformBounds(new Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
-            rects.Add(new LayoutRect(bounds.X, bounds.Y, bounds.Width, bounds.Height));
-        }
-
-        RectInt32[] regions = TitleBarRegions.Passthrough(rects, scale)
-            .Select(r => new RectInt32(r.X, r.Y, r.Width, r.Height))
-            .ToArray();
-        InputNonClientPointerSource.GetForWindowId(AppWindow.Id).SetRegionRects(NonClientRegionKind.Passthrough, regions);
     }
 
     // ---- Clocks ------------------------------------------------------------
@@ -848,7 +826,7 @@ public sealed partial class MainWindow
         switch (TitleBarRegions.WhenToRead(wasMinimised, _minimised))
         {
             case TitleBarRead.Now:
-                UpdateTitleBarRegions();
+                UpdateTitleBarInsets();
                 LayoutPanes();
                 break;
             case TitleBarRead.AfterDispatch:
@@ -868,7 +846,7 @@ public sealed partial class MainWindow
                         }
                     }
 
-                    UpdateTitleBarRegions();
+                    UpdateTitleBarInsets();
                     LayoutPanes();
                 });
                 break;
