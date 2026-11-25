@@ -190,8 +190,10 @@ private struct HarnessRowView: View {
                     Text(verbatim: path)
                         .textSelection(.enabled)
                 }
-                Text(verbatim: row.connectCommand)
-                    .textSelection(.enabled)
+                if !row.connectCommand.isEmpty {
+                    Text(verbatim: row.connectCommand)
+                        .textSelection(.enabled)
+                }
             }
             .glassType(GlassTokens.TypeScale.mono)
             .foregroundStyle(GlassColor.textSecondary)

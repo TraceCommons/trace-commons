@@ -720,6 +720,14 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_list` | — | `catalog_present`, `harnesses[]`, `activity`, `spend`, `destination_port` | which coding tools this machine has and whether each sends its calls here; reads the filesystem on every call, never a cache; see "The harness list" below |
 | `harness_plan` | `id` (required), `action` (`connect` \| `disconnect`) | `id`, `action`, `outcome`, `plan_id`, `path`, `changes[]`, `occupied[]` | works out an edit and **writes nothing**; see "The harness list" below |
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
+| `gateway_harness_list` | same as `harness_list` | same shape | Gateway-owned listener and activity only, with no standalone connection command |
+| `gateway_harness_plan` | same as `harness_plan` | same shape | pins a Connect preview to the live Gateway endpoint and generation |
+| `gateway_harness_commit` | same as `harness_commit` | same shape | rechecks Gateway endpoint and generation before writing |
+| `gateway_inference_calls` | same as `inference_calls` | same shape | Gateway-owned ledger only |
+| `gateway_tool_destinations` | same as `tool_destinations` | same shape | Gateway-owned routing evidence only |
+| `gateway_private_ai` | same as `private_ai` | same shape | lifecycle of the Gateway listener |
+| `gateway_set_private_ai` | same as `set_private_ai` | same shape | changes the Gateway listener only |
+| `gateway_set_private_inference_settings` | same as `set_settings` | same shape | desktop settings that enable or disable Gateway inference |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths; `source_revisions` counts each declaration's writes by settings key (`claude_source` for `claude_root` too), absent before the first, so a shell can tell a declaration landed while its mode stayed `watch` | |
 | `get_setup_status` | empty object | versioned completion/readiness state, enrollment scope, saved data uses and available scope choices | read-only; no offline initialization or setup mutation |
@@ -4361,6 +4369,16 @@ hosted listener's port when it is up, else the port declared for a proxy the
 contributor runs themselves. It is `null` when nothing on this machine is
 answering model calls, and in that state `harness_plan` refuses a connect with
 `harness-no-destination` rather than writing a guess.
+
+A Gateway daemon uses only its own bound listener for these operations and
+records the actual port for subsequent starts. The desktop uses the
+`gateway_*` methods for shared inference and its related activity. A
+headless daemon refuses these methods with
+`gateway-private-inference-unavailable`, and an older daemon treats them as
+unknown methods. An explicitly declared external route remains available for
+routing evidence. Gateway's own activity is unreadable while that observer is
+selected. Gateway records the bound port and listener generation with
+each Connect preview. A changed endpoint requires a new preview.
 
 #### `state`, and why there are five values and not two
 

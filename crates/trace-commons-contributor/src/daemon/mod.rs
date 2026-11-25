@@ -457,6 +457,11 @@ pub async fn start_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
     start_embedded_at(store, None).await
 }
 
+/// Start the desktop Gateway daemon with its own private inference runtime.
+pub async fn start_gateway_embedded(store: ConfigStore) -> Result<EmbeddedDaemon> {
+    start_embedded_with_ownership(store, None, true).await
+}
+
 /// Where a daemon takes `watcher.lock` and serves the host link, named by
 /// the caller rather than read from the environment and the platform's
 /// default state directory. For an embedder's tests: a shell's own test
@@ -479,6 +484,14 @@ pub struct HostLinkSite {
 pub async fn start_embedded_at(
     store: ConfigStore,
     site: Option<HostLinkSite>,
+) -> Result<EmbeddedDaemon> {
+    start_embedded_with_ownership(store, site, false).await
+}
+
+async fn start_embedded_with_ownership(
+    store: ConfigStore,
+    site: Option<HostLinkSite>,
+    gateway_owned: bool,
 ) -> Result<EmbeddedDaemon> {
     #[cfg(not(unix))]
     let _ = site;
@@ -547,8 +560,12 @@ pub async fn start_embedded_at(
         // without it the namespace still decides.
         let migrate = store.clone();
         let _ = tokio::task::spawn_blocking(move || record_identity_once(&migrate)).await;
-        let mut shared =
-            Arc::new(tokio::task::spawn_blocking(move || ipc::DaemonShared::load(store)).await??);
+        let mut shared = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                ipc::DaemonShared::load_with_ownership(store, gateway_owned)
+            })
+            .await??,
+        );
         // K2 (#1173): the one place `dev_dry_run` is ever set to `true`.
         // `Arc::get_mut` succeeds only while this is the sole reference,
         // which stops being true when `preview_runner` below takes its

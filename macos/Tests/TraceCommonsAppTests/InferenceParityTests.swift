@@ -746,8 +746,10 @@ final class InferenceParityTests: XCTestCase {
                            + "                    Text(verbatim: path)\n"
                            + "                        .textSelection(.enabled)\n"
                            + "                }\n"
-                           + "                Text(verbatim: row.connectCommand)\n"
-                           + "                    .textSelection(.enabled)\n"] {
+                           + "                if !row.connectCommand.isEmpty {\n"
+                           + "                    Text(verbatim: row.connectCommand)\n"
+                           + "                        .textSelection(.enabled)\n"
+                           + "                }\n"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }

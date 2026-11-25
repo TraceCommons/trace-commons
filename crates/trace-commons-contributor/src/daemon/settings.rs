@@ -1313,12 +1313,20 @@ pub fn ironwire_ledger_for(
     let declaration = declaration?;
     let port = declaration.port()?;
     let path = ironwire_token_path(declaration.token_dir())?;
+    ironwire_ledger_at(port, &path)
+}
+
+/// The token of a listener whose port and home are already checked.
+pub(crate) fn ironwire_ledger_at(
+    port: u16,
+    path: &std::path::Path,
+) -> Option<std::sync::Arc<crate::routing::ironwire::IronWireLedger>> {
     // The token is a credential for an API that can rewrite the
     // contributor's agent configuration, and this process is about to put it
     // on the wire. A file another principal could have written is not one to
     // send anywhere, whichever of the four resolution steps produced it.
-    super::ironwire_pointer::trustworthy_file(&path)?;
-    let token = std::fs::read_to_string(&path).ok()?;
+    super::ironwire_pointer::trustworthy_file(path)?;
+    let token = std::fs::read_to_string(path).ok()?;
     Some(std::sync::Arc::new(
         crate::routing::ironwire::IronWireLedger::new(port, token.trim().to_string()),
     ))

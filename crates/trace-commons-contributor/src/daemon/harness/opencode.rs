@@ -877,8 +877,11 @@ mod tests {
             &Catalog::default(),
             ID,
             HarnessAction::Connect,
-            Some(4321),
-            true,
+            Destination {
+                port: Some(4321),
+                credentialed: true,
+                gateway: None,
+            },
             Some(context),
         )
         .unwrap()

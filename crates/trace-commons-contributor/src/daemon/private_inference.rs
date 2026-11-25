@@ -4,7 +4,8 @@
 //! `private_inference` setting is the contributor's declaration and it
 //! defaults to off. Finding a pointer on disk is never enough.
 //!
-//! The home is `$IRONWIRE_HOME`, else `~/.ironwire` -- deliberately the same
+//! Gateway uses a channel-specific home in the daemon state directory.
+//! The headless daemon honors `$IRONWIRE_HOME`, else `~/.ironwire` -- the same
 //! home the `ironwire` CLI uses, so a contributor who installs it sees one
 //! ledger, one token, one pointer, and the routing reader keeps talking to
 //! 127.0.0.1 exactly as before.
@@ -366,6 +367,8 @@ async fn existing_instance(home: &Path) -> Option<u16> {
 pub(crate) struct OwnedEndpoint {
     pub port: u16,
     pub home: PathBuf,
+    pub generation: u64,
+    pub connect_ready: bool,
 }
 
 pub(crate) fn effective_metadata_declaration(
@@ -712,6 +715,9 @@ pub struct PrivateInference {
     /// `None` takes the port from IronWire's own configuration; `Some(0)`
     /// asks for an ephemeral one.
     port: Option<u16>,
+    gateway_store: Option<crate::config::ConfigStore>,
+    /// Once persisted, the port is also part of connected tools' configs.
+    gateway_port_saved: bool,
     proxy: Option<EmbeddedProxy>,
     owned_home: Option<PathBuf>,
     // Kept across canceled callers and deadlines. Dropping a wait must not
@@ -758,6 +764,10 @@ pub struct PrivateInference {
     starts: u64,
 }
 
+fn gateway_port_file() -> String {
+    format!("gateway-private-ai-{}-port", crate::channel::CHANNEL)
+}
+
 /// Why a start did not produce a proxy.
 ///
 /// A separate type from `EmbedError` because one of the two ways to fail is
@@ -780,6 +790,8 @@ impl PrivateInference {
         Self {
             home,
             port: None,
+            gateway_store: None,
+            gateway_port_saved: false,
             proxy: None,
             owned_home: None,
             starting: None,
@@ -807,6 +819,28 @@ impl PrivateInference {
             Some(port) => Self::with_port(home, port),
             None => Self::new(home),
         }
+    }
+
+    /// Use a channel-specific Gateway runtime. Standalone discovery and
+    /// configuration live outside this directory.
+    pub(crate) fn for_gateway(store: &crate::config::ConfigStore) -> Self {
+        let home = store
+            .dir()
+            .join("gateway-private-ai")
+            .join(crate::channel::CHANNEL);
+        let mut host = Self::for_channel(home);
+        if let Some(port) = store
+            .read_daemon_file(&gateway_port_file())
+            .ok()
+            .flatten()
+            .and_then(|bytes| std::str::from_utf8(&bytes).ok()?.parse::<u16>().ok())
+            .filter(|&port| port != 0)
+        {
+            host.port = Some(port);
+            host.gateway_port_saved = true;
+        }
+        host.gateway_store = Some(store.clone());
+        host
     }
 
     /// Host IronWire out of `home` on an explicit port. `0` asks the OS for
@@ -953,11 +987,14 @@ impl PrivateInference {
         self.state = state_after_unrequested_exit(Ok(()));
     }
 
-    pub(crate) fn owned_endpoint(&self) -> Option<OwnedEndpoint> {
+    pub(crate) fn owned_endpoint(&self, generation: u64) -> Option<OwnedEndpoint> {
         let proxy = self.proxy.as_ref().filter(|proxy| !proxy.is_finished())?;
         Some(OwnedEndpoint {
             port: proxy.port(),
             home: self.owned_home.clone()?,
+            generation,
+            connect_ready: self.gateway_store.is_none()
+                || (self.gateway_port_saved && self.port == Some(proxy.port())),
         })
     }
 
@@ -1044,7 +1081,8 @@ impl PrivateInference {
         if self.proxy.is_some() || self.stopping.is_some() || self.crashed {
             return;
         }
-        if !recovering
+        if self.gateway_store.is_none()
+            && !recovering
             && self.starting.is_none()
             && let Some(port) = existing_instance(&self.home).await
         {
@@ -1060,6 +1098,24 @@ impl PrivateInference {
             Ok(proxy) => {
                 self.cleanup_unconfirmed = false;
                 let port = proxy.port();
+                if let Some(store) = self.gateway_store.as_ref()
+                    && !self.gateway_port_saved
+                {
+                    // Persist the first owned port before Connect can write it
+                    // into tool configs, even if it was the preferred port.
+                    if store
+                        .write_daemon_file(&gateway_port_file(), port.to_string().as_bytes())
+                        .is_ok()
+                    {
+                        self.port = Some(port);
+                        self.gateway_port_saved = true;
+                    } else {
+                        tracing::warn!(
+                            reason = "private-inference-port-not-saved",
+                            "could not save the bound port"
+                        );
+                    }
+                }
                 self.state = state_after_start(port, proxy.startup_report().no_backends);
                 // Capture the resolved home once, while adopting this proxy;
                 // later changes to the spelling of a relative path cannot
@@ -1111,7 +1167,9 @@ impl PrivateInference {
                     };
                     return;
                 }
-                if let EmbedError::Lock { port } = error {
+                if self.gateway_store.is_none()
+                    && let EmbedError::Lock { port } = error
+                {
                     tracing::info!(
                         pass = "private_inference",
                         port,
@@ -1148,6 +1206,9 @@ impl PrivateInference {
                 .unwrap_or_else(tokio::runtime::Handle::current);
             let home = self.home.clone();
             let port = self.port;
+            // An alternate is safe only before any tool can be configured
+            // to use the persisted port.
+            let allow_alternate = self.gateway_store.is_some() && !self.gateway_port_saved;
             let env_base = std::env::var(IRONWIRE_NEARAI_BASE_ENV).ok();
             let credential =
                 credential_for_start(&home, self.credential.clone(), env_base.as_deref());
@@ -1163,7 +1224,14 @@ impl PrivateInference {
                     // the response path.
                     options = options.with_signer_attestor(attestor);
                 }
-                embed::start_with_options(&home, port, options, |_, _| {}).await
+                let started =
+                    embed::start_with_options(&home, port, options.clone(), |_, _| {}).await;
+                match started {
+                    Err(EmbedError::PortInUse { .. }) if allow_alternate => {
+                        embed::start_with_options(&home, Some(0), options, |_, _| {}).await
+                    }
+                    started => started,
+                }
             }));
         }
         // Await through the retained handle. Canceling a caller leaves the
@@ -1790,6 +1858,8 @@ mod tests {
     fn effective_metadata_preserves_explicit_consent_and_requires_owned_opt_in() {
         use super::super::settings::IronWireDeclaration;
         let owned = OwnedEndpoint {
+            generation: 0,
+            connect_ready: true,
             port: 3210,
             home: PathBuf::from("/owned"),
         };

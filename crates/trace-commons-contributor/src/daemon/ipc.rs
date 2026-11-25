@@ -453,6 +453,14 @@ pub const METHODS: &[&str] = &[
     "harness_commit",
     "harness_list",
     "harness_plan",
+    "gateway_harness_commit",
+    "gateway_harness_list",
+    "gateway_harness_plan",
+    "gateway_inference_calls",
+    "gateway_private_ai",
+    "gateway_set_private_ai",
+    "gateway_set_private_inference_settings",
+    "gateway_tool_destinations",
     "hello",
     "history_detail",
     "history_rollup",
@@ -658,6 +666,11 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "discover_routing",
     "harness_list",
     "harness_plan",
+    "gateway_harness_list",
+    "gateway_harness_plan",
+    "gateway_inference_calls",
+    "gateway_private_ai",
+    "gateway_tool_destinations",
     "skill_review",
     "skill_install_plan",
     "skill_install_status",
@@ -680,6 +693,68 @@ fn dev_dry_run_refusal(shared: &DaemonShared, req: &Request) -> Option<Response>
         return Some(Response::err(req.id, ERR_BAD_PARAMS, ERR_DEV_DRY_RUN));
     }
     None
+}
+
+/// Scope desktop tool actions to the Gateway-owned listener. Distinct
+/// method names let a desktop attached to an older daemon fail closed.
+pub fn gateway_private_inference_method<'a>(
+    method: &'a str,
+    params: &serde_json::Value,
+) -> &'a str {
+    match method {
+        "harness_list" => "gateway_harness_list",
+        "harness_plan" => "gateway_harness_plan",
+        "harness_commit" => "gateway_harness_commit",
+        "inference_calls" => "gateway_inference_calls",
+        "private_ai" => "gateway_private_ai",
+        "set_private_ai" => "gateway_set_private_ai",
+        "set_settings"
+            if params.get("private_inference").is_some()
+                || params.get("private_inference_offer_seen").is_some()
+                || params.get("token_capture_enabled").is_some() =>
+        {
+            "gateway_set_private_inference_settings"
+        }
+        "tool_destinations" => "gateway_tool_destinations",
+        _ => method,
+    }
+}
+
+/// Hide standalone lifecycle state from an attached Gateway desktop. The
+/// original response remains available to CLI and operator callers.
+pub fn scope_gateway_private_inference_response(response: &mut Response) {
+    if let Some(result) = response.result.as_mut() {
+        scope_gateway_private_inference_value(result);
+    }
+}
+
+/// The same scoping applies to a status carried in an attached snapshot.
+pub fn scope_gateway_private_inference_value(value: &mut serde_json::Value) {
+    let Some(settings) = value.as_object_mut() else {
+        return;
+    };
+    let Some(state) = settings.get_mut("private_inference_state") else {
+        return;
+    };
+    if state["gateway_owned"] != true {
+        *state = serde_json::json!({ "state": "off", "port": null });
+        if let Some(on) = settings.get_mut("private_inference") {
+            *on = serde_json::Value::Bool(false);
+        }
+    }
+}
+
+fn gateway_private_inference_refusal(shared: &DaemonShared, req: &Request) -> Option<Response> {
+    (!shared.gateway_owned
+        && req.method.starts_with("gateway_")
+        && METHODS.contains(&req.method.as_str()))
+    .then(|| {
+        Response::err(
+            req.id,
+            ERR_UNAVAILABLE,
+            "gateway-private-inference-unavailable",
+        )
+    })
 }
 
 pub const EVENT_FEATURE_FLAGS_CHANGED: &str = "feature_flags_changed";
@@ -977,6 +1052,9 @@ pub struct DaemonShared {
     pub(crate) model_catalogue: crate::managed::catalogue_cache::CatalogueCache,
     pub(crate) managed: Mutex<Result<super::managed::ManagedService, crate::managed::ManagedError>>,
     pub store: ConfigStore,
+    /// The desktop launcher owns this proxy. Headless daemon callers may
+    /// still configure and observe a shared standalone proxy explicitly.
+    pub(crate) gateway_owned: bool,
     pub(crate) subscription_usage: Arc<super::subscription_usage::UsageService>,
     pub queue: Mutex<Queue>,
     pub policy: Mutex<ProjectPolicy>,
@@ -1567,6 +1645,10 @@ impl DaemonShared {
     }
 
     pub fn load(store: ConfigStore) -> Result<Self> {
+        Self::load_with_ownership(store, false)
+    }
+
+    pub(crate) fn load_with_ownership(store: ConfigStore, gateway_owned: bool) -> Result<Self> {
         // Never stops a start: the file is unread, so a leftover is harmless.
         if store.remove_retired_files().is_err() {
             tracing::warn!("could not remove a retired daemon file");
@@ -1669,9 +1751,10 @@ impl DaemonShared {
         // Built here from the declaration this settings file carries at
         // startup. A later edit does not wait for a restart:
         // `set_settings` rebuilds the instance in place.
+        let declaration = settings.ironwire.clone();
         let routing = RwLock::new(RoutingSnapshot {
-            declaration: settings.ironwire.clone(),
-            ledger: super::settings::ironwire_ledger_for(settings.ironwire.as_ref()),
+            ledger: super::settings::ironwire_ledger_for(declaration.as_ref()),
+            declaration,
             derived: false,
         });
         let (events, _) = broadcast::channel(256);
@@ -1689,7 +1772,16 @@ impl DaemonShared {
             super::terms_state::TermsState::default()
         });
         let terms_held = terms.held();
+        let private_inference = if gateway_owned {
+            Some(super::private_inference::PrivateInference::for_gateway(
+                &store,
+            ))
+        } else {
+            super::private_inference::ironwire_home()
+                .map(super::private_inference::PrivateInference::for_channel)
+        };
         Ok(Self {
+            gateway_owned,
             feature_flags: crate::feature_flags::Runtime::for_store(&store)?,
             claude_desktop: Mutex::new(super::claude_desktop::Connection::open(&store)),
             managed,
@@ -1733,10 +1825,7 @@ impl DaemonShared {
             // Constructed, never started. Nothing binds until the reconcile
             // pass reads `private_inference` out of settings and finds it
             // on -- a daemon that has never been asked hosts nothing.
-            private_inference: Arc::new(tokio::sync::Mutex::new(
-                super::private_inference::ironwire_home()
-                    .map(super::private_inference::PrivateInference::for_channel),
-            )),
+            private_inference: Arc::new(tokio::sync::Mutex::new(private_inference)),
             private_inference_terminating: AtomicBool::new(false),
             private_inference_generation: std::sync::atomic::AtomicU64::new(0),
             token_review_generation: std::sync::atomic::AtomicU64::new(0),
@@ -1999,7 +2088,7 @@ impl DaemonShared {
                     | super::private_inference::PrivateInferenceState::RunningWithoutBackends { .. }) {
                     None
                 } else {
-                    *self.private_inference_endpoint.lock().expect("proxy endpoint lock") = host.owned_endpoint();
+                    *self.private_inference_endpoint.lock().expect("proxy endpoint lock") = host.owned_endpoint(generation);
                     self.rebuild_effective_routing(&settings);
                     let reported = host.state();
                     let changed = *state != reported;
@@ -2240,10 +2329,14 @@ impl DaemonShared {
         // The label, not `state.label()`: while the proxy is running, which
         // account answers is part of what a shell has to say, and the honest
         // answer includes "not known". See `private_inference_destination`.
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "state": state.label_for(self.private_inference_destination()),
             "port": state.port(),
-        })
+        });
+        if self.gateway_owned {
+            value["gateway_owned"] = serde_json::Value::Bool(true);
+        }
+        value
     }
 
     /// The label `private_inference_state.state` carries right now.
@@ -2273,7 +2366,7 @@ impl DaemonShared {
     /// Takes the settings lock: never call this while holding it.
     fn private_inference_destination(&self) -> Option<bool> {
         let proxy = self
-            .routing_ledger()
+            .private_ai_routing_ledger()
             .and_then(|ledger| ledger.nearai_authenticated());
         super::private_inference::destination(proxy, self.holds_near_ai_key())
     }
@@ -2307,10 +2400,55 @@ impl DaemonShared {
     /// and runs themselves -- `harness::repair_stale_status_line`, which
     /// would otherwise remove that proxy's working status line.
     pub(crate) fn hosted_destination_port(&self) -> Option<u16> {
+        if self.gateway_owned {
+            return self.gateway_destination().map(|(port, _)| port);
+        }
         self.private_inference_state
             .lock()
             .expect("private inference state lock")
             .port()
+    }
+
+    /// Connect can only target a listener this Gateway started in the
+    /// current opt-in generation. A displayed legacy port is never enough.
+    pub(crate) fn gateway_destination(&self) -> Option<(u16, u64)> {
+        self.with_gateway_destination(|target| target)
+    }
+
+    /// Keep a Connect write in the same lifecycle generation as its
+    /// preview. Take the host lock first, as reconciliation does, and
+    /// keep the settings and state locks across the synchronous write so
+    /// opt-out, credential rotation and terminal teardown cannot race it.
+    pub(crate) fn with_gateway_destination<T>(
+        &self,
+        commit: impl FnOnce(Option<(u16, u64)>) -> T,
+    ) -> T {
+        let Ok(host) = self.private_inference.try_lock() else {
+            return commit(None);
+        };
+        let Ok(settings) = self.settings.lock() else {
+            return commit(None);
+        };
+        let Ok(_state) = self.private_inference_state.lock() else {
+            return commit(None);
+        };
+        let target = if self.gateway_owned
+            && settings.private_inference
+            && !self.private_inference_terminating.load(Ordering::Acquire)
+        {
+            let generation = self.private_inference_generation.load(Ordering::Acquire);
+            let published = self.private_inference_endpoint.lock().ok();
+            let live = host
+                .as_ref()
+                .and_then(|host| host.owned_endpoint(generation));
+            live.filter(|live| {
+                live.connect_ready && published.as_deref().and_then(Option::as_ref) == Some(live)
+            })
+            .map(|live| (live.port, generation))
+        } else {
+            None
+        };
+        commit(target)
     }
 
     /// Set the hosted listener's state, for tests outside this module.
@@ -2341,8 +2479,9 @@ impl DaemonShared {
     /// connect has no destination to write, and `harness_plan` refuses it by
     /// name rather than writing a guess into somebody's config file.
     pub(crate) fn destination_port(&self) -> Option<u16> {
-        if let Some(port) = self.hosted_destination_port() {
-            return Some(port);
+        let hosted = self.hosted_destination_port();
+        if self.gateway_owned || hosted.is_some() {
+            return hosted;
         }
         self.settings
             .lock()
@@ -2491,6 +2630,18 @@ impl DaemonShared {
             .and_then(|held| held.ledger.as_ref().map(Arc::clone))
     }
 
+    /// Gateway activity may only be attributed to the Gateway listener.
+    /// A separate explicit declaration still supports routing evidence.
+    pub(crate) fn private_ai_routing_ledger(
+        &self,
+    ) -> Option<Arc<crate::routing::ironwire::IronWireLedger>> {
+        let held = self.routing.read().ok()?;
+        if self.gateway_owned && !held.derived {
+            return None;
+        }
+        held.ledger.as_ref().map(Arc::clone)
+    }
+
     /// Rebuild only when the effective endpoint changes, preserving warm rows.
     /// Caller holds settings; lock order is settings -> endpoint -> routing.
     pub(crate) fn rebuild_effective_routing(&self, settings: &DaemonSettings) {
@@ -2498,19 +2649,31 @@ impl DaemonShared {
             .private_inference_endpoint
             .lock()
             .expect("proxy endpoint lock");
+        let explicit = settings.ironwire.as_ref();
         let declaration = super::private_inference::effective_metadata_declaration(
-            settings.ironwire.as_ref(),
+            explicit,
             settings.private_inference
                 && !self.private_inference_terminating.load(Ordering::Acquire),
             owned.as_ref(),
         );
-        let derived = settings.ironwire.is_none() && declaration.is_some();
+        let derived = explicit.is_none() && declaration.is_some();
         let mut held = self.routing.write().expect("routing lock");
         if held.declaration == declaration {
             held.derived = derived;
             return;
         }
-        let ledger = super::settings::ironwire_ledger_for(declaration.as_ref());
+        let ledger = if self.gateway_owned && derived {
+            declaration
+                .as_ref()
+                .and(owned.as_ref())
+                .and_then(|endpoint| {
+                    let token = endpoint.home.join(super::settings::IRONWIRE_TOKEN_FILE);
+                    let path = super::ironwire_pointer::confine_token_path(&token, &endpoint.home)?;
+                    super::settings::ironwire_ledger_at(endpoint.port, &path)
+                })
+        } else {
+            super::settings::ironwire_ledger_for(declaration.as_ref())
+        };
         *held = RoutingSnapshot {
             declaration,
             ledger,
@@ -2570,7 +2733,12 @@ impl DaemonShared {
         // Once per row this tick read that no earlier tick had. Reads only
         // the snapshot the refresh above committed; never a second fetch.
         let added = ledger.take_added_rows();
-        super::inference_map::publish_added_calls(self, &added);
+        if self
+            .private_ai_routing_ledger()
+            .is_some_and(|owned| Arc::ptr_eq(&owned, &ledger))
+        {
+            super::inference_map::publish_added_calls(self, &added);
+        }
         super::insights_glance::publish_usage_changed(self, &added);
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
@@ -4060,6 +4228,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("inference_summary", "inference-summary-requires-async"),
     ("model_spend", "model-spend-requires-async"),
     ("set_private_ai", "private-ai-requires-async"),
+    ("gateway_set_private_ai", "private-ai-requires-async"),
     ("invite_lookup", "invite-lookup-requires-async"),
     ("first_run_estimate", "first-run-estimate-requires-async"),
     ("first_run_copy", "first-run-copy-requires-async"),
@@ -4276,6 +4445,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
     {
         return Response::err(req.id, ERR_UNAVAILABLE, label);
     }
+    if let Some(refused) = gateway_private_inference_refusal(shared, req) {
+        return refused;
+    }
     match req.method.as_str() {
         // One arm per method: `every_advertised_method_is_dispatched_and_the_reverse`
         // counts one arm per string literal, and an or-pattern hides all but its last.
@@ -4334,6 +4506,8 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "gateway_inference_calls" => super::inference_map::handle_calls(shared, req),
+        "gateway_tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_activity" => super::inference_map::handle_activity(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "insights_week" => super::insights_week::handle_week(shared, req),
@@ -4351,6 +4525,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "insights_submitted" => super::insights_submitted::handle_submitted(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
+        "gateway_private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
         "list_past_sessions" => handle_list_past_sessions(shared, req),
         "list_kept" => handle_list_kept(shared, req),
@@ -4522,6 +4697,9 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "harness_list" => super::harness::handle_list(shared, req),
         "harness_plan" => super::harness::handle_plan(shared, req),
         "harness_commit" => super::harness::handle_commit(shared, req),
+        "gateway_harness_list" => super::harness::handle_list(shared, req),
+        "gateway_harness_plan" => super::harness::handle_plan(shared, req),
+        "gateway_harness_commit" => super::harness::handle_commit(shared, req),
         "skill_review" => super::skill_loop::handle_review(shared, req),
         // Writes only `terms-state.json`; the post to ingest is the tick's.
         "terms_accept" => super::terms_state::handle_accept(shared, req),
@@ -4671,6 +4849,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
             Response::ok(req.id, value)
         }
         "set_settings" => handle_set_settings(shared, req),
+        "gateway_set_private_inference_settings" => handle_set_settings(shared, req),
 
         "shutdown" => {
             shared.shutdown.store(true, Ordering::Relaxed);
@@ -7537,7 +7716,9 @@ pub(crate) async fn handle_set_settings_async(shared: &DaemonShared, req: &Reque
 /// why both real callers (the socket loop and `handle_local`) always go
 /// through this function rather than `handle_request` directly.
 pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Response {
-    if let Some(refused) = dev_dry_run_refusal(shared, req) {
+    if let Some(refused) =
+        dev_dry_run_refusal(shared, req).or_else(|| gateway_private_inference_refusal(shared, req))
+    {
         return refused;
     }
     // Managed methods answer as on the synchronous path, except that
@@ -7559,9 +7740,11 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "claude_desktop_disconnect" => super::claude_desktop::handle(shared, req).await,
         "insights_skills" => super::insights_skills::handle(shared, req).await,
         "harness_plan" => super::harness::handle_plan_async(shared, req).await,
+        "gateway_harness_plan" => super::harness::handle_plan_async(shared, req).await,
         "inference_summary" => super::network_data::handle_summary(shared, req).await,
         "model_spend" => super::network_data::handle_model_spend(shared, req).await,
         "set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
+        "gateway_set_private_ai" => super::network_data::handle_set_private_ai(shared, req).await,
         "invite_lookup" => super::network_data::handle_invite_lookup(shared, req).await,
         "first_run_estimate" => super::network_data::handle_first_run_estimate(shared, req).await,
         "first_run_copy" => super::network_data::handle_first_run_copy(shared, req).await,
@@ -7628,6 +7811,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
             super::account_onboarding::handle_capabilities(shared, req).await
         }
         "set_settings" => handle_set_settings_async(shared, req).await,
+        "gateway_set_private_inference_settings" => handle_set_settings_async(shared, req).await,
         "witness_preview_request" => {
             if req.params.get("background").and_then(|v| v.as_bool()) == Some(true) {
                 handle_witness_preview_background(shared, req).await
@@ -16598,6 +16782,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn desktop_private_inference_cannot_activate_a_headless_daemon() {
+        let s = shared();
+        let port = crate::channel::IRONWIRE_CONTROL_PORT.unwrap_or(9999);
+        s.settings.lock().unwrap().ironwire =
+            Some(crate::daemon::settings::IronWireDeclaration::Watch {
+                port,
+                token_dir: None,
+            });
+        let operator = handle_request(&s, &req("harness_list", serde_json::json!({})));
+        assert_eq!(operator.result.unwrap()["destination_port"], port);
+        let params = serde_json::json!({"private_inference": true});
+        let method = gateway_private_inference_method("set_settings", &params);
+        let desktop = handle_request(&s, &req(method, params));
+        assert_eq!(
+            desktop.error.unwrap().message,
+            "gateway-private-inference-unavailable"
+        );
+        assert!(!s.settings.lock().unwrap().private_inference);
+
+        let mut older = Response::ok(
+            1,
+            serde_json::json!({"private_inference": true,
+                "private_inference_state": {"state": "running_elsewhere", "port": 9999}}),
+        );
+        scope_gateway_private_inference_response(&mut older);
+        let result = older.result.unwrap();
+        assert_eq!(result["private_inference"], false);
+        assert!(result["private_inference_state"]["port"].is_null());
+    }
+
     /// The credential gate on a connect asks about the destination this
     /// daemon hosts, and about nothing else.
     ///
@@ -20604,7 +20819,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 83);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 84);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -21087,8 +21302,8 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 116, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 90, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(sync.len(), 123, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(asy.len(), 93, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =

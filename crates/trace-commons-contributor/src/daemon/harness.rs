@@ -356,6 +356,7 @@ struct HeldPlan {
     id: Uuid,
     tool_id: String,
     action: HarnessAction,
+    gateway_destination: Option<(u16, u64)>,
     planned: Edit,
     /// SHA-256 of the config file as it was when the plan was worked out, or
     /// `None` when the file did not exist. Compared again before the write.
@@ -411,11 +412,42 @@ impl PlanStore {
 /// and the alternative is a digest that says "absent" for a file that is
 /// present.
 fn config_digest(path: &Path) -> Option<String> {
+    std::fs::read(path).ok().map(|bytes| digest_bytes(&bytes))
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path).ok()?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Some(format!("{:x}", hasher.finalize()))
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Distinguish a missing config from one that we could not safely read.
+fn gateway_config_digest(path: &Path) -> Result<Option<String>, PlanOutcome> {
+    use std::io::{ErrorKind, Read};
+    const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+    let refused = PlanOutcome::Unparseable;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(refused),
+    };
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
+        return Err(refused);
+    }
+    // Open without following a final symlink or waiting for a FIFO writer,
+    // even if another process replaces the file after the metadata check.
+    let file = crate::evidence_import::open_import_file(path).map_err(|_| refused)?;
+    let opened = file.metadata().map_err(|_| refused)?;
+    if !opened.is_file() || opened.len() > MAX_CONFIG_BYTES {
+        return Err(refused);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| refused)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES || std::str::from_utf8(&bytes).is_err() {
+        return Err(refused);
+    }
+    Ok(Some(digest_bytes(&bytes)))
 }
 
 /// Whether a tool's config names the destination answering on THIS machine.
@@ -656,7 +688,41 @@ pub fn plan(
     port: Option<u16>,
     credentialed: bool,
 ) -> Result<PlanView, &'static str> {
-    plan_with_opencode(store, catalog, tool_id, action, port, credentialed, None)
+    plan_with_opencode(
+        store,
+        catalog,
+        tool_id,
+        action,
+        Destination {
+            port,
+            credentialed,
+            gateway: None,
+        },
+        None,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Destination {
+    port: Option<u16>,
+    credentialed: bool,
+    gateway: Option<(u16, u64)>,
+}
+
+fn request_destination(shared: &DaemonShared, gateway: bool) -> Destination {
+    if gateway {
+        let target = shared.gateway_destination();
+        return Destination {
+            port: target.map(|(port, _)| port),
+            credentialed: target.is_none() || shared.destination_credentialed(),
+            gateway: target,
+        };
+    }
+    Destination {
+        port: shared.destination_port(),
+        credentialed: shared.destination_credentialed(),
+        gateway: None,
+    }
 }
 
 fn plan_with_opencode(
@@ -664,10 +730,14 @@ fn plan_with_opencode(
     catalog: &Catalog,
     tool_id: &str,
     action: HarnessAction,
-    port: Option<u16>,
-    credentialed: bool,
+    destination: Destination,
     opencode_context: Option<&opencode::Context>,
 ) -> Result<PlanView, &'static str> {
+    let Destination {
+        port,
+        credentialed,
+        gateway,
+    } = destination;
     let rows = tools_now(catalog);
     let Some(row) = rows.iter().find(|t| t.id == tool_id) else {
         return Err(ERR_UNKNOWN_HARNESS);
@@ -746,12 +816,20 @@ fn plan_with_opencode(
     // not decode is refused with the outcome the copy already describes.
     // OpenCode's editor validates file type and bounded UTF-8 itself. The
     // legacy reader here would defeat that bound or block on a FIFO first.
+    let gateway_legacy_connect =
+        action == HarnessAction::Connect && gateway.is_some() && tool_id != opencode::ID;
+    let mut gateway_digest = None;
     if tool_id != opencode::ID
         && let Some(path) = row.config_path.as_ref()
-        && path.exists()
-        && std::fs::read_to_string(path).is_err()
     {
-        return Ok(refuse(PlanOutcome::Unparseable));
+        if gateway_legacy_connect {
+            match gateway_config_digest(path) {
+                Ok(digest) => gateway_digest = digest,
+                Err(outcome) => return Ok(refuse(outcome)),
+            }
+        } else if path.exists() && std::fs::read_to_string(path).is_err() {
+            return Ok(refuse(PlanOutcome::Unparseable));
+        }
     }
 
     let planned = if tool_id == CLAUDE {
@@ -838,6 +916,9 @@ fn plan_with_opencode(
 
     let occupied = planned.occupied().to_vec();
     let path = planned.path().to_path_buf();
+    if gateway_legacy_connect && gateway_config_digest(&path) != Ok(gateway_digest.clone()) {
+        return Ok(refuse(PlanOutcome::Unparseable));
+    }
     if planned.is_noop() {
         // A distinct outcome, not an empty preview. Occupied slots still
         // ride along: "nothing to change, and here is the slot somebody else
@@ -867,10 +948,15 @@ fn plan_with_opencode(
         id,
         tool_id: tool_id.to_string(),
         action,
+        gateway_destination: (action == HarnessAction::Connect)
+            .then_some(gateway)
+            .flatten(),
         // OpenCode keeps bounded exact preimages for BOTH files internally.
         // Do not re-read its config with the legacy unbounded digest helper.
         digest: if matches!(&planned, Edit::OpenCode(_)) {
             None
+        } else if gateway_legacy_connect {
+            gateway_digest
         } else {
             config_digest(&path)
         },
@@ -905,10 +991,28 @@ pub struct CommitView {
 /// [`ERR_COMMIT_FAILED`] when the write itself failed.
 pub fn commit(store: &PlanStore, plan_id: Uuid) -> Result<CommitView, &'static str> {
     let held = store.take(plan_id).ok_or(ERR_PLAN_UNKNOWN)?;
-    if !matches!(&held.planned, Edit::OpenCode(_))
-        && config_digest(held.planned.path()) != held.digest
+    commit_for_destination(held, None, false)
+}
+
+fn commit_for_destination(
+    held: HeldPlan,
+    target: Option<(u16, u64)>,
+    gateway: bool,
+) -> Result<CommitView, &'static str> {
+    if held.action == HarnessAction::Connect
+        && (held.gateway_destination != target || (gateway && target.is_none()))
     {
-        return Err(ERR_CONFIG_CHANGED);
+        return Err(ERR_NO_DESTINATION);
+    }
+    if !matches!(&held.planned, Edit::OpenCode(_)) {
+        let digest = if gateway && held.action == HarnessAction::Connect {
+            gateway_config_digest(held.planned.path()).map_err(|_| ERR_CONFIG_CHANGED)?
+        } else {
+            config_digest(held.planned.path())
+        };
+        if digest != held.digest {
+            return Err(ERR_CONFIG_CHANGED);
+        }
     }
 
     // Upstream #37's `commit_if_unchanged` reads the file again immediately
@@ -1078,7 +1182,8 @@ fn command_runs_ironwire(command: &str) -> bool {
 /// Skipped under either dry run, which edits no contributor's files; a
 /// dry-run start leaves the line for the next normal one.
 pub(crate) fn repair_stale_status_line(shared: &DaemonShared, dry_run: bool) -> bool {
-    if dry_run || shared.dev_dry_run {
+    // Gateway leaves a tool's old configuration to an explicit preview.
+    if dry_run || shared.dev_dry_run || shared.gateway_owned {
         return false;
     }
     match repair_claude_status_line(shared.hosted_destination_port()) {
@@ -1229,7 +1334,7 @@ pub(crate) fn rows_now(shared: &DaemonShared) -> Vec<HarnessRow> {
 
 /// What the ledger can say about calls that arrived, rolled up by family.
 fn activity_for(shared: &DaemonShared) -> FamilyActivity {
-    let Some(ledger) = shared.routing_ledger() else {
+    let Some(ledger) = shared.private_ai_routing_ledger() else {
         // No declared, readable proxy: no evidence about any tool. Reported
         // as unreadable rather than as an empty window, because "nothing has
         // answered" and "the proxy answered and this window is empty" are
@@ -1261,7 +1366,7 @@ fn activity_for(shared: &DaemonShared) -> FamilyActivity {
 /// apart -- which is the whole reason this is an `Option` on the wire as
 /// well as here.
 fn spend_for(shared: &DaemonShared) -> Option<u64> {
-    let ledger = shared.routing_ledger()?;
+    let ledger = shared.private_ai_routing_ledger()?;
     // The same gate `activity_for` applies, for the same reason: a ledger
     // that has never completed a refresh holds a cold zero, and reporting
     // that as a measured figure is the defect this whole surface exists to
@@ -1332,11 +1437,18 @@ fn offers_disconnect(row: &HarnessRow) -> bool {
 /// `harness_list`: every tool this machine knows about, and its state.
 pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
     let catalog = catalog();
-    let activity = activity_for(shared);
-    let spend = spend_for(shared);
-    let destination_port = shared.destination_port();
-    let credentialed = shared.destination_credentialed();
-    let rows = list(&catalog, &activity, destination_port);
+    let gateway = shared.gateway_owned || req.method == "gateway_harness_list";
+    let Destination {
+        port, credentialed, ..
+    } = request_destination(shared, gateway);
+    let observed = !gateway || port.is_some();
+    let activity = if observed {
+        activity_for(shared)
+    } else {
+        FamilyActivity::default()
+    };
+    let spend = if observed { spend_for(shared) } else { None };
+    let rows = list(&catalog, &activity, port);
 
     let harnesses: Vec<serde_json::Value> = rows
         .iter()
@@ -1347,7 +1459,7 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
                 "installed": row.installed,
                 "connected": row.connected,
                 "config_path": path_value(row.config_path.as_deref()),
-                "connect_command": row.connect_command,
+                "connect_command": if gateway { "" } else { row.connect_command.as_str() },
                 "family": row.family,
                 // The vendor this tool answers at by default, from the same
                 // fixed table `source::discovery` draws its rows'
@@ -1411,7 +1523,7 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
             // The port a connect would write into a config file. Null when
             // nothing on this machine is answering model calls, which is
             // what `harness_plan` refuses a connect with.
-            "destination_port": shared.destination_port(),
+            "destination_port": port,
             // Whether that destination can answer anything. False is the
             // reason every `can_connect` on the list above is false, and is
             // on the wire so a shell can say so where the control would have
@@ -1423,7 +1535,8 @@ pub fn handle_list(shared: &DaemonShared, req: &Request) -> Response {
 
 /// `harness_plan`: work out one tool's edit and write nothing.
 pub fn handle_plan(shared: &DaemonShared, req: &Request) -> Response {
-    handle_plan_with_opencode(shared, req, None)
+    let gateway = shared.gateway_owned || req.method == "gateway_harness_plan";
+    handle_plan_with_opencode(shared, req, request_destination(shared, gateway), None)
 }
 
 /// OpenCode needs the serving proxy's actual model list before a persistent
@@ -1435,10 +1548,12 @@ pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response
     {
         return handle_plan(shared, req);
     }
-    if !shared.destination_credentialed() {
+    let gateway = shared.gateway_owned || req.method == "gateway_harness_plan";
+    let destination = request_destination(shared, gateway);
+    if !destination.credentialed {
         return handle_plan(shared, req);
     }
-    let Some(port) = shared.destination_port() else {
+    let Some(port) = destination.port else {
         return handle_plan(shared, req);
     };
     let major = match tokio::task::spawn_blocking(opencode::native_major).await {
@@ -1451,10 +1566,15 @@ pub async fn handle_plan_async(shared: &DaemonShared, req: &Request) -> Response
         Err(_) => return opencode_refusal(req, PlanOutcome::ModelsUnavailable),
     };
     // Do not preview a different destination if it changed during the probe.
-    if shared.destination_port() != Some(port) || !shared.destination_credentialed() {
+    if request_destination(shared, gateway) != destination {
         return Response::err(req.id, ERR_UNAVAILABLE, ERR_NO_DESTINATION);
     }
-    handle_plan_with_opencode(shared, req, Some(&opencode::Context { major, models }))
+    handle_plan_with_opencode(
+        shared,
+        req,
+        destination,
+        Some(&opencode::Context { major, models }),
+    )
 }
 
 /// Why a connect stops at the version probe: a missing executable is not
@@ -1482,6 +1602,7 @@ fn opencode_refusal(req: &Request, outcome: PlanOutcome) -> Response {
 fn handle_plan_with_opencode(
     shared: &DaemonShared,
     req: &Request,
+    destination: Destination,
     context: Option<&opencode::Context>,
 ) -> Response {
     let Some(id) = req.params.get("id").and_then(serde_json::Value::as_str) else {
@@ -1501,8 +1622,7 @@ fn handle_plan_with_opencode(
         &catalog(),
         id,
         action,
-        shared.destination_port(),
-        shared.destination_credentialed(),
+        destination,
         context,
     ) {
         Ok(view) => Response::ok(
@@ -1545,7 +1665,16 @@ pub fn handle_commit(shared: &DaemonShared, req: &Request) -> Response {
     else {
         return Response::err(req.id, ERR_BAD_PARAMS, "plan-id-invalid");
     };
-    match commit(&shared.harness_plans, plan_id) {
+    let Some(held) = shared.harness_plans.take(plan_id) else {
+        return Response::err(req.id, ERR_UNAVAILABLE, ERR_PLAN_UNKNOWN);
+    };
+    let gateway = shared.gateway_owned || req.method == "gateway_harness_commit";
+    let committed = if gateway && held.action == HarnessAction::Connect {
+        shared.with_gateway_destination(|target| commit_for_destination(held, target, true))
+    } else {
+        commit_for_destination(held, None, false)
+    };
+    match committed {
         Ok(view) => Response::ok(
             req.id,
             serde_json::json!({
@@ -1676,6 +1805,76 @@ mod tests {
             true,
         )
         .expect("claude is known")
+    }
+
+    #[test]
+    fn gateway_connect_preview_expires_with_the_listener_generation() {
+        let (_dir, _guard, path) = claude_config("{}");
+        let store = PlanStore::default();
+        let view = plan_with_opencode(
+            &store,
+            &Catalog::default(),
+            "claude",
+            HarnessAction::Connect,
+            Destination {
+                port: Some(8463),
+                credentialed: true,
+                gateway: Some((8463, 1)),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            commit_for_destination(
+                store.take(view.plan_id.unwrap()).unwrap(),
+                Some((8463, 2)),
+                true,
+            )
+            .unwrap_err(),
+            ERR_NO_DESTINATION
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gateway_connect_refuses_a_fifo_in_place_of_a_missing_config() {
+        let (_dir, _guard, path) = claude_config("{}");
+        std::fs::remove_file(&path).unwrap();
+        let store = PlanStore::default();
+        let target = Some((8463, 1));
+        let view = plan_with_opencode(
+            &store,
+            &Catalog::default(),
+            "claude",
+            HarnessAction::Connect,
+            Destination {
+                port: Some(8463),
+                credentialed: true,
+                gateway: target,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let held = store.take(view.plan_id.unwrap()).unwrap();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(commit_for_destination(held, target, true));
+        });
+        assert_eq!(
+            result
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("Connect commit blocked on the FIFO")
+                .unwrap_err(),
+            ERR_CONFIG_CHANGED,
+        );
     }
 
     /// A file appearing between the plan and the commit is refused.

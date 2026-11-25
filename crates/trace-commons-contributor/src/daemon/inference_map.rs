@@ -987,7 +987,7 @@ pub(crate) fn publish_added_calls(shared: &DaemonShared, added: &[RoutedExchange
 
 /// The ledger's rows for the window, or `None` when no ledger has answered.
 fn ledger_rows(shared: &DaemonShared) -> Option<Vec<RoutedExchange>> {
-    let ledger = shared.routing_ledger()?;
+    let ledger = shared.private_ai_routing_ledger()?;
     ledger.last_refresh_at()?;
     let since: DateTime<Utc> = Utc::now() - chrono::Duration::hours(ACTIVITY_WINDOW_HOURS);
     Some(crate::routing::RoutingLedger::exchanges_since(

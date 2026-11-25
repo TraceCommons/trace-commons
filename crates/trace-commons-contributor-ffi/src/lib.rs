@@ -559,7 +559,9 @@ fn start_daemon_handle(store: ConfigStore) -> anyhow::Result<tc_handle> {
         .worker_threads(workers)
         .enable_all()
         .build()?;
-    let embedded = rt.block_on(trace_commons_contributor::daemon::start_embedded(store))?;
+    let embedded = rt.block_on(trace_commons_contributor::daemon::start_gateway_embedded(
+        store,
+    ))?;
     let supervisor_shared = Arc::clone(&embedded.shared);
     let supervisor = rt.spawn(trace_commons_contributor::daemon::run_supervisor(
         supervisor_shared,
@@ -1537,14 +1539,18 @@ pub unsafe extern "C" fn tc_call(
                 Ok(v) => v,
                 Err(_) => return error_frame(ERR_BAD_PARAMS, "invalid-params-json"),
             };
+            let scoped_method = ipc::gateway_private_inference_method(method, &params);
             // An attached handle has no `DaemonShared` to borrow: the
             // daemon is in another process. Checked before `shared_of`,
             // which would otherwise report a perfectly healthy attached
             // handle as a stopped daemon.
             if let Some(attached) = attached_of(handle) {
-                return match attached.call(method, &params) {
-                    Ok(response) => serde_json::to_string(&response)
-                        .unwrap_or_else(|_| error_frame("unavailable", "serialize-failed")),
+                return match attached.call(scoped_method, &params) {
+                    Ok(mut response) => {
+                        ipc::scope_gateway_private_inference_response(&mut response);
+                        serde_json::to_string(&response)
+                            .unwrap_or_else(|_| error_frame("unavailable", "serialize-failed"))
+                    }
                     Err(AttachError::StopRefused) => {
                         error_frame(ERR_REFUSED, ERR_ATTACHED_STOP_REFUSED)
                     }
@@ -1570,7 +1576,7 @@ pub unsafe extern "C" fn tc_call(
             let Some(shared) = shared_of(handle) else {
                 return error_frame("unavailable", "daemon-stopped");
             };
-            let response = ipc::handle_local(&shared, method, params);
+            let response = ipc::handle_local(&shared, scoped_method, params);
             serde_json::to_string(&response)
                 .unwrap_or_else(|_| error_frame("unavailable", "serialize-failed"))
         })();
@@ -1847,9 +1853,24 @@ unsafe fn subscribe_inner(
             let ctx = SendPtr(ctx);
             let token = handle_ref.next_subscription.fetch_add(1, Ordering::Relaxed);
             let declared = accepts.clone().unwrap_or(serde_json::Value::Null);
+            let gateway_owned = AtomicBool::new(false);
             if attached
                 .subscribe_with_accepts(
-                    move |event| {
+                    move |mut event| {
+                        if event.event == ipc::EVENT_SNAPSHOT
+                            && let Some(status) = event.data.get_mut("status")
+                        {
+                            gateway_owned.store(
+                                status["private_inference_state"]["gateway_owned"] == true,
+                                Ordering::Relaxed,
+                            );
+                            ipc::scope_gateway_private_inference_value(status);
+                        }
+                        if event.event == ipc::EVENT_INFERENCE_CALL_ADDED
+                            && !gateway_owned.load(Ordering::Relaxed)
+                        {
+                            return;
+                        }
                         let ctx = &ctx;
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if let Ok(c) = CString::new(json) {
