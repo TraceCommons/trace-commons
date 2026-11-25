@@ -158,7 +158,7 @@ apple-native-keyring-store = { version = "=1.0.2", features = ["keychain", "prot
 # Intel macOS has no pinned `rts` runtime archive (`RTS_RELEASE` is aarch64-apple-darwin only).
 # Pinned to a revision that resolves the same `nearai/ironwire` revision as above.
 [target.'cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))'.dependencies]
-rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "d10b305807a4b745c37b72c3b96eed02cc05b04a" }
+rts = { git = "https://github.com/nearai/nearai-red-sandbox", rev = "7e43f37dd5f6f14cf2e0ed329bbcda285b8339f3" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus-secret-service-keyring-store = { version = "=1.0.1", default-features = false, features = ["rt-tokio-crypto-rust"] }

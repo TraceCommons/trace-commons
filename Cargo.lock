@@ -1738,7 +1738,7 @@ dependencies = [
 [[package]]
 name = "dcap-qvl"
 version = "0.7.0"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=d10b305807a4b745c37b72c3b96eed02cc05b04a#d10b305807a4b745c37b72c3b96eed02cc05b04a"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=7e43f37dd5f6f14cf2e0ed329bbcda285b8339f3#7e43f37dd5f6f14cf2e0ed329bbcda285b8339f3"
 dependencies = [
  "anyhow",
  "asn1_der",
@@ -6594,7 +6594,7 @@ dependencies = [
 [[package]]
 name = "rts"
 version = "0.1.10"
-source = "git+https://github.com/nearai/nearai-red-sandbox?rev=d10b305807a4b745c37b72c3b96eed02cc05b04a#d10b305807a4b745c37b72c3b96eed02cc05b04a"
+source = "git+https://github.com/nearai/nearai-red-sandbox?rev=7e43f37dd5f6f14cf2e0ed329bbcda285b8339f3#7e43f37dd5f6f14cf2e0ed329bbcda285b8339f3"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.23.1",
