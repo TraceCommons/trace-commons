@@ -1220,7 +1220,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
         ApplySubmitOutcome(response, new[] { entry.EntryId });
 
-        await RefreshAsync().ConfigureAwait(true);
+        await _refreshGate.RunAsync(RefreshSnapshotAsync, waitForRefresh: true).ConfigureAwait(true);
     }
 
     /// <summary>
