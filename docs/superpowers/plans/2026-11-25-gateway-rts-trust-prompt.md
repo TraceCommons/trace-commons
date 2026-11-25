@@ -12,15 +12,28 @@
 
 ## Prerequisite
 
-- nearai/nearai-red-sandbox#69 is merged, **including the fix that moves the trust store to `~/.local/share/nearai-red-sandbox/trusted-composes.json`**. Call its merge commit `R` (40 hex). Every task uses `R`. Do not start Task 1 before #69 merges: a rev on the PR branch could be rewritten.
+1. nearai/nearai-red-sandbox#69 is merged, **including the fix that moves the trust store to `~/.local/share/nearai-red-sandbox/trusted-composes.json`** (7ca65f2).
+2. **Upstream follow-up U (for D1):** one PR on nearai/nearai-red-sandbox adding `pub trust_forget_command: Option<String>` to `rts::launch::LaunchSpec`.
+   - `None` means `rts trust forget`, so the CLI is unchanged.
+   - Thread it into `attest::prompt::prompt_text(nt, forget_command: &str)` and `attest_with_consent`.
+   - `LaunchSpec::from_cli` sets `None`.
+   - Tests:
+     - `the_prompt_names_the_configured_forget_command`: with `Some("near-ai red-team trust forget")`, the prompt's last two lines name it.
+     - The existing exact-copy test keeps `rts trust forget` for `None`.
+     - The command string goes through the same printable filter as other displayed text.
+3. Call U's merge commit `R` (40 hex). Every task uses `R`. Do not start Task 1 before U merges: a rev on a PR branch could be rewritten.
 
-## Owner decisions this plan needs
+## Owner decisions
 
-- **D1: how a Gateway user forgets a trusted build.** The upstream prompt says "until you run `rts trust forget <prefix>`". Gateway users have no `rts` on their PATH: the runtime lives under `<config>/red-team/runtime`. The options:
-  - **(a) Recommended:** add `near-ai red-team trust list|forget`, which calls `rts::attest::trusted::{load, forget}` directly. Add an upstream `LaunchSpec` field naming the forget command, so Gateway's prompt says `near-ai red-team trust forget <prefix>`. This changes approved prompt copy, so it needs your approval of the exact line.
-  - **(b)** Accept it for v1: the store file can be edited by hand, and support can explain.
+- **D1 (decided 2026-11-25: option a).** Gateway users have no `rts` on their PATH, so Gateway gets `near-ai red-team trust list|forget`, and its prompt names that command through U's `trust_forget_command`.
+  - The only copy change is the command inside the prompt's last line:
 
-  Task 3 is built only under (a).
+    ```
+    Trust this build on this device? Red Sandbox will use it without asking
+    again until you run `near-ai red-team trust forget f4a9b480`. [y/N]
+    ```
+
+  - **Exact line: pending the owner's approval** (copy guide rule 9). Do not merge Task 3 until the owner has approved it.
 - **D2 (decided in this plan; say if you disagree): compile the feed keys in through a repository `.cargo/config.toml` `[env]` entry.** The alternative was setting them only in release-workflow env. With the config entry, every build (dev, CI, release, both shells) gets the same feed behaviour, and a test pins the keys. Rotating a key then needs a commit here as well as an `rts` release. The CLAUDE.md rule against adding `RUSTFLAGS`/`CARGO_INCREMENTAL`/`rustc-wrapper` to that file does not cover public constants.
 
 ## Global Constraints
@@ -119,12 +132,36 @@ RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX = "<the two keys from Global Constraints>
 - [ ] **Step 4: Run** `release_pipeline::` and check that `actionlint` is clean.
 - [ ] **Step 5: Commit** `git commit -m "Report production pin drift without blocking a Gateway release"`.
 
-### Task 3 (only under D1(a)): `near-ai red-team trust list|forget`
+### Task 3: `near-ai red-team trust list|forget`, named in Gateway's prompt
 
-Write this task in full once D1 is answered: the upstream `LaunchSpec` field and its approved wording decide its interface. It is scoped to:
-- a new `red-team trust` subcommand in `crates/trace-commons-contributor/src/cli.rs`, which calls `rts::attest::trusted::{load, forget}` with the user's home, using the same `rts::install::home_in` launch uses;
-- output through `rts::attest::trusted::list_lines` and `rts::attest::prompt::store_warning_line`, which are already sanitized upstream;
-- the upstream field set in `red_team::spec_for`.
+**Files:**
+- Modify: `crates/trace-commons-contributor/src/cli.rs` (`RedTeamCommand`, the early dispatch at ~651)
+- Modify: `crates/trace-commons-contributor/src/managed/red_team.rs` (`spec_for`, plus a new `trust_command` next to `run_tool`)
+- Test: `crates/trace-commons-contributor/src/managed/red_team_tests.rs`, `crates/trace-commons-contributor/src/cli.rs` tests
+
+**Interfaces:**
+- Consumes, from `rts` at `R`:
+  - `rts::attest::trusted::{load, forget, list_lines}`
+  - `rts::attest::prompt::store_warning_line`
+  - `rts::install::home_in`
+  - `rts::launch::LaunchSpec::trust_forget_command`
+- Produces:
+  - `RedTeamCommand::Trust { #[command(subcommand)] action: RedTeamTrust }`, where `enum RedTeamTrust { List, Forget { prefix: String } }`. Parent `red-team` stays hidden.
+  - `pub fn trust_command(action: TrustAction, env: &[(String, String)]) -> (Vec<String> /*stdout*/, Vec<String> /*stderr*/, i32)` in red_team.rs. Use a plain local enum `TrustAction { List, Forget(String) }` so cli.rs stays thin and the function is testable without a terminal.
+    - **List:** first, the store warning through `store_warning_line`, if there is one; then the `list_lines`.
+    - **Forget:** one stdout line per removed entry, `forgot {environment} {role} {sha256}` (the same format as `rts trust forget`). An error goes to stderr through `store_warning_line`, with exit 1.
+    - **No home:** stderr `[rts] no home directory`, exit 1.
+  - `spec_for` sets `trust_forget_command: Some("near-ai red-team trust forget".into())`.
+  - On targets without `rts` (not Apple silicon, not Windows), `trust_command` prints the same "only supported on Apple silicon Macs and Windows" line `run_tool` uses, with exit 1.
+
+- [ ] **Step 1: Write the failing tests**
+  - `parses_red_team_trust_list_and_forget` (cli.rs): `["near-ai","red-team","trust","list"]` and `["near-ai","red-team","trust","forget","f4a9b480"]` parse. `["near-ai","red-team","trust"]` and `["near-ai","red-team","trust","forget"]` do not.
+  - `the_gateway_prompt_names_the_near_ai_forget_command` (red_team_tests.rs, cfg as the `rts` dependency): `spec_for(..)` yields `trust_forget_command == Some("near-ai red-team trust forget")`. Reuse the existing `spec_for` test fixture.
+  - `red_team_trust_forget_removes_one_build_and_lists_the_rest`: with a temp HOME in `env`, write two entries with `rts::attest::trusted::add`. Then `trust_command(Forget(first 8 hex))` gives exit 0 and the `forgot ...` line, and `List` shows the other entry.
+  - `red_team_trust_list_never_prints_store_text_raw`: a 0600 store at `rts::install::trusted_composes_path(home)` containing the unknown key `"[2J"`. Every output line is free of ESC.
+- [ ] **Step 2: Confirm they fail.**
+- [ ] **Step 3: Implement.** Dispatch `red-team trust` in cli.rs beside the `Tool` arm, before anything opens the config directory, with `std::env::vars()` as `env`.
+- [ ] **Step 4: Run** the new tests. Commit `git commit -m "Let Gateway users forget a trusted Red SandBox build"`.
 
 ### Final verification (once, after the last task)
 
