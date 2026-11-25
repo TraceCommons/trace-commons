@@ -24,6 +24,7 @@ namespace TraceCommons.App;
 public sealed partial class MainWindow : ITracesTreeHost
 {
     private TracesTreeView? _tree;
+    private readonly HashSet<string> _submittingTraceIds = new(StringComparer.Ordinal);
 
     private FolderAutomatic? _automatic;
 
@@ -128,8 +129,19 @@ public sealed partial class MainWindow : ITracesTreeHost
         TracesTreeState? state = _tree?.State;
         foreach (QueueEntryViewModel entry in ViewModel.Pending)
         {
-            entry.MaySubmit = state is not null && state.MaySubmit(entry.EntryId, entry.CanContribute, entry.StateCode, entry.ReasonCode);
+            entry.MaySubmit = !IsTraceSubmitting(entry.EntryId)
+                && state is not null && state.MaySubmit(entry.EntryId, entry.CanContribute, entry.StateCode, entry.ReasonCode);
         }
+    }
+
+    private bool IsTraceSubmitting(string entryId) => _submittingTraceIds.Contains(entryId);
+
+    bool ITracesTreeHost.IsTraceSubmitting(string entryId) => IsTraceSubmitting(entryId);
+
+    private void RefreshTraceSubmitControls()
+    {
+        RefreshMaySubmit();
+        _tree?.RequestRefresh();
     }
 
     QueueGroupViewModel? ITracesTreeHost.Group(string projectId) =>
@@ -187,14 +199,24 @@ public sealed partial class MainWindow : ITracesTreeHost
     /// <summary>A trace's Submit, asked again at the press against the live row (TracesStore.swift:810-815).</summary>
     async void ITracesTreeHost.SubmitTrace(QueueEntryViewModel entry)
     {
-        QueueEntryViewModel live = ViewModel.Pending.FirstOrDefault(e => e.EntryId == entry.EntryId) ?? entry;
+        QueueEntryViewModel? live = ViewModel.LiveEntry(entry.EntryId);
         TracesTreeState? state = _tree?.State;
-        if (state is null || !state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode))
+        if (live is null || state is null || !state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode)
+            || !_submittingTraceIds.Add(live.EntryId))
         {
             return;
         }
 
-        await ViewModel.SubmitEntryAsync(live);
+        try
+        {
+            RefreshTraceSubmitControls();
+            await ViewModel.SubmitEntryAsync(live);
+        }
+        finally
+        {
+            _submittingTraceIds.Remove(live.EntryId);
+            RefreshTraceSubmitControls();
+        }
     }
 
     /// <summary>

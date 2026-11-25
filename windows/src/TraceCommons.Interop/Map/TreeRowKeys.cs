@@ -20,7 +20,7 @@ public static class TreeRowKeys
     /// <summary>What a trace row draws from the queue's own row.</summary>
     public sealed record LiveFacts(
         long SizeBytes, string? ReasonCode, bool CanContribute, string? EligibilityText, bool WasTrimmed,
-        string? AttestationText, bool AttestationClear, bool AttestationAttention, bool MaySubmit);
+        string? AttestationText, bool AttestationClear, bool AttestationAttention, bool MaySubmit, bool IsSubmitting = false);
 
     private const char Unit = '\u001f';
 
@@ -69,7 +69,7 @@ public static class TreeRowKeys
         else
         {
             Add(key, live.SizeBytes, live.ReasonCode, live.CanContribute, live.EligibilityText, live.WasTrimmed);
-            Add(key, live.AttestationText, live.AttestationClear, live.AttestationAttention, live.MaySubmit);
+            Add(key, live.AttestationText, live.AttestationClear, live.AttestationAttention, live.MaySubmit, live.IsSubmitting);
         }
 
         return key.ToString();

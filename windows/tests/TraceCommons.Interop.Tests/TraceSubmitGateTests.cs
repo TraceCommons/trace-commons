@@ -74,6 +74,19 @@ public class TraceSubmitGateTests
         Assert.Contains("SubmitTrace(", body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void BothTraceSurfacesHideSubmitDuringTheRequest()
+    {
+        string window = ShellSource("TraceCommons.App/MainWindow.Tree.cs");
+        string tree = ShellSource("TraceCommons.App/Controls/TracesTreeView.cs");
+
+        Assert.Contains("!IsTraceSubmitting(entry.EntryId)", window, StringComparison.Ordinal);
+        Assert.Contains("if (live is not null && !_host.IsTraceSubmitting(entry.EntryId))", tree, StringComparison.Ordinal);
+        Assert.Contains("_submittingTraceIds.Add(live.EntryId)", window, StringComparison.Ordinal);
+        Assert.Contains("finally", window[window.IndexOf("await ViewModel.SubmitEntryAsync(live)", StringComparison.Ordinal)..], StringComparison.Ordinal);
+        Assert.Contains("_submittingTraceIds.Remove(live.EntryId)", window, StringComparison.Ordinal);
+    }
+
     private static string ShellSource(string relativePath)
     {
         string path = Path.Combine(AppContext.BaseDirectory, "shell-source", relativePath + ".txt");

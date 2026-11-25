@@ -36,6 +36,8 @@ internal interface ITracesTreeHost
     /// <summary>The queue's row for a trace, or null while it has not listed it.</summary>
     ViewModels.QueueEntryViewModel? Entry(string entryId);
 
+    bool IsTraceSubmitting(string entryId);
+
     /// <summary>The selection moved: the inspector shows it.</summary>
     void Selected(TreeSelection? selection);
 
@@ -748,7 +750,8 @@ internal sealed class TracesTreeView : UserControl
                     live is null ? null : new TreeRowKeys.LiveFacts(
                         live.SizeBytes, live.ReasonCode, live.CanContribute, live.HasEligibilityText ? live.EligibilityText : null, live.WasTrimmed,
                         live.AttestationText, live.AttestationIsClear, live.AttestationIsAttention,
-                        _state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode)));
+                        _state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode),
+                        _host.IsTraceSubmitting(entry.EntryId)));
             default:
                 throw new InvalidOperationException();
         }
@@ -935,23 +938,21 @@ internal sealed class TracesTreeView : UserControl
         TreeRowGrid row = RowFrame(true, selected, title, sub, flag, off, ToolTile.ForSession(entry.Source, entry.DeclaredSource));
         AutomationProperties.SetHelpText(row, string.Join(" ", new[] { sub, MapTools.Known(entry.DeclaredSource ?? entry.Source) ? MapTools.DisplayName(entry.DeclaredSource ?? entry.Source) : null }.Where(s => !string.IsNullOrEmpty(s))));
 
-        // Submit sends it at once, as a folder's does; turned off while it cannot be sent (TracesViews.swift:785-805).
-        var submit = new Button
+        if (live is not null && !_host.IsTraceSubmitting(entry.EntryId))
         {
-            Content = _words["submit"],
-            Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
-            VerticalAlignment = VerticalAlignment.Center,
-            IsEnabled = live is not null && _state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode),
-            IsTabStop = selected,
-        };
-        ToolTipService.SetToolTip(submit, _words["submit_trace_tip"]);
-        if (live is not null)
-        {
+            var submit = new Button
+            {
+                Content = _words["submit"],
+                Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
+                VerticalAlignment = VerticalAlignment.Center,
+                IsEnabled = _state.MaySubmit(live.EntryId, live.CanContribute, live.StateCode, live.ReasonCode),
+                IsTabStop = selected,
+            };
+            ToolTipService.SetToolTip(submit, _words["submit_trace_tip"]);
             submit.Click += (_, _) => _host.SubmitTrace(live);
+            Grid.SetColumn(submit, 3);
+            row.Children.Add(submit);
         }
-
-        Grid.SetColumn(submit, 3);
-        row.Children.Add(submit);
 
         // The row menu: Dismiss trace, which asks first (TracesViews.swift:826-842, :890-922).
         if (live is not null)

@@ -123,6 +123,11 @@ public class TreeRowKeysTests
         TreeRowPlan held = Plan(drawn, Keys(state, group: _ => offer, live: id => id == entry ? live with { MaySubmit = false } : live));
         Assert.Equal(new[] { new TreeSelection.Session(entry).RawValue }, held.Build);
 
+        // Starting or ending a submit redraws just its trace, even if eligibility is unchanged.
+        List<(string Id, string Key)> submitting = Keys(state, group: _ => offer, live: id => id == entry ? live with { IsSubmitting = true } : live);
+        Assert.Equal(new[] { new TreeSelection.Session(entry).RawValue }, Plan(drawn, submitting).Build);
+        Assert.Equal(new[] { new TreeSelection.Session(entry).RawValue }, Plan(submitting, drawn).Build);
+
         // The queue cleared under a refresh: every trace row has no live row.
         TreeRowPlan cleared = Plan(drawn, Keys(state, group: _ => offer));
         Assert.Equal(drawn.Count(r => r.Id.StartsWith(new TreeSelection.Session("").RawValue, StringComparison.Ordinal)), cleared.Build.Count);

@@ -8,6 +8,39 @@ namespace TraceCommons.Interop.Tests;
 public class CoalescingRefreshTests
 {
     [Fact]
+    public async Task AWaiterJoinsTheSnapshotQueuedAfterTheCurrentRead()
+    {
+        var refresh = new CoalescingRefresh();
+        var staleRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var freshRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var freshReadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int reads = 0;
+
+        async Task ReadSnapshot()
+        {
+            if (++reads == 1)
+            {
+                await staleRead.Task;
+                return;
+            }
+
+            freshReadStarted.SetResult();
+            await freshRead.Task;
+        }
+
+        Task first = refresh.RunAsync(ReadSnapshot);
+        Task afterSubmit = refresh.RunAsync(ReadSnapshot, waitForRefresh: true);
+        Assert.False(afterSubmit.IsCompleted);
+        staleRead.SetResult();
+        await freshReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.False(afterSubmit.IsCompleted);
+
+        freshRead.SetResult();
+        await Task.WhenAll(first, afterSubmit);
+        Assert.Equal(2, reads);
+    }
+
+    [Fact]
     public async Task AStatusEventDuringHistoryReadProducesOneFollowUpSnapshot()
     {
         var refresh = new CoalescingRefresh();
