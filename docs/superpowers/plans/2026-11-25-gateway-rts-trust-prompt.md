@@ -33,7 +33,7 @@
     again until you run `near-ai red-team trust forget f4a9b480`. [y/N]
     ```
 
-  - **Exact line: pending the owner's approval** (copy guide rule 9). Do not merge Task 3 until the owner has approved it.
+  - **Exact line approved by the owner on 2026-11-25** (copy guide rule 9).
 - **D2 (decided in this plan; say if you disagree): compile the feed keys in through a repository `.cargo/config.toml` `[env]` entry.** The alternative was setting them only in release-workflow env. With the config entry, every build (dev, CI, release, both shells) gets the same feed behaviour, and a test pins the keys. Rotating a key then needs a commit here as well as an `rts` release. The CLAUDE.md rule against adding `RUSTFLAGS`/`CARGO_INCREMENTAL`/`rustc-wrapper` to that file does not cover public constants.
 
 ## Global Constraints
