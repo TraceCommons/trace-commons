@@ -332,17 +332,15 @@ public class MonitorShellTests
     }
 
     [Fact]
-    public void TracesNoticesStackOffersBehindWhatIsHappeningNowWithActionsInFront()
+    public void TracesNoticesStackOffersBehindCurrentNoticesAndKeepUndoInFront()
     {
-        // MonitorNotices.swift:140-161: app items, then the place's own, then
-        // the action notice in front.
         NoticeKind[] present =
         {
             NoticeCatalog.ActionNotice, NoticeCatalog.Undo(new[] { "e1" }), NoticeCatalog.ArmingOffer("p1"),
             NoticeCatalog.Update, NoticeCatalog.PrivateAIOffer, NoticeCatalog.GateHeld,
         };
         Assert.Equal(
-            new[] { "update", "arming-offer:p1", "gate-held", "approval-undo:e1", "action-notice" },
+            new[] { "update", "arming-offer:p1", "gate-held", "action-notice", "approval-undo:e1" },
             NoticeCatalog.Order(NoticePlace.Traces, present).Select(card => card.Id));
         Assert.Equal(
             new[] { "update", "private-ai-offer", "action-notice" },
@@ -353,6 +351,17 @@ public class MonitorShellTests
         Assert.Equal(
             new[] { "update", "gate-held", "approval-undo:e1" },
             NoticeCatalog.Shown(NoticePlace.Traces, present, new HashSet<string> { "arming-offer:p1", "action-notice" }).Select(card => card.Id));
+    }
+
+    [Fact]
+    public void HistoryShowsOtherNoticesAgainAfterUndoExpires()
+    {
+        NoticeKind[] otherNotices = { NoticeCatalog.ActionNotice, NoticeCatalog.Transfer("t1") };
+        var closed = new HashSet<string>();
+        NoticeKind undo = NoticeCatalog.Undo(new[] { "e1" });
+
+        Assert.Equal(undo, NoticeCatalog.Shown(NoticePlace.History, otherNotices.Append(undo), closed)[^1]);
+        Assert.Equal(otherNotices, NoticeCatalog.Shown(NoticePlace.History, otherNotices, closed));
     }
 
     [Fact]
