@@ -2127,11 +2127,9 @@ fn live_attestation_is_required_before_app_publication() {
     // Gateway shows a trust prompt for a production build the policy does not
     // list, so the blocking pass runs production and staging with every check
     // but the pin. A broken verifier still fails the release here.
-    assert!(
-        gate.contains(
-            "RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=mr-config-only \\"
-        )
-    );
+    assert!(gate.contains(
+        "RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=mr-config-only \\"
+    ));
     assert!(
         gate.contains(
             "RTS_LIVE_NEAR_ENVIRONMENT=staging RTS_LIVE_COMPOSE_POLICY=mr-config-only \\"
