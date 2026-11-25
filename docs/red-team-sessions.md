@@ -61,3 +61,7 @@ explains the change before the prompt with the `red_team_enable_explain` copy.
 The Windows runtime archive is pinned in `managed/red_team_release.rs`
 (`RTS_RELEASE_WINDOWS`); it holds a placeholder digest until the rts 0.1.7
 release exists, and a test fails while it does.
+
+## Trusted builds
+
+When Red SandBox meets a build it does not list, it asks whether to trust it and tells you the command to forget it again. On macOS, `near-ai` is on the PATH only after you install the command-line link from Gateway's settings; on Windows, use `near-ai-gateway-helper`.

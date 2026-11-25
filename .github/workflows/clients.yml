@@ -47,6 +47,8 @@ on:
       - "crates/trace-commons-protocol/**"
       - ".github/workflows/clients.yml"
       - ".github/actions/**"
+      # The attestation policy feed keys are compiled in from here.
+      - ".cargo/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

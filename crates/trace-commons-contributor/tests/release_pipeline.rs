@@ -1874,10 +1874,10 @@ fn the_release_workflow_publishes_the_appcast() {
     );
 }
 
-/// Extracts the text of one top-level job block from a workflow file: from
-/// `\n  <name>:` up to (but not including) the next line matching `\n  <ident>:`
-/// at the same two-space indent, or end of file.
-/// Splits a job body into its steps: each starts at a `      - ` line.
+/// Splits a job body into its steps: each starts at a `      - ` line. Text
+/// before the first step (the job header) belongs to no step. A comment
+/// written above a step is attached to the PREVIOUS step, since it precedes
+/// the step's `- ` line.
 fn job_steps(job: &str) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for line in job.lines() {
@@ -1892,6 +1892,9 @@ fn job_steps(job: &str) -> Vec<String> {
     steps
 }
 
+/// Extracts the text of one top-level job block from a workflow file: from
+/// `\n  <name>:` up to (but not including) the next line matching `\n  <ident>:`
+/// at the same two-space indent, or end of file.
 fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
     let marker = format!("\n  {name}:");
     let start = workflow
@@ -2164,6 +2167,31 @@ fn live_attestation_is_required_before_app_publication() {
         }
     }
     assert!(pinned[0].contains("id: production-pin"));
+    assert!(
+        pinned[0].contains("timeout-minutes:"),
+        "continue-on-error does not cover the job timeout, so the step needs its own"
+    );
+    // The drift step loads the signed feed; no other step does.
+    let feed_on: Vec<&String> = steps
+        .iter()
+        .filter(|step| step.contains("RTS_LIVE_POLICY_FEED"))
+        .collect();
+    assert_eq!(
+        feed_on.len(),
+        1,
+        "only the production-pin step loads the feed"
+    );
+    assert!(feed_on[0].contains("id: production-pin"));
+    assert!(feed_on[0].contains(r#"RTS_LIVE_POLICY_FEED: "on""#));
+    // The blocking path is never continue-on-error, nor is the job.
+    let blocking: Vec<&String> = steps
+        .iter()
+        .filter(|step| step.contains("RTS_LIVE_COMPOSE_POLICY=mr-config-only"))
+        .collect();
+    assert_eq!(blocking.len(), 1, "one step runs the blocking pass");
+    assert!(!blocking[0].contains("continue-on-error"));
+    let header = gate.split("\n      - ").next().unwrap();
+    assert!(!header.contains("continue-on-error"));
     let warning = steps
         .iter()
         .find(|step| step.contains("::warning::"))
