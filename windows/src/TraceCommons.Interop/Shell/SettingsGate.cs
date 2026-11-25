@@ -38,6 +38,11 @@ public static class SettingsGates
     /// <summary>One section's gate (<c>forSettings</c>).</summary>
     public static SettingsGate For(SettingsSection section, SettingsGate window) =>
         SettingsSections.AvailableBeforeOnboarding(section) ? SettingsGate.Open : window;
+
+    /// <summary>A live payout rail and the wallet-login action belong to the account, even during device setup.</summary>
+    public static bool ShowsPayouts(SettingsGate window, bool railVisible, bool loginLine, bool refusal) =>
+        (window is SettingsGate.Open or SettingsGate.SignedOut && (railVisible || loginLine))
+        || (window == SettingsGate.Open && refusal);
 }
 
 /// <summary>

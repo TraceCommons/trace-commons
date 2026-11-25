@@ -6,24 +6,26 @@ using System.Threading.Tasks;
 namespace TraceCommons.Interop;
 
 /// <summary>
-/// Settings > Insights, the weekly summary switch (<c>InsightsSettingsCard</c>,
-/// InsightsSettingsCard.swift, and <c>AppModel.setInsightsSwitch</c>,
-/// AppModel.swift:3159-3184). The switch reads the value the daemon
+/// A daemon-backed Insights setting (<c>AppModel.setInsightsSwitch</c>).
+/// The switch reads the value the daemon
 /// confirmed and is drawn only once the daemon reported one. A write is one
 /// <c>set_settings</c>; it stands only when the reply carries the asked
 /// value, otherwise the reply's value (when it has one) is kept and the
 /// core's request-failed line shows; a failed call reads the settings again
 /// and shows the same line. One write at a time.
 /// </summary>
-public sealed class InsightsRecapSwitch
+public abstract class InsightsSettingSwitch
 {
-    public const string Key = "insights_recap_card_enabled";
-
     private readonly Func<string, string, Task<DaemonResponse>> _call;
+    private readonly string _key;
+    private readonly Func<DaemonSettingsSnapshot, bool?> _value;
 
-    public InsightsRecapSwitch(Func<string, string, Task<DaemonResponse>> call)
+    protected InsightsSettingSwitch(Func<string, string, Task<DaemonResponse>> call,
+        string key, Func<DaemonSettingsSnapshot, bool?> value)
     {
         _call = call;
+        _key = key;
+        _value = value;
     }
 
     /// <summary>The settings have answered (<c>daemonSettings != nil</c>).</summary>
@@ -55,7 +57,7 @@ public sealed class InsightsRecapSwitch
         if (settings is not null)
         {
             SettingsAnswered = true;
-            On = settings.InsightsRecapCardEnabled;
+            On = _value(settings);
         }
     }
 
@@ -70,16 +72,16 @@ public sealed class InsightsRecapSwitch
         Busy = true;
         try
         {
-            string parameters = JsonSerializer.Serialize(new Dictionary<string, bool> { [Key] = on });
+            string parameters = JsonSerializer.Serialize(new Dictionary<string, bool> { [_key] = on });
             DaemonSettingsSnapshot? reply = await SettingsAsync(DaemonProtocol.Methods.SetSettings, parameters).ConfigureAwait(true);
-            if (reply is not null && reply.InsightsRecapCardEnabled == on)
+            if (reply is not null && _value(reply) == on)
             {
                 On = on;
                 Refusal = null;
             }
             else if (reply is not null)
             {
-                if (reply.InsightsRecapCardEnabled is { } kept)
+                if (_value(reply) is { } kept)
                 {
                     On = kept;
                 }
@@ -90,7 +92,7 @@ public sealed class InsightsRecapSwitch
             {
                 if (await SettingsAsync(DaemonProtocol.Methods.GetSettings, "{}").ConfigureAwait(true) is { } confirmed)
                 {
-                    On = confirmed.InsightsRecapCardEnabled;
+                    On = _value(confirmed);
                 }
 
                 Refusal = RefusalLine();
@@ -114,6 +116,18 @@ public sealed class InsightsRecapSwitch
             return null;
         }
     }
+}
+
+public sealed class InsightsRecapSwitch(Func<string, string, Task<DaemonResponse>> call)
+    : InsightsSettingSwitch(call, InsightsRecapSwitch.Key, settings => settings.InsightsRecapCardEnabled)
+{
+    public const string Key = "insights_recap_card_enabled";
+}
+
+public sealed class InsightsLedgerFeedSwitch(Func<string, string, Task<DaemonResponse>> call)
+    : InsightsSettingSwitch(call, InsightsLedgerFeedSwitch.Key, settings => settings.InsightsLedgerFeed)
+{
+    public const string Key = "insights_ledger_feed";
 }
 
 /// <summary>The Insights words this card reads (<c>tc_insights_copy_json</c>, <c>TCInsights.copy</c>).</summary>

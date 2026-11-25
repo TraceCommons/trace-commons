@@ -40,6 +40,8 @@ public sealed class PublicProfileViewModel : INotifyPropertyChanged
     private string _bio = string.Empty;
     private string _notice = string.Empty;
     private bool _isBusy;
+    private bool _profileReadAnswered;
+    private bool _profileReadFailed;
 
     public PublicProfileViewModel(DaemonHost host)
     {
@@ -59,6 +61,8 @@ public sealed class PublicProfileViewModel : INotifyPropertyChanged
     public string HeadingText => PublicProfileCopy.Heading;
 
     public string ListHandlePubliclyText => PublicProfileCopy.ListHandlePublicly;
+
+    public string GoPublicText => PublicProfileCopy.GoPublicConfirm;
 
     public string HandleLabelText => PublicProfileCopy.HandleLabel;
 
@@ -80,7 +84,9 @@ public sealed class PublicProfileViewModel : INotifyPropertyChanged
     /// </remarks>
     public bool IsListed => _profile.ListedHandle is not null;
 
-    public bool IsNotListed => !IsListed;
+    public bool IsNotListed => _profileReadAnswered && !IsListed;
+    public bool ShowsReadNotice => !_profileReadAnswered;
+    public bool ReadFailed => _profileReadFailed;
 
     /// <summary>The handle box. Two-way; nothing is sent until Save.</summary>
     public string Handle
@@ -159,10 +165,7 @@ public sealed class PublicProfileViewModel : INotifyPropertyChanged
     /// It IS a cache and the daemon says so: there is no
     /// <c>GET /v1/community/profile</c>, so the daemon has nowhere to read a
     /// contributor's own row back from and reports what this device last
-    /// successfully wrote. A read failure leaves the panel as it was and says
-    /// nothing: this call changes nothing public, so there is nothing to
-    /// report about the public surface, and a notice here would be this
-    /// window inventing an event.
+    /// successfully wrote. A failed first read leaves the profile undecided.
     /// </remarks>
     public async Task LoadAsync()
     {
@@ -170,12 +173,17 @@ public sealed class PublicProfileViewModel : INotifyPropertyChanged
             .CallAsync(DaemonProtocol.Methods.GetPublicProfile)
             .ConfigureAwait(true);
 
-        if (response.IsError)
+        if (response.IsError || PublicProfileResult.Parse(response.Result) is not { } result)
         {
+            _profileReadFailed = true;
+            Raise(nameof(ReadFailed));
             return;
         }
 
-        Adopt(PublicProfileResult.Parse(response.Result));
+        _profileReadAnswered = true;
+        _profileReadFailed = false;
+        Adopt(result);
+        Raise(nameof(ShowsReadNotice));
     }
 
     /// <summary>

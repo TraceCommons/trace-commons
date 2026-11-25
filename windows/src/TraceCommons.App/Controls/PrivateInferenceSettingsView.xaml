@@ -5,88 +5,24 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:vm="using:TraceCommons.App.ViewModels">
     <StackPanel Spacing="10">
+        <StackPanel Spacing="4" Visibility="{x:Bind StandardControls(ViewModel.Available), Mode=OneWay}">
+            <TextBlock Text="{x:Bind StandardSettingsHeading}" Style="{StaticResource TcEyebrowTextStyle}" />
+            <TextBlock Text="{x:Bind StandardSettingsScope}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+        </StackPanel>
         <Border Background="{ThemeResource TcSurfaceCardBrush}"
                 BorderBrush="{ThemeResource TcHairlineBrush}"
                 BorderThickness="1"
                 CornerRadius="{StaticResource TcCardCornerRadius}"
                 Padding="14,12"
-                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
-            <StackPanel Spacing="10">
-                <TextBlock Text="{x:Bind ViewModel.Title, Mode=OneWay}"
-                           Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
-                <!--
-                    What turning it on exposes. Here as well as in the
-                    first run offer: a contributor who declined and
-                    came back later is making the same decision and is
-                    owed the same sentence.
-                -->
-                <TextBlock Text="{x:Bind ViewModel.Exposure, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
-                <ToggleSwitch Header="{x:Bind ViewModel.ToggleText, Mode=OneWay}"
-                              IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
-                              IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
-                              Toggled="OnToggled" />
-                <!--
-                    One line per tone, chosen from the tone and never
-                    from the text: three of the sentences begin with
-                    the same two words, so a colour picked by reading
-                    the sentence would be picked by matching a prefix.
-                    Only the clear one is green.
-                -->
-                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.StateIsNeutral, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.StateIsHeld, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcBlueBrandBrush}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.StateIsClear, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcGreenTextBrush}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.StateIsAttention, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcGoldTextBrush}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.StateIsRefused, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcCoralTextBrush}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.ServingText, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.HasServingText, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
-                <TextBlock Text="{x:Bind ViewModel.AppliesAtOnce, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           TextWrapping="Wrap" />
-                <!--
-                    A write the daemon did not confirm. The payload's
-                    sentence, and absent when there is nothing to say.
-                -->
-                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
-                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
-                           Style="{StaticResource TcCaptionTextStyle}"
-                           Foreground="{ThemeResource TcCoralTextBrush}"
-                           TextWrapping="Wrap" />
-            </StackPanel>
-        </Border>
-
-        <Border Background="{ThemeResource TcSurfaceCardBrush}"
-                BorderBrush="{ThemeResource TcHairlineBrush}"
-                BorderThickness="1"
-                CornerRadius="{StaticResource TcCardCornerRadius}"
-                Padding="14,12"
-                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                Visibility="{x:Bind StandardControls(ViewModel.Available), Mode=OneWay}">
             <StackPanel Spacing="6">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.ToolsEyebrow}" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <Button Grid.Column="1" Content="{x:Bind ViewModel.PanelRefresh}"
+                            AutomationProperties.Name="{x:Bind ViewModel.ToolsRefreshName}"
+                            IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                            Click="OnToolsRefresh" />
+                </Grid>
                 <TextBlock Text="{x:Bind ViewModel.HarnessesTitle, Mode=OneWay}"
                            ToolTipService.ToolTip="{x:Bind ViewModel.HarnessesPrecedenceTooltip, Mode=OneWay}"
                            Style="{StaticResource TcTitleCardTextStyle}"
@@ -220,7 +156,89 @@
                 BorderThickness="1"
                 CornerRadius="{StaticResource TcCardCornerRadius}"
                 Padding="14,12"
-                Visibility="{x:Bind ViewModel.Available, Mode=OneWay}">
+                Visibility="{x:Bind StandardControls(ViewModel.Available), Mode=OneWay}">
+            <StackPanel Spacing="10">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <TextBlock Text="{x:Bind ViewModel.ConnectionEyebrow}" Style="{StaticResource TcEyebrowTextStyle}" />
+                    <Button Grid.Column="1" Content="{x:Bind ViewModel.PanelRefresh}"
+                            AutomationProperties.Name="{x:Bind ViewModel.ConnectionRefreshName}"
+                            IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                            Click="OnConnectionRefresh" />
+                </Grid>
+                <TextBlock Text="{x:Bind ViewModel.Title, Mode=OneWay}"
+                           Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.What, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    What turning it on exposes. Here as well as in the
+                    first run offer: a contributor who declined and
+                    came back later is making the same decision and is
+                    owed the same sentence.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Exposure, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <ToggleSwitch Header="{x:Bind ViewModel.ToggleText, Mode=OneWay}"
+                              IsOn="{x:Bind ViewModel.Enabled, Mode=OneWay}"
+                              IsEnabled="{x:Bind ViewModel.ControlsEnabled, Mode=OneWay}"
+                              Toggled="OnToggled" />
+                <!--
+                    One line per tone, chosen from the tone and never
+                    from the text: three of the sentences begin with
+                    the same two words, so a colour picked by reading
+                    the sentence would be picked by matching a prefix.
+                    Only the clear one is green.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsNeutral, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsHeld, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcBlueBrandBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsClear, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGreenTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsAttention, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcGoldTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.StateText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.StateIsRefused, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.ServingText, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasServingText, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <TextBlock Text="{x:Bind ViewModel.AppliesAtOnce, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           TextWrapping="Wrap" />
+                <!--
+                    A write the daemon did not confirm. The payload's
+                    sentence, and absent when there is nothing to say.
+                -->
+                <TextBlock Text="{x:Bind ViewModel.Notice, Mode=OneWay}"
+                           Visibility="{x:Bind ViewModel.HasNotice, Mode=OneWay}"
+                           Style="{StaticResource TcCaptionTextStyle}"
+                           Foreground="{ThemeResource TcCoralTextBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <Border Background="{ThemeResource TcSurfaceCardBrush}"
+                BorderBrush="{ThemeResource TcHairlineBrush}"
+                BorderThickness="1"
+                CornerRadius="{StaticResource TcCardCornerRadius}"
+                Padding="14,12"
+                Visibility="{x:Bind CredentialCard(ViewModel.Available, ViewModel.ShowsCredentialShortcut), Mode=OneWay}">
             <StackPanel Spacing="6">
                 <TextBlock Text="{x:Bind ViewModel.CredentialTitle, Mode=OneWay}"
                            Style="{StaticResource TcTitleCardTextStyle}"

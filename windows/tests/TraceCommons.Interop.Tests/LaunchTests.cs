@@ -142,6 +142,15 @@ public sealed class LaunchTests
         Assert.Null(Snapshot().AccountLaunchParams(account, @"C:\p", model: "  ", collectTraces: false, "r"));
     }
 
+    [Fact]
+    public void ASavedAccountCanLaunchInHomeWithoutSendingAFolder()
+    {
+        var account = new ManagedAccount("a", "claude", "subscription", "Work", "ready");
+        var request = Snapshot().AccountLaunchParams(account, null, model: null, collectTraces: false, "r");
+        Assert.NotNull(request);
+        Assert.DoesNotContain("cwd", request.Keys);
+    }
+
     [Theory]
     [InlineData("claude")]
     [InlineData("codex")]

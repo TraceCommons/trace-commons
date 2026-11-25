@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -18,9 +19,11 @@ namespace TraceCommons.App.Controls.Settings;
 public sealed class AccountDevicesSection : UserControl
 {
     private readonly AccountDevicesFlow _flow;
+    private readonly Func<Task> _signIn;
     private readonly StackPanel _root = new() { Spacing = 12 };
+    private bool _signingIn;
 
-    public AccountDevicesSection(DaemonHost host)
+    public AccountDevicesSection(DaemonHost host, Func<Task> signIn)
     {
         // A container, not a stop: Tab goes to the controls inside it.
         IsTabStop = false;
@@ -28,6 +31,7 @@ public sealed class AccountDevicesSection : UserControl
         _flow = new AccountDevicesFlow(
             new AccountDevicesClient((method, json) => host.CallAsync(method, json)),
             copy is null ? null : new AccountDevicesSurface(copy));
+        _signIn = signIn;
         _flow.Changed += Render;
         Content = _root;
         Loaded += async (_, _) =>
@@ -89,11 +93,23 @@ public sealed class AccountDevicesSection : UserControl
         }
         else if (_flow.ListRefusal == AccountDevicesRefusal.SessionEnded)
         {
-            // The session ended: the line is the action, as on the Mac. The
-            // sign-in itself is the account section's; this re-reads after it.
-            _root.Children.Add(SettingsCards.Card(
-                surface.Copy.Title,
-                SettingsCards.Button(surface.Copy.SessionEnded, async (_, _) => await _flow.RefreshAsync())));
+            Button signIn = SettingsCards.Button(surface.Copy.SessionEnded, async (_, _) =>
+            {
+                _signingIn = true;
+                Render();
+                try
+                {
+                    await _signIn();
+                    await _flow.RefreshAsync();
+                }
+                finally
+                {
+                    _signingIn = false;
+                    Render();
+                }
+            });
+            signIn.IsEnabled = !_signingIn;
+            _root.Children.Add(SettingsCards.Card(surface.Copy.Title, signIn));
         }
     }
 

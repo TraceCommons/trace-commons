@@ -325,6 +325,25 @@ public class NotificationKindsStoreTests
     }
 
     [Fact]
+    public async System.Threading.Tasks.Task SuggestionsAndEstimatePreferencesFollowTheDaemon()
+    {
+        var daemon = new FakeDaemon { SettingsJson = """{"suggestions_enabled":true,"settlement_estimate_enabled":false}""" };
+        var store = new NotificationKindsStore(daemon.Call) { Word = key => key };
+        Assert.Empty(store.Preferences);
+        await store.ReadAsync();
+        Assert.Collection(store.Preferences, suggestion => Assert.True(suggestion.IsOn), estimate => Assert.False(estimate.IsOn));
+
+        daemon.SettingsJson = """{"suggestions_enabled":false,"settlement_estimate_enabled":false}""";
+        await store.SetPreferenceAsync(NudgePreference.Suggestions, false);
+        daemon.SettingsJson = """{"suggestions_enabled":false,"settlement_estimate_enabled":true}""";
+        await store.SetPreferenceAsync(NudgePreference.SettlementEstimate, true);
+
+        Assert.Equal(("set_suggestions_enabled", """{"on":false}"""), daemon.Calls[1]);
+        Assert.Equal(("set_settings", """{"settlement_estimate_enabled":true}"""), daemon.Calls[3]);
+        Assert.Collection(store.Preferences, suggestion => Assert.False(suggestion.IsOn), estimate => Assert.True(estimate.IsOn));
+    }
+
+    [Fact]
     public async System.Threading.Tasks.Task ARefusedWriteSaysSoAndKeepsTheStoredValue()
     {
         var daemon = new FakeDaemon();

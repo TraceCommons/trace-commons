@@ -86,23 +86,27 @@ public static class StartupRegistration
 
     private static StartupRegistrationState FromPackagedState(StartupTaskState state) => state switch
     {
-        StartupTaskState.Enabled or StartupTaskState.EnabledByPolicy =>
+        StartupTaskState.Enabled =>
             new StartupRegistrationState(true, true, string.Empty),
+        StartupTaskState.EnabledByPolicy =>
+            new StartupRegistrationState(true, true, string.Empty, CanChange: false),
         StartupTaskState.DisabledByUser =>
             new StartupRegistrationState(
                 true,
                 false,
-                $"Startup was disabled in Windows. Turn {TraceCommons.Interop.Shell.MonitorWords.AppName} on in Settings > Apps > Startup."),
+                $"Startup was disabled in Windows. Turn {TraceCommons.Interop.Shell.MonitorWords.AppName} on in Settings > Apps > Startup.",
+                CanChange: false),
         StartupTaskState.DisabledByPolicy =>
             new StartupRegistrationState(
                 true,
                 false,
-                "Startup is disabled by your organization's Windows policy."),
+                "Startup is disabled by your organization's Windows policy.",
+                CanChange: false),
         _ => new StartupRegistrationState(true, false, string.Empty),
     };
 }
 
-public sealed record StartupRegistrationState(bool IsSupported, bool IsEnabled, string Notice)
+public sealed record StartupRegistrationState(bool IsSupported, bool IsEnabled, string Notice, bool CanChange = true)
 {
     public static StartupRegistrationState Unavailable { get; } = new(
         false,

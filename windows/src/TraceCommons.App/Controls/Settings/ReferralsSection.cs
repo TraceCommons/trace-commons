@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -19,13 +20,15 @@ namespace TraceCommons.App.Controls.Settings;
 public sealed class ReferralsSection : UserControl
 {
     private readonly ReferralFlow _flow;
+    private readonly Func<Task> _signIn;
+    private bool _signingIn;
     private readonly StackPanel _root = new() { Spacing = 12 };
     private readonly TextBox _field = new();
     private readonly DispatcherTimer _copiedClear = new() { Interval = TimeSpan.FromSeconds(2) };
     private Button? _apply;
     private TextBlock? _problem;
 
-    public ReferralsSection(DaemonHost host)
+    public ReferralsSection(DaemonHost host, Func<Task> signIn)
     {
         // A container, not a stop: Tab goes to the controls inside it.
         IsTabStop = false;
@@ -33,6 +36,7 @@ public sealed class ReferralsSection : UserControl
         _flow = new ReferralFlow(
             new ReferralClient((method, json) => host.CallAsync(method, json)),
             copy is null ? null : new ReferralSurface(copy));
+        _signIn = signIn;
         _flow.Changed += Render;
         _field.TextChanged += (_, _) =>
         {
@@ -58,6 +62,7 @@ public sealed class ReferralsSection : UserControl
         Unloaded += (_, _) => _copiedClear.Stop();
         Content = _root;
         Loaded += async (_, _) => await _flow.RefreshAsync();
+        Render();
     }
 
     /// <summary>Reads the codes again, after a change of account.</summary>
@@ -88,24 +93,33 @@ public sealed class ReferralsSection : UserControl
         _root.Children.Clear();
         _apply = null;
         _problem = null;
-        if (_flow.Surface is not { } surface)
-        {
-            return;
-        }
-
-        if (!_flow.Answered)
+        if (!_flow.Answered || _flow.Surface is not { } surface)
         {
             // Not answered yet: a spinner, or the failure line with Retry,
             // never a blank body under the rule (ReferralsSection.swift).
-            _root.Children.Add(SettingsCards.ReadNotice(_flow.Failed, async (_, _) => await _flow.RefreshAsync()));
+            _root.Children.Add(SettingsCards.ReadNotice(_flow.Failed || _flow.Answered, async (_, _) => await _flow.RefreshAsync()));
             return;
         }
 
         if (_flow.SessionEnded)
         {
-            _root.Children.Add(SettingsCards.Card(
-                surface.Copy["title"],
-                SettingsCards.Button(surface.Copy["session_ended"], async (_, _) => await _flow.RefreshAsync())));
+            Button signIn = SettingsCards.Button(surface.Copy["session_ended"], async (_, _) =>
+            {
+                _signingIn = true;
+                Render();
+                try
+                {
+                    await _signIn();
+                    await _flow.RefreshAsync();
+                }
+                finally
+                {
+                    _signingIn = false;
+                    Render();
+                }
+            });
+            signIn.IsEnabled = !_signingIn;
+            _root.Children.Add(SettingsCards.Card(surface.Copy["title"], signIn));
             return;
         }
 

@@ -1469,7 +1469,7 @@ public sealed partial class MainWindow : Window
     {
         if (InsightsPane.Content is not InsightsView)
         {
-            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this), CreateInsightsModel());
+            var page = new InsightsView(WinRT.Interop.WindowNative.GetWindowHandle(this), InsightsModel);
             page.ContributionSetupRequested += async (_, _) =>
             {
                 if (await StartContributionsAsync()) ViewModel.ShowQueue();
@@ -1494,6 +1494,10 @@ public sealed partial class MainWindow : Window
     /// (<c>InsightsSample</c>). Otherwise the local store and the daemon's
     /// <c>insights_benchmarks</c>.
     /// </summary>
+    private InsightsViewModel? _insightsModel;
+
+    private InsightsViewModel InsightsModel => _insightsModel ??= CreateInsightsModel();
+
     private InsightsViewModel CreateInsightsModel()
     {
 #if DEBUG

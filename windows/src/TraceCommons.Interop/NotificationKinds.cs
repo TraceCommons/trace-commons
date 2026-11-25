@@ -20,7 +20,9 @@ public sealed record NotificationSettingsState(
     bool? NotificationsEnabled,
     IReadOnlyDictionary<string, bool> Notify,
     bool VerdictsOfferPending,
-    bool IdleOfferPending)
+    bool IdleOfferPending,
+    bool? SuggestionsEnabled = null,
+    bool? SettlementEstimateEnabled = null)
 {
     /// <summary>The state from a <c>get_settings</c> result; null when it is not an object.</summary>
     public static NotificationSettingsState? Parse(string? json)
@@ -66,7 +68,9 @@ public sealed record NotificationSettingsState(
             notify,
             // Written only while true (settings.rs), so absent is "no offer".
             settings.TryGetProperty("verdicts_offer_pending", out JsonElement verdicts) && Bool(verdicts) == true,
-            settings.TryGetProperty("idle_offer_pending", out JsonElement idle) && Bool(idle) == true);
+            settings.TryGetProperty("idle_offer_pending", out JsonElement idle) && Bool(idle) == true,
+            settings.TryGetProperty("suggestions_enabled", out JsonElement suggestions) ? Bool(suggestions) : null,
+            settings.TryGetProperty("settlement_estimate_enabled", out JsonElement estimate) ? Bool(estimate) : null);
     }
 
     private static bool? Bool(JsonElement value) => value.ValueKind switch
@@ -82,6 +86,10 @@ public sealed record NotifySwitchRow(string Kind, string Label, string? Help, bo
 
 /// <summary>The master switch: the core's label and hover tip, and the stored value.</summary>
 public sealed record NotifyMasterRow(string Label, string? Tooltip, bool IsOn);
+
+public enum NudgePreference { Suggestions, SettlementEstimate }
+
+public sealed record NudgePreferenceRow(NudgePreference Preference, string Label, string? Help, bool IsOn);
 
 /// <summary>A one-time offer to turn a kind on, in the core's words.</summary>
 public sealed record NotifyOffer(string Kind, string Text, string Accept, string Decline);
@@ -285,6 +293,29 @@ public static class NotificationKinds
             ? new NotifyMasterRow(label, word("SETTING_NOTIFY_MASTER_TOOLTIP"), on)
             : null;
 
+    public static IReadOnlyList<NudgePreferenceRow> Preferences(NotificationSettingsState? state, Func<string, string?> word)
+    {
+        var rows = new List<NudgePreferenceRow>();
+        if (state?.SuggestionsEnabled is bool suggestions && word("SETTING_SUGGESTIONS") is { } suggestionsLabel)
+        {
+            rows.Add(new(NudgePreference.Suggestions, suggestionsLabel, word("SETTING_SUGGESTIONS_HELP"), suggestions));
+        }
+
+        if (state?.SettlementEstimateEnabled is bool estimate && word("SETTING_SETTLEMENT_ESTIMATE") is { } estimateLabel)
+        {
+            rows.Add(new(NudgePreference.SettlementEstimate, estimateLabel, word("SETTING_SETTLEMENT_ESTIMATE_HELP"), estimate));
+        }
+
+        return rows;
+    }
+
+    public static NudgeRequest SetPreference(NudgePreference preference, bool on) => preference switch
+    {
+        NudgePreference.Suggestions => new("set_suggestions_enabled", JsonSerializer.Serialize(new { on })),
+        NudgePreference.SettlementEstimate => new(DaemonProtocol.Methods.SetSettings, JsonSerializer.Serialize(new { settlement_estimate_enabled = on })),
+        _ => throw new ArgumentOutOfRangeException(nameof(preference)),
+    };
+
     /// <summary>The master switch, written through <c>set_notifications_enabled</c>.</summary>
     public static NudgeRequest SetMaster(bool on) =>
         new("set_notifications_enabled", JsonSerializer.Serialize(new { on }));
@@ -485,8 +516,12 @@ public sealed class NotificationKindsStore
     /// <summary>The master switch, or null.</summary>
     public NotifyMasterRow? Master => NotificationKinds.Master(_state, Word);
 
+    public IReadOnlyList<NudgePreferenceRow> Preferences => NotificationKinds.Preferences(_state, Word);
+
     /// <summary>The line under the switches, or null.</summary>
-    public string? Footnote => NotificationKinds.Footnote(Rows, Word);
+    public string? Footnote => Rows.Count > 0 || Master is not null || Preferences.Count > 0
+        ? Word("SETTING_NOTIFY_BUDGET_HELP")
+        : null;
 
     /// <summary>The offer <paramref name="place"/> draws.</summary>
     public IReadOnlyList<NotifyOffer> Offers(OfferPlace place) => NotificationKinds.Offers(_state, Word, place);
@@ -505,6 +540,9 @@ public sealed class NotificationKindsStore
     /// <summary>The master switch, then a fresh read.</summary>
     public System.Threading.Tasks.Task SetMasterAsync(bool on) =>
         WriteAsync(NotificationKinds.SetMaster(on), offerKind: null);
+
+    public System.Threading.Tasks.Task SetPreferenceAsync(NudgePreference preference, bool on) =>
+        WriteAsync(NotificationKinds.SetPreference(preference, on), offerKind: null);
 
     /// <summary>One kind's switch, then a fresh read.</summary>
     public System.Threading.Tasks.Task SetAsync(string kind, bool on) =>

@@ -31,6 +31,7 @@ public sealed partial class SettingsWindow : Window
         Closed += (_, _) => _windowClosed = true;
         WindowClocks.Watch(this);
         Title = WindowTitles.Settings;
+        view.SettingsOwnerHandle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         SettingsHost.Content = view;
 
         // Settings > General's appearance, here as on the Monitor window.

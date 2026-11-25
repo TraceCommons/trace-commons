@@ -127,15 +127,10 @@ public class SourceCheckTests
     }
 
     /// <summary>
-    /// The view model asks the Rust for the row and does not write one.
-    ///
-    /// Asserted about the call site, not about the wording helper: a test
-    /// that only exercised <see cref="SourceChecks"/> would keep passing
-    /// while the settings screen went on rendering its own two hand-written
-    /// sentences beside it, which is exactly the state this change found.
+    /// Account's connection card leaves capture controls and state to the capture sections.
     /// </summary>
     [Fact]
-    public void TheSettingsScreenAsksForTheRowRatherThanWritingIt()
+    public void AccountLeavesCaptureStatusToTheCaptureSections()
     {
         string path = Path.Combine(AppContext.BaseDirectory, "ContributorSettingsViewModel.cs.txt");
         Assert.True(File.Exists(path), $"the view model source was not copied to {path}");
@@ -144,18 +139,8 @@ public class SourceCheckTests
             "\n",
             source.Split('\n').Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
 
-        Assert.Contains(
-            "AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode)",
-            uncommented,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode)",
-            uncommented,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "SourceChecks.CheckLine(tool, sourceMode)",
-            uncommented,
-            StringComparison.Ordinal);
+        Assert.DoesNotContain("ConnectionRows", uncommented, StringComparison.Ordinal);
+        Assert.DoesNotContain("SourceChecks.CheckLine(tool, sourceMode)", uncommented, StringComparison.Ordinal);
 
         // The sentences themselves, and the boolean that could not tell the
         // two false-branch facts apart, are gone from this shell.

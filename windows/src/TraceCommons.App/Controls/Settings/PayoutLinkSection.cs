@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 
 namespace TraceCommons.App.Controls.Settings;
 
@@ -17,26 +18,29 @@ namespace TraceCommons.App.Controls.Settings;
 public sealed class PayoutLinkSection : UserControl
 {
     private readonly PayoutLinkFlow _flow;
+    private readonly Func<System.Threading.Tasks.Task> _signIn;
     private readonly StackPanel _root = new() { Spacing = 12 };
-    private bool _visible;
+    private bool _hasRail;
+    private bool _hasStatusRefusal;
 
-    public PayoutLinkSection(DaemonHost host)
+    public PayoutLinkSection(DaemonHost host, Func<System.Threading.Tasks.Task> signIn)
     {
         // A container, not a stop: Tab goes to the controls inside it.
         IsTabStop = false;
+        _signIn = signIn;
         PayoutLinkCopy? copy = PayoutLinkCopy.Live;
         _flow = new PayoutLinkFlow(
             new PayoutLinkClient((method, json) => host.CallAsync(method, json)),
             copy is null ? null : new PayoutLinkSurface(copy));
         _flow.Changed += Render;
         Content = _root;
-        Loaded += async (_, _) => await _flow.RefreshAsync();
     }
 
     /// <summary>Raised when the section starts or stops drawing anything: the list shows its row only then (D2).</summary>
-    public event Action<bool>? VisibilityChanged;
+    public event Action? StateChanged;
 
-    public bool Shown => _visible;
+    public bool HasRail => _flow.Rail is not null;
+    public bool HasStatusRefusal => _flow.StatusRefusal is not null;
 
     public System.Threading.Tasks.Task RefreshAsync() => _flow.RefreshAsync();
 
@@ -54,15 +58,20 @@ public sealed class PayoutLinkSection : UserControl
                 _root.Children.Add(SettingsCards.Card(
                     surface.Copy.Title,
                     refusal == PayoutLinkRefusal.SessionEnded
-                        ? SettingsCards.Button(surface.RefusalLine(refusal), async (_, _) => await _flow.RefreshAsync())
+                        ? SettingsCards.Button(surface.RefusalLine(refusal), async (_, _) =>
+                        {
+                            await _signIn();
+                            await _flow.RefreshAsync();
+                        })
                         : SettingsCards.Text(surface.RefusalLine(refusal))));
             }
         }
 
-        if (_flow.Visible != _visible)
+        if (HasRail != _hasRail || HasStatusRefusal != _hasStatusRefusal)
         {
-            _visible = _flow.Visible;
-            VisibilityChanged?.Invoke(_visible);
+            _hasRail = HasRail;
+            _hasStatusRefusal = HasStatusRefusal;
+            StateChanged?.Invoke();
         }
     }
 
@@ -72,6 +81,11 @@ public sealed class PayoutLinkSection : UserControl
         if (surface.StatusLine(rail) is { } line)
         {
             body.Children.Add(SettingsCards.Text(line));
+        }
+        else
+        {
+            string template = rail.State == "waiting" ? surface.Copy.StatusWaiting : surface.Copy.StatusLinked;
+            body.Children.Add(SettingsCards.Text(PayoutLinkCopy.Render(template, MonitorShellCopy.Top("unknown"))));
         }
 
         if (PayoutLinkSurface.CanUnlink(rail))

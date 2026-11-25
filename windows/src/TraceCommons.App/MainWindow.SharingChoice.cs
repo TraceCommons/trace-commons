@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using TraceCommons.App.Controls;
 using TraceCommons.Interop;
@@ -18,7 +19,7 @@ namespace TraceCommons.App;
 /// setup's two disclosures, lets the core decide whether the grant may be
 /// asked for, then grants. Every word is the core's.
 /// </summary>
-public sealed partial class MainWindow : ISharingChoiceSteps
+public sealed partial class MainWindow
 {
     private static readonly FirstRunCopy? SharingCopy = FirstRunCopy.Load();
 
@@ -83,7 +84,7 @@ public sealed partial class MainWindow : ISharingChoiceSteps
             }
 
             return await SharingChoice.PressAsync(
-                SharingChoice.Current(_grant), asking, this,
+                SharingChoice.Current(_grant), asking, new SharingChoiceSteps(ViewModel.Host, Content.XamlRoot, copy, _grantCopy),
                 new SharingRefusals(copy.Uses.SettingsSharingRefused, copy.Uses.SettingsSharingSaveFailed));
         }
         finally
@@ -101,11 +102,19 @@ public sealed partial class MainWindow : ISharingChoiceSteps
         }
     }
 
+}
+
+internal sealed class SharingChoiceSteps(
+    DaemonHost host, XamlRoot root, FirstRunCopy copy, AutomaticGrantCopy grantCopy) : ISharingChoiceSteps
+{
+    private readonly long _account = host.Account.Current;
+    private bool AccountChanged => !host.Account.IsCurrent(_account);
+
     /// <summary>The first run's grant calls, each guarded by the settled account (FirstRunDaemon.GuardedGrantCall).</summary>
     private FirstRunDaemon SharingDaemon() => new(
-        (method, json) => ViewModel.Host.CallAsync(method, json),
+        (method, json) => host.CallAsync(method, json),
         _ => Task.FromResult(false),
-        () => ViewModel.Host.IsRunning,
+        () => host.IsRunning,
         () => Task.FromResult(false),
         () => Task.FromResult(false),
         _ => { },
@@ -115,17 +124,17 @@ public sealed partial class MainWindow : ISharingChoiceSteps
     /// The question about folders set to Ask (SharingChoiceCard.swift:198-208):
     /// Cancel, make them all Automatic, or keep them asking (the default).
     /// </summary>
-    async Task<bool?> ISharingChoiceSteps.AskKeepFolderAsks(int count)
+    public async Task<bool?> AskKeepFolderAsks(int count)
     {
-        UsesWords uses = SharingCopy!.Uses;
+        UsesWords uses = copy.Uses;
         var dialog = new ContentDialog
         {
-            XamlRoot = Content.XamlRoot,
+            XamlRoot = root,
             Title = uses.KeepAsksTitle.Length > 0 ? uses.KeepAsksTitle : uses.Sharing,
             Content = FirstRunCopy.Fill(uses.KeepAsksBody, new Dictionary<string, string> { ["count"] = count.ToString(System.Globalization.CultureInfo.CurrentCulture) }),
             PrimaryButtonText = uses.KeepAsksKeep,
             SecondaryButtonText = uses.KeepAsksAll,
-            CloseButtonText = SharingCopy.Frame.Cancel,
+            CloseButtonText = copy.Frame.Cancel,
             DefaultButton = ContentDialogButton.Primary,
         };
         return await DialogGuard.ShowOnceAsync(dialog) switch
@@ -136,12 +145,12 @@ public sealed partial class MainWindow : ISharingChoiceSteps
         };
     }
 
-    async Task<SharingDisclosureFlow?> ISharingChoiceSteps.Disclose()
+    public async Task<SharingDisclosureFlow?> Disclose()
     {
         var flow = new SharingDisclosureFlow();
         bool done = await SharingDisclosureSheets.ShowAsync(
-            Content.XamlRoot, flow, _grantCopy!, SharingCopy!,
-            () => ViewModel.Host.CallAsync(DaemonProtocol.Methods.RouteDisclosure), () => false,
+            root, flow, grantCopy, copy,
+            () => host.CallAsync(DaemonProtocol.Methods.RouteDisclosure), () => AccountChanged,
             show: DialogGuard.ShowOnceAsync);
         return done ? flow : null;
     }
@@ -151,10 +160,10 @@ public sealed partial class MainWindow : ISharingChoiceSteps
     /// (signed in, the scopes saved), never from a step remembered here
     /// (SharingChoiceCard.swift:243-249).
     /// </summary>
-    async Task<Flow1GrantRequest?> ISharingChoiceSteps.GrantRequest(SharingDisclosureFlow flow)
+    public async Task<Flow1GrantRequest?> GrantRequest(SharingDisclosureFlow flow)
     {
-        DaemonResponse reply = await ViewModel.Host.CallAsync(DaemonProtocol.Methods.Status);
-        if (reply.IsError || reply.ResultAs<DaemonStatus>() is not { } status)
+        DaemonResponse reply = await host.CallAsync(DaemonProtocol.Methods.Status);
+        if (AccountChanged || reply.IsError || reply.ResultAs<DaemonStatus>() is not { } status)
         {
             return null;
         }
@@ -162,8 +171,9 @@ public sealed partial class MainWindow : ISharingChoiceSteps
         return Flow1GrantRequest.Ask(flow.ProgressJson(status.LoggedIn, status.ConsentScopes));
     }
 
-    Task<GrantAnswer> ISharingChoiceSteps.GrantAutomatic(string? witness, bool keepFolderAsks) =>
-        SharingDaemon().GrantAutomatic(witness, keepFolderAsks);
+    public Task<GrantAnswer> GrantAutomatic(string? witness, bool keepFolderAsks) =>
+        AccountChanged ? Task.FromResult(new GrantAnswer(false, "automatic-grant-unavailable"))
+            : SharingDaemon().GrantAutomatic(witness, keepFolderAsks);
 
-    Task<bool> ISharingChoiceSteps.SetAskEachTime() => SharingDaemon().SetAskEachTime();
+    public Task<bool> SetAskEachTime() => AccountChanged ? Task.FromResult(false) : SharingDaemon().SetAskEachTime();
 }

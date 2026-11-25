@@ -10,13 +10,39 @@ namespace TraceCommons.App.Controls;
 /// <summary>The listener, tool routing, and connection controls in Settings > Private AI.</summary>
 public sealed partial class PrivateInferenceSettingsView : UserControl
 {
-    public PrivateInferenceSettingsView(PrivateInferenceViewModel viewModel)
+    private readonly bool _accountOnly;
+    private bool _refreshing;
+
+    public PrivateInferenceSettingsView(PrivateInferenceViewModel viewModel, bool accountOnly = false)
     {
         ViewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _accountOnly = accountOnly;
         InitializeComponent();
     }
 
     public PrivateInferenceViewModel ViewModel { get; }
+    public string StandardSettingsHeading => ManagedWords.Text("global_title");
+    public string StandardSettingsScope => ManagedWords.Text("global_scope");
+
+    private Visibility StandardControls(bool available) => available && !_accountOnly
+        ? Visibility.Visible : Visibility.Collapsed;
+
+    private Visibility CredentialCard(bool available, bool shortcut) => available && (_accountOnly || shortcut)
+        ? Visibility.Visible : Visibility.Collapsed;
+
+    private async void OnToolsRefresh(object sender, RoutedEventArgs e) =>
+        await RefreshAsync(ViewModel.LoadHarnessesAsync);
+
+    private async void OnConnectionRefresh(object sender, RoutedEventArgs e) =>
+        await RefreshAsync(ViewModel.LoadAsync);
+
+    private async Task RefreshAsync(Func<Task> refresh)
+    {
+        if (_refreshing || !ViewModel.ControlsEnabled) return;
+        _refreshing = true;
+        try { await refresh(); }
+        finally { _refreshing = false; }
+    }
 
     /// <summary>
     /// The credential card's one button.
@@ -32,8 +58,11 @@ public sealed partial class PrivateInferenceSettingsView : UserControl
     private async void OnBalanceAction(object sender, RoutedEventArgs e) =>
         await ViewModel.ContinueCredentialAsync(await ViewModel.PressBalanceAsync());
 
-    private async void OnCredentialAction(object sender, RoutedEventArgs e) =>
-        await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync());
+    private async void OnCredentialAction(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.HasCredentialAction)
+            await ViewModel.ContinueCredentialAsync(await ViewModel.PressCredentialAsync());
+    }
 
     /// <summary>
     /// "Send this tool's calls here", for one row.

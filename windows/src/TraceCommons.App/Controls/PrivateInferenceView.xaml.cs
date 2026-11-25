@@ -84,7 +84,7 @@ public sealed partial class PrivateInferenceView : UserControl
         await ViewModel.Funding.ActivateAsync();
 
     private async void OnFundingAction(object sender, RoutedEventArgs e) =>
-        await ViewModel.Funding.PressAsync();
+        await ViewModel.Funding.AddFundsAsync();
 
     /// <summary>
     /// Reads the switch once the page is on screen rather than in the

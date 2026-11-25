@@ -10,6 +10,8 @@ public sealed record ManagedAccount(
     string Id, string Tool, string Connection, string Label,
     [property: JsonPropertyName("auth_state")] string AuthState);
 
+public sealed record ManagedDefault([property: JsonPropertyName("account_id")] string AccountId);
+
 public sealed record ManagedSession(
     string Id, string Tool, string Connection,
     [property: JsonPropertyName("account_id")] string AccountId,
@@ -113,7 +115,8 @@ public sealed record ManagedSnapshot(
     Dictionary<string, ulong> Generations, ManagedCapabilities Capabilities,
     Dictionary<string, string> Copy,
     [property: JsonPropertyName("sign_in_accounts")] ManagedAccount[]? SignInAccounts = null, ManagedTool[]? Tools = null,
-    [property: JsonPropertyName("cli_options")] Dictionary<string, string>? CliOptions = null)
+    [property: JsonPropertyName("cli_options")] Dictionary<string, string>? CliOptions = null,
+    ManagedDefault[]? Defaults = null)
 {
     /// <summary>The tools this shell launches, in the order the Add and
     /// Launch dialogs offer them. OpenCode is one since #1418.</summary>
@@ -127,6 +130,16 @@ public sealed record ManagedSnapshot(
         : LaunchedTools.Contains(tool) &&
             (Tools is null || Tools.Any(t => t.Tool == tool && t.Installed));
     public string[] SetupTools => LaunchedTools.Where(CanLaunch).ToArray();
+    [JsonIgnore] public bool OffersSavedAccountLaunch =>
+        Capabilities.TerminalLaunch && Accounts.Any(account => CanLaunch(account.Tool));
+
+    public bool IsDefault(ManagedAccount account) => Defaults?.Any(item => item.AccountId == account.Id) == true;
+
+    public string AuthenticationLabel(ManagedAccount account) => account.AuthState switch
+    {
+        "sign_in_required" or "checking" or "ready" or "unavailable" => Text($"auth_{account.AuthState}"),
+        _ => string.Empty,
+    };
     /// <summary>The tools the install block offers: every tool this shell
     /// launches, and only while none is installed (Ron, 2026-10-15).</summary>
     public ManagedTool[] InstallTools => Tools is null || SetupTools.Length > 0 ? []
@@ -251,14 +264,14 @@ public sealed record ManagedSnapshot(
     /// <summary>
     /// The <c>managed_launch_prepare</c> request the saved-account Launch
     /// dialog sends: <paramref name="account"/> in <paramref name="cwd"/>,
-    /// decided at send time. Null when the folder is not fully qualified, or
-    /// when the selected account requires a model ID and none was entered.
+    /// decided at send time. A null folder starts in the person's home. An
+    /// invalid path or absent required model makes the request unavailable.
     /// </summary>
     public Dictionary<string, object?>? AccountLaunchParams(
         ManagedAccount account, string? cwd, string? model, bool collectTraces, string requestId,
         ManagedLaunchOptions? options = null)
     {
-        if (!ManagedLaunchFolder.IsAcceptable(cwd)) return null;
+        if (cwd is not null && !ManagedLaunchFolder.IsAcceptable(cwd)) return null;
         bool openCode = account.Tool == "opencode";
         string? trimmed = openCode ? model?.Trim() : null;
         if (options is null && openCode && string.IsNullOrEmpty(trimmed)) return null;
@@ -267,10 +280,11 @@ public sealed record ManagedSnapshot(
         var request = new Dictionary<string, object?>
         {
             ["request_id"] = requestId, ["purpose"] = "coding", ["tool"] = account.Tool,
-            ["connection"] = account.Connection, ["account_id"] = account.Id, ["cwd"] = cwd,
+            ["connection"] = account.Connection, ["account_id"] = account.Id,
             ["expected_generation"] = Generations.GetValueOrDefault(account.Tool), ["save_default"] = false,
             ["model"] = trimmed, ["collect_traces"] = openCode && collectTraces,
         };
+        if (cwd is not null) request["cwd"] = cwd;
         options?.Apply(request, account, Capabilities);
         return request;
     }

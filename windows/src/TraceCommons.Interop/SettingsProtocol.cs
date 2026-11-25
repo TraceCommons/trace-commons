@@ -60,6 +60,9 @@ public sealed class DaemonSettingsSnapshot
     [JsonPropertyName("insights_recap_card_enabled")]
     public bool? InsightsRecapCardEnabled { get; set; }
 
+    [JsonPropertyName("insights_ledger_feed")]
+    public bool? InsightsLedgerFeed { get; set; }
+
     [JsonPropertyName("local_notifications")]
     public bool LocalNotifications { get; set; }
 
@@ -120,6 +123,12 @@ public sealed class DaemonSettingsSnapshot
 
     [JsonPropertyName("antigravity_source_mode")]
     public string AntigravitySourceMode { get; set; } = string.Empty;
+
+    [JsonPropertyName("opencode_source_mode")]
+    public string? OpenCodeSourceMode { get; set; }
+
+    [JsonPropertyName("trajectory_source_mode")]
+    public string? TrajectorySourceMode { get; set; }
 
     /// <summary>
     /// The local proxy declaration as the daemon holds it. Absent means off:
@@ -301,7 +310,18 @@ public sealed class ProjectSetting
     /// </summary>
     [JsonPropertyName("is_unresolved_bucket")]
     public bool IsUnresolvedBucket { get; set; }
+
+    [JsonPropertyName("offerable_modes")]
+    public string[]? OfferableModes { get; set; }
+
+    [JsonPropertyName("collision")]
+    public ProjectLabelCollision? Collision { get; set; }
 }
+
+public sealed record ProjectLabelCollision(
+    [property: JsonPropertyName("group")] string Group,
+    [property: JsonPropertyName("base_label")] string BaseLabel,
+    [property: JsonPropertyName("suffix")] string Suffix);
 
 /// <summary><c>list_audit</c>'s privacy-safe local change log.</summary>
 public sealed class AuditSettingsPayload

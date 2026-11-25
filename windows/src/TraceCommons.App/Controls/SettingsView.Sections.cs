@@ -37,7 +37,7 @@ public sealed partial class SettingsView
     {
         SettingsSection.Account, SettingsSection.Payouts, SettingsSection.Referrals, SettingsSection.Watching, SettingsSection.Tools,
         SettingsSection.Insights, SettingsSection.Projects, SettingsSection.Consent, SettingsSection.PublicProfile, SettingsSection.Changes,
-        SettingsSection.PrivateAI, SettingsSection.General, SettingsSection.Startup, SettingsSection.Updates, SettingsSection.Witness,
+        SettingsSection.PrivateAI, SettingsSection.SavedAccounts, SettingsSection.General, SettingsSection.Startup, SettingsSection.Updates, SettingsSection.Witness,
         SettingsSection.Compute,
     };
 
@@ -58,6 +58,8 @@ public sealed partial class SettingsView
     private ReferralsSection? _referrals;
     private UpdatesSection? _updates;
     private DaemonHost? _sectionsHost;
+
+    internal nint SettingsOwnerHandle { get; set; }
 
     /// <summary>The window's onboarding gate; awaiting until the status is read.</summary>
     private SettingsGate _gate = SettingsGate.Awaiting;
@@ -122,20 +124,27 @@ public sealed partial class SettingsView
         Unloaded += (_, _) =>
         {
             host.StatusChanged -= OnGateStatusChanged;
-            host.Started -= OnGateStatusChanged;
+            host.Started -= OnSectionsHostStarted;
             host.Refused -= OnGateStatusChanged;
             host.Account.Changed -= OnAccountChanged;
+            Settings.PropertyChanged -= OnPayoutLoginChanged;
         };
 
-        _devices = new AccountDevicesSection(host);
+        InitializeAccountSettings(host);
+        _devices = new AccountDevicesSection(host, SignInToSettingsAccountAsync);
         DevicesHost.Content = _devices;
-        _payouts = new PayoutLinkSection(host);
-        _payouts.VisibilityChanged += _ => DrawList();
+        _payouts = new PayoutLinkSection(host, SignInToSettingsAccountAsync);
+        _payouts.StateChanged += DrawList;
         PayoutsHost.Content = _payouts;
-        _referrals = new ReferralsSection(host);
+        _referrals = new ReferralsSection(host, SignInToSettingsAccountAsync);
         ReferralsHost.Content = _referrals;
         GeneralHost.Content = new GeneralSection();
         InsightsHost.Content = new InsightsSection(host);
+        BodyProjects.Children.Add(new ProjectsSettingsSection(host, async () =>
+        {
+            await Settings.RetryAuditAsync();
+            DrawAuditNotice();
+        }));
         NotificationsHost.Content = new NotificationsSection(host);
         CliOptionsHost.Content = new CliOptionsCard(host);
         _updates = new UpdatesSection(() => CheckForUpdatesRequested?.Invoke(this, System.EventArgs.Empty), updateChecks);
@@ -143,11 +152,15 @@ public sealed partial class SettingsView
         var watcher = new WatchingSection(host);
         watcher.PausedChanged += DrawHeaderChip;
         WatcherHost.Content = watcher;
+        BodyWatching.Children.Add(new WatchedFoldersSection(host, () => SettingsOwnerHandle));
         DrawHeaderChip(false);
         ComputeHost.Content = new ComputeSection(host, AppCompute);
 
         DrawList();
     }
+
+    internal void AttachSubscriptionUsage(SubscriptionUsageModel model) =>
+        BodyInsights.Children.Add(new SubscriptionUsageSettingsSection(model));
 
     /// <summary>
     /// Draws the list and the rules: each drawn section's row in the Mac's
@@ -157,10 +170,8 @@ public sealed partial class SettingsView
     private void DrawList()
     {
         SettingsNavWords words = SettingsNavWordsLive.Value;
-        // Payouts is listed only while it applies, and only once its gate is
-        // open: before first run there is no account to pay (D2, R-43).
-        bool payoutsShown = _payouts?.Shown == true
-            && SettingsGates.For(SettingsSection.Payouts, _gate) == SettingsGate.Open;
+        bool payoutsShown = SettingsGates.ShowsPayouts(
+            _gate, _payouts?.HasRail == true, Settings?.ShowsPayoutsNeedLogin == true, _payouts?.HasStatusRefusal == true);
         var rows = new List<SettingsSection>();
         foreach (SettingsSection section in SettingsSections.Rows(payoutsShown))
         {
@@ -229,13 +240,31 @@ public sealed partial class SettingsView
         // gate too (MonitorGate.down).
         host.StatusChanged -= OnGateStatusChanged;
         host.StatusChanged += OnGateStatusChanged;
-        host.Started -= OnGateStatusChanged;
-        host.Started += OnGateStatusChanged;
+        host.Started -= OnSectionsHostStarted;
+        host.Started += OnSectionsHostStarted;
         host.Refused -= OnGateStatusChanged;
         host.Refused += OnGateStatusChanged;
         host.Account.Changed -= OnAccountChanged;
         host.Account.Changed += OnAccountChanged;
-        await ReadGateAsync(host);
+        Settings.PropertyChanged -= OnPayoutLoginChanged;
+        Settings.PropertyChanged += OnPayoutLoginChanged;
+        await System.Threading.Tasks.Task.WhenAll(ReadGateAsync(host), _payouts!.RefreshAsync());
+    }
+
+    private void OnPayoutLoginChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(Settings.ShowsPayoutsNeedLogin))
+        {
+            DrawList();
+        }
+    }
+
+    private async void OnSectionsHostStarted()
+    {
+        if (_sectionsHost is { } host && IsLoaded)
+        {
+            await System.Threading.Tasks.Task.WhenAll(ReadGateAsync(host), _payouts!.RefreshAsync());
+        }
     }
 
     /// <summary>
@@ -290,6 +319,7 @@ public sealed partial class SettingsView
         if (gate != _gate)
         {
             _gate = gate;
+            ApplyPrivateAISettingsGate();
             DrawList();
         }
     }
@@ -306,7 +336,9 @@ public sealed partial class SettingsView
             return;
         }
 
-        SettingsGate gate = SettingsGates.For(section, _gate);
+        SettingsGate gate = section == SettingsSection.Payouts && shown
+            ? SettingsGate.Open
+            : SettingsGates.For(section, _gate);
         body.Visibility = shown && gate == SettingsGate.Open ? Visibility.Visible : Visibility.Collapsed;
         if (!shown || gate == SettingsGate.Open || section == SettingsSection.Payouts)
         {

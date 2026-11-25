@@ -18,6 +18,7 @@ namespace TraceCommons.App.Controls;
 public sealed partial class ManagedSessionsView : UserControl
 {
     private readonly DaemonHost _host;
+    private readonly bool _savedAccounts;
     private readonly StackPanel _root = new() { Spacing = 10 };
     private readonly TextBlock _error = new() { TextWrapping = TextWrapping.Wrap };
     private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(10) };
@@ -43,10 +44,14 @@ public sealed partial class ManagedSessionsView : UserControl
         public string Code { get; } = code;
     }
 
-    public ManagedSessionsView(DaemonHost host)
+    public ManagedSessionsView(DaemonHost host) : this(host, savedAccounts: false) { }
+
+    internal ManagedSessionsView(DaemonHost host, bool savedAccounts)
     {
         _host = host;
+        _savedAccounts = savedAccounts;
         Content = _root;
+        if (_savedAccounts) RenderSavedAccounts();
         // The 10 s poll stops while the window is hidden to the tray or
         // minimised (WindowClocks), and resumes with a read when it is back.
         // The subscription lives while the view is loaded: WindowClocks is
@@ -83,7 +88,7 @@ public sealed partial class ManagedSessionsView : UserControl
         }
     }
 
-    private string T(string key) => _snapshot?.Text(key) ?? string.Empty;
+    private string T(string key) => _snapshot?.Text(key) ?? (_savedAccounts ? ManagedWords.Text(key) : string.Empty);
 
     private async Task<JsonElement> CallAsync(string method, object parameters)
     {
@@ -109,7 +114,7 @@ public sealed partial class ManagedSessionsView : UserControl
             string json = value.GetRawText();
             if (!forceRender && json == _snapshotJson)
             {
-                if (_snapshot is not null) _ = LoadSessionModelNamesAsync(_snapshot);
+                if (!_savedAccounts && _snapshot is not null) _ = LoadSessionModelNamesAsync(_snapshot);
                 return;
             }
 
@@ -118,7 +123,7 @@ public sealed partial class ManagedSessionsView : UserControl
             _snapshot = next;
             Render();
             _snapshotJson = json;
-            _ = LoadSessionModelNamesAsync(next);
+            if (!_savedAccounts) _ = LoadSessionModelNamesAsync(next);
         }
         catch { _error.Text = T("action_failed"); }
         finally { _reading = false; }
@@ -143,12 +148,12 @@ public sealed partial class ManagedSessionsView : UserControl
     }
 
     /// <summary>A bare refresh glyph: no text, its tooltip and accessible name "Refresh".</summary>
-    private Button RefreshGlyph()
+    private Button RefreshGlyph(string key = "refresh")
     {
         var glyph = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 }, Background = null, BorderThickness = new Thickness(0), IsEnabled = !_busy };
         glyph.Click += async (_, _) => await RefreshAsync(forceRender: true);
-        ToolTipService.SetToolTip(glyph, T("refresh"));
-        AutomationProperties.SetName(glyph, T("refresh"));
+        ToolTipService.SetToolTip(glyph, T(key));
+        AutomationProperties.SetName(glyph, T(key));
         return glyph;
     }
 
@@ -169,12 +174,12 @@ public sealed partial class ManagedSessionsView : UserControl
             // buttons (ManagedSessionsView.swift:131-136, :160-163); an
             // unsupported version keeps its recovery row below.
             string key = _unsupportedVersion ? "unsupported_version" : ManagedSignIn.ErrorKey(refused.Code);
-            if (_fromCard && !_unsupportedVersion) _failure.Refuse(key, fromCard: true);
+            if (_savedAccounts || (_fromCard && !_unsupportedVersion)) _failure.Refuse(key, fromCard: true);
             else _error.Text = ManagedSignIn.FillTerminal(T(key), _snapshot?.Capabilities.SessionDestination, T("terminal"));
         }
         catch
         {
-            if (_fromCard) _failure.Refuse("action_failed", fromCard: true);
+            if (_savedAccounts || _fromCard) _failure.Refuse("action_failed", fromCard: true);
             else _error.Text = T("action_failed");
         }
         finally { _busy = false; _fromCard = false; await RefreshAsync(forceRender: true); }
@@ -185,12 +190,13 @@ public sealed partial class ManagedSessionsView : UserControl
     /// </summary>
     private void Render()
     {
-        if (_snapshot is null) return;
+        if (_snapshot is null && !_savedAccounts) return;
         // While a dialog is open (busy) a poll's rebuild keeps the return.
         bool returningFromDialog = !_busy && _returnFocus is not null;
         var (target, keep) = ManagedFocus.Rebuild(FocusedButtonKey(), _busy, _returnFocus);
         _returnFocus = keep;
-        RenderContent();
+        if (_savedAccounts) RenderSavedAccounts();
+        else RenderContent();
         if (target is { } key) RestoreFocus(key, returningFromDialog);
     }
 
@@ -242,12 +248,6 @@ public sealed partial class ManagedSessionsView : UserControl
         RenderSignIn();
         var sessions = new StackPanel { Spacing = 6 };
         sessions.Children.Add(SectionTitle("title"));
-        sessions.Children.Add(new TextBlock { Text = T("description"), TextWrapping = TextWrapping.Wrap });
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        actions.Children.Add(Button("launch", LaunchAsync, _snapshot.Capabilities.TerminalLaunch && _snapshot.Accounts.Any(a => _snapshot.CanLaunch(a.Tool))));
-        // Hidden, not disabled, with no tool to add an account for (Ron, 2026-10-15).
-        if (_snapshot.SetupTools.Length > 0) actions.Children.Add(Button("add", AddAsync));
-        sessions.Children.Add(actions);
         // Signed in, the card above holds the Install links (box,
         // 2026-11-19: both drew them); signed out, this block stands in for
         // the Mac's setup row (ManagedSessionsView.swift:34-36).
@@ -291,46 +291,12 @@ public sealed partial class ManagedSessionsView : UserControl
             CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"],
             Background = ThemeBrushes.Get("TcSurfaceCardBrush"), BorderBrush = ThemeBrushes.Get("TcHairlineBrush"),
         });
-        foreach (var account in _snapshot.Accounts)
-        {
-            bool held = _snapshot.Sessions.Any(s => s.AccountId == account.Id && s.HoldsAccount);
-            var row = new StackPanel { Spacing = 4 };
-            row.Children.Add(new TextBlock { Text = $"{account.Label} · {T(account.Tool)} · {T(account.Connection)} · {account.AuthState}" });
-            if (_snapshot.ToolMissing(account.Tool))
-            {
-                row.Children.Add(new TextBlock { Text = _snapshot.ToolUnavailable(account.Tool), TextWrapping = TextWrapping.Wrap });
-                var recovery = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                if (_snapshot.Tools?.FirstOrDefault(t => t.Tool == account.Tool) is ManagedTool tool) recovery.Children.Add(InstallButton(tool));
-                recovery.Children.Add(RefreshGlyph());
-                row.Children.Add(recovery);
-            }
-            var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-            controls.Children.Add(Button("use_default", async () => {
-                ulong generation = _snapshot.Generations.GetValueOrDefault(account.Tool);
-                await CallAsync("managed_select", new { selection = new { tool = account.Tool, connection = account.Connection, account_id = account.Id, generation }, expected_generation = generation });
-            }));
-            controls.Children.Add(Button("rename_short", () => RenameAsync(account)));
-            // Hidden, not disabled, while the tool is missing.
-            if (_snapshot.OffersReconnect(account)) controls.Children.Add(Button("reconnect", async () => {
-                await OpenAsync(await CallAsync("managed_account_reconnect", new { account_id = account.Id }));
-            }, !held && _snapshot.Capabilities.TerminalLaunch));
-            controls.Children.Add(Button("remove", async () => {
-                var dialog = Dialog("remove_question", new TextBlock { Text = T("remove_description"), TextWrapping = TextWrapping.Wrap }, "remove");
-                if (await dialog.ShowAsync() == ContentDialogResult.Primary) await CallAsync("managed_account_remove", new { account_id = account.Id });
-            }, !held));
-            row.Children.Add(controls);
-            rows.Children.Add(row);
-        }
         foreach (var session in _snapshot.Sessions)
         {
             rows.Children.Add(SessionRow(session, _snapshot.Capabilities));
         }
         if (_snapshot.Sessions.Length == 0) rows.Children.Add(new TextBlock { Text = T("empty") });
         sessions.Children.Add(_error);
-        var global = new StackPanel { Spacing = 4 };
-        global.Children.Add(SectionTitle("global_title"));
-        global.Children.Add(new TextBlock { Text = T("global_scope"), TextWrapping = TextWrapping.Wrap });
-        _root.Children.Add(global);
     }
 
     private TextBlock SectionTitle(string key)
@@ -633,8 +599,8 @@ public sealed partial class ManagedSessionsView : UserControl
 
     private async Task RenameAsync(ManagedAccount account)
     {
-        var name = new TextBox { Text = account.Label, Header = T("label") };
-        if (await Dialog("rename", name, "save").ShowAsync() == ContentDialogResult.Primary)
+        var name = new TextBox { Text = account.Label, Header = T("label"), PlaceholderText = T("label_placeholder") };
+        if (await DialogGuard.ShowOnceAsync(Dialog("rename", name, "save")) == ContentDialogResult.Primary)
             await CallAsync("managed_account_rename", new { account_id = account.Id, label = name.Text });
     }
 
@@ -643,93 +609,139 @@ public sealed partial class ManagedSessionsView : UserControl
         string[] tools = _snapshot?.SetupTools ?? [];
         if (tools.Length == 0) return;
         bool signedIn = _snapshot?.NearAiSignedIn == true;
-        string[] connections = ManagedSnapshot.Connections(tools[0], signedIn);
         var tool = new ComboBox { Header = T("tool"), ItemsSource = tools.Select(T).ToArray(), SelectedIndex = 0 };
-        var connection = new ComboBox { Header = T("connection"), ItemsSource = connections.Select(T).ToArray(), SelectedIndex = 0 };
-        var label = new TextBox { Header = T("label") };
-        var key = new PasswordBox { Header = T("api_key"), Visibility = Visibility.Collapsed };
-        connection.SelectionChanged += (_, _) => key.Visibility = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && connections[connection.SelectedIndex] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
-        key.Visibility = connections[0] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
-        var openCodeScope = new TextBlock { Text = T("opencode_scope"), TextWrapping = TextWrapping.Wrap, Visibility = tools[0] == "opencode" ? Visibility.Visible : Visibility.Collapsed };
-        tool.SelectionChanged += (_, _) => {
-            if (tool.SelectedIndex < 0) return;
-            openCodeScope.Visibility = tools[tool.SelectedIndex] == "opencode" ? Visibility.Visible : Visibility.Collapsed;
-            connections = ManagedSnapshot.Connections(tools[tool.SelectedIndex], signedIn);
-            connection.ItemsSource = connections.Select(T).ToArray(); connection.SelectedIndex = 0;
-            key.Visibility = connections[0] == "subscription" ? Visibility.Collapsed : Visibility.Visible;
-        };
+        var connection = new ComboBox { Header = T("connection") };
+        var label = new TextBox { Header = T("label"), PlaceholderText = T("label_placeholder") };
+        var key = new PasswordBox { Header = T("api_key") };
+        var loginDescription = SessionCaption(T("login_description"));
+        var storageDescription = SessionCaption(T("key_storage"));
         var form = new StackPanel { Spacing = 10 };
-        form.Children.Add(openCodeScope);
-        form.Children.Add(tool); form.Children.Add(connection); form.Children.Add(label); form.Children.Add(key);
-        var loginDescription = new TextBlock { Text = T("login_description"), TextWrapping = TextWrapping.Wrap };
-        void UpdateLoginDescription() => loginDescription.Visibility = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && connections[connection.SelectedIndex] == "subscription" ? Visibility.Visible : Visibility.Collapsed;
-        connection.SelectionChanged += (_, _) => UpdateLoginDescription(); tool.SelectionChanged += (_, _) => UpdateLoginDescription(); UpdateLoginDescription();
+        form.Children.Add(tool);
+        form.Children.Add(connection);
+        form.Children.Add(label);
+        form.Children.Add(key);
         form.Children.Add(loginDescription);
-        form.Children.Add(new TextBlock { Text = T("key_storage"), TextWrapping = TextWrapping.Wrap });
-        var dialog = Dialog("save_title", form, "save");
-        void ValidateAccount() => dialog.IsPrimaryButtonEnabled = connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length && !string.IsNullOrWhiteSpace(label.Text) && (connections[connection.SelectedIndex] == "subscription" ? _snapshot?.Capabilities.TerminalLaunch == true : !string.IsNullOrWhiteSpace(key.Password));
-        label.TextChanged += (_, _) => ValidateAccount(); key.PasswordChanged += (_, _) => ValidateAccount();
-        connection.SelectionChanged += (_, _) => ValidateAccount(); ValidateAccount();
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(label.Text)) return;
-        string kind = connections[connection.SelectedIndex];
-        if (kind == "subscription" && _snapshot?.Capabilities.TerminalLaunch != true) throw new InvalidOperationException();
-        var account = await CallAsync("managed_account_add", new { tool = tools[tool.SelectedIndex], connection = kind, label = label.Text });
-        string id = account.GetProperty("id").GetString()!;
-        if (kind == "subscription") await OpenAsync(await CallAsync("managed_account_reconnect", new { account_id = id }));
-        else { await CallAsync("managed_account_set_key", new { account_id = id, key = key.Password }); key.Password = string.Empty; }
+        form.Children.Add(storageDescription);
+        var dialog = Dialog("save_title", form, "save_account");
+        string[] connections = [];
+        string? ChosenConnection() => connection.SelectedIndex >= 0 && connection.SelectedIndex < connections.Length
+            ? connections[connection.SelectedIndex] : null;
+        void ValidateAccount()
+        {
+            string? kind = ChosenConnection();
+            bool subscription = kind == "subscription";
+            key.Visibility = storageDescription.Visibility = subscription ? Visibility.Collapsed : Visibility.Visible;
+            loginDescription.Visibility = subscription ? Visibility.Visible : Visibility.Collapsed;
+            dialog.PrimaryButtonText = T(subscription ? "save_login" : "save_account");
+            dialog.IsPrimaryButtonEnabled = kind is not null && !string.IsNullOrWhiteSpace(label.Text)
+                && (subscription ? _snapshot?.Capabilities.TerminalLaunch == true : !string.IsNullOrEmpty(key.Password));
+        }
+        void UpdateConnections()
+        {
+            if (tool.SelectedIndex < 0) return;
+            string selectedTool = tools[tool.SelectedIndex];
+            string? previous = ChosenConnection();
+            connections = ManagedSnapshot.Connections(selectedTool, signedIn);
+            connection.ItemsSource = connections.Select(kind => T(selectedTool == "opencode" && kind == "api_key" ? "openai_api_key" : kind)).ToArray();
+            connection.SelectedIndex = Math.Max(0, Array.IndexOf(connections, previous));
+            ValidateAccount();
+        }
+        tool.SelectionChanged += (_, _) => UpdateConnections();
+        label.TextChanged += (_, _) => ValidateAccount();
+        key.PasswordChanged += (_, _) => ValidateAccount();
+        connection.SelectionChanged += (_, _) => ValidateAccount();
+        UpdateConnections();
+
+        try
+        {
+            if (await DialogGuard.ShowOnceAsync(dialog) != ContentDialogResult.Primary
+                || ChosenConnection() is not { } kind || tool.SelectedIndex < 0) return;
+            if (kind == "subscription" && _snapshot?.Capabilities.TerminalLaunch != true) throw new InvalidOperationException();
+            var account = await CallAsync("managed_account_add", new { tool = tools[tool.SelectedIndex], connection = kind, label = label.Text });
+            string id = account.GetProperty("id").GetString()!;
+            if (kind == "subscription") await OpenAsync(await CallAsync("managed_account_reconnect", new { account_id = id }));
+            else await CallAsync("managed_account_set_key", new { account_id = id, key = key.Password });
+        }
+        finally { key.Password = string.Empty; }
     }
 
     private async Task LaunchAsync()
     {
-        if (_snapshot is null) return;
-        var accounts = _snapshot.Accounts.Where(a => _snapshot.CanLaunch(a.Tool)).ToArray();
+        if (_snapshot is not { OffersSavedAccountLaunch: true } snapshot) return;
+        var accounts = snapshot.Accounts.Where(a => snapshot.CanLaunch(a.Tool)).ToArray();
         if (accounts.Length == 0) return;
-        var account = new ComboBox { Header = T("saved_account"), ItemsSource = accounts.Select(a => $"{T(a.Tool)} · {a.Label} · {T(a.Connection)}").ToArray(), SelectedIndex = 0 };
-        var project = new TextBox { Header = T("project_placeholder") };
-        var form = new StackPanel { Spacing = 10 };
-        form.Children.Add(account); form.Children.Add(project);
-        var choose = new Button { Content = T("choose_folder") };
-        choose.Click += async (_, _) => {
-            if (await PickFolderAsync() is string path) project.Text = path;
+        var account = new ComboBox
+        {
+            Header = T("saved_account"), PlaceholderText = T("choose_account"),
+            ItemsSource = accounts.Select(a => $"{T(a.Tool)} · {a.Label} · {T(a.Connection)}").ToArray(),
         };
-        form.Children.Add(choose);
-        var terminalPicker = _snapshot.AsksForTerminal ? TerminalPicker() : null;
+        var project = new TextBox { PlaceholderText = T("home_folder") };
+        AutomationProperties.SetName(project, T("pick_folder"));
+        string? Folder() => project.Text.Length == 0 ? null : project.Text;
+        bool ValidFolder() => Folder() is not string folder || ManagedLaunchFolder.IsAcceptable(folder);
+        var form = new StackPanel { Spacing = 10 };
+        form.Children.Add(account);
+        form.Children.Add(project);
+        var choose = new Button { Content = T("pick_folder") };
+        var clear = new Button { Content = T("clear_folder"), Visibility = Visibility.Collapsed };
+        choose.Click += async (_, _) =>
+        {
+            if (await PickFolderAsync() is string path && ManagedLaunchFolder.IsAcceptable(path)) project.Text = path;
+        };
+        clear.Click += (_, _) => project.Text = string.Empty;
+        var projectActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        projectActions.Children.Add(choose);
+        projectActions.Children.Add(clear);
+        form.Children.Add(projectActions);
+        var terminalPicker = snapshot.AsksForTerminal ? TerminalPicker() : null;
         if (terminalPicker is not null) form.Children.Add(terminalPicker);
-        form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.SessionDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
+        var destinationLine = SessionCaption(string.Empty);
+        void ShowDestination() => destinationLine.Text = T("launch_scope").Replace("{destination}",
+            terminalPicker?.SelectedItem as string ?? snapshot.Capabilities.SessionDestination ?? T("terminal"));
+        if (terminalPicker is not null) terminalPicker.SelectionChanged += (_, _) => ShowDestination();
+        ShowDestination();
+        form.Children.Add(destinationLine);
         var launchDialog = Dialog("launch_title", new ScrollViewer { Content = form }, "launch_short");
-        var fields = new LaunchFields(this, _snapshot.Capabilities);
+        var fields = new LaunchFields(this, snapshot.Capabilities);
         fields.Changed += ValidateLaunch;
-        form.Children.Insert(form.Children.IndexOf(choose) + 1, fields.Panel);
+        form.Children.Insert(1, fields.Panel);
         void ValidateLaunch()
         {
             launchDialog.IsPrimaryButtonEnabled = fields.Ready && account.SelectedIndex >= 0
-                && ManagedLaunchFolder.IsAcceptable(project.Text)
+                && ValidFolder()
                 && (ManagedLaunchOptions.ModelMode(accounts[account.SelectedIndex].Tool, accounts[account.SelectedIndex].Connection)
                     != ManagedModelMode.Text || !string.IsNullOrWhiteSpace(fields.Choices?.Model));
         }
         async Task LoadAsync(bool typing = false)
         {
             ValidateLaunch();
-            if (account.SelectedIndex < 0 || !ManagedLaunchFolder.IsAcceptable(project.Text))
+            if (account.SelectedIndex < 0 || !ValidFolder())
             {
                 fields.Close();
                 fields.Panel.Children.Clear();
                 return;
             }
             var selected = accounts[account.SelectedIndex];
-            await fields.LoadAsync(selected.Tool, selected.Connection, project.Text, waitForTyping: typing);
+            await fields.LoadAsync(selected.Tool, selected.Connection, Folder(), waitForTyping: typing);
         }
         account.SelectionChanged += async (_, _) => await LoadAsync();
-        project.TextChanged += async (_, _) => await LoadAsync(typing: true);
+        project.TextChanged += async (_, _) =>
+        {
+            clear.Visibility = Folder() is null ? Visibility.Collapsed : Visibility.Visible;
+            await LoadAsync(typing: true);
+        };
         ValidateLaunch();
-        var result = await launchDialog.ShowAsync();
+        var result = await DialogGuard.ShowOnceAsync(launchDialog);
         var choices = fields.Choices;
         fields.Close();
-        if (result != ContentDialogResult.Primary || !ManagedLaunchFolder.IsAcceptable(project.Text)) return;
-        var selected = accounts[account.SelectedIndex];
-        // Decided from the typed folder at send time (L4).
-        if (_snapshot.AccountLaunchParams(selected, project.Text, null, false, Guid.NewGuid().ToString(), choices) is not { } request) return;
-        if (terminalPicker is not null) await SaveTerminalAsync(terminalPicker.SelectedIndex);
+        if (result != ContentDialogResult.Primary || account.SelectedIndex < 0 || !ValidFolder() || _snapshot is not { } current) return;
+        string selectedId = accounts[account.SelectedIndex].Id;
+        ManagedAccount? selected = current.Accounts.FirstOrDefault(saved => saved.Id == selectedId);
+        if (selected is null || !current.CanLaunch(selected.Tool) || !current.Capabilities.TerminalLaunch)
+            throw new InvalidOperationException();
+        if (current.AccountLaunchParams(selected, Folder(), null, false, Guid.NewGuid().ToString(), choices) is not { } request) return;
+        if (terminalPicker is not null && snapshot.TerminalToSave(terminalPicker.SelectedIndex) is { } terminal)
+            await CallAsync("set_managed_terminal", new { terminal });
         await OpenAsync(await CallAsync("managed_launch_prepare", request));
     }
 }

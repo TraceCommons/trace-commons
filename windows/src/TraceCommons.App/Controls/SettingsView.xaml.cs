@@ -34,6 +34,8 @@ public sealed partial class SettingsView : UserControl
         LegacyOfferView.Offer = LegacyOffer;
         ManagedTerminalHost.Content = new ManagedTerminalPicker(host);
         ManagedFavoritesHost.Content = new ManagedFavoritesCard(host);
+        BodySavedAccounts.Children.Add(new ManagedSessionsView(host, savedAccounts: true));
+        PrivateAILedgerFeedHost.Content = new PrivateAILedgerFeedCard(host);
         InitializeShellSwitches();
 
         // The Traces map's style (W6-D1), its card in General after the edge
@@ -49,7 +51,17 @@ public sealed partial class SettingsView : UserControl
         }
 
         ViewModel = new PublicProfileViewModel(host);
+        ViewModel.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is nameof(ViewModel.ReadFailed) or nameof(ViewModel.ShowsReadNotice))
+            {
+                DrawProfileReadNotice();
+            }
+        };
+        DrawProfileReadNotice();
         Settings = new ContributorSettingsViewModel(host);
+        Settings.ConsentReadChanged += DrawConsentReadNotice;
+        DrawConsentReadNotice();
         Settings.AuditReadChanged += DrawAuditNotice;
         DrawAuditNotice();
         Loaded += OnFirstLoaded;
@@ -84,7 +96,7 @@ public sealed partial class SettingsView : UserControl
     private async void OnFirstLoaded(object sender, RoutedEventArgs e)
     {
         Loaded -= OnFirstLoaded;
-        await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync());
+        await Task.WhenAll(ViewModel.LoadAsync(), Settings.LoadAsync(), Settings.RefreshStartupAsync());
     }
 
     internal void ShowPrivateAIControls(PrivateInferenceView page)
@@ -92,6 +104,9 @@ public sealed partial class SettingsView : UserControl
         var controls = new PrivateInferenceSettingsView(page.ViewModel);
         controls.Loaded += async (_, _) => await page.EnsureLoadedAsync();
         PrivateInferenceSettingsHost.Content = controls;
+        AccountCredentialHost.Content = new PrivateInferenceSettingsView(page.ViewModel, accountOnly: true);
+        if (page.ViewModel.Available)
+            PrivateAIFundingHost.Content = new NearAiFundingCard(page.ViewModel.SettingsFunding);
     }
 
     internal void BringPrivateAIIntoView()
@@ -142,22 +157,24 @@ public sealed partial class SettingsView : UserControl
     {
         // Not while another settings write runs: the confirmation would ask
         // for something that could not start.
-        if (_setUpAgainDialogOpen || !Settings.HasAccountAttention || Settings.IsBusy)
+        if (_setUpAgainDialogOpen || (!Settings.HasAccountAttention && !CanSetUpAccountAgain) || Settings.IsBusy || _accountActionBusy)
         {
             return;
         }
 
+        bool fromAttention = Settings.HasAccountAttention;
+        long? accountGeneration = _accountHost?.Account.Current;
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = Settings.AccountAttentionConfirmTitle,
+            Title = fromAttention ? Settings.AccountAttentionConfirmTitle : AccountSetupWords!.ConfirmTitle,
             Content = new TextBlock
             {
-                Text = Settings.AccountAttentionConfirmBody,
+                Text = fromAttention ? Settings.AccountAttentionConfirmBody : AccountSetupWords!.ConfirmBody,
                 TextWrapping = TextWrapping.Wrap,
             },
-            PrimaryButtonText = Settings.AccountAttentionConfirmAction,
-            CloseButtonText = Settings.AccountAttentionConfirmCancel,
+            PrimaryButtonText = fromAttention ? Settings.AccountAttentionConfirmAction : AccountSetupWords!.ConfirmAction,
+            CloseButtonText = fromAttention ? Settings.AccountAttentionConfirmCancel : AccountSetupWords!.ConfirmCancel,
 
             // Keeping the enrollment is what Enter and Escape both do: the
             // primary button drops it.
@@ -177,9 +194,20 @@ public sealed partial class SettingsView : UserControl
             _setUpAgainDialogOpen = false;
         }
 
+        if (_accountHost?.Account.Current != accountGeneration)
+        {
+            return;
+        }
+
+        _accountSetupNotice = string.Empty;
         if (await Settings.SetUpAgainAsync())
         {
             SetUpAgainRequested?.Invoke(this, EventArgs.Empty);
+        }
+        else if (!fromAttention)
+        {
+            _accountSetupNotice = AccountSetupWords!.Failed;
+            DrawAccountLeave();
         }
     }
 
@@ -323,23 +351,22 @@ public sealed partial class SettingsView : UserControl
 
     private async void OnStartAtLoginToggled(object sender, RoutedEventArgs e)
     {
-        if (sender is ToggleSwitch toggle && Settings.IsLoaded)
+        if (sender is ToggleSwitch toggle && Settings.StartupControlsEnabled)
         {
             await Settings.SetStartAtLoginAsync(toggle.IsOn);
         }
     }
 
+    public string StartupEyebrow => MonitorShellCopy.Shell("desktop_eyebrow");
+    public string StartupTitle => MonitorShellCopy.Shell("desktop_title");
+    public string StartupRefresh => MonitorShellCopy.Shell("settings_refresh");
+    public string StartupRefreshName => MonitorShellCopy.Shell("settings_refresh_desktop");
+
+    private async void OnRefreshStartup(object sender, RoutedEventArgs e) => await Settings.RefreshStartupAsync();
+
     private async void OnConsentChanged(object sender, RoutedEventArgs e)
     {
         await Settings.SaveConsentAsync();
-    }
-
-    private async void OnProjectMode(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { DataContext: ProjectSettingViewModel project })
-        {
-            await Settings.ToggleProjectAsync(project);
-        }
     }
 
     /// <summary>
@@ -428,37 +455,8 @@ public sealed partial class SettingsView : UserControl
         await Settings.ClearWitnessAsync();
     }
 
-    /// <summary>
-    /// Going public.
-    /// </summary>
-    /// <remarks>
-    /// <para>The toggle does not claim anything. It opens the consent dialog,
-    /// which is where the handle is typed and the acknowledgement is given --
-    /// a contributor cannot meaningfully acknowledge "my handle becomes
-    /// public" and then be asked afterwards what the handle is.</para>
-    ///
-    /// <para>Abandoning the dialog puts the toggle back off. The toggle says
-    /// whether a handle is on the roster, and closing without claiming has put
-    /// none there; a toggle left on would be this window claiming a listing
-    /// that does not exist. A successful claim never reaches that line,
-    /// because the panel replaces the row the toggle lives in.</para>
-    ///
-    /// <para>Only the off-to-on edge opens anything. Putting the toggle back
-    /// re-enters this handler, and without the guard that second pass would
-    /// open the dialog again the moment the contributor declined it.</para>
-    /// </remarks>
-    private async void OnGoPublicToggled(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ToggleSwitch toggle || !toggle.IsOn)
-        {
-            return;
-        }
-
-        if (!await GoPublicDialog.RunAsync(XamlRoot, ViewModel))
-        {
-            toggle.IsOn = false;
-        }
-    }
+    private async void OnGoPublic(object sender, RoutedEventArgs e) =>
+        await GoPublicDialog.RunAsync(XamlRoot, ViewModel);
 
     private async void OnSaveProfile(object sender, RoutedEventArgs e)
     {

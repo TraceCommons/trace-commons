@@ -374,10 +374,8 @@
                                    Visibility="{x:Bind ViewModel.HasBalanceObservedText, Mode=OneWay}"
                                    Style="{StaticResource TcCaptionSmallTextStyle}"
                                    TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.Funding.Title}" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
-                        <TextBlock Text="{x:Bind ViewModel.Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
-                        <Button Content="{x:Bind ViewModel.Funding.Action, Mode=OneWay}"
+                        <Button Content="{x:Bind ViewModel.Funding.AddFundsLabel}"
+                                Visibility="{x:Bind ViewModel.Funding.CanAddFunds, Mode=OneWay}"
                                 IsEnabled="{x:Bind ViewModel.Funding.Enabled, Mode=OneWay}"
                                 HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
                     </StackPanel>

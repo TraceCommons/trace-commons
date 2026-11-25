@@ -137,7 +137,7 @@ public class SettingsGateTests
     {
         string sections = ShellSource("TraceCommons.App/Controls/SettingsView.Sections.cs");
         Assert.Contains("SettingsGates.Window(host.StartRefused, _gateReader.Gate)", sections);
-        Assert.Contains("host.Started += OnGateStatusChanged;", sections);
+        Assert.Contains("host.Started += OnSectionsHostStarted;", sections);
         Assert.Contains("host.Refused += OnGateStatusChanged;", sections);
         Assert.Contains("if (gate == SettingsGate.Down)", sections);
         Assert.Contains("HealthCopy.CoreDownTitle()", sections);

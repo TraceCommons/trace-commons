@@ -110,6 +110,20 @@ public class SettingsSectionsTests
         Assert.False(SettingsSections.StartsGroup(SettingsSection.Referrals, SettingsSections.Rows(false)));
     }
 
+    [Theory]
+    [InlineData(SettingsGate.SignedOut, true, false, false, true)]
+    [InlineData(SettingsGate.SignedOut, false, true, false, true)]
+    [InlineData(SettingsGate.SignedOut, false, false, true, false)]
+    [InlineData(SettingsGate.Open, false, false, true, true)]
+    [InlineData(SettingsGate.Open, false, false, false, false)]
+    [InlineData(SettingsGate.Down, true, true, true, false)]
+    [InlineData(SettingsGate.Awaiting, true, true, true, false)]
+    public void PayoutsUsesTheAccountRailEvenWhenDeviceSetupIsIncomplete(
+        SettingsGate gate, bool railVisible, bool loginLine, bool refusal, bool expected)
+    {
+        Assert.Equal(expected, SettingsGates.ShowsPayouts(gate, railVisible, loginLine, refusal));
+    }
+
     [Fact]
     public void TheNavTableIsReadFromTheCoresMonitorWords()
     {
