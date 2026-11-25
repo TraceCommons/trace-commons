@@ -1079,6 +1079,13 @@ jobs:
           }
           Write-Host "registered $($installed.PackageFullName)"
 
+          # Probe from outside the package, just as Windows Terminal does.
+          $alias = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$($installed.PackageFamilyName)\near-ai-gateway-helper.exe"
+          $version = & $alias --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^near-ai ') {
+            throw "Unable to run the installed managed-session helper through its execution alias."
+          }
+
       # The virtualization check. Files a packaged desktop app creates under
       # %LOCALAPPDATA% are redirected to a per-package private location
       # unless write virtualization is disabled, and under redirection this

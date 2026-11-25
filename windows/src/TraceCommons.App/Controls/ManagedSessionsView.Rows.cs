@@ -155,7 +155,13 @@ public sealed partial class ManagedSessionsView
         _ => "dismiss",
     };
 
-    private static string ManagedHelperPath => System.IO.Path.Combine(AppContext.BaseDirectory, "near-ai.exe");
+    private static string ManagedHelperPath => PackageIdentity.IsPackaged()
+        ? System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "WindowsApps",
+            global::Windows.ApplicationModel.Package.Current.Id.FamilyName,
+            "near-ai-gateway-helper.exe")
+        : System.IO.Path.Combine(AppContext.BaseDirectory, "near-ai.exe");
 
     private async Task RunRowActionAsync(ManagedSession session, ManagedSessionAction action)
     {

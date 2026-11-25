@@ -17,10 +17,12 @@
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
   xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
-  IgnorableNamespaces="uap rescap desktop desktop6">
+  IgnorableNamespaces="uap uap5 rescap desktop desktop4 desktop6">
 
   <Identity
     Name="Iqlusion.TraceCommons"
@@ -109,6 +111,27 @@
             Enabled="false"
             DisplayName="Near AI Gateway" />
         </desktop:Extension>
+      </Extensions>
+    </Application>
+
+    <!-- Windows Terminal has its own package identity. A console alias
+         activates the helper under Gateway's identity with stdio attached. -->
+    <Application Id="ManagedSessionHelper" Executable="near-ai.exe"
+                 EntryPoint="Windows.FullTrustApplication"
+                 desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements
+        DisplayName="Near AI Gateway"
+        Description="Near AI Gateway"
+        AppListEntry="none"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias desktop4:Subsystem="console">
+            <uap5:ExecutionAlias Alias="near-ai-gateway-helper.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
       </Extensions>
     </Application>
   </Applications>

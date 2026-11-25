@@ -61,6 +61,27 @@ fn strings(args: &[OsString]) -> Vec<&str> {
 }
 
 #[test]
+fn packaged_helper_uses_only_its_execution_alias() {
+    let local_data = tempfile::tempdir().unwrap();
+    let family = std::ffi::OsStr::new("Iqlusion.TraceCommons_ycm4v9153hzvp");
+    let aliases = local_data.path().join("Microsoft").join("WindowsApps");
+    let package = aliases.join(family);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(aliases.join("near-ai-gateway-helper.exe"), []).unwrap();
+    assert!(matches!(
+        windows_package_helper(local_data.path(), family),
+        Err(ManagedError::UnsupportedVersion)
+    ));
+
+    let alias = package.join("near-ai-gateway-helper.exe");
+    std::fs::write(&alias, []).unwrap();
+    assert_eq!(
+        windows_package_helper(local_data.path(), family).unwrap(),
+        alias
+    );
+}
+
+#[test]
 fn windows_terminal_gets_the_folder_and_the_helper_as_argv() {
     let plan = wt_plan(Path::new(r"C:\Users\x\My Projects\app")).unwrap();
     assert_eq!(plan.program, Path::new(WT));
