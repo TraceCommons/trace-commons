@@ -294,17 +294,21 @@ jobs:
         shell: bash
         run: cp -R release-red-sandbox "$RUNNER_TEMP/release-red-sandbox"
 
-      - name: Verify production and staging against the locked policy
+      # Each environment is verified the way the app launches against it.
+      # Production builds require a pinned compose. Staging builds accept any
+      # compose the TEE measured (red_team::attest_options), because NEAR
+      # redeploys the staging gateway several times a day; the TDX quote, TCB,
+      # report_data, mr_config_id and GPU checks still run.
+      - name: Verify production against the locked policy and staging without the pin
         working-directory: ${{ runner.temp }}/release-red-sandbox
         shell: bash
         env:
-          RTS_LIVE_COMPOSE_POLICY: pinned
           RTS_LIVE_NEAR_MODELS: deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated,Qwen/Qwen3.8-27B-abliterated
         run: |
-          for environment in production staging; do
-            RTS_LIVE_NEAR_ENVIRONMENT="$environment" \
-              cargo test --locked --test live_attest -- --ignored --test-threads=1
-          done
+          RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \
+            cargo test --locked --test live_attest -- --ignored --test-threads=1
+          RTS_LIVE_NEAR_ENVIRONMENT=staging RTS_LIVE_COMPOSE_POLICY=mr-config-only \
+            cargo test --locked --test live_attest -- --ignored --test-threads=1
 
   macos:
     name: macOS signed DMG
