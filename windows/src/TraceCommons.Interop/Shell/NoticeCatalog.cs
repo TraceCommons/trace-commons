@@ -203,9 +203,8 @@ public static class NoticeCatalog
 
     /// <summary>
     /// The cards a place shows, back first and front last: the present cards
-    /// of each group the place draws, in group order, each group keeping the
-    /// order it was given in. A card of a group the place does not draw is
-    /// not shown there.
+    /// of each group the place draws, in group and rank order. Cards of the
+    /// same rank keep their input order.
     /// </summary>
     public static IReadOnlyList<NoticeKind> Order(NoticePlace place, IEnumerable<NoticeKind> present)
     {
@@ -216,19 +215,18 @@ public static class NoticeCatalog
     }
 
     /// <summary>
-    /// The Mac's order inside the traces-now group (MonitorNotices.swift:377-407,
-    /// :447-513): the consent notices (voids, then rewordings, then the gate
-    /// hold), then health. The witness hold is this shell's
-    /// own and sits with the gate hold. Cards of other groups keep the order
-    /// they were given in (a stable sort, every one rank 0).
+    /// The order inside the traces-now group. Consent acknowledgements sit
+    /// in front of the holds and health banner so they remain reachable
+    /// while a persistent banner has no close action. Cards of other groups
+    /// keep their input order.
     /// </summary>
     private static int Rank(string id) => id switch
     {
-        "void" => 1,
-        "reworded" => 2,
-        "gate-held" => 3,
-        "witness-capacity" => 4,
-        "health" => 5,
+        "gate-held" => 1,
+        "witness-capacity" => 2,
+        "health" => 3,
+        "void" => 4,
+        "reworded" => 5,
         _ => 0,
     };
 
