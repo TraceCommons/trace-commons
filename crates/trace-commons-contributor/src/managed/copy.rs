@@ -402,7 +402,7 @@ pub fn copy() -> serde_json::Value {
             "red_team_enable_action": "Enable Red Team",
             "red_team_enable_explain": "Turns on Hyper-V and adds you to Hyper-V Administrators. Needs admin once.",
             "red_team_group_enable_explain": "Enable Red Team adds the Windows account you use for Gateway to Hyper-V Administrators. Approve the Windows administrator prompt to continue.",
-            "red_team_group_manual_setup": "To set up access manually, ask a Windows administrator to open Computer Management, go to Local Users and Groups > Groups, and add your Windows account to Hyper-V Administrators. After your account is added, sign out of Windows and back in, then reopen Gateway.",
+            "red_team_group_manual_setup": "For manual setup, ask a Windows administrator to press Windows + R, type compmgmt.msc, and press Enter. In Computer Management, open System Tools > Local Users and Groups > Groups and add the Windows account you use for Gateway to Hyper-V Administrators.\n\nYou can also ask a local agent to add your Windows account to the local Hyper-V Administrators group. This requires Windows administrator approval. Once your account has been added, sign out of Windows and back in, then reopen Gateway.",
             "red_team_home_unsupported": "Red Team needs Windows 11 Pro, Enterprise or Education. Windows Home has no Hyper-V.",
             "red_team_enable_sign_out": "Red Team is enabled. Sign out of Windows and back in to finish.",
             "red_team_enable_restart": "Hyper-V is on. Restart Windows to finish, then sign in again.",

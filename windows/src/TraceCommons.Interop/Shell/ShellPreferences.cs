@@ -64,6 +64,13 @@ public sealed class ShellPreferences
         set => Write(_values with { ClosedCampaign = value });
     }
 
+    /// <summary>Whether the user dismissed the Red Team setup instructions in Private AI.</summary>
+    public bool RedTeamSetupDismissed
+    {
+        get => _values.RedTeamSetupDismissed;
+        set => Write(_values with { RedTeamSetupDismissed = value });
+    }
+
     /// <summary>Settings' "Show promotions": on unless turned off.</summary>
     public bool ShowsPromotions
     {
@@ -153,6 +160,9 @@ public sealed class ShellPreferences
 
         [JsonPropertyName("closed_campaign")]
         public string? ClosedCampaign { get; init; }
+
+        [JsonPropertyName("red_team_setup_dismissed")]
+        public bool RedTeamSetupDismissed { get; init; }
 
         [JsonPropertyName("shows_promotions")]
         public bool? ShowsPromotions { get; init; }

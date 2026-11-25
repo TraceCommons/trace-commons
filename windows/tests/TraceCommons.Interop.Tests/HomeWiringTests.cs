@@ -100,6 +100,32 @@ public class HomeWiringTests
         }
     }
 
+    [Fact]
+    public void RedTeamSetupDismissalPersistsAndCanBeReopened()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "tc-prefs-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(dir, "shell-preferences.json");
+        try
+        {
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(path, """{"edge_rail":true}""");
+            var prefs = new ShellPreferences(path);
+            Assert.False(prefs.RedTeamSetupDismissed);
+
+            prefs.RedTeamSetupDismissed = true;
+            var reopened = new ShellPreferences(path);
+            Assert.True(reopened.RedTeamSetupDismissed);
+            Assert.True(reopened.EdgeRail);
+
+            reopened.RedTeamSetupDismissed = false;
+            Assert.False(new ShellPreferences(path).RedTeamSetupDismissed);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
     /// <summary>The recorded normalDay status: two owed, the core's "ready" mark, so the halo rings the badge and the core's words are spoken.</summary>
     [Fact]
     public void TheTrayStripComesFromTheRecordedStatus()
