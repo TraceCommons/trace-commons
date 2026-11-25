@@ -182,6 +182,10 @@ public sealed record ManagedSnapshot(
     /// <summary>Whether Red Team is explained as unsupported (Windows Home) instead.</summary>
     [JsonIgnore] public bool RedTeamUnsupportedEdition => RedTeamTool is { HostProblem: "home_edition" };
 
+    /// <summary>The account needs Hyper-V group membership or a fresh Windows sign-in.</summary>
+    [JsonIgnore] public bool RedTeamNeedsHyperVGroup =>
+        RedTeamTool is { Installed: false, HostProblem: "not_in_hyper_v_administrators" };
+
     /// <summary>Whether the daemon holds a NEAR AI sign-in.</summary>
     [JsonIgnore] public bool NearAiSignedIn => Capabilities.NearAiSignin;
 

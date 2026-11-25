@@ -321,10 +321,9 @@ public sealed partial class ManagedSessionsView : UserControl
     /// the name, whether its runtime is installed, and its line, with Install
     /// while it is not. On Windows the daemon also says why the host cannot run
     /// it: Windows Home is explained and offered nothing; otherwise Enable Red
-    /// Team stands under the line that says what it does (turns on Hyper-V,
-    /// adds you to Hyper-V Administrators, needs admin once), so the person
-    /// reads that before the Windows prompt. Nothing is drawn while the daemon
-    /// sends no <c>red_team</c> row.
+    /// Team stands under the line that says what it does, so the person reads
+    /// that before the Windows prompt. If the account needs group access, the
+    /// same section explains the manual setup and when to sign out.
     /// </summary>
     private void RenderRedTeam()
     {
@@ -338,12 +337,24 @@ public sealed partial class ManagedSessionsView : UserControl
         {
             section.Children.Add(new TextBlock { Text = T("red_team_home_unsupported"), TextWrapping = TextWrapping.Wrap });
         }
-        else if (_snapshot.OffersRedTeamEnable)
+        else if (_snapshot.OffersRedTeamEnable || _snapshot.RedTeamNeedsHyperVGroup)
         {
-            section.Children.Add(new TextBlock { Text = T("red_team_enable_explain"), TextWrapping = TextWrapping.Wrap });
-            var enable = Button("red_team_enable_action", EnableRedTeamAsync);
-            AutomationProperties.SetName(enable, T("red_team_enable_action"));
-            section.Children.Add(enable);
+            if (_snapshot.OffersRedTeamEnable)
+            {
+                string groupExplain = _snapshot.RedTeamNeedsHyperVGroup ? T("red_team_group_enable_explain") : string.Empty;
+                section.Children.Add(new TextBlock
+                {
+                    Text = groupExplain.Length > 0 ? groupExplain : T("red_team_enable_explain"),
+                    TextWrapping = TextWrapping.Wrap,
+                });
+                var enable = Button("red_team_enable_action", EnableRedTeamAsync);
+                AutomationProperties.SetName(enable, T("red_team_enable_action"));
+                section.Children.Add(enable);
+            }
+            if (_snapshot.RedTeamNeedsHyperVGroup && T("red_team_group_manual_setup") is { Length: > 0 } manualSetup)
+            {
+                section.Children.Add(new TextBlock { Text = manualSetup, TextWrapping = TextWrapping.Wrap });
+            }
         }
         else if (setup == RedTeamSetup.NotInstalled)
         {

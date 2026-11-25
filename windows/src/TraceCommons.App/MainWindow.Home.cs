@@ -27,6 +27,7 @@ public sealed partial class MainWindow
     private DispatcherQueueTimer? _creditTimer;
     private TaskbarCredit? _taskbarCredit;
     private bool _homeLoading;
+    private bool _homeAccountReadFinished;
     private string? _insightsHeading;
     private string? _insightsIntro;
     private CommonsCredit? _homeCredit;
@@ -67,7 +68,8 @@ public sealed partial class MainWindow
                 _home.Showing = ViewModel.ShowingHome;
                 if (ViewModel.ShowingHome)
                 {
-                    _ = RefreshHomeAsync();
+                    ShowHome();
+                    RefreshHomeIfShown();
                 }
             }
         };
@@ -80,6 +82,7 @@ public sealed partial class MainWindow
         // Home's own reads follow the daemon while Home is on screen, as the
         // tray's do: the window opens on Home, so no page change would ever
         // ask for them (HomeStore.run on the Mac).
+        _host.Started += RefreshHomeIfShown;
         _host.StatusChanged += RefreshHomeIfShown;
         _host.QueueChanged += RefreshHomeIfShown;
 
@@ -172,7 +175,7 @@ public sealed partial class MainWindow
     {
         if (ViewModel.ShowingHome && !_closed)
         {
-            _ = RefreshHomeAsync();
+            _ = Observed.Run(RefreshHomeAsync(), "home-refresh");
         }
     }
 
@@ -192,6 +195,12 @@ public sealed partial class MainWindow
         _homeLoading = true;
         try
         {
+            if (_launchDaemonStart is { IsCompleted: false } launch)
+            {
+                await launch;
+                if (_closed) return;
+            }
+
             Task<DaemonResponse> credit = _host.CallAsync(HomeFacts.CommonsCreditSummaryMethod);
             Task<DaemonResponse> balance = _host.CallAsync(DaemonProtocol.Methods.NearAiBalance);
             Task<DaemonResponse> glance = _host.CallAsync(HomeFacts.InsightsGlanceMethod);
@@ -208,9 +217,6 @@ public sealed partial class MainWindow
             _homeManaged = managed.Result.IsError || managed.Result.Result is not JsonElement snapshot
                 ? null
                 : ManagedSnapshot.Parse(snapshot.GetRawText());
-            _homeNetwork = network.Result.IsError || network.Result.Result is not JsonElement summary
-                ? null
-                : InferenceLedger.ParseNetworkSummary(summary) is NetworkInferenceSummary { Readable: true } readable ? readable : null;
             _homeStatus = status.Result.ResultAs<DaemonStatus>();
             if (_homeStatus is { } reported)
             {
@@ -221,7 +227,12 @@ public sealed partial class MainWindow
             _homePending = pending.Result.ResultAs<PendingList>()?.Pending;
             _homeCredit = credit.Result.IsError ? null : CommonsCredit.Parse(credit.Result.Result);
             _homeGlance = glance.Result.IsError ? null : glance.Result.Result;
+            _homeNetwork = network.Result.IsError || network.Result.Result is not JsonElement summary
+                ? null
+                : InferenceLedger.ParseNetworkSummary(summary) is NetworkInferenceSummary { Readable: true } readable ? readable : null;
+            _homeAccountReadFinished = true;
             ObserveBalance(balance.Result);
+            ShowHome();
 
             // Every rollup read notes a settled credit arriving, as the Mac's
             // does (AppModel.recordHistoryRollup, AppModel.swift:2160-2174),
@@ -256,6 +267,11 @@ public sealed partial class MainWindow
         finally
         {
             _homeLoading = false;
+            if (!_homeAccountReadFinished && ViewModel.ShowingHome && !_closed)
+            {
+                _homeAccountReadFinished = true;
+                ShowHome();
+            }
         }
     }
 
@@ -305,7 +321,8 @@ public sealed partial class MainWindow
             _insightsIntro,
             ViewModel.MissionsShown && MissionCatalogueRead(),
             _homeManaged,
-            _homeNetwork);
+            _homeNetwork,
+            AccountReadPending: !_homeAccountReadFinished);
         PrivateInferenceCopy? copy = PrivateInferenceSurface.Copy();
         _homeModel = HomeOverviewModel.From(
             reads,

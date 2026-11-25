@@ -304,7 +304,8 @@ public class PrivateInferenceDestinationTests
         Assert.Contains("x:Name=\"TabInferenceLabel\" Grid.Column=\"0\" VerticalAlignment=\"Center\" />", markup, StringComparison.Ordinal);
         string shell = ShellSource("TraceCommons.App/MainWindow.Shell.cs");
         Assert.Contains("string title = MonitorWords.TabTitle(tab);", shell, StringComparison.Ordinal);
-        Assert.Contains("OnShowPrivateInference(this, new RoutedEventArgs());", shell, StringComparison.Ordinal);
+        Assert.Matches(@"case MonitorTab\.Inference:\s*ViewModel\.ShowPrivateInference\(\);\s*_ = Observed\.Run\(PreparePrivateInferenceTabAsync\(\)", shell);
+        Assert.Matches(@"case MonitorTab\.Traces:\s*ViewModel\.ShowQueue\(\);\s*_ = Observed\.Run\(StartContributionsCoreAsync\(\)", shell);
     }
 
     /// <summary>

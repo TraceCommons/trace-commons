@@ -39,16 +39,17 @@ public class ManifestBrandTests
         XDocument manifest = Manifest();
         string package = manifest.Descendants().Single(e => e.Name.LocalName == "Properties")
             .Elements().Single(e => e.Name.LocalName == "DisplayName").Value;
-        string tile = manifest.Descendants().Single(e => e.Name.LocalName == "VisualElements")
+        XElement app = manifest.Descendants().Single(e => e.Name.LocalName == "Application" && (string?)e.Attribute("Id") == "App");
+        string tile = app.Elements().Single(e => e.Name.LocalName == "VisualElements")
             .Attribute("DisplayName")!.Value;
-        string startup = manifest.Descendants().Single(e => e.Name.LocalName == "StartupTask")
+        string startup = app.Descendants().Single(e => e.Name.LocalName == "StartupTask")
             .Attribute("DisplayName")!.Value;
 
         Assert.Equal(MonitorWords.AppName, package);
         Assert.Equal(MonitorWords.AppName, tile);
         Assert.Equal(MonitorWords.AppName, startup);
 
-        string invite = manifest.Descendants().Single(e => e.Name.LocalName == "Protocol")
+        string invite = app.Descendants().Single(e => e.Name.LocalName == "Protocol")
             .Elements().Single(e => e.Name.LocalName == "DisplayName").Value;
         Assert.Equal(MonitorWords.AppName, invite);
     }

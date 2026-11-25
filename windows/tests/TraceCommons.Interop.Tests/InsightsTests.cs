@@ -220,14 +220,15 @@ public sealed class InsightsTests
     }
 
     [Fact]
-    public void FirstActivationShowsInsightsAndReachesFirstRunOnlyThroughTheStartupGate()
+    public void FirstActivationShowsHomeAndReachesFirstRunOnlyThroughTheStartupGate()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "shell-source", "TraceCommons.App", "MainWindow.xaml.cs.txt");
         string source = File.ReadAllText(path);
         int start = source.IndexOf("private void OnFirstActivated(", StringComparison.Ordinal);
         int end = source.IndexOf("private bool _contributionStartupAttempted", start, StringComparison.Ordinal);
         string activation = source[start..end];
-        Assert.Contains("ShowInsightsPaneAsync()", activation);
+        Assert.Contains("if (!ViewModel.HasSelectedPane) OpenTab(MonitorTab.Home);", activation);
+        Assert.DoesNotContain("ShowInsightsPaneAsync()", activation);
         // First run opens on its own for a device never set up, but only by
         // way of the contribution startup's gate: the activation itself never
         // starts the daemon or asks for roots.

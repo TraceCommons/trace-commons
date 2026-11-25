@@ -231,7 +231,7 @@ public class WindowRootLatchTests
 
     /// <summary>
     /// A device that has never finished first run opens it on the first
-    /// activation; one that has keeps the quiet landing on Insights.
+    /// activation; one that has keeps the quiet landing on Home.
     /// </summary>
     [Fact]
     public void FirstRunOpensOnItsOwnOnlyOnADeviceNeverSetUp()
@@ -241,7 +241,7 @@ public class WindowRootLatchTests
         string window = Shell("MainWindow.xaml.cs");
         int activated = window.IndexOf("private void OnFirstActivated", StringComparison.Ordinal);
         string handler = window[activated..window.IndexOf("private async Task OpenFirstRunOnFirstLaunchAsync", StringComparison.Ordinal)];
-        Assert.Matches(@"_ = Observed\.Run\(ShowInsightsPaneAsync\(\), ""insights-pane""\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
+        Assert.Matches(@"OpenTab\(MonitorTab\.Home\);\s*//[^\n]*\n(\s*//[^\n]*\n)*\s*if \(global::TraceCommons\.Interop\.FirstRun\.FirstRunOnLaunch\.Wanted\(OnboardingState\.Default\(\)\.AnyComplete\(\)\)\)", handler);
         Assert.Contains("_ = OpenFirstRunOnFirstLaunchAsync();", handler);
     }
 }

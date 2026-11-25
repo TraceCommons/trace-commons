@@ -421,7 +421,7 @@ public sealed partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Starts with local Insights, and starts the daemon quietly beside it.
+    /// Opens Home while the daemon starts in the background.
     /// The contribution screens keep the existing source declaration and
     /// enrollment gates: a daemon refused for undeclared sources is asked
     /// for them when one of those screens opens.
@@ -439,8 +439,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
-        // A device never set up opens first run on its own, over Insights;
+        // A tray action may already have selected a destination.
+        if (!ViewModel.HasSelectedPane) OpenTab(MonitorTab.Home);
+        // A device never set up opens first run on its own, over the current pane;
         // one that has finished it keeps the quiet landing.
         if (global::TraceCommons.Interop.FirstRun.FirstRunOnLaunch.Wanted(OnboardingState.Default().AnyComplete()))
         {
@@ -449,7 +450,7 @@ public sealed partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Runs the contribution startup's gates without leaving Insights: a daemon
+    /// Runs the contribution startup's gates without changing panes: a daemon
     /// refused for undeclared sources opens first run, a started daemon that is
     /// not set up opens it too.
     /// </summary>
@@ -458,7 +459,7 @@ public sealed partial class MainWindow : Window
         try
         {
             // The core, not the wrapper: this start is automatic and a failed one
-            // must not move the person off Insights onto a blank Traces pane.
+            // must not move the person to a blank Traces pane.
             await StartContributionsCoreAsync();
         }
         catch (Exception exception)
@@ -467,6 +468,8 @@ public sealed partial class MainWindow : Window
             CrashGuard.Log.Record("first-launch", exception);
         }
     }
+
+    private Task<bool>? _launchDaemonStart;
 
     /// <summary>
     /// The Mac starts its daemon at launch and reads its feature flags then
@@ -488,7 +491,7 @@ public sealed partial class MainWindow : Window
             return;
         }
 #endif
-        _ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
+        _launchDaemonStart = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());
     }
 
 #if DEBUG
@@ -1141,10 +1144,7 @@ public sealed partial class MainWindow : Window
         await ViewModel.ResumeAsync();
     }
 
-    private async void OnShowQueue(object sender, RoutedEventArgs e)
-    {
-        if (await StartContributionsAsync()) ViewModel.ShowQueue();
-    }
+    private void OnShowQueue(object sender, RoutedEventArgs e) => OpenTab(MonitorTab.Traces);
 
     /// <summary>
     /// Switches to History, creating the view the first time and keeping it
@@ -1162,11 +1162,19 @@ public sealed partial class MainWindow : Window
     /// IPC calls as soon as it loads, and a contributor who never opens
     /// History should not pay for them at launch.
     /// </remarks>
-    private async void OnShowHistory(object sender, RoutedEventArgs e)
+    private void OnShowHistory(object sender, RoutedEventArgs e)
     {
-        if (!await StartContributionsAsync()) return;
-        HistoryPane.Content ??= NewHistoryView();
         ViewModel.ShowHistory();
+        _ = Observed.Run(PrepareHistoryAsync(), "history-startup");
+    }
+
+    private async Task PrepareHistoryAsync()
+    {
+        await StartContributionsCoreAsync();
+        if (!_closed && _host.IsRunning && ViewModel.ShowingHistory)
+        {
+            HistoryPane.Content ??= NewHistoryView();
+        }
     }
 
     /// <summary>
@@ -1483,7 +1491,7 @@ public sealed partial class MainWindow : Window
         // Overview's credit tile is Home's (InsightsView.swift:177-182): hand
         // Insights what Home last read, then read Home's figures again.
         ShowInsightsCreditTile();
-        _ = RefreshHomeAsync();
+        _ = Observed.Run(RefreshHomeAsync(), "home-refresh");
         await ((InsightsView)InsightsPane.Content).ActivateAsync();
     }
 
@@ -1557,10 +1565,13 @@ public sealed partial class MainWindow : Window
     ///
     /// Created lazily because it makes an IPC call as soon as it loads.
     /// </remarks>
-    private async void OnShowPrivateInference(object sender, RoutedEventArgs e)
+    private async Task PreparePrivateInferenceTabAsync()
     {
-        if (!await StartContributionsAsync()) return;
-        ShowPrivateInferencePane();
+        await StartContributionsCoreAsync();
+        if (!_closed && _host.IsRunning && ViewModel.ShowingPrivateInference)
+        {
+            ShowPrivateInferencePane();
+        }
     }
 
     private PrivateInferenceView EnsurePrivateInferencePage()

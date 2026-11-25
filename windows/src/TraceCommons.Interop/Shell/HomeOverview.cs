@@ -89,7 +89,8 @@ public sealed record HomeOverviewModel(
     HomeNotice? NoCredit = null,
     HomeCard? Catalogue = null,
     HomePrivateAI? PrivateAI = null,
-    HomeAccountSignIn? AccountSignIn = null)
+    HomeAccountSignIn? AccountSignIn = null,
+    bool AccountReadPending = false)
 {
     /// <summary>The figure rules, the core's (<c>tc_count_figure</c>, <c>tc_credit_figure</c>), handed in so tests need no library.</summary>
     public sealed record Figures(Func<ulong, string?> Count, Func<double, string?> Credit, Func<long?, byte?, string> Amount);
@@ -110,7 +111,8 @@ public sealed record HomeOverviewModel(
         string? InsightsIntro,
         bool CatalogueRead = false,
         ManagedSnapshot? Managed = null,
-        NetworkInferenceSummary? Network = null);
+        NetworkInferenceSummary? Network = null,
+        bool AccountReadPending = false);
 
     /// <summary>The data use that earns credit (<c>SentTracesTrainingState.scope</c>).</summary>
     public const string ModelTrainingScope = "model_training";
@@ -221,7 +223,7 @@ public sealed record HomeOverviewModel(
         // offers one (HomeFacts.BalanceOffersSignIn). The account-session
         // half has no sign-in on Windows, so it draws nothing here.
         HomeAccountSignIn? accountSignIn = null;
-        if (reads.Balance is NearAiBalance balance && HomeFacts.BalanceOffersSignIn(balance.State)
+        if (!reads.AccountReadPending && reads.Balance is NearAiBalance balance && HomeFacts.BalanceOffersSignIn(balance.State)
             && reads.Managed is ManagedSnapshot snapshot
             && HomeFacts.CardHeading(home("account_no_data")) is string noData
             && HomeFacts.CardHeading(snapshot.Text("sign_in_near_ai")) is string accountSignInWord)
@@ -233,14 +235,15 @@ public sealed record HomeOverviewModel(
             home("section_traces"),
             home("section_account"),
             traceTiles,
-            accountTiles,
+            reads.AccountReadPending ? Array.Empty<HomeTile>() : accountTiles,
             heroes,
             bars,
             insightsLine,
             noCredit,
             catalogue,
             privateAI,
-            accountSignIn);
+            accountSignIn,
+            reads.AccountReadPending);
     }
 
     /// <summary>
@@ -258,6 +261,7 @@ public sealed record HomeOverviewModel(
         && Catalogue == other.Catalogue
         && Equals(PrivateAI, other.PrivateAI)
         && AccountSignIn == other.AccountSignIn
+        && AccountReadPending == other.AccountReadPending
         && TraceTiles.SequenceEqual(other.TraceTiles)
         && AccountTiles.SequenceEqual(other.AccountTiles)
         && Heroes.SequenceEqual(other.Heroes)

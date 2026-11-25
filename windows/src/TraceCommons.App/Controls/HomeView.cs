@@ -208,7 +208,9 @@ public sealed class HomeView : UserControl
         }
 
         AddSection(model.TracesHeading, model.TraceTiles, HomeLink.Traces, balanceIndex: -1, model.NoCredit is HomeNotice notice ? BuildNotice(notice) : null);
-        AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2, accessory: model.AccountSignIn is HomeAccountSignIn signIn ? BuildAccountSignIn(signIn) : null);
+        AddSection(model.AccountHeading, model.AccountTiles, HomeLink.PrivateAI, balanceIndex: 2,
+            underHeading: model.AccountReadPending ? BuildAccountLoading() : null,
+            accessory: model.AccountSignIn is HomeAccountSignIn signIn ? BuildAccountSignIn(signIn) : null);
 
         foreach (HomeHero hero in model.Heroes)
         {
@@ -259,6 +261,11 @@ public sealed class HomeView : UserControl
             _column.Children.Add(underHeading);
         }
 
+        if (tiles.Count == 0)
+        {
+            return;
+        }
+
         var grid = new Grid { ColumnSpacing = HomeTrayInks.Measures.S3 };
         for (int i = 0; i < tiles.Count; i++)
         {
@@ -281,6 +288,22 @@ public sealed class HomeView : UserControl
         }
 
         _column.Children.Add(grid);
+    }
+
+    private static UIElement BuildAccountLoading()
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = HomeTrayInks.Measures.S3 };
+        var ring = new ProgressRing { IsActive = true, Width = 16, Height = 16, VerticalAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetAccessibilityView(ring, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        row.Children.Add(ring);
+        row.Children.Add(new TextBlock
+        {
+            Text = MonitorShellCopy.Section("history_actions", "checking_account"),
+            Style = (Style)Application.Current.Resources["TcCaptionTextStyle"],
+            Foreground = ThemeBrushes.Get("TcInkSecondaryBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        return row;
     }
 
     /// <summary>

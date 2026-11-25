@@ -541,9 +541,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void ShowPrivateInference() => SetPane(MainPane.PrivateInference);
 
+    public bool HasSelectedPane { get; private set; }
 
     private void SetPane(MainPane pane)
     {
+        HasSelectedPane = true;
         if (_pane == pane)
         {
             return;

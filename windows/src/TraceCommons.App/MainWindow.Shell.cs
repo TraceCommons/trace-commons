@@ -290,10 +290,12 @@ public sealed partial class MainWindow
                 ViewModel.ShowHome();
                 break;
             case MonitorTab.Inference:
-                OnShowPrivateInference(this, new RoutedEventArgs());
+                ViewModel.ShowPrivateInference();
+                _ = Observed.Run(PreparePrivateInferenceTabAsync(), "private-inference-startup");
                 break;
             case MonitorTab.Traces:
-                OnShowQueue(this, new RoutedEventArgs());
+                ViewModel.ShowQueue();
+                _ = Observed.Run(StartContributionsCoreAsync(), "traces-startup");
                 break;
             case MonitorTab.Insights:
                 _ = Observed.Run(ShowInsightsPaneAsync(), "insights-pane");
