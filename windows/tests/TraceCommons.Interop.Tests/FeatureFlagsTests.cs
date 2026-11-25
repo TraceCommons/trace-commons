@@ -545,7 +545,7 @@ public class FeatureFlagsTests
         Assert.True(at > 0);
         string first = window.Substring(at, window.IndexOf("\n    }\n", at, StringComparison.Ordinal) - at);
         int sample = first.IndexOf("if (_host.IsSample)", StringComparison.Ordinal);
-        int launch = first.IndexOf("_ = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());", StringComparison.Ordinal);
+        int launch = first.IndexOf("_launchDaemonStart = LaunchDaemonStart.StartQuietlyAsync(() => _host.StartAsync());", StringComparison.Ordinal);
         Assert.True(sample > 0 && launch > sample, "the launch start sits after the sample return");
 
         // A contribution start pressed while that one runs joins it; the roots

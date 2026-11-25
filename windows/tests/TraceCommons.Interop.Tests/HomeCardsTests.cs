@@ -147,10 +147,26 @@ public class HomeAccountSignInTests
 
     private static NearAiBalance Balance(string state) => new(state, null, null, null, null, null);
 
-    private static HomeOverviewModel Build(NearAiBalance? balance, ManagedSnapshot? managed = null, CommonsCredit? credit = null) =>
+    private static HomeOverviewModel Build(NearAiBalance? balance, ManagedSnapshot? managed = null, CommonsCredit? credit = null, bool accountReadPending = false) =>
         HomeOverviewModel.From(
-            new HomeOverviewModel.Reads(new DaemonStatus(), null, credit, balance, null, null, null, false, false, null, null, null, false, managed ?? Managed),
+            new HomeOverviewModel.Reads(new DaemonStatus(), null, credit, balance, null, null, null, false, false, null, null, null, false, managed ?? Managed, AccountReadPending: accountReadPending),
             MonitorShellCopy.Top, k => MonitorShellCopy.Section("home_history", k), "Balance", Figures);
+
+    [Fact]
+    public void PendingAccountShowsLoadingUntilTheFirstReadCompletes()
+    {
+        HomeOverviewModel loading = Build(null, accountReadPending: true);
+        HomeOverviewModel signedOut = Build(Balance("no_session"));
+
+        Assert.True(loading.AccountReadPending);
+        Assert.Empty(loading.AccountTiles);
+        Assert.Null(loading.AccountSignIn);
+        Assert.NotEmpty(loading.TraceTiles);
+        Assert.False(signedOut.AccountReadPending);
+        Assert.NotEmpty(signedOut.AccountTiles);
+        Assert.NotNull(signedOut.AccountSignIn);
+        Assert.False(loading.Same(signedOut));
+    }
 
     [Theory]
     [InlineData("no_session")]

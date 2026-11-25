@@ -21,6 +21,25 @@ public sealed class RedTeamEnableTests
         }
     }
 
+    [Theory]
+    [InlineData("not_in_hyper_v_administrators", true, false, true)]
+    [InlineData("not_in_hyper_v_administrators", false, false, true)]
+    [InlineData("not_in_hyper_v_administrators", false, true, false)]
+    [InlineData("hyper_v_missing", true, false, false)]
+    [InlineData("home_edition", false, false, false)]
+    [InlineData(null, false, false, false)]
+    public void GroupInstructionsFollowTheReportedPermissionProblem(string? problem, bool offerEnable, bool installed, bool expected)
+    {
+        string tool = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            tool = "red_team",
+            installed,
+            host_problem = problem,
+            enable_offered = offerEnable,
+        });
+        Assert.Equal(expected, Snapshot(tool).RedTeamNeedsHyperVGroup);
+    }
+
     [Fact]
     public void WindowsHomeIsExplainedAndOffersNoButton()
     {
