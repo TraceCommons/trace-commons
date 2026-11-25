@@ -485,6 +485,7 @@ pub(crate) fn spec_for(
         ironwire,
         env,
         near: near_environment(),
+        trust_forget_command: Some("near-ai red-team trust forget".into()),
     })
 }
 
@@ -611,6 +612,67 @@ pub fn run_tool(name: &str) -> i32 {
 pub fn run_tool(_name: &str) -> i32 {
     eprintln!("Red Team sessions are only supported on Apple silicon Macs and Windows.");
     1
+}
+
+/// What `red-team trust` was asked to do.
+pub enum TrustAction {
+    List,
+    Forget(String),
+}
+
+/// `red-team trust list|forget`: the user's trusted Gateway builds. Returns
+/// the stdout lines, the stderr lines and the exit code. Every line that
+/// comes from the store file or a store error is already sanitized by `rts`.
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+pub fn trust_command(
+    action: TrustAction,
+    env: &[(String, String)],
+) -> (Vec<String>, Vec<String>, i32) {
+    use rts::attest::{prompt::store_warning_line, trusted};
+    let Some(home) = rts::install::home_in(env, cfg!(windows)) else {
+        return (vec![], vec!["[rts] no home directory".into()], 1);
+    };
+    match action {
+        TrustAction::List => {
+            let (store, warning) = trusted::load(Some(&home));
+            let mut out = Vec::new();
+            if let Some(w) = warning {
+                out.push(store_warning_line(&w));
+            }
+            out.extend(trusted::list_lines(&store));
+            (out, vec![], 0)
+        }
+        TrustAction::Forget(prefix) => match trusted::forget(&home, &prefix) {
+            Ok(removed) => (
+                removed
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "forgot {} {} {}",
+                            trusted::env_name(e.environment),
+                            e.role.as_str(),
+                            hex::encode(e.sha256)
+                        )
+                    })
+                    .collect(),
+                vec![],
+                0,
+            ),
+            Err(e) => (vec![], vec![store_warning_line(&e)], 1),
+        },
+    }
+}
+
+#[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
+pub fn trust_command(
+    _action: TrustAction,
+    _env: &[(String, String)],
+) -> (Vec<String>, Vec<String>, i32) {
+    (
+        vec![],
+        vec!["Red Team sessions are only supported on Apple silicon Macs and Windows.".into()],
+        1,
+    )
 }
 
 #[cfg(test)]

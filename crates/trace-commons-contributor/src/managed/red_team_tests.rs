@@ -555,3 +555,92 @@ fn the_ledger_is_in_the_managed_route_home() {
         .join(ctx.session.id.to_string());
     assert_eq!(spec.ironwire.home, Some(expected_home));
 }
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+#[test]
+fn the_attestation_policy_feed_keys_are_compiled_in() {
+    let hex: Vec<String> = rts::attest::feed::FEED_KEYS
+        .iter()
+        .map(hex::encode)
+        .collect();
+    assert_eq!(
+        hex,
+        [
+            "7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c",
+            "39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17",
+        ]
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn the_gateway_prompt_names_the_near_ai_forget_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ConfigStore::open(dir.path().join("state")).unwrap();
+    let ctx = test_context(dir.path(), vec![], "sk-red-team-secret");
+    let spec = spec_for(&store, &ctx, None).unwrap();
+    assert_eq!(
+        spec.trust_forget_command.as_deref(),
+        Some("near-ai red-team trust forget")
+    );
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+fn trust_env(home: &Path) -> Vec<(String, String)> {
+    let h = home.to_string_lossy().to_string();
+    vec![("HOME".into(), h.clone()), ("USERPROFILE".into(), h)]
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+#[test]
+fn red_team_trust_forget_removes_one_build_and_lists_the_rest() {
+    use rts::attest::{Role, trusted};
+    let dir = tempfile::tempdir().unwrap();
+    let env = trust_env(dir.path());
+    let home = rts::install::home_in(&env, cfg!(windows)).unwrap();
+    let entry = |byte: u8| trusted::TrustedEntry {
+        environment: near_environment(),
+        role: Role::Gateway,
+        sha256: [byte; 32],
+        app_name: None,
+        trusted_at: "2026-11-25".into(),
+    };
+    trusted::add(&home, entry(0xf4)).unwrap();
+    trusted::add(&home, entry(0xa1)).unwrap();
+    let (out, err, code) = trust_command(TrustAction::Forget("f4f4f4f4".into()), &env);
+    assert_eq!(code, 0, "{err:?}");
+    assert_eq!(
+        out,
+        vec![format!(
+            "forgot {} gateway {}",
+            trusted::env_name(near_environment()),
+            "f4".repeat(32)
+        )]
+    );
+    let (out, _, code) = trust_command(TrustAction::List, &env);
+    assert_eq!(code, 0);
+    let joined = out.join("\n");
+    assert!(joined.contains(&"a1".repeat(4)), "{joined}");
+    assert!(!joined.contains("f4f4f4f4"), "{joined}");
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+#[test]
+fn red_team_trust_list_never_prints_store_text_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = trust_env(dir.path());
+    let home = rts::install::home_in(&env, cfg!(windows)).unwrap();
+    let path = rts::install::trusted_composes_path(&home);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"version\":1,\"entries\":[],\"\\u001b[2J\":1}").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let (out, err, _) = trust_command(TrustAction::List, &env);
+    assert!(!out.is_empty());
+    for line in out.iter().chain(err.iter()) {
+        assert!(!line.contains('\u{1b}'), "{line:?}");
+    }
+}
