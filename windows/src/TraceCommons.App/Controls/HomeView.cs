@@ -672,7 +672,7 @@ public sealed class HomeView : UserControl
                 Background = new SolidColorBrush(HeroColor(HeroPart.PillFill, ground, highContrast)),
                 BorderBrush = highContrast ? ink : null,
                 BorderThickness = new Thickness(highContrast ? 1 : 0),
-                CornerRadius = new CornerRadius(HomeTrayInks.Measures.PillRadius),
+                CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
                 Padding = new Thickness(HeroCard.PillPaddingX, HeroCard.PillPaddingY, HeroCard.PillPaddingX, HeroCard.PillPaddingY),
                 Margin = new Thickness(0, HomeTrayInks.Measures.S1, 0, 0),
                 HorizontalAlignment = HorizontalAlignment.Left,
@@ -688,7 +688,7 @@ public sealed class HomeView : UserControl
 
         card.Children.Add(words);
 
-        // The whole card is one button; the pill draws the action, it is not
+        // The whole card is one button; the label draws the action, it is not
         // a second control (HeroCard.swift:84-96).
         var button = new Button
         {

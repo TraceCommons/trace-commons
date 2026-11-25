@@ -23,7 +23,7 @@ namespace TraceCommons.App.Controls;
 /// <summary>
 /// The graph under the Traces tab (<c>TracesGraphFooter</c>,
 /// MonitorShell.swift:188-346; MonitorWindowView.swift:400-418): the
-/// legend, the shared-over-kept dot matrix and six pills round the range.
+/// legend, the shared-over-kept dot matrix and six buttons around the range.
 /// Every decision and every number is <see cref="TracesGraphState"/>'s and
 /// <see cref="BarGraph"/>'s; this draws them. Every word is the core's
 /// (<see cref="TracesGraphWords"/>).
@@ -96,43 +96,33 @@ internal sealed class TracesGraphFooter : UserControl
         graph.SizeChanged += (_, _) => LayoutColumns();
         stack.Children.Add(graph);
 
-        // The pills (:234-269).
-        var pills = new Grid { ColumnSpacing = 6 };
+        var toolbar = new Grid { ColumnSpacing = 6 };
         foreach (GridLength width in new[] { GridLength.Auto, GridLength.Auto, GridLength.Auto, new GridLength(1, GridUnitType.Star), GridLength.Auto, GridLength.Auto, GridLength.Auto })
         {
-            pills.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
+            toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
         }
 
-        _previous = Pill(_words.Previous, "‹", () => { _state.Previous(); Changed(); });
-        _focus = Pill(_words.Focus, null, () => FocusRequested?.Invoke(), _focusGlyph);
-        _zoomOut = Pill(_words.ZoomOut, _words.ZoomOutGlyph, () => { _state.ZoomOut(); Changed(); });
-        _zoomIn = Pill(_words.ZoomIn, _words.ZoomInGlyph, () => { _state.ZoomIn(); Changed(); });
-        _next = Pill(_words.Next, "›", () => { _state.Next(); Changed(); });
-        _jump = Pill(_words.JumpToNow, _words.JumpToNowGlyph, () => { _state.JumpToNow(); Changed(); });
+        _previous = GraphButton(_words.Previous, "‹", () => { _state.Previous(); Changed(); });
+        _focus = GraphButton(_words.Focus, null, () => FocusRequested?.Invoke(), _focusGlyph);
+        _zoomOut = GraphButton(_words.ZoomOut, _words.ZoomOutGlyph, () => { _state.ZoomOut(); Changed(); });
+        _zoomIn = GraphButton(_words.ZoomIn, _words.ZoomInGlyph, () => { _state.ZoomIn(); Changed(); });
+        _next = GraphButton(_words.Next, "›", () => { _state.Next(); Changed(); });
+        _jump = GraphButton(_words.JumpToNow, _words.JumpToNowGlyph, () => { _state.JumpToNow(); Changed(); });
 
-        // The range capsule: ink 0.07, label type, primary text (:243-252).
         _range.Style = (Style)Application.Current.Resources["TcCaptionTextStyle"];
         _range.FontSize = 12;
         _range.FontWeight = FontWeights.Medium;
+        _range.Margin = new Thickness(8, 0, 8, 0);
         // Built once: set again on a live theme switch (ThemeBrushes).
         ThemeBrushes.Bind(_range, TextBlock.ForegroundProperty, "TcInkPrimaryBrush");
-        var rangePill = new Grid
-        {
-            Height = 26,
-            Padding = new Thickness(8, 0, 8, 0),
-            CornerRadius = new CornerRadius(13),
-        };
-        rangePill.Children.Add(_range);
-        _rangeFill = rangePill;
-
         int column = 0;
-        foreach (FrameworkElement pill in new FrameworkElement[] { _previous, _focus, _zoomOut, rangePill, _zoomIn, _next, _jump })
+        foreach (FrameworkElement item in new FrameworkElement[] { _previous, _focus, _zoomOut, _range, _zoomIn, _next, _jump })
         {
-            Grid.SetColumn(pill, column++);
-            pills.Children.Add(pill);
+            Grid.SetColumn(item, column++);
+            toolbar.Children.Add(item);
         }
 
-        stack.Children.Add(pills);
+        stack.Children.Add(toolbar);
 
         // Insets: the window's main inset across, s5 above and below (MonitorWindowView.swift:408-409).
         var body = new Grid { Padding = new Thickness(16, 10, 16, 10) };
@@ -157,7 +147,6 @@ internal sealed class TracesGraphFooter : UserControl
         Render();
     }
 
-    private readonly Grid _rangeFill;
 
     /// <summary>
     /// The History page the bars draw from: the last page of a read that
@@ -395,10 +384,9 @@ internal sealed class TracesGraphFooter : UserControl
         }
     }
 
-    /// <summary>The inks that follow the theme: the hairline and the range capsule's fill.</summary>
+    /// <summary>Refreshes the graph and focus glyph inks.</summary>
     private void Paint()
     {
-        _rangeFill.Background = new SolidColorBrush(Ink("ink", 0.07));
         _focusGlyph.Foreground = new SolidColorBrush(Ink(_face?.FocusInk ?? "graphFocusOff"));
         foreach ((Ellipse dot, string token) in _dots)
         {
@@ -483,8 +471,8 @@ internal sealed class TracesGraphFooter : UserControl
         return cell;
     }
 
-    /// <summary>A 30 by 26 pill with a glyph; named with its core word, the glyph never read (Controls.swift:372-416).</summary>
-    private static Button Pill(string name, string? glyph, Action onClick, FontIcon? icon = null)
+    /// <summary>A compact graph control with an accessible label and a glyph.</summary>
+    private static Button GraphButton(string name, string? glyph, Action onClick, FontIcon? icon = null)
     {
         var button = new Button
         {
@@ -494,7 +482,7 @@ internal sealed class TracesGraphFooter : UserControl
             MinHeight = 0,
             Padding = new Thickness(0),
             Style = (Style)Application.Current.Resources["TcSecondaryButtonStyle"],
-            CornerRadius = new CornerRadius(13),
+            CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
             Content = icon ?? new FontIcon { Glyph = Symbol(glyph ?? string.Empty), FontSize = 11 },
         };
         AutomationProperties.SetName(button, name);

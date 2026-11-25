@@ -91,7 +91,7 @@ public class ShellWordingTests
             // the queue-expiry sentence no control drew any more (W17 review F7).
             { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 2 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
-            { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
+            { "TraceCommons.App/ViewModels/MainViewModel.cs", 16 },
             // The approval failure sentence is shared with the tested decision factory.
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 9 },
             { "TraceCommons.App/ViewModels/PreviewDecision.cs", 2 },

@@ -1672,7 +1672,7 @@ public sealed class SkillCover : Grid
             return new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb((byte)(SkillCoverArt.MarkOpacity * 255), 0, 0, 0)),
-                CornerRadius = new CornerRadius(99),
+                CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
                 Padding = new Thickness(6, 2, 6, 2),
                 Margin = new Thickness(8),
                 HorizontalAlignment = HorizontalAlignment.Left,

@@ -526,7 +526,7 @@ public sealed partial class MainWindow : Window
         {
             // A start failure that is not "session roots undeclared" -- for
             // example ViewModel.StatusText's "another instance may already be
-            // running" -- must still reach the contributor: Queue's header chip
+            // running" -- must still reach the contributor: Queue's status row
             // shows that message, so a click from any pane navigates there
             // instead of doing nothing.
             ViewModel.ShowQueue();

@@ -938,8 +938,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string StatusText
     {
         get => _statusText;
-        private set => Set(ref _statusText, value);
+        private set
+        {
+            if (Set(ref _statusText, value))
+            {
+                Raise(nameof(HasStatusText));
+            }
+        }
     }
+
+    public bool HasStatusText => StatusText.Length > 0;
 
     public bool IsBusy
     {
@@ -1734,10 +1742,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _decisionsOwed = status.IsError ? null : status.ResultAs<DaemonStatus>()?.DecisionsOwed;
             RaiseShield();
 
-            // DRAFT, NEEDS APPROVAL (2026-11-04).
-            StatusText = status.IsError
-                ? "Status unavailable"
-                : DescribeQueue(Pending.Count);
+            // The Traces badge already shows the waiting count.
+            StatusText = status.IsError ? "Status unavailable" : string.Empty;
 
             // The banner comes out of the status read this method already
             // makes. An error frame leaves the previous banner rather than
@@ -2102,13 +2108,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Raise(nameof(IsPaused));
         Raise(nameof(IsWatching));
     }
-
-    private static string DescribeQueue(int count) => count switch
-    {
-        0 => "No traces waiting for review.",
-        1 => "1 trace waiting for review.",
-        _ => $"{count} traces waiting for review.",
-    };
 
     /// <summary>
     /// Rewrites the collection in place.
