@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enterprise Gateway flow</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f3f2f7; --card: #ffffff; --ink: #17151f; --muted: #6a6676; --line: #dedbe6;
+    --purple: #6d14f3; --blue: #0091fd; --chip: #efeaff; --warn: #c2410c; --term: #0f1117; --termink: #d7dae0;
+    --placeholder: #fff6e5; --placeholder-line: #e8a33d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d0c12; --card: #1a1822; --ink: #f1eff7; --muted: #a29eb0; --line: #2e2b3a;
+      --chip: #2a2140; --placeholder: #2b2214; --placeholder-line: #b07a25;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { padding: 20px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 4px; font-size: 20px; }
+  header p { margin: 0; color: var(--muted); max-width: 70ch; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 20px 16px; }
+  @media (min-width: 1100px) { main { grid-template-columns: minmax(420px, 46%) 1fr; padding: 24px 28px; } }
+  .chart { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; align-self: start; }
+  @media (min-width: 1100px) { .chart { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; } }
+  .chart img { width: 100%; display: block; background: #fff; border-radius: 8px; }
+  .chart p { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 28px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .promises { margin: 10px 0 0; padding-left: 20px; color: var(--muted); max-width: 90ch; }
+  .promises .broken { color: var(--warn); }
+  .region-note { color: var(--muted); margin: -4px 0 12px; font-size: 13px; max-width: 70ch; }
+  .frames { display: flex; flex-wrap: wrap; gap: 18px; }
+  .frame { width: 100%; max-width: 300px; }
+  .frame > b { display: block; font-size: 12px; color: var(--purple); margin-bottom: 6px; font-weight: 650; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .frame > b { color: #b18cff; } }
+  .win { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 8px 24px rgb(20 10 40 / .08); min-height: 300px; display: flex; flex-direction: column; }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+  .bar span { margin-left: 6px; }
+  .body { padding: 14px; display: flex; flex-direction: column; gap: 10px; flex: 1; }
+  .body h3 { margin: 0; font-size: 16px; }
+  .body p { margin: 0; color: var(--muted); font-size: 13px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .row small { color: var(--muted); }
+  .pill { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; font-size: 12px; }
+  .pill i { font-style: normal; padding: 3px 9px; color: var(--muted); }
+  .pill i.on { background: var(--purple); color: #fff; }
+  .pill i.off { opacity: .4; text-decoration: line-through; }
+  .chip { font-size: 11px; background: var(--chip); color: var(--ink); border-radius: 999px; padding: 2px 8px; }
+  .spacer { flex: 1; }
+  button { font: inherit; font-weight: 600; border-radius: 8px; padding: 8px 12px; border: 0; background: var(--purple); color: #fff; }
+  button.quiet { background: none; color: var(--purple); border: 1px solid var(--line); }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  .ph { border: 1px dashed var(--placeholder-line); background: var(--placeholder); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--ink); }
+  .ph::before { content: "Placeholder, wording not approved: "; font-weight: 650; }
+  .spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--purple); }
+  .term { background: var(--term); color: var(--termink); font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace; padding: 12px; border-radius: 12px; min-height: 160px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .term .p { color: #8b93a7; }
+  .term .ok { color: #6ee7a8; }
+  .term .bad { color: #fca5a5; }
+  .console .bar { background: linear-gradient(90deg, var(--purple), var(--blue)); color: #fff; border: 0; }
+  .console .bar .dot { background: rgb(255 255 255 / .5); }
+  .kpi { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .kpi div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .kpi strong { display: block; font-size: 17px; }
+  .kpi small { color: var(--muted); font-size: 11px; }
+  .assume { margin-top: 28px; color: var(--muted); font-size: 13px; max-width: 75ch; }
+  .assume li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Enterprise Near AI Gateway: seats in an org</h1>
+  <p>One member's Mac and one server seat through the life of an org, from the design in <code>docs/superpowers/specs/2026-11-11-enterprise-gateway-design.md</code>. Each frame's title is a chart state. The member frames show only the controls the model gives for that state. </p>
+  <ol class="promises">
+    <li>Joining never carries your Automatic over. Holds.</li>
+    <li>Your traces leave only by your act. Holds.</li>
+    <li>If the org forbids Automatic, nothing of yours goes automatically. Holds after fix: the claim carries the policy.</li>
+    <li>Sharing off means no new credit. Holds.</li>
+    <li>Removal stops uploads, including one already in flight. Holds.</li>
+    <li>Leaving the NEAR AI org stops uploads by your next sign-in. Holds.</li>
+    <li>You can take back what you gave the org. Holds.</li>
+    <li>What you earned personally stays withdrawable. Holds after fix: Before you joined.</li>
+    <li>Servers share only under the org's consent. Holds.</li>
+    <li>The org closes cleanly. Holds.</li>
+    <li>A submitted trace eventually lands. Holds, with two conditions you added: policy settles, and your sign-in lasts.</li>
+  </ol>
+</header>
+<main>
+  <aside class="chart">
+    <h2>Checked chart</h2>
+    <img src="../enterprise_seat.svg" alt="Statechart with four regions: your Mac, your latest trace, the server, and the org">
+    <p>Drawn from all 1,217,568 model states, merged by the render view in render.mts. Redraw with chart.sh; do not edit by hand. Hidden steps: choosing Ask or Automatic, the Mac fetching policy, NEAR AI removing or re-adding you, the admin forbidding or allowing Automatic or accepting server terms, settlement, the server's own uploads, and the claim request failing. All of them still run in the model.</p>
+  </aside>
+  <section>
+    <h2>Your Mac</h2>
+    <p class="region-note">Near AI Gateway on the member's Mac. Folder modes use the shipped pill: Ask, Automatic, Never.</p>
+    <div class="frames">
+
+      <div class="frame" data-state="Personal"><b>Personal</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <h3>Traces</h3>
+          <div class="row">~/code/api <span class="pill"><i class="on">Ask</i><i>Automatic</i><i>Never</i></span></div>
+          <div class="row">Held trace, 14 min ago <small>Held</small></div>
+          <div class="row">Credited trace <small>Credited to you</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button>Submit</button><button class="quiet">Withdraw</button></div>
+          <div class="buttons"><button class="quiet">Join your organization</button></div>
+        </div></div></div>
+
+      <div class="frame" data-state="Joining your org"><b>Joining your org</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <h3>Joining Acme Robotics</h3>
+          <p>Checking your NEAR AI organization membership.</p>
+          <div class="row"><span class="spin"></span><small>Waiting for the server…</small></div>
+          <div class="ph">what joining changes: folders back to Ask, new credit goes to the org (decision 9)</div>
+          <div class="row"><small>Before you joined</small></div>
+          <div class="row">Credited trace <small>Credited to you</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button class="quiet">Withdraw</button></div>
+        </div></div></div>
+
+      <div class="frame" data-state="Managed"><b>Managed</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <div class="ph">managed-by row: "Managed by Acme Robotics; credit goes to the org" (decision 9)</div>
+          <h3>Traces</h3>
+          <div class="row">~/code/api <span class="pill"><i class="on">Ask</i><i>Automatic</i><i>Never</i></span></div>
+          <div class="row">Held trace, 3 min ago <small>Held</small></div>
+          <div class="row">Credited trace <small>Credited to Acme Robotics</small></div>
+          <div class="row">Trace being sent <small>Waiting for the server…</small></div>
+          <div class="row">Data uses <small>Set by your organization</small></div>
+          <div class="row"><small>Before you joined</small></div>
+          <div class="row">Credited trace <small>Credited to you</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button>Submit</button><button class="quiet">Withdraw</button></div>
+        </div></div></div>
+
+      <div class="frame" data-state="Managed, signed out"><b>Managed, signed out</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <h3>Sign in again</h3>
+          <div class="ph">why sign-in is needed again (decision 9)</div>
+          <div class="row">~/code/api <span class="pill"><i class="on">Ask</i><i>Automatic</i><i>Never</i></span></div>
+          <div class="row">Held trace <small>Held</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button>Sign in again</button></div>
+        </div></div></div>
+
+      <div class="frame" data-state="Removed, can withdraw"><b>Removed, can withdraw</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <div class="ph">removal notice and window length (decisions 6 and 9)</div>
+          <h3>Traces you submitted</h3>
+          <div class="row">Credited trace <small>Credited to Acme Robotics</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button class="quiet">Withdraw</button></div>
+        </div></div></div>
+
+      <div class="frame" data-state="Removed"><b>Removed</b><div class="win">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Near AI Gateway</span></div>
+        <div class="body">
+          <div class="ph">removed state: how to withdraw through the operator (decisions 6 and 9)</div>
+          <div class="row"><small>Before you joined</small></div>
+          <div class="row">Credited trace <small>Credited to you</small></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button class="quiet">Withdraw</button></div>
+        </div></div></div>
+    </div>
+
+    <h2>Your latest trace</h2>
+    <p class="region-note">Shown inside the Traces list above, not as screens of their own: Held, Sending, Credited to you, Credited to the org, Withdrawn. "Asking to send" is the claim request: nothing has left the Mac yet, and the issuer refuses a claim made under stale policy or a forbidden Automatic. "Credited to you" is a trace credited to your personal account; it stays under "Before you joined", with Withdraw, on every screen.</p>
+
+    <h2>Server</h2>
+    <p class="region-note">A headless seat. No screens; this is the proposed CLI status on the box.</p>
+    <div class="frames">
+      <div class="frame" data-state="Not enrolled"><b>Not enrolled</b><div class="term"><span class="p">$</span> near-ai status
+Not enrolled. Set TRACE_COMMONS_INVITE to an
+enrolment token from your org admin.</div></div>
+      <div class="frame" data-state="Enrolled"><b>Enrolled</b><div class="term"><span class="p">$</span> near-ai status
+Org        Acme Robotics (server seat ci-runners)
+Consent    org policy
+Sharing    <span class="ok">on</span>
+Last trace credited to the org 4 min ago</div></div>
+      <div class="frame" data-state="Revoked"><b>Revoked</b><div class="term"><span class="p">$</span> near-ai status
+<span class="bad">This server's key was revoked by the org.</span>
+Nothing is uploaded.</div></div>
+    </div>
+
+    <h2>Org</h2>
+    <p class="region-note">The org console. It shows seats, counts and credit, never trace content.</p>
+    <div class="frames">
+      <div class="frame" data-state="Active"><b>Active</b><div class="win console">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Acme Robotics · Org console</span></div>
+        <div class="body">
+          <div class="kpi"><div><strong>412</strong><small>credited traces</small></div><div><strong>38</strong><small>seats, 6 servers</small></div></div>
+          <div class="row">Sharing <span class="pill"><i class="on">On</i><i>Off</i></span></div>
+          <div class="row">Automatic for members <span class="pill"><i class="on">Allowed</i><i>Forbidden</i></span></div>
+          <div class="spacer"></div>
+          <div class="buttons"><button class="quiet">Remove seat</button><button class="quiet">Enrol server</button><button class="quiet">Revoke server</button><button class="quiet">Close org</button></div>
+        </div></div></div>
+      <div class="frame" data-state="Active, sharing off"><b>Active, sharing off</b><div class="win console">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Acme Robotics · Org console</span></div>
+        <div class="body">
+          <div class="row">Sharing <span class="pill"><i>On</i><i class="on">Off</i></span></div>
+          <p>No new trace is credited. Members' folders show Never.</p>
+          <div class="spacer"></div>
+          <div class="buttons"><button>Turn sharing on</button><button class="quiet">Close org</button></div>
+        </div></div></div>
+      <div class="frame" data-state="Suspended"><b>Suspended</b><div class="win console">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Acme Robotics · Org console</span></div>
+        <div class="body">
+          <h3>Suspended by Trace Commons</h3>
+          <p>New claims are refused. Credit already earned still settles.</p>
+          <div class="spacer"></div>
+        </div></div></div>
+      <div class="frame" data-state="Closing"><b>Closing</b><div class="win console">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Acme Robotics · Org console</span></div>
+        <div class="body">
+          <h3>Closing</h3>
+          <p>No new traces. Waiting for the last credit to settle.</p>
+          <div class="row"><span class="spin"></span><small>Settling</small></div>
+          <div class="spacer"></div>
+        </div></div></div>
+      <div class="frame" data-state="Closed"><b>Closed</b><div class="win console">
+        <div class="bar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>Acme Robotics · Org console</span></div>
+        <div class="body">
+          <h3>Closed</h3>
+          <p>All credit settled and paid to the org's holder account.</p>
+          <div class="spacer"></div>
+        </div></div></div>
+    </div>
+
+    <div class="assume">
+      <h2>What the model assumes</h2>
+      <ul>
+        <li>Org identity is NEAR AI organization membership (decision 1); credit goes to the org only (decision 3); one enrolment per Mac, except a withdraw-only personal credential for "Before you joined" (decision 4, change B).</li>
+        <li>Removal opens a closing window that allows only Withdraw (decision 6). Its length is not modelled.</li>
+        <li>Org sessions do not slide; an expired one is renewed only by a fresh membership check (spec 5.3).</li>
+        <li>Automatic is enforced on the Mac and by the issuer: the claim carries the policy digest and how the trace was sent (change A). Sharing off, removal, suspension and a lapsed sign-in are checked again when the upload arrives.</li>
+        <li>In an org, the Mac sends nothing while it is signed out (change C).</li>
+        <li>One member, one server, one trace at a time each.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+</body>
+</html>

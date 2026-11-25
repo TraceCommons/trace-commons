@@ -1,0 +1,93 @@
+---
+title: "Enterprise Near AI Gateway: seats in an org"
+---
+stateDiagram-v2
+  direction LR
+  state "Legend" as legend {
+    lg0: personal
+    lg1: org
+    lg2: leaving
+  }
+  class lg0 blue
+  class lg1 teal
+  class lg2 tan
+  state "At the same time" as all {
+    state "Your Mac" as r0 {
+      s0: Personal
+      s1: Joining your org
+      s2: Managed
+      s3: Managed, signed out
+      s4: Removed, can withdraw
+      s5: Removed
+      [*] --> s0
+      s0 --> s1: you press Join your organization
+      s1 --> s0: the join fails
+      s1 --> s2: NEAR AI membership checks out [while the org is active]
+      s2 --> s3: your session expires
+      s2 --> s4: the admin removes you
+      s3 --> s2: you sign in again [still in the NEAR AI org]
+      s3 --> s4: the admin removes you
+      s4 --> s5: the window ends
+    }
+    --
+    state "Your latest trace" as r1 {
+      s6: No trace yet
+      s7: Held on your Mac
+      s8: Asking to send, for you
+      s9: Sending, for you
+      s10: Asking to send, for the org
+      s11: Credited to you
+      s12: Withdrawn
+      s13: Sending, for the org
+      s14: Credited to the org
+      [*] --> s6
+      s6 --> s7: your agent writes a trace [when Your Mac is one of Managed, Managed, signed out, Personal]
+      s7 --> s8: Automatic sends it or you press Submit [when Your Mac is Personal]
+      s8 --> s9: the issuer grants the claim
+      s9 --> s7: the upload fails or is refused
+      s9 --> s11: the trace is credited
+      s7 --> s10: you press Submit or Automatic sends it [when Your Mac is Managed]
+      s10 --> s13: the issuer grants the claim
+      s11 --> s7: your agent writes a trace [when Your Mac is one of Managed, Managed, signed out, Personal]
+      s11 --> s12: you press Withdraw
+      s10 --> s7: the issuer refuses the claim
+      s12 --> s7: your agent writes a trace [when Your Mac is one of Managed, Managed, signed out, Personal]
+      s13 --> s7: the upload fails or is refused
+      s13 --> s14: the trace is credited [when Your Mac is Managed and Org is Active]
+      s14 --> s7: your agent writes a trace [when Your Mac is one of Managed, Managed, signed out]
+      s14 --> s12: you press Withdraw [when Your Mac is one of Managed, Removed, can withdraw]
+    }
+    --
+    state "Server" as r2 {
+      s15: Not enrolled
+      s16: Enrolled
+      s17: Revoked
+      [*] --> s15
+      s15 --> s16: the admin enrols the server [while the org is active]
+      s16 --> s17: the admin revokes the server
+    }
+    --
+    state "Org" as r3 {
+      s18: Active
+      s19: Active, sharing off
+      s20: Closing
+      s21: Suspended
+      s22: Closed
+      [*] --> s18
+      s18 --> s19: the admin turns sharing off
+      s18 --> s20: the admin closes the org
+      s18 --> s21: the operator suspends the org
+      s19 --> s18: the admin turns sharing on
+      s19 --> s20: the admin closes the org
+      s19 --> s21: the operator suspends the org
+      s20 --> s22: credit settles, the org closes
+      s21 --> s18: the operator resumes the org
+      s21 --> s19: the operator resumes the org
+    }
+  }
+  class s0 blue
+  class s1 blue
+  class s2 teal
+  class s3 teal
+  class s4 tan
+  class s5 tan
