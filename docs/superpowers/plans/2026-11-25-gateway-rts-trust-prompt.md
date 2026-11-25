@@ -21,7 +21,7 @@
      - `the_prompt_names_the_configured_forget_command`: with `Some("near-ai red-team trust forget")`, the prompt's last two lines name it.
      - The existing exact-copy test keeps `rts trust forget` for `None`.
      - The command string goes through the same printable filter as other displayed text.
-3. Call U's merge commit `R` (40 hex). Every task uses `R`. Do not start Task 1 before U merges: a rev on a PR branch could be rewritten.
+3. Call U's merge commit `R` (40 hex). **R = 5881eef6ee3e6675f6542b4f8a7ea63a71db768e** (nearai/nearai-red-sandbox#70, merged 2026-11-25; #69 merged as cbdd2549). Every task uses `R`. Do not start Task 1 before U merges: a rev on a PR branch could be rewritten.
 
 ## Owner decisions
 
