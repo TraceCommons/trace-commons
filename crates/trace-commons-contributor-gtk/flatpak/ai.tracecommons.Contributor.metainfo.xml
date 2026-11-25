@@ -62,7 +62,7 @@
   </provides>
 
   <releases>
-    <release version="1.0.23" date="2026-11-24">
+    <release version="1.0.24" date="2026-11-25">
       <description>
         <p>Maintenance release for Linux: the version number follows the macOS app.</p>
       </description>

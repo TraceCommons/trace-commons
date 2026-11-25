@@ -1634,7 +1634,53 @@ pub fn shell_command(
     ))
 }
 
+#[cfg(windows)]
+fn windows_package_helper(
+    local_data: &Path,
+    family: &std::ffi::OsStr,
+) -> Result<PathBuf, ManagedError> {
+    let alias = local_data
+        .join("Microsoft")
+        .join("WindowsApps")
+        .join(family)
+        .join("near-ai-gateway-helper.exe");
+    alias
+        .is_file()
+        .then_some(alias)
+        .ok_or(ManagedError::UnsupportedVersion)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn packaged_windows_helper() -> Result<Option<PathBuf>, ManagedError> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{APPMODEL_ERROR_NO_PACKAGE, ERROR_SUCCESS};
+    use windows_sys::Win32::Storage::Packaging::Appx::{
+        GetCurrentPackageFamilyName, PACKAGE_FAMILY_NAME_MAX_LENGTH,
+    };
+
+    let mut family = [0u16; PACKAGE_FAMILY_NAME_MAX_LENGTH as usize + 1];
+    let mut len = family.len() as u32;
+    // SAFETY: the length is initialized to the capacity of the writable
+    // buffer. Windows counts the trailing NUL in the returned length.
+    match unsafe { GetCurrentPackageFamilyName(&mut len, family.as_mut_ptr()) } {
+        APPMODEL_ERROR_NO_PACKAGE => Ok(None),
+        ERROR_SUCCESS if len > 1 && len as usize <= family.len() => {
+            let family = std::ffi::OsString::from_wide(&family[..len as usize - 1]);
+            let local_data = dirs::data_local_dir().ok_or(ManagedError::UnsupportedVersion)?;
+            // Keep the alias path intact. Windows needs the app execution
+            // reparse point to grant the helper its package identity.
+            windows_package_helper(&local_data, &family).map(Some)
+        }
+        _ => Err(ManagedError::UnsupportedVersion),
+    }
+}
+
 pub fn helper_path() -> Result<PathBuf, ManagedError> {
+    #[cfg(windows)]
+    if let Some(alias) = packaged_windows_helper()? {
+        return Ok(alias);
+    }
     let exe = std::env::current_exe().map_err(|_| ManagedError::UnsupportedVersion)?;
     let parent = exe.parent().ok_or(ManagedError::UnsupportedVersion)?;
     let name = if cfg!(windows) {
