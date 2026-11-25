@@ -2109,9 +2109,25 @@ fn live_attestation_is_required_before_app_publication() {
     assert!(gate.contains("ref: ${{ steps.rts.outputs.revision }}"));
     assert!(gate.contains(r#"cp -R release-red-sandbox "$RUNNER_TEMP/release-red-sandbox""#));
     assert!(gate.contains("working-directory: ${{ runner.temp }}/release-red-sandbox"));
-    assert!(gate.contains("RTS_LIVE_COMPOSE_POLICY: pinned"));
-    assert!(gate.contains("for environment in production staging"));
-    assert!(gate.contains("cargo test --locked --test live_attest -- --ignored"));
+    // Production builds launch only a pinned compose, so production is
+    // verified pinned. Staging builds launch any compose the TEE measured
+    // (`red_team::attest_options`), and NEAR redeploys the staging gateway
+    // several times a day, so staging is verified the way the app runs it:
+    // every check but the pin.
+    assert!(
+        gate.contains("RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \\")
+    );
+    assert!(
+        gate.contains(
+            "RTS_LIVE_NEAR_ENVIRONMENT=staging RTS_LIVE_COMPOSE_POLICY=mr-config-only \\"
+        )
+    );
+    assert!(!gate.contains("for environment in production staging"));
+    assert_eq!(
+        gate.matches("cargo test --locked --test live_attest -- --ignored --test-threads=1")
+            .count(),
+        2
+    );
 
     // The GitHub Release supports partial platform success, so all platform
     // results together still cannot stand in for successful attestation.
