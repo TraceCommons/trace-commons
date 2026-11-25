@@ -572,12 +572,20 @@ pub fn run() -> std::process::ExitCode {
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
+/// Whether `argv0` names this binary as `near-ai`: the binary itself, or the
+/// MSIX console alias `near-ai-gateway-helper.exe` that Windows Terminal runs
+/// under Gateway's package identity.
+fn is_near_ai_name(argv0: &std::ffi::OsStr) -> bool {
+    std::path::Path::new(argv0)
+        .file_stem()
+        .is_some_and(|stem| stem == "near-ai" || stem == "near-ai-gateway-helper")
+}
+
 fn run_on_this_thread() -> std::process::ExitCode {
     use clap::CommandFactory;
     let canonical = std::env::args_os()
         .next()
-        .and_then(|p| PathBuf::from(p).file_stem().map(|s| s == "near-ai"))
-        .unwrap_or(false);
+        .is_some_and(|argv0| is_near_ai_name(&argv0));
     let mut command = Cli::command();
     if canonical {
         command = command
@@ -1023,6 +1031,31 @@ mod tests {
             help.contains(&format!("${}", crate::channel::STATE_DIR_ENV)),
             "{help}"
         );
+    }
+
+    /// The MSIX's console alias runs the same binary as
+    /// `near-ai-gateway-helper.exe`; it must present itself as `near-ai`, as
+    /// the release workflow's install check and Windows Terminal expect.
+    #[test]
+    fn the_windows_helper_alias_is_a_near_ai_name() {
+        use std::ffi::OsStr;
+        for name in [
+            "near-ai",
+            "/opt/bin/near-ai",
+            "near-ai.exe",
+            "near-ai-gateway-helper.exe",
+            "/WindowsApps/Iqlusion.TraceCommons_ycm4v9153hzvp/near-ai-gateway-helper.exe",
+        ] {
+            assert!(is_near_ai_name(OsStr::new(name)), "{name}");
+        }
+        for name in [
+            "trace-commons-contributor",
+            "near-ai-gateway",
+            "near",
+            "helper.exe",
+        ] {
+            assert!(!is_near_ai_name(OsStr::new(name)), "{name}");
+        }
     }
 
     fn parse(args: &[&str]) -> Cli {
