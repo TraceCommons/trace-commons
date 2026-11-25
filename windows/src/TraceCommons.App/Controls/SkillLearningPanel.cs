@@ -625,7 +625,7 @@ public sealed class SkillLearningPanel : UserControl
     {
         BorderBrush = Res<Brush>(brush),
         BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(10),
+        CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
         Padding = new Thickness(8, 2, 8, 2),
         HorizontalAlignment = HorizontalAlignment.Left,
         VerticalAlignment = VerticalAlignment.Center,

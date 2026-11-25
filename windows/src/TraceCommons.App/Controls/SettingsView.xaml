@@ -69,7 +69,7 @@
         </Style>
         <Style x:Key="SettingsGlassChipStyle" TargetType="Border">
             <Setter Property="Padding" Value="9,3,9,3" />
-            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcGlassRadiusTile}" />
             <Setter Property="BorderThickness" Value="0.5" />
             <Setter Property="BorderBrush" Value="{ThemeResource TcHairlineBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
@@ -79,7 +79,7 @@
         </Style>
         <Style x:Key="SettingsStatusChipStyle" TargetType="Border">
             <Setter Property="Padding" Value="9,3,9,3" />
-            <Setter Property="CornerRadius" Value="{StaticResource TcPillCornerRadius}" />
+            <Setter Property="CornerRadius" Value="{StaticResource TcGlassRadiusTile}" />
             <Setter Property="Background" Value="{ThemeResource TcSurfaceInsetBrush}" />
             <Setter Property="VerticalAlignment" Value="Center" />
         </Style>

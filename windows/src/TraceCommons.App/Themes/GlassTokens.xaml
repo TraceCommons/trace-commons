@@ -249,7 +249,6 @@
     <CornerRadius x:Key="TcGlassRadiusMenuStatePill">22</CornerRadius>
     <CornerRadius x:Key="TcControlCornerRadius">11</CornerRadius>
     <CornerRadius x:Key="TcCardCornerRadius">16</CornerRadius>
-    <CornerRadius x:Key="TcPillCornerRadius">999</CornerRadius>
     <!-- A card is drawn as a 1px border, so an element bleeding to its inside
          edge is one pixel tighter than the card itself. -->
     <CornerRadius x:Key="TcCardInnerBottomCornerRadius">0,0,15,15</CornerRadius>

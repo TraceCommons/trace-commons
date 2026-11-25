@@ -649,7 +649,7 @@ public sealed partial class TracesMapView : UserControl
             made.Text.FontSize = size;
             made.Pill.Padding = new Thickness(8 * unit, 0, 8 * unit, 0);
             made.Pill.Height = size + 8 * unit;
-            made.Pill.CornerRadius = new CornerRadius((size + 8 * unit) / 2);
+            made.Pill.CornerRadius = new CornerRadius(GlassTokens.Radius.Tile * unit);
             made.Pill.Opacity = reveal.Dim;
             AutomationProperties.SetName(made.Pill, name);
             ToolTipService.SetToolTip(made.Pill, name);
@@ -2250,7 +2250,8 @@ public sealed partial class TracesMapView : UserControl
         double width = Lerp(MapToolStack.Width, MapToolStack.OpenWidth, moving ? 0 : wide) * s;
         MapPoint left = fit.Point(stack.PortLeft);
         Color fill = open && wide > 0.5 ? Ink("paneOpaque") : Ink("wellFill");
-        ds.FillRoundedRectangle(new Rect(left.X, left.Y - height / 2, width, height), (float)(26 * s), (float)(26 * s), fill);
+        float corner = (float)(GlassTokens.Radius.Control * s);
+        ds.FillRoundedRectangle(new Rect(left.X, left.Y - height / 2, width, height), corner, corner, fill);
         if (Words?.ToolsHeading is { Length: > 0 } heading)
         {
             DrawText(ds, heading.ToUpperInvariant(), new MapPoint(left.X + 30 * s, left.Y - height / 2 - 12 * s), Math.Max(9, 10 * s), Ink("textTertiary"), CanvasHorizontalAlignment.Center, bold: true, tracking: MapFonts.ToolsHeadingTracking);

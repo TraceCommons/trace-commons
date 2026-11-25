@@ -383,63 +383,31 @@
                                                    Style="{StaticResource TcCaptionSmallTextStyle}"
                                                    VerticalAlignment="Center" />
 
-                                        <!-- Four chips rather than one tinted
-                                             chip, because the four states are
-                                             drawn from four exclusive flags and
-                                             a status this build has never heard
-                                             of has to land in the neutral one
-                                             rather than in no chip at all. A
-                                             record with no chip would read as a
-                                             record with no state.
-
-                                             The withdrawn chip is toned as the
-                                             contributor's own act. It is never
-                                             drawn as a failure, and the record
-                                             is never dropped from this list. -->
-                                        <Border Grid.Column="2"
-                                                Visibility="{x:Bind IsAccepted}"
-                                                BorderBrush="{ThemeResource TcGreenChipBorderBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="{StaticResource TcPillCornerRadius}"
-                                                Padding="8,2"
-                                                VerticalAlignment="Center">
-                                            <TextBlock Text="{x:Bind StatusWord}"
-                                                       Style="{StaticResource TcMonoChipTextStyle}"
-                                                       Foreground="{ThemeResource TcGreenTextBrush}" />
-                                        </Border>
-                                        <Border Grid.Column="2"
-                                                Visibility="{x:Bind IsHeld}"
-                                                BorderBrush="{ThemeResource TcGoldAttentionBorderBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="{StaticResource TcPillCornerRadius}"
-                                                Padding="8,2"
-                                                VerticalAlignment="Center">
-                                            <TextBlock Text="{x:Bind StatusWord}"
-                                                       Style="{StaticResource TcMonoChipTextStyle}"
-                                                       Foreground="{ThemeResource TcGoldTextBrush}" />
-                                        </Border>
-                                        <Border Grid.Column="2"
-                                                Visibility="{x:Bind IsWithdrawn}"
-                                                BorderBrush="{ThemeResource TcHairlineBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="{StaticResource TcPillCornerRadius}"
-                                                Padding="8,2"
-                                                VerticalAlignment="Center">
-                                            <TextBlock Text="{x:Bind StatusWord}"
-                                                       Style="{StaticResource TcMonoChipTextStyle}"
-                                                       Foreground="{ThemeResource TcCoralTextBrush}" />
-                                        </Border>
-                                        <Border Grid.Column="2"
-                                                Visibility="{x:Bind IsWaiting}"
-                                                BorderBrush="{ThemeResource TcHairlineBrush}"
-                                                BorderThickness="1"
-                                                CornerRadius="{StaticResource TcPillCornerRadius}"
-                                                Padding="8,2"
-                                                VerticalAlignment="Center">
-                                            <TextBlock Text="{x:Bind StatusWord}"
-                                                       Style="{StaticResource TcMonoChipTextStyle}"
-                                                       Foreground="{ThemeResource TcInkTertiaryBrush}" />
-                                        </Border>
+                                        <!-- Unknown states use the neutral label. -->
+                                        <TextBlock Grid.Column="2"
+                                                   Visibility="{x:Bind IsAccepted}"
+                                                   Text="{x:Bind StatusWord}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcGreenTextBrush}"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2"
+                                                   Visibility="{x:Bind IsHeld}"
+                                                   Text="{x:Bind StatusWord}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcGoldTextBrush}"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2"
+                                                   Visibility="{x:Bind IsWithdrawn}"
+                                                   Text="{x:Bind StatusWord}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcCoralTextBrush}"
+                                                   VerticalAlignment="Center" />
+                                        <TextBlock Grid.Column="2"
+                                                   Visibility="{x:Bind IsWaiting}"
+                                                   Text="{x:Bind StatusWord}"
+                                                   Style="{StaticResource TcMonoChipTextStyle}"
+                                                   Foreground="{ThemeResource TcInkTertiaryBrush}"
+                                                   VerticalAlignment="Center" />
                                     </Grid>
 
                                     <!-- The server's own prose, verbatim.

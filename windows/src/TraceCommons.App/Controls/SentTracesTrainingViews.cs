@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 using TraceCommons.App.Look;
 
 namespace TraceCommons.App.Controls;
@@ -219,7 +220,7 @@ public static class SentTracesTrainingViews
             {
                 BorderBrush = ThemeBrushes.Get("TcInkSecondaryBrush"),
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
+                CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
                 Padding = new Thickness(8, 2, 8, 2),
                 HorizontalAlignment = HorizontalAlignment.Left,
                 Child = Text(copy.Pending, "TcCaptionSmallTextStyle", "TcInkSecondaryBrush"),

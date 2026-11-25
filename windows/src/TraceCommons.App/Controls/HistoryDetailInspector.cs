@@ -1023,7 +1023,7 @@ public sealed class HistoryDetailInspector : UserControl
         {
             BorderBrush = Res<Brush>(brush),
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(10),
+            CornerRadius = new CornerRadius(GlassTokens.Radius.Tile),
             Padding = new Thickness(8, 2, 8, 2),
             HorizontalAlignment = HorizontalAlignment.Left,
             Child = Text(word, "TcCaptionSmallTextStyle", brush),

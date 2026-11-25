@@ -232,10 +232,10 @@
     </Style>
 
     <!--
-        The refresh pill (Containers.swift:150-182, GlassRefreshPill): the
+        The refresh button (Containers.swift:150-182, GlassRefreshPill): the
         word in the label type, then the refresh glyph (SymbolGlyphs
         arrow.clockwise, U+E72C), on the control surface, as tall as the large
-        round button (28) with its height for a radius. Under the pointer the
+        round button (28). Under the pointer the
         control's hover fill fades in over 0.15 s on the token curve
         (GlassHover.swift:40); pressed, a 0.08 black wash, the same timing
         (GlassPress.swift:107-127). Disabled while refreshing, at 0.45.
@@ -252,7 +252,7 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="look:GlassRefreshButton">
-                    <Grid x:Name="Root" CornerRadius="14" Background="{ThemeResource TcGlassControlBrush}">
+                    <Grid x:Name="Root" CornerRadius="{StaticResource TcGlassRadiusTile}" Background="{ThemeResource TcGlassControlBrush}">
                         <VisualStateManager.CustomVisualStateManager>
                             <look:GlassVisualStateManager />
                         </VisualStateManager.CustomVisualStateManager>
@@ -268,8 +268,8 @@
                                 </VisualState>
                             </VisualStateGroup>
                         </VisualStateManager.VisualStateGroups>
-                        <Border x:Name="HoverFill" Background="{ThemeResource TcGlassControlHoverBrush}" Opacity="0" />
-                        <Border x:Name="PressWash" Background="{ThemeResource TcGlassPressWashBrush}" Opacity="0" />
+                        <Border x:Name="HoverFill" CornerRadius="{StaticResource TcGlassRadiusTile}" Background="{ThemeResource TcGlassControlHoverBrush}" Opacity="0" />
+                        <Border x:Name="PressWash" CornerRadius="{StaticResource TcGlassRadiusTile}" Background="{ThemeResource TcGlassPressWashBrush}" Opacity="0" />
                         <StackPanel Orientation="Horizontal" Spacing="{StaticResource TcGlassSpaceS2}" Padding="{TemplateBinding Padding}" VerticalAlignment="Center">
                             <ContentPresenter Content="{TemplateBinding Content}" VerticalAlignment="Center" />
                             <FontIcon x:Name="Glyph"

@@ -25,7 +25,6 @@ internal sealed class TransferCardView : UserControl
     private readonly ToolMarkView _coin = new();
     private readonly TextBlock _title = new() { FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _tag = new() { VerticalAlignment = VerticalAlignment.Center };
-    private readonly Border _tagPill = new() { Padding = new Thickness(8, 2, 8, 2), VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _eyebrow = new();
     private readonly TextBlock _folder = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock _time = new();
@@ -49,8 +48,6 @@ internal sealed class TransferCardView : UserControl
 
         _title.Style = Resource("TcBodyTextStyle");
         _tag.Style = Resource("TcCaptionTextStyle");
-        _tagPill.CornerRadius = (CornerRadius)Application.Current.Resources["TcPillCornerRadius"];
-        _tagPill.Child = _tag;
         _eyebrow.Style = Resource("TcEyebrowTextStyle");
         _folder.Style = Resource("TcCaptionTextStyle");
         _time.Style = Resource("TcCaptionTextStyle");
@@ -66,8 +63,8 @@ internal sealed class TransferCardView : UserControl
         head.Children.Add(_coin);
         Grid.SetColumn(_title, 1);
         head.Children.Add(_title);
-        Grid.SetColumn(_tagPill, 2);
-        head.Children.Add(_tagPill);
+        Grid.SetColumn(_tag, 2);
+        head.Children.Add(_tag);
         if (closeStyle is not null)
         {
             _close = new Button
@@ -132,7 +129,6 @@ internal sealed class TransferCardView : UserControl
         _time.Foreground = Brush("TcInkSecondaryBrush");
         _stays.Foreground = Brush("TcInkSecondaryBrush");
         _memory.Background = Brush("TcSurfaceInsetBrush");
-        _tagPill.Background = Brush("TcSurfaceInsetBrush");
         _tag.Foreground = _tagOn ? Brush("TcStatusOnTextBrush") : Brush("TcInkSecondaryBrush");
     }
 

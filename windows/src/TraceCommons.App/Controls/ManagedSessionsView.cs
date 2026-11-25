@@ -90,10 +90,10 @@ public sealed partial class ManagedSessionsView : UserControl
 
     private string T(string key) => _snapshot?.Text(key) ?? (_savedAccounts ? ManagedWords.Text(key) : string.Empty);
 
-    private async Task<JsonElement> CallAsync(string method, object parameters)
+    private async Task<JsonElement> CallAsync(string method, object parameters, bool trackUnsupportedVersion = true)
     {
         var response = await _host.CallAsync(method, JsonSerializer.Serialize(parameters));
-        if (response.Error?.Message == "managed-unsupported-version")
+        if (trackUnsupportedVersion && response.Error?.Message == "managed-unsupported-version")
         {
             _unsupportedVersion = true;
             var request = JsonSerializer.SerializeToElement(parameters);
@@ -312,12 +312,11 @@ public sealed partial class ManagedSessionsView : UserControl
         return title;
     }
 
-    /// <summary>How the last "Enable Red Team" ended (a copy key), shown under the
-    /// row until Red Team is ready.</summary>
+    /// <summary>The copy key for the last setup result, shown inside the card.</summary>
     private string? _redTeamOutcomeKey;
 
     /// <summary>
-    /// Red Team's setup row, as the Mac's Settings row (RedTeamSetup.swift):
+    /// Red Team's setup card:
     /// the name, whether its runtime is installed, and its line, with Install
     /// while it is not. On Windows the daemon also says why the host cannot run
     /// it: Windows Home is explained and offered nothing; otherwise Enable Red
@@ -329,7 +328,16 @@ public sealed partial class ManagedSessionsView : UserControl
     {
         if (_snapshot?.RedTeamState is not RedTeamSetup setup) return;
         if (setup == RedTeamSetup.Installed) _redTeamOutcomeKey = null;
-        var section = new StackPanel { Spacing = 4 };
+        var section = new StackPanel { Spacing = 8 };
+        var card = new Border
+        {
+            Child = section,
+            Padding = new Thickness(12),
+            BorderThickness = new Thickness(1),
+            CornerRadius = (CornerRadius)Application.Current.Resources["TcCardCornerRadius"],
+            Background = ThemeBrushes.Get("TcSurfaceCardBrush"),
+            BorderBrush = ThemeBrushes.Get("TcHairlineBrush"),
+        };
         section.Children.Add(SectionTitle("red_team"));
         section.Children.Add(new TextBlock { Text = T(setup == RedTeamSetup.Installed ? "red_team_installed" : "red_team_not_installed") });
         section.Children.Add(new TextBlock { Text = T("red_team_settings_line"), TextWrapping = TextWrapping.Wrap });
@@ -347,7 +355,7 @@ public sealed partial class ManagedSessionsView : UserControl
                     Text = groupExplain.Length > 0 ? groupExplain : T("red_team_enable_explain"),
                     TextWrapping = TextWrapping.Wrap,
                 });
-                var enable = Button("red_team_enable_action", EnableRedTeamAsync);
+                var enable = Button("red_team_enable_action", () => ChangeRedTeamSetupAsync("enable"));
                 AutomationProperties.SetName(enable, T("red_team_enable_action"));
                 section.Children.Add(enable);
             }
@@ -358,12 +366,16 @@ public sealed partial class ManagedSessionsView : UserControl
         }
         else if (setup == RedTeamSetup.NotInstalled)
         {
-            var install = Button("install", InstallRedTeamAsync);
+            var install = Button("install", () => ChangeRedTeamSetupAsync("install"));
             AutomationProperties.SetName(install, $"{T("install")} {T("red_team")}");
             section.Children.Add(install);
         }
         if (_redTeamOutcomeKey is string key)
-            section.Children.Add(new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap });
+        {
+            var outcome = new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap };
+            AutomationProperties.SetLiveSetting(outcome, AutomationLiveSetting.Polite);
+            section.Children.Add(outcome);
+        }
         if (setup == RedTeamSetup.NotInstalled)
         {
             var preferences = ShellPreferences.Shared;
@@ -373,7 +385,7 @@ public sealed partial class ManagedSessionsView : UserControl
 
             void ApplyDismissal()
             {
-                section.Visibility = preferences.RedTeamSetupDismissed ? Visibility.Collapsed : Visibility.Visible;
+                card.Visibility = preferences.RedTeamSetupDismissed ? Visibility.Collapsed : Visibility.Visible;
                 reopen.Visibility = preferences.RedTeamSetupDismissed ? Visibility.Visible : Visibility.Collapsed;
             }
 
@@ -393,25 +405,32 @@ public sealed partial class ManagedSessionsView : UserControl
             _root.Children.Add(reopen);
             ApplyDismissal();
         }
-        _root.Children.Add(section);
-    }
-
-    /// <summary>Installs the pinned runtime; the daemon answers when done and the
-    /// next snapshot says Installed.</summary>
-    private async Task InstallRedTeamAsync()
-    {
-        await CallAsync("managed_tool_setup", new { tool = "red_team", action = "install" });
+        _root.Children.Add(card);
     }
 
     /// <summary>
-    /// "Enable Red Team": the daemon runs its fixed script elevated (the Windows
-    /// prompt), with no arguments from here, and answers how it ended.
+    /// Run the requested setup action and keep its result in the setup card.
     /// </summary>
-    private async Task EnableRedTeamAsync()
+    private async Task ChangeRedTeamSetupAsync(string action)
     {
-        var result = await CallAsync("managed_tool_setup", new { tool = "red_team", action = "enable" });
-        _redTeamOutcomeKey = ManagedSignIn.EnableOutcomeKey(
-            result.TryGetProperty("outcome", out var outcome) ? outcome.GetString() : null);
+        _redTeamOutcomeKey = null;
+        try
+        {
+            var result = await CallAsync("managed_tool_setup", new { tool = "red_team", action }, trackUnsupportedVersion: false);
+            if (action == "enable")
+            {
+                _redTeamOutcomeKey = ManagedSignIn.EnableOutcomeKey(
+                    result.TryGetProperty("outcome", out var outcome) ? outcome.GetString() : null);
+            }
+        }
+        catch (Refused refused)
+        {
+            _redTeamOutcomeKey = ManagedSignIn.ErrorKey(refused.Code);
+        }
+        catch (Exception)
+        {
+            _redTeamOutcomeKey = "action_failed";
+        }
     }
 
     /// <summary>
