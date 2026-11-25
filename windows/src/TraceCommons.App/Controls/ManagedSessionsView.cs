@@ -364,6 +364,35 @@ public sealed partial class ManagedSessionsView : UserControl
         }
         if (_redTeamOutcomeKey is string key)
             section.Children.Add(new TextBlock { Text = T(key), TextWrapping = TextWrapping.Wrap });
+        if (setup == RedTeamSetup.NotInstalled)
+        {
+            var preferences = ShellPreferences.Shared;
+            var reopen = new HyperlinkButton { Content = T("red_team_setup_title") };
+            var dismiss = new HyperlinkButton { Content = T("dismiss") };
+            AutomationProperties.SetHelpText(dismiss, T("red_team_setup_title"));
+
+            void ApplyDismissal()
+            {
+                section.Visibility = preferences.RedTeamSetupDismissed ? Visibility.Collapsed : Visibility.Visible;
+                reopen.Visibility = preferences.RedTeamSetupDismissed ? Visibility.Visible : Visibility.Collapsed;
+            }
+
+            dismiss.Click += (_, _) =>
+            {
+                preferences.RedTeamSetupDismissed = true;
+                ApplyDismissal();
+                reopen.Focus(FocusState.Programmatic);
+            };
+            reopen.Click += (_, _) =>
+            {
+                preferences.RedTeamSetupDismissed = false;
+                ApplyDismissal();
+                dismiss.Focus(FocusState.Programmatic);
+            };
+            section.Children.Add(dismiss);
+            _root.Children.Add(reopen);
+            ApplyDismissal();
+        }
         _root.Children.Add(section);
     }
 
