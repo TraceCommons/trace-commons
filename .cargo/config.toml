@@ -1,0 +1,7 @@
+# Ed25519 keys that sign NEAR AI Red SandBox's attestation policy feed (CI key,
+# then the offline recovery key), compiled into `rts` with option_env!. Without
+# them `rts` never fetches the feed and never offers its trust prompt. Public
+# values; they match nearai/nearai-red-sandbox's README and its
+# RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX variable.
+[env]
+RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX = "7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c,39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17"

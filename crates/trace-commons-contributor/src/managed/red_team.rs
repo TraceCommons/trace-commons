@@ -485,6 +485,7 @@ pub(crate) fn spec_for(
         ironwire,
         env,
         near: near_environment(),
+        trust_forget_command: None,
     })
 }
 

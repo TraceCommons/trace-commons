@@ -555,3 +555,16 @@ fn the_ledger_is_in_the_managed_route_home() {
         .join(ctx.session.id.to_string());
     assert_eq!(spec.ironwire.home, Some(expected_home));
 }
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+#[test]
+fn the_attestation_policy_feed_keys_are_compiled_in() {
+    let hex: Vec<String> = rts::attest::feed::FEED_KEYS.iter().map(hex::encode).collect();
+    assert_eq!(
+        hex,
+        [
+            "7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c",
+            "39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17",
+        ]
+    );
+}
