@@ -7,6 +7,21 @@ use super::ToolId;
 use super::{ManagedError, sessions::LaunchContext};
 use crate::config::ConfigStore;
 use std::path::{Path, PathBuf};
+
+/// The command a trust prompt tells the user to run to forget a build. The
+/// Windows MSIX registers only the `near-ai-gateway-helper.exe` alias, which
+/// answers as `near-ai`; on macOS the command-line link is named `near-ai`.
+#[cfg(windows)]
+const TRUST_FORGET_COMMAND: &str = "near-ai-gateway-helper red-team trust forget";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const TRUST_FORGET_COMMAND: &str = "near-ai red-team trust forget";
+
+// Fails the release build itself if `.cargo/config.toml` stops compiling the feed keys in.
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
+const _: () = assert!(
+    rts::attest::feed::FEED_KEYS.len() == 2,
+    "the attestation policy feed keys are not compiled in; see .cargo/config.toml [env]"
+);
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows, test))]
 use uuid::Uuid;
 
@@ -485,7 +500,7 @@ pub(crate) fn spec_for(
         ironwire,
         env,
         near: near_environment(),
-        trust_forget_command: Some("near-ai red-team trust forget".into()),
+        trust_forget_command: Some(TRUST_FORGET_COMMAND.into()),
     })
 }
 

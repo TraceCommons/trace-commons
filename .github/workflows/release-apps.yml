@@ -245,7 +245,8 @@ jobs:
   release-attestation:
     name: Verify live Red Sandbox attestation
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # 35: the production-pin step adds an rts recompile and a third live run.
+    timeout-minutes: 35
     env:
       RUSTFLAGS: "-D warnings"
       CARGO_INCREMENTAL: "0"
@@ -319,14 +320,17 @@ jobs:
       # production runs a build the policy does not list yet, which Gateway
       # users meet as a trust prompt. The next step reports it. Under
       # continue-on-error the step's outcome stays 'failure' while its
-      # conclusion is 'success', which is what the report step reads.
+      # conclusion is 'success'; the report step reads the outcome.
       - name: Report production builds the policy does not list yet
         id: production-pin
         continue-on-error: true
+        # continue-on-error does not cover the job timeout, so bound the step.
+        timeout-minutes: 8
         working-directory: ${{ runner.temp }}/release-red-sandbox
         shell: bash
         env:
           RTS_LIVE_NEAR_MODELS: deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated,Qwen/Qwen3.8-27B-abliterated
+          RTS_LIVE_POLICY_FEED: "on"
           RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX: 7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c,39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17
         run: |
           RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \
@@ -336,7 +340,7 @@ jobs:
         if: steps.production-pin.outcome == 'failure'
         shell: bash
         run: |
-          echo "::warning::Production is running a build the attestation policy does not list yet. Gateway users will see the trust prompt for it."
+          echo "::warning::The production attestation check against the pinned and endorsed builds failed. Either NEAR AI production is running a build the attestation policy does not list yet, so Gateway users will see the trust prompt for it, or the check could not run; see the step log."
 
   macos:
     name: macOS signed DMG

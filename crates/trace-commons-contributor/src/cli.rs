@@ -52,7 +52,7 @@ struct Cli {
 enum RedTeamCommand {
     /// Execute one sandboxed tool call on behalf of OpenCode's plugin shim.
     Tool { name: String },
-    /// List or forget the Gateway builds you chose to trust.
+    /// List or forget the Red SandBox builds you chose to trust.
     Trust {
         #[command(subcommand)]
         action: RedTeamTrust,
@@ -61,7 +61,7 @@ enum RedTeamCommand {
 
 #[derive(Subcommand)]
 enum RedTeamTrust {
-    /// List the trusted Gateway builds.
+    /// List the trusted Red SandBox builds.
     List,
     /// Forget the trusted build whose hash starts with this prefix.
     Forget { prefix: String },

@@ -572,17 +572,18 @@ fn the_attestation_policy_feed_keys_are_compiled_in() {
     );
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
 #[test]
 fn the_gateway_prompt_names_the_near_ai_forget_command() {
     let dir = tempfile::tempdir().unwrap();
     let store = ConfigStore::open(dir.path().join("state")).unwrap();
     let ctx = test_context(dir.path(), vec![], "sk-red-team-secret");
     let spec = spec_for(&store, &ctx, None).unwrap();
-    assert_eq!(
-        spec.trust_forget_command.as_deref(),
-        Some("near-ai red-team trust forget")
-    );
+    #[cfg(windows)]
+    let expected = "near-ai-gateway-helper red-team trust forget";
+    #[cfg(not(windows))]
+    let expected = "near-ai red-team trust forget";
+    assert_eq!(spec.trust_forget_command.as_deref(), Some(expected));
 }
 
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), windows))]
