@@ -1109,8 +1109,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(decision);
 
-        ClearUndo();
-
         switch (decision.Outcome)
         {
             case PreviewOutcome.Approved when decision.Hold is { } hold
@@ -1128,6 +1126,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 // No hold, or one that had already expired by the time the
                 // response arrived. Saying so is the honest option; a button
                 // that would be refused is not.
+                ClearUndo();
                 Notice = decision.Hold?.Toast.Line
                     ?? PreviewDecision.ApprovalUnconfirmedMessage;
                 break;
@@ -1212,8 +1211,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        ClearUndo();
-
         DaemonResponse response = await _host
             .CallAsync(DaemonProtocol.Methods.Approve, SubmitParams.ForEntry(entry.EntryId))
             .ConfigureAwait(true);
@@ -1254,8 +1251,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             return;
         }
-
-        ClearUndo();
 
         IReadOnlyList<string> candidateEntryIds = Pending
             .Where(entry => entry.ProjectId == projectId)
@@ -1380,7 +1375,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 CultureInfo.CurrentCulture, "{0} {1}", hold.Toast.Line, withheld)
             : hold.Toast.Line;
 
-        if (hold.Toast.OfferUndo && hold.IsLive(DateTimeOffset.UtcNow))
+        // Only a confirmed approval supersedes the previous Undo.
+        if (hold.Approved == 0)
+        {
+            return;
+        }
+
+        if (hold.IsLive(DateTimeOffset.UtcNow))
         {
             _undoHold = hold;
             _undoApprovedAt = DateTimeOffset.UtcNow;
@@ -1388,6 +1389,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _undoNoticeLine = hold.Toast.Line;
             RaiseUndo();
             if (_clocksRunning) _undoTick.Start();
+        }
+        else
+        {
+            ClearUndo();
         }
     }
 
@@ -1504,7 +1509,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void DismissUndo()
     {
         ClearUndo();
-        Notice = ApprovedNoUndo;
+        if (!HasNotice)
+        {
+            Notice = ApprovedNoUndo;
+        }
     }
 
     private void OnUndoTick()

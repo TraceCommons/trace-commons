@@ -645,17 +645,38 @@ public class MonitorShellTests
 
     // ---- Notice catalog: order, ids and X names ----------------------------
 
-    [Fact]
-    public void VoidsComeBeforeRewordingsThenTheGateHoldThenHealthThenTheUndo()
+    [Theory]
+    [InlineData(NoticePlace.Traces)]
+    [InlineData(NoticePlace.History)]
+    public void ConsentAcknowledgementsComeToTheFrontWhileHealthRemainsPresent(NoticePlace place)
     {
-        // MonitorNotices.swift:377-407 and :447-513.
+        NoticeKind[] present =
+        {
+            NoticeCatalog.GrantVoids, NoticeCatalog.ArmingRewordings, NoticeCatalog.GateHeld,
+            NoticeCatalog.WitnessCapacity, NoticeCatalog.Health,
+        };
+        var closed = new HashSet<string>();
+
+        Assert.Equal("reworded", NoticeCatalog.Shown(place, present, closed)[^1].Id);
+        var afterRewording = present.Where(card => card != NoticeCatalog.ArmingRewordings);
+        Assert.Equal("void", NoticeCatalog.Shown(place, afterRewording, closed)[^1].Id);
+
+        var remaining = new[] { NoticeCatalog.GateHeld, NoticeCatalog.WitnessCapacity, NoticeCatalog.Health };
+        NoticeKind front = NoticeCatalog.Shown(place, remaining, closed)[^1];
+        Assert.Equal("health", front.Id);
+        Assert.Equal(NoticeClose.None, front.Close);
+    }
+
+    [Fact]
+    public void UndoStaysInFrontOfConsentAcknowledgementsAndPersistentStatus()
+    {
         NoticeKind[] present =
         {
             NoticeCatalog.Undo(new[] { "e" }), NoticeCatalog.Health, NoticeCatalog.ArmingRewordings,
-            NoticeCatalog.GateHeld, NoticeCatalog.GrantVoids,
+            NoticeCatalog.GateHeld, NoticeCatalog.GrantVoids, NoticeCatalog.WitnessCapacity,
         };
         Assert.Equal(
-            new[] { "void", "reworded", "gate-held", "health", "approval-undo:e" },
+            new[] { "gate-held", "witness-capacity", "health", "void", "reworded", "approval-undo:e" },
             NoticeCatalog.Order(NoticePlace.Traces, present).Select(card => card.Id));
     }
 
