@@ -6,6 +6,21 @@ namespace TraceCommons.Interop.Tests;
 
 public sealed class ManagedSessionsTests
 {
+    [Fact]
+    public void SavedAccountsUseDaemonDefaultsAndLocalizedAuthenticationStates()
+    {
+        var snapshot = ManagedSnapshot.Parse("""
+        {"revision":1,"accounts":[{"id":"a","tool":"claude","connection":"subscription","label":"Work","auth_state":"ready"},{"id":"b","tool":"claude","connection":"api_key","label":"Personal","auth_state":"future"}],"defaults":[{"account_id":"a","tool":"claude","connection":"subscription","generation":1}],"sessions":[],"generations":{},"capabilities":{"terminal_launch":true},"copy":{"auth_ready":"Ready","auth_future":"Unexpected"}}
+        """)!;
+
+        Assert.True(snapshot.OffersSavedAccountLaunch);
+        Assert.True(snapshot.IsDefault(snapshot.Accounts[0]));
+        Assert.False(snapshot.IsDefault(snapshot.Accounts[1]));
+        Assert.Equal("Ready", snapshot.AuthenticationLabel(snapshot.Accounts[0]));
+        Assert.Empty(snapshot.AuthenticationLabel(snapshot.Accounts[1]));
+        Assert.False((snapshot with { Capabilities = snapshot.Capabilities with { TerminalLaunch = false } }).OffersSavedAccountLaunch);
+    }
+
     [Theory]
     [InlineData("claude")]
     [InlineData("codex")]

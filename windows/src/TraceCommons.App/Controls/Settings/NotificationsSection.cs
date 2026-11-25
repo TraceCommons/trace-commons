@@ -45,6 +45,11 @@ public sealed class NotificationsSection : UserControl
         }
 
         var body = new StackPanel { Spacing = 12 };
+        if (Copy?.NotificationPurpose is { Length: > 0 } purpose)
+        {
+            body.Children.Add(SettingsCards.Caption(purpose));
+        }
+
         if (!_store.SettingsAnswered)
         {
             body.Children.Add(SettingsCards.ReadNotice(_store.ReadFailed, async (_, _) =>
@@ -52,6 +57,35 @@ public sealed class NotificationsSection : UserControl
                 await _store.ReadAsync();
                 Render();
             }));
+        }
+
+        foreach (NudgePreferenceRow row in _store.Preferences)
+        {
+            var toggle = new ToggleSwitch
+            {
+                Header = row.Label,
+                IsOn = row.IsOn,
+                IsEnabled = !_store.Busy,
+                OnContent = string.Empty,
+                OffContent = string.Empty,
+            };
+            AutomationProperties.SetName(toggle, row.Label);
+            toggle.Toggled += async (_, _) =>
+            {
+                if (toggle.IsOn == row.IsOn)
+                {
+                    return;
+                }
+
+                toggle.IsEnabled = false;
+                await _store.SetPreferenceAsync(row.Preference, toggle.IsOn);
+                Render();
+            };
+            body.Children.Add(toggle);
+            if (row.Help is { } help)
+            {
+                body.Children.Add(SettingsCards.Caption(help));
+            }
         }
 
         if (_store.Master is { } master)

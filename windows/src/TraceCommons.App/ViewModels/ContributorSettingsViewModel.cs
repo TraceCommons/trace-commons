@@ -19,11 +19,14 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
 {
     private readonly DaemonHost _host;
     private bool _disposed;
-    private readonly HashSet<string> _preservedNonDataScopes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _preservedScopes = new(StringComparer.Ordinal);
     private bool _isBusy;
     private bool _isLoaded;
     private bool _startAtLogin;
-    private bool _startupSupported = true;
+    private bool _startupSupported;
+    private bool _startupCanChange;
+    private bool _startupBusy;
+    private string _startupNotice = string.Empty;
     private bool _connected;
     private string _notice = string.Empty;
 
@@ -145,7 +148,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public ObservableCollection<ConnectionStatusViewModel> ConnectionRows { get; } = new();
 
     /// <summary>
     /// K11: what leaves this machine, to whom, and where the witness came
@@ -155,9 +157,12 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     public ObservableCollection<DisclosureRow> DisclosureRows { get; } = new();
 
     private string _disclosureTitle = string.Empty;
+    private bool _disclosureAnswered;
 
     /// <summary>The section title, from the Rust, whether or not the route could be read.</summary>
     public string DisclosureTitle => _disclosureTitle;
+    public bool DisclosureAnswered => _disclosureAnswered;
+    public bool DisclosureLoading => !_disclosureAnswered;
 
     /// <summary>
     /// Ask the daemon what leaves this machine and lay out the Rust's words
@@ -180,14 +185,22 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         }
 
         _disclosureTitle = RouteDisclosureSurface.PanelTitle(disclosure, unreadable);
+        _disclosureAnswered = true;
         Raise(nameof(DisclosureTitle));
+        Raise(nameof(DisclosureAnswered));
+        Raise(nameof(DisclosureLoading));
     }
 
     public ObservableCollection<ConsentScopeViewModel> AlwaysIncluded { get; } = new();
 
     public ObservableCollection<ConsentScopeViewModel> OptionalScopes { get; } = new();
 
-    public ObservableCollection<ProjectSettingViewModel> Projects { get; } = new();
+    public ObservableCollection<ConsentScopeViewModel> AttributionScopes { get; } = new();
+
+    public bool ConsentReadAnswered { get; private set; }
+    public bool ConsentReadFailed { get; private set; }
+    public bool ConsentSaveFailed { get; private set; }
+    public event Action? ConsentReadChanged;
 
     public ObservableCollection<AuditSettingViewModel> AuditEntries { get; } = new();
 
@@ -892,6 +905,9 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     /// <summary>Whether the witness actions may be pressed.</summary>
     public bool WitnessControlsEnabled => !_isBusy && _witnessCopy is not null;
 
+    public bool OffersWitnessConfigure => _witnessStateCode != WitnessTools.StateNotEnrolled;
+    public bool OffersWitnessClear => OffersWitnessConfigure && _witnessStateCode != WitnessTools.StateAbsent;
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -928,6 +944,11 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         private set => Set(ref _startAtLogin, value);
     }
 
+    public bool StartupControlsEnabled => _startupSupported && _startupCanChange && !_startupBusy;
+    public bool StartupRefreshEnabled => !_startupBusy;
+    public string StartupNotice => _startupNotice;
+    public bool HasStartupNotice => _startupNotice.Length > 0;
+
     public bool Connected
     {
         get => _connected;
@@ -935,21 +956,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         {
             if (Set(ref _connected, value))
             {
-                Raise(nameof(ConnectionText));
-                Raise(nameof(ConnectionDetail));
-                Raise(nameof(HasConnectionDetail));
                 RaiseLoginChange();
             }
         }
     }
-
-    public string ConnectionText => Connected ? "Connected" : "Not connected";
-
-    public string ConnectionDetail => Connected
-        ? string.Empty
-        : "Traces are being queued, but nothing can be sent.";
-
-    public bool HasConnectionDetail => !Connected;
 
     private AccountAttention? _accountAttention;
 
@@ -1070,6 +1080,10 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
 
     public string LoginChangeLabel => LoginChangeCopy?.Change ?? string.Empty;
 
+    public bool ShowsPrivateAILoginChange => ShowsLoginMismatchChange || ShowsLoginChangeButton;
+
+    public string PrivateAILoginChangeLabel => ShowsLoginMismatchChange ? LoginMismatchChange : LoginChangeLabel;
+
     /// <summary>A wallet-origin account's "Payouts need a NEAR AI login" line.</summary>
     public bool ShowsPayoutsNeedLogin => _loginChangeStatus.ShowsPayoutsLine && LoginChangeCopy is not null;
 
@@ -1099,6 +1113,8 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         Raise(nameof(ShowsLoginMismatchChange));
         Raise(nameof(ShowsLoginChangeButton));
         Raise(nameof(LoginChangeLabel));
+        Raise(nameof(ShowsPrivateAILoginChange));
+        Raise(nameof(PrivateAILoginChangeLabel));
         Raise(nameof(ShowsPayoutsNeedLogin));
         Raise(nameof(PayoutsNeedsLoginBody));
         Raise(nameof(PayoutsNeedsLoginAdd));
@@ -1253,7 +1269,8 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
             DaemonResponse response = await _host
                 .CallAsync(DaemonProtocol.Methods.Unenroll, "{}")
                 .ConfigureAwait(true);
-            if (response.IsError)
+            if (response.IsError || response.Result is not { ValueKind: JsonValueKind.Object } answer
+                || !answer.TryGetProperty("unenrolled", out JsonElement unenrolled) || unenrolled.ValueKind != JsonValueKind.True)
             {
                 AccountAttentionFailedLine = AccountAttention?.Failed ?? string.Empty;
                 return false;
@@ -1298,10 +1315,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     }
 
     public bool HasNotice => _notice.Length > 0;
-
-    public bool HasProjects => Projects.Count > 0;
-
-    public bool HasNoProjects => Projects.Count == 0;
 
     /// <summary>
     /// The change log's read (<see cref="TraceCommons.Interop.Shell.AuditLogRead"/>): the read notice
@@ -1356,23 +1369,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
                 .ConfigureAwait(true);
             FillConsent(
                 optionsResponse.ResultAs<ConsentOptionsPayload>(),
-                status?.ConsentScopes ?? new List<string>());
+                status?.ConsentScopes);
 
-            await LoadProjectsAsync().ConfigureAwait(true);
             await LoadAuditAsync().ConfigureAwait(true);
             if (RoutingDeclared)
             {
                 await CheckRoutingAsync().ConfigureAwait(true);
             }
 
-            StartupRegistrationState startup = await StartupRegistration
-                .GetStateAsync()
-                .ConfigureAwait(true);
-            StartupSupported = startup.IsSupported;
-            StartAtLogin = startup.IsEnabled;
-            Notice = statusResponse.IsError
-                ? "Settings couldn't be read just now."
-                : startup.Notice;
+            if (statusResponse.IsError)
+            {
+                Notice = "Settings couldn't be read just now.";
+            }
+
             IsLoaded = true;
         }
         finally
@@ -1381,47 +1390,59 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         }
     }
 
-    public async Task SetStartAtLoginAsync(bool enabled)
+    public Task RefreshStartupAsync() => ReadStartupAsync(StartupRegistration.GetStateAsync);
+
+    public Task SetStartAtLoginAsync(bool enabled) =>
+        StartupControlsEnabled && enabled != StartAtLogin
+            ? ReadStartupAsync(() => StartupRegistration.SetEnabledAsync(enabled), requested: enabled)
+            : Task.CompletedTask;
+
+    private async Task ReadStartupAsync(Func<Task<StartupRegistrationState>> read, bool? requested = null)
     {
-        if (!IsLoaded || IsBusy || !StartupSupported || enabled == StartAtLogin)
+        if (_startupBusy)
         {
             return;
         }
 
-        IsBusy = true;
+        _startupBusy = true;
+        Raise(nameof(StartupRefreshEnabled));
+        Raise(nameof(StartupControlsEnabled));
         try
         {
-            // Keep the source in step with the contributor's requested
-            // position so a refused result can produce a real property
-            // change back to the authoritative state.
-            StartAtLogin = enabled;
-            StartupRegistrationState startup = await StartupRegistration
-                .SetEnabledAsync(enabled)
-                .ConfigureAwait(true);
+            if (requested is bool enabled)
+            {
+                // Keep the binding in step so a refusal rolls it back to the authoritative state.
+                StartAtLogin = enabled;
+            }
+
+            StartupRegistrationState startup = await read().ConfigureAwait(true);
             StartupSupported = startup.IsSupported;
             StartAtLogin = startup.IsEnabled;
-            Notice = startup.Notice;
+            _startupCanChange = startup.CanChange;
+            _startupNotice = startup.Notice;
+            Raise(nameof(StartupNotice));
+            Raise(nameof(HasStartupNotice));
         }
         finally
         {
-            IsBusy = false;
+            _startupBusy = false;
+            Raise(nameof(StartupRefreshEnabled));
+            Raise(nameof(StartupControlsEnabled));
         }
     }
 
     /// <summary>
-    /// Commits every optional data-use scope as one set. Non-data scopes such
-    /// as public attribution are preserved because their separate consent
-    /// surface owns them.
+    /// Commits the visible choices and preserves grants this version cannot edit.
     /// </summary>
     public async Task SaveConsentAsync()
     {
-        if (!IsLoaded || IsBusy)
+        if (!IsLoaded || IsBusy || !ConsentReadAnswered)
         {
             return;
         }
 
-        var scopes = new List<string>(_preservedNonDataScopes);
-        foreach (ConsentScopeViewModel row in OptionalScopes)
+        var scopes = new List<string>(_preservedScopes);
+        foreach (ConsentScopeViewModel row in OptionalScopes.Concat(AttributionScopes))
         {
             if (row.IsSelected)
             {
@@ -1437,12 +1458,16 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
                 .CallAsync(DaemonProtocol.Methods.SetConsentScopes, payload)
                 .ConfigureAwait(true);
 
-            Notice = response.IsError
-                ? "Permissions couldn't be changed. The previous choices still apply."
-                : "Permissions updated for traces sent from now on.";
+            ConsentSaveFailed = response.IsError;
+            ConsentReadChanged?.Invoke();
 
             if (response.IsError)
             {
+                foreach (ConsentScopeViewModel row in OptionalScopes.Concat(AttributionScopes))
+                {
+                    row.IsSelected = _reportedScopes.Contains(row.Name, StringComparer.Ordinal);
+                }
+
                 await ReloadConsentAsync().ConfigureAwait(true);
             }
             else
@@ -1466,90 +1491,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         }
     }
 
-    /// <summary>
-    /// Moves one project to its next manual mode.
-    /// </summary>
-    /// <remarks>
-    /// The rows are rebuilt from a fresh list_projects rather than from the
-    /// mode that was sent: what this screen shows about a consent field has
-    /// to be what the daemon stores, and a write that was refused or that
-    /// stored something else is invisible to a shell that believes its own
-    /// request. The re-read runs on the failure path too -- that is the path
-    /// where the two can disagree, and a refused toggle that still flips the
-    /// row is a lie the contributor then acts on. Onboarding's list was
-    /// fixed the same way and reads the same notice table.
-    /// </remarks>
-    public async Task ToggleProjectAsync(ProjectSettingViewModel project)
-    {
-        ArgumentNullException.ThrowIfNull(project);
-        if (!IsLoaded || IsBusy || !project.CanToggle)
-        {
-            return;
-        }
-
-        string? next = ProjectManualMode.Next(project.Mode);
-        if (next is null)
-        {
-            return;
-        }
-
-        // Held separately because the row object this was called with does
-        // not survive the re-read: LoadProjectsAsync rebuilds the collection.
-        string projectId = project.ProjectId;
-        string payload = JsonSerializer.Serialize(
-            new Dictionary<string, string>
-            {
-                ["project_id"] = projectId,
-                ["mode"] = next,
-            });
-
-        IsBusy = true;
-        project.IsPending = true;
-        try
-        {
-            DaemonResponse response = await _host
-                .CallAsync(DaemonProtocol.Methods.SetProjectMode, payload)
-                .ConfigureAwait(true);
-
-            await LoadProjectsAsync().ConfigureAwait(true);
-            Notice = ProjectManualMode.NoticeFor(
-                response.IsError, next, FindProject(projectId)?.Mode);
-        }
-        finally
-        {
-            project.IsPending = false;
-            IsBusy = false;
-        }
-    }
-
-    private ProjectSettingViewModel? FindProject(string projectId)
-    {
-        foreach (ProjectSettingViewModel candidate in Projects)
-        {
-            if (string.Equals(candidate.ProjectId, projectId, StringComparison.Ordinal))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// One session-source row. The satisfied tone tracks the same mode word
-    /// the sentence does, so the tick and the words cannot disagree.
-    /// </summary>
-    private void AddSourceRow(string tool, string sourceMode)
-    {
-        string? line = SourceChecks.CheckLine(tool, sourceMode);
-        if (line is null)
-        {
-            return;
-        }
-
-        ConnectionRows.Add(new ConnectionStatusViewModel(line, sourceMode == "watch"));
-    }
-
     private void FillSettings(DaemonSettingsSnapshot? settings)
     {
         if (settings is not null)
@@ -1557,22 +1498,6 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
             FillInferenceEvidence(settings);
             FillTokenContribution(settings);
         }
-        ConnectionRows.Clear();
-        if (settings is null)
-        {
-            return;
-        }
-
-        // The row's words come from the Rust, chosen by the MODE. This shell
-        // branched on ClaudeRootConfigured, which is (mode == "watch") and
-        // therefore false for "off" as well as for "unset" -- so a
-        // contributor who declared Claude Code off was told its sessions
-        // were being read from the usual place. Nothing is read from an off
-        // source. A null line means the call failed; the row is left out
-        // rather than filled with a sentence written here.
-        AddSourceRow(SourceChecks.Claude, settings.ClaudeSourceMode);
-        AddSourceRow(SourceChecks.Codex, settings.CodexSourceMode);
-
     }
 
     /// <summary>The consent scopes the daemon last reported to this screen.</summary>
@@ -1584,26 +1509,30 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     /// </summary>
     public event Action<IReadOnlyList<string>, IReadOnlyList<string>>? ConsentScopesConfirmed;
 
-    private void FillConsent(ConsentOptionsPayload? options, IReadOnlyCollection<string> granted)
+    private void FillConsent(ConsentOptionsPayload? options, IReadOnlyCollection<string>? granted)
     {
+        ConsentReadFailed = options is null || granted is null;
+        if (options is null || granted is null)
+        {
+            ConsentReadChanged?.Invoke();
+            return;
+        }
+
         _reportedScopes = granted.ToList();
         AlwaysIncluded.Clear();
         OptionalScopes.Clear();
-        _preservedNonDataScopes.Clear();
+        AttributionScopes.Clear();
+        _preservedScopes.Clear();
+        _preservedScopes.UnionWith(granted);
 
         var grantedSet = new HashSet<string>(granted, StringComparer.Ordinal);
-        foreach (ConsentOption option in options?.Scopes ?? new List<ConsentOption>())
+        foreach (ConsentOption option in options.Scopes)
         {
             // Fail closed: a scope the core gave no title is not offered. One
             // already granted is kept as it is, never revoked by a later
             // write.
             if (string.IsNullOrEmpty(option.Title))
             {
-                if (!option.AlwaysOn && grantedSet.Contains(option.Name))
-                {
-                    _preservedNonDataScopes.Add(option.Name);
-                }
-
                 continue;
             }
 
@@ -1615,20 +1544,26 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
 
             if (option.AlwaysOn)
             {
+                _preservedScopes.Remove(option.Name);
                 AlwaysIncluded.Add(row);
             }
             else if (option.GrantsDataUse)
             {
+                _preservedScopes.Remove(option.Name);
                 OptionalScopes.Add(row);
             }
-            else if (grantedSet.Contains(option.Name))
+            else
             {
-                _preservedNonDataScopes.Add(option.Name);
+                _preservedScopes.Remove(option.Name);
+                AttributionScopes.Add(row);
             }
         }
+
+        ConsentReadAnswered = true;
+        ConsentReadChanged?.Invoke();
     }
 
-    private async Task ReloadConsentAsync()
+    public async Task ReloadConsentAsync()
     {
         DaemonResponse status = await _host
             .CallAsync(DaemonProtocol.Methods.Status)
@@ -1638,27 +1573,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
             .ConfigureAwait(true);
         FillConsent(
             options.ResultAs<ConsentOptionsPayload>(),
-            status.ResultAs<DaemonStatus>()?.ConsentScopes ?? new List<string>());
-    }
-
-    private async Task LoadProjectsAsync()
-    {
-        DaemonResponse response = await _host
-            .CallAsync(DaemonProtocol.Methods.ListProjects)
-            .ConfigureAwait(true);
-
-        Projects.Clear();
-        foreach (ProjectSetting project in response.ResultAs<ProjectSettingsPayload>()?.Projects
-                 ?? new List<ProjectSetting>())
-        {
-            if (!string.IsNullOrWhiteSpace(project.ProjectId))
-            {
-                Projects.Add(new ProjectSettingViewModel(project));
-            }
-        }
-
-        Raise(nameof(HasProjects));
-        Raise(nameof(HasNoProjects));
+            status.ResultAs<DaemonStatus>()?.ConsentScopes);
     }
 
     private async Task LoadAuditAsync()
@@ -1856,7 +1771,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     /// </remarks>
     public async Task ConfigureWitnessAsync()
     {
-        if (!IsLoaded || IsBusy || _witnessCopy is null || Program.IsSampleLaunch)
+        if (!IsLoaded || IsBusy || _witnessCopy is null || !OffersWitnessConfigure || Program.IsSampleLaunch)
         {
             return;
         }
@@ -1896,7 +1811,7 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
     /// </remarks>
     public async Task ClearWitnessAsync()
     {
-        if (!IsLoaded || IsBusy || _witnessCopy is null || Program.IsSampleLaunch)
+        if (!IsLoaded || IsBusy || _witnessCopy is null || !OffersWitnessClear || Program.IsSampleLaunch)
         {
             return;
         }
@@ -1946,6 +1861,8 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged, IDisp
         }
 
         _witnessStateCode = WitnessSurface.TrustState(_host.ConfigDir);
+        Raise(nameof(OffersWitnessConfigure));
+        Raise(nameof(OffersWitnessClear));
 
         // Both halves of the state row from the same input. The sentence is
         // never parsed to recover the tone, and a state with no sentence shows
@@ -2325,118 +2242,6 @@ public sealed class AuditSettingViewModel
     public string AtText { get; }
 
     public string WhatText { get; }
-}
-
-public sealed class ConnectionStatusViewModel
-{
-    public ConnectionStatusViewModel(string text, bool configured)
-    {
-        Text = text;
-        State = configured ? "Set" : "Default";
-    }
-
-    public string Text { get; }
-
-    public string State { get; }
-}
-
-public sealed class ProjectSettingViewModel : INotifyPropertyChanged
-{
-    private readonly string _mode;
-    private bool _isPending;
-
-    public ProjectSettingViewModel(ProjectSetting project)
-    {
-        ArgumentNullException.ThrowIfNull(project);
-        ProjectId = project.ProjectId;
-
-        // The daemon marks this row; this shell never infers it from the label,
-        // which is display text and carries the slug "unknown-project". Note
-        // the blank-label fallback below does NOT cover the bucket: that slug is
-        // not blank, which is why this row rendered as raw slug for so long.
-        IsUnresolvedBucket = project.IsUnresolvedBucket;
-        ProjectLabel = IsUnresolvedBucket
-            ? UnresolvedBucketCopy.Label
-            : string.IsNullOrWhiteSpace(project.ProjectLabel)
-                ? "Unknown project"
-                : project.ProjectLabel;
-        _mode = project.Mode;
-    }
-
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    public string ProjectId { get; }
-
-    public string ProjectLabel { get; }
-
-    /// <summary>
-    /// The row holding sessions whose project the daemon cannot name. It can be
-    /// silenced but never armed, and the daemon enforces that itself.
-    /// </summary>
-    public bool IsUnresolvedBucket { get; }
-
-    /// <summary>
-    /// The explanation shown beneath the name, or empty for an ordinary row.
-    ///
-    /// It sits under the name rather than in the state column: the note is a
-    /// sentence and that column holds two or three words, and Settings keeps
-    /// its state column populated for every row because a blank cell in a list
-    /// reads as a fault rather than as an absence.
-    /// </summary>
-    public string Note => IsUnresolvedBucket ? UnresolvedBucketCopy.Note : string.Empty;
-
-    public bool HasNote => IsUnresolvedBucket;
-
-    public string Mode => _mode;
-
-    /// <summary>
-    /// The row's mode by the core's one name (<see cref="WatchCopy.ModeLabel"/>),
-    /// the words onboarding, the pill and every other shell use.
-    /// </summary>
-    public string StateText => _mode switch
-    {
-        "ignore" => WatchCopy.Ignored,
-
-        // Unreachable for the unresolvable bucket, and deliberately guarded
-        // rather than trusted: the daemon refuses auto_upload for it in two
-        // places, so if this row ever reported that mode the honest reading is
-        // that something is wrong, not that it was armed. Calling it armed
-        // there would be the one claim this row must never
-        // make.
-        "auto_upload" when !UnresolvedBucketCopy.MayOfferAutoUpload(IsUnresolvedBucket)
-            => WatchCopy.AskMeFirst,
-        "auto_upload" => WatchCopy.Armed,
-        _ => WatchCopy.AskMeFirst,
-    };
-
-    /// <summary>
-    /// The button's words, from the shared table so onboarding's list and this
-    /// one do not name a single transition two ways. Empty only for a mode with
-    /// no transition, where <see cref="CanToggle"/> is already false.
-    /// </summary>
-    public string ActionText => WatchCopy.ActionFor(_mode) ?? WatchCopy.IgnoreAction;
-
-    public bool CanToggle => !_isPending && ProjectManualMode.Next(_mode) is not null;
-
-    /// <summary>
-    /// Set while this row's write is in flight, so the button that started it
-    /// cannot be pressed again before the stored answer has been read back.
-    /// </summary>
-    public bool IsPending
-    {
-        get => _isPending;
-        set
-        {
-            _isPending = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsPending)));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanToggle)));
-        }
-    }
-
-    // There is deliberately no mode setter here, for the reason onboarding's
-    // row has none: a row's mode arrives from list_projects and nowhere else.
-    // The one caller this class had set it from the value the shell had just
-    // sent, which is the optimism the re-read in ToggleProjectAsync replaced.
 }
 
 /// <summary>

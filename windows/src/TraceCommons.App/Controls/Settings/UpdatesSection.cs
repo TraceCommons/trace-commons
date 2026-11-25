@@ -79,9 +79,8 @@ public sealed class UpdatesSection : UserControl
     }
 
     /// <summary>
-    /// Sets the last-check line from the clock now: hidden before a check
-    /// has completed this run, and read against the time now when the kept
-    /// window is shown again.
+    /// Sets the last-check line from the clock, refreshing its relative time
+    /// when the kept window is shown again.
     /// </summary>
     public void Draw()
     {

@@ -78,10 +78,10 @@ public class AccountAttentionShellWiringTests
         string body = handler.Groups["body"].Value;
         foreach (string bound in new[]
         {
-            "Title = Settings.AccountAttentionConfirmTitle",
-            "Text = Settings.AccountAttentionConfirmBody",
-            "PrimaryButtonText = Settings.AccountAttentionConfirmAction",
-            "CloseButtonText = Settings.AccountAttentionConfirmCancel",
+            "Title = fromAttention ? Settings.AccountAttentionConfirmTitle : AccountSetupWords!.ConfirmTitle",
+            "Text = fromAttention ? Settings.AccountAttentionConfirmBody : AccountSetupWords!.ConfirmBody",
+            "PrimaryButtonText = fromAttention ? Settings.AccountAttentionConfirmAction : AccountSetupWords!.ConfirmAction",
+            "CloseButtonText = fromAttention ? Settings.AccountAttentionConfirmCancel : AccountSetupWords!.ConfirmCancel",
             "DefaultButton = ContentDialogButton.Close",
         })
         {
@@ -108,7 +108,7 @@ public class AccountAttentionShellWiringTests
     {
         string viewModel = ShellSource("TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs");
         Assert.Matches(
-            new Regex(@"if \(response\.IsError\)\s*\{\s*AccountAttentionFailedLine = AccountAttention\?\.Failed \?\? string\.Empty;\s*return false;", RegexOptions.Singleline),
+            new Regex(@"if \(response\.IsError \|\|.*?\)\s*\{\s*AccountAttentionFailedLine = AccountAttention\?\.Failed \?\? string\.Empty;\s*return false;", RegexOptions.Singleline),
             viewModel);
         Assert.DoesNotContain("\"Nothing changed.\"", viewModel, StringComparison.Ordinal);
 
@@ -133,7 +133,7 @@ public class AccountAttentionShellWiringTests
 
         string view = ShellSource("TraceCommons.App/Controls/SettingsView.xaml.cs");
         Assert.Matches(
-            new Regex(@"if \(_setUpAgainDialogOpen \|\| !Settings\.HasAccountAttention \|\| Settings\.IsBusy\)\s*\{\s*return;", RegexOptions.Singleline),
+            new Regex(@"if \(_setUpAgainDialogOpen \|\| \(!Settings\.HasAccountAttention && !CanSetUpAccountAgain\) \|\| Settings\.IsBusy \|\| _accountActionBusy\)\s*\{\s*return;", RegexOptions.Singleline),
             view);
     }
 

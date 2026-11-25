@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="TraceCommons.App.Controls.NearAiFundingCard"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="{ThemeResource TcSurfaceCardBrush}"
+            BorderBrush="{ThemeResource TcHairlineBrush}"
+            BorderThickness="1"
+            CornerRadius="{StaticResource TcCardCornerRadius}"
+            Padding="14,12">
+        <StackPanel Spacing="8">
+            <TextBlock Text="{x:Bind Funding.Title}" Style="{StaticResource TcTitleCardTextStyle}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Funding.Message, Mode=OneWay}" Style="{StaticResource TcBodyTextStyle}" TextWrapping="Wrap" />
+            <TextBlock Text="{x:Bind Funding.What}" Style="{StaticResource TcCaptionTextStyle}" TextWrapping="Wrap" />
+            <Button Content="{x:Bind Funding.Action, Mode=OneWay}"
+                    IsEnabled="{x:Bind Funding.Enabled, Mode=OneWay}"
+                    HorizontalAlignment="Left" MinHeight="44" Click="OnFundingAction" />
+        </StackPanel>
+    </Border>
+</UserControl>

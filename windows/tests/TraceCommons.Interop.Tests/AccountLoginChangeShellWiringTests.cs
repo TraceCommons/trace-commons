@@ -9,14 +9,14 @@ namespace TraceCommons.Interop.Tests;
 /// <summary>
 /// The half of changing the NEAR AI login (F10) a contributor looks at.
 /// <c>TraceCommons.App</c> cannot be referenced from this suite, so these
-/// read its sources: the three entry points sit in Settings' account section,
+/// read its sources: the entry points sit in Settings,
 /// every string is bound from the core's copy, the dialog draws the driver's
 /// page, and Switch is never the default button.
 /// </summary>
 public class AccountLoginChangeShellWiringTests
 {
     [Fact]
-    public void TheThreeEntryPointsAreInSettingsAndEveryStringIsBound()
+    public void LoginChangeEntryPointsAreInSettingsAndEveryStringIsBound()
     {
         string settings = ShellSource("TraceCommons.App/Controls/SettingsView.xaml");
         foreach (string bound in new[]
@@ -24,6 +24,7 @@ public class AccountLoginChangeShellWiringTests
             "Settings.HasLoginMismatch", "Settings.LoginMismatchBody", "Settings.LoginMismatchSignIn",
             "Settings.LoginMismatchChange", "Settings.ShowsLoginMismatchChange",
             "Settings.ShowsLoginChangeButton", "Settings.LoginChangeLabel",
+            "Settings.ShowsPrivateAILoginChange", "Settings.PrivateAILoginChangeLabel",
             "Settings.ShowsPayoutsNeedLogin", "Settings.PayoutsNeedsLoginBody", "Settings.PayoutsNeedsLoginAdd",
             "Settings.LoginChangeStartFailedLine", "Settings.HasLoginChangeStartFailedLine",
         })
@@ -38,8 +39,10 @@ public class AccountLoginChangeShellWiringTests
                 + @"Visibility=""\{x:Bind Settings\.ShowsLoginMismatchChange, Mode=OneWay\}"".*?Click=""OnUseDifferentAccount""",
                 RegexOptions.Singleline),
             settings);
-        // All three entry points open the one dialog.
-        Assert.Equal(3, Regex.Matches(settings, @"Click=""OnUseDifferentAccount""").Count);
+        int privateAI = settings.IndexOf("x:Name=\"BodyPrivateAI\"", StringComparison.Ordinal);
+        int savedAccounts = settings.IndexOf("x:Name=\"RuleSavedAccounts\"", StringComparison.Ordinal);
+        Assert.Contains("Click=\"OnUseDifferentAccount\"", settings[privateAI..savedAccounts], StringComparison.Ordinal);
+        Assert.Equal(4, Regex.Matches(settings, @"Click=""OnUseDifferentAccount""").Count);
 
         // A status in Settings, never a notice in the main window.
         string main = ShellSource("TraceCommons.App/MainWindow.xaml");

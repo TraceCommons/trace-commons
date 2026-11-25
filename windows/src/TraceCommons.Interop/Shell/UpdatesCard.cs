@@ -19,7 +19,7 @@ namespace TraceCommons.Interop.Shell;
 /// Installer's 8-hour background task. The last-check line is the Mac's
 /// <c>last_checked</c>, timed from this app's own last check that got an
 /// answer (at launch or Check Now; <see cref="UpdateCheckClock"/>), and
-/// absent until one has this run. Homebrew's branch has no Windows
+/// says when this app has yet to check. Homebrew's branch has no Windows
 /// counterpart.
 /// </summary>
 public sealed record UpdatesCard(string VersionLabel, string Version, string? Tag, bool TagOn, string? LastChecked, string? Caption, string? CheckNow)
@@ -37,7 +37,7 @@ public sealed record UpdatesCard(string VersionLabel, string Version, string? Ta
             version,
             NonEmpty(word("checks_every_eight_hours")),
             true,
-            LastCheckedLine(word("last_checked"), lastCheck, now),
+            lastCheck is null ? NonEmpty(word("not_checked_yet")) : LastCheckedLine(word("last_checked"), lastCheck.Value, now),
             NonEmpty(word("installs_when_closed")),
             NonEmpty(word("check_now")));
     }
@@ -49,10 +49,10 @@ public sealed record UpdatesCard(string VersionLabel, string Version, string? Ta
     /// <summary>
     /// "Last checked {relative}." with the hole filled the way the routing
     /// card's last-check line is (<see cref="SessionRootsCopy.HumanWhen(DateTimeOffset?, DateTimeOffset)"/>);
-    /// null before any check has completed, or without the word.
+    /// null without the word.
     /// </summary>
-    private static string? LastCheckedLine(string template, DateTimeOffset? lastCheck, DateTimeOffset now) =>
-        lastCheck is null || template.Length == 0
+    private static string? LastCheckedLine(string template, DateTimeOffset lastCheck, DateTimeOffset now) =>
+        template.Length == 0
             ? null
             : SettingsLegacyWords.Fill(template, "relative", SessionRootsCopy.HumanWhen(lastCheck, now));
 

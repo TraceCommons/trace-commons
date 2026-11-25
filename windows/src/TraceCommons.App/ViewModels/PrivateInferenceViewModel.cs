@@ -63,14 +63,27 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         _host = host ?? throw new ArgumentNullException(nameof(host));
         _requiresSession = requiresSession;
         Credential = credential ?? new CredentialActivity();
-        Funding = new NearAiFunding(_copy,
+        Funding = CreateFunding();
+        SettingsFunding = CreateFunding();
+    }
+
+    private NearAiFunding CreateFunding() => new(_copy,
             parameters => _host.CallAsync(NearAiFunding.Method, parameters),
             () => _host.IsRunning,
             async uri => await Windows.System.Launcher.LaunchUriAsync(uri),
             () => _host.ConnectionGeneration);
-    }
 
     public NearAiFunding Funding { get; }
+    internal NearAiFunding SettingsFunding { get; }
+
+    private void UpdateFundingCredential(bool busy)
+    {
+        bool balanceChanged = Funding.CredentialChanged(_credential.SessionState, busy);
+        bool settingsChanged = SettingsFunding.CredentialChanged(_credential.SessionState, busy);
+        if (busy) return;
+        if (balanceChanged) _ = Funding.RefreshAsync();
+        if (settingsChanged) _ = SettingsFunding.RefreshAsync();
+    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -80,6 +93,12 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public bool ControlsEnabled => !_busy && _copy is not null;
 
     public string Title => _copy?.SettingsTitle ?? string.Empty;
+
+    public string PanelRefresh => _copy?.PanelRefresh ?? string.Empty;
+    public string ToolsEyebrow => _copy?.PanelToolsEyebrow ?? string.Empty;
+    public string ConnectionEyebrow => _copy?.PanelConnectionEyebrow ?? string.Empty;
+    public string ToolsRefreshName => _copy?.PanelToolsRefreshAccessibility ?? string.Empty;
+    public string ConnectionRefreshName => _copy?.PanelConnectionRefreshAccessibility ?? string.Empty;
 
     public string Subtitle => _copy?.Subtitle ?? string.Empty;
 
@@ -510,18 +529,19 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
     public string CredentialActionPreamble =>
         NearAiCredentialSurface.ActionPreamble(OfferedAction, _copy) ?? string.Empty;
 
-    public bool HasCredentialActionPreamble => CredentialActionPreamble.Length > 0;
+    public bool HasCredentialActionPreamble => HasCredentialAction && CredentialActionPreamble.Length > 0;
 
     /// <summary>
     /// Whether there is an action to draw at all. A state this build could
     /// not read offers nothing.
     /// </summary>
     public bool ShowCredentialSignIn => HasCredentialAction && OfferedAction == CredentialAction.Obtain;
-    public bool ShowCredentialOtherAction => HasCredentialAction && OfferedAction != CredentialAction.Obtain;
+    public bool ShowCredentialOtherAction => HasCredentialAction && OfferedAction == CredentialAction.Cancel;
     public bool ShowAccountBalance => _copy is not null && OfferedAction != CredentialAction.Obtain;
+    public bool ShowsCredentialShortcut => OfferedAction != CredentialAction.Forget || HasBalanceAction;
 
     public bool HasCredentialAction =>
-        OfferedAction != CredentialAction.None && _copy is not null;
+        OfferedAction is CredentialAction.Obtain or CredentialAction.Cancel && _copy is not null;
 
     /// <summary>
     /// Whether the credential control may be pressed.
@@ -608,7 +628,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
             _attemptId = null;
         }
 
-        Funding.CredentialChanged(_credential.SessionState, _credentialBusy);
+        UpdateFundingCredential(_credentialBusy);
         RaiseCredential();
 
         // And what is left in the account that key belongs to. Not while a
@@ -640,7 +660,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         }
 
         _credentialBusy = true;
-        Funding.CredentialChanged(_credential.SessionState, true);
+        UpdateFundingCredential(true);
         Raise(nameof(CredentialControlsEnabled));
         try
         {
@@ -675,7 +695,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         finally
         {
             _credentialBusy = false;
-            Funding.CredentialChanged(_credential.SessionState, false);
+            UpdateFundingCredential(false);
             Raise(nameof(CredentialControlsEnabled));
         }
     }
@@ -754,7 +774,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Func<DaemonResponse, PrivateInferenceCopy?, string>? notice = null)
     {
         _credentialBusy = true;
-        Funding.CredentialChanged(_credential.SessionState, true);
+        UpdateFundingCredential(true);
         Raise(nameof(CredentialControlsEnabled));
         try
         {
@@ -777,7 +797,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         finally
         {
             _credentialBusy = false;
-            Funding.CredentialChanged(_credential.SessionState, false);
+            UpdateFundingCredential(false);
             Raise(nameof(CredentialControlsEnabled));
         }
 
@@ -823,6 +843,9 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Raise(nameof(HasCredentialAction));
         Raise(nameof(ShowCredentialSignIn));
         Raise(nameof(ShowCredentialOtherAction));
+        Raise(nameof(HasBalanceAction));
+        Raise(nameof(HasBalanceActionPreamble));
+        Raise(nameof(ShowsCredentialShortcut));
         Raise(nameof(ShowAccountBalance));
         Raise(nameof(CredentialControlsEnabled));
     }
@@ -1042,6 +1065,7 @@ public sealed class PrivateInferenceViewModel : INotifyPropertyChanged
         Raise(nameof(BalanceActionPreamble));
         Raise(nameof(HasBalanceActionPreamble));
         Raise(nameof(HasBalanceAction));
+        Raise(nameof(ShowsCredentialShortcut));
     }
 
     private const int CredentialPollLimit = 150;

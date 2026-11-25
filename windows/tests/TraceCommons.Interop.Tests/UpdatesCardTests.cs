@@ -45,10 +45,10 @@ public class UpdatesCardTests
     }
 
     [Fact]
-    public void TheLastCheckedLineIsHiddenUntilACheckHasCompleted()
+    public void TheCardSaysItHasNotCheckedUntilACheckHasCompleted()
     {
         UpdatesCard card = UpdatesCard.Of(true, "1", SettingsLegacyWords.Word, lastCheck: null, now: Now);
-        Assert.Null(card.LastChecked);
+        Assert.Equal("Not checked yet.", card.LastChecked);
     }
 
     [Fact]
@@ -79,7 +79,7 @@ public class UpdatesCardTests
         var clock = new UpdateCheckClock();
         int changed = 0;
         clock.Changed += () => changed++;
-        Assert.Null(UpdatesCard.Of(true, "1", SettingsLegacyWords.Word, clock.LastCompleted, Now).LastChecked);
+        Assert.Equal("Not checked yet.", UpdatesCard.Of(true, "1", SettingsLegacyWords.Word, clock.LastCompleted, Now).LastChecked);
 
         // The launch check, then Check Now three hours later.
         clock.Record(TcUpdateAvailability.NoUpdates, Now.AddHours(-3));

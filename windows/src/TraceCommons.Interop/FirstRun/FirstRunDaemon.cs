@@ -265,12 +265,23 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     public async Task<NearAILoginOutcome> NearAILoginOutcome(CancellationToken cancel)
     {
         _attemptId = null;
-        if (await Verdict(null).ConfigureAwait(true) == LoginPoll.SignedIn)
+        return await OpenNearAILoginAsync(Call2, _openBrowser, id => _attemptId = id, fresh: false, cancel);
+    }
+
+    /// <summary>Opens and waits for the NEAR AI credential ceremony used by first run and Account.</summary>
+    public static async Task<NearAILoginOutcome> OpenNearAILoginAsync(
+        Func<string, string, Task<DaemonResponse?>> call,
+        Func<Uri, Task<bool>> openBrowser,
+        Action<string?> rememberAttempt,
+        bool fresh,
+        CancellationToken cancel)
+    {
+        if (!fresh && await Verdict(call, null, fresh).ConfigureAwait(true) == LoginPoll.SignedIn)
         {
             return FirstRun.NearAILoginOutcome.SignedIn;
         }
 
-        DaemonResponse? started = await Call(DaemonProtocol.Methods.NearAiCredentialStart).ConfigureAwait(true);
+        DaemonResponse? started = await call(DaemonProtocol.Methods.NearAiCredentialStart, NearAiCredentialSurface.StartRequest).ConfigureAwait(true);
         if (started is not { IsError: false, Result: JsonElement res }
             || NearAiCredentialSurface.ParseStart(res.GetRawText()) is not { } attempt
             || !Uri.TryCreate(attempt.BrowserUrl, UriKind.Absolute, out Uri? url))
@@ -281,7 +292,7 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
         bool opened;
         try
         {
-            opened = !cancel.IsCancellationRequested && await _openBrowser(url).ConfigureAwait(true);
+            opened = !cancel.IsCancellationRequested && await openBrowser(url).ConfigureAwait(true);
         }
         catch (Exception e) when (e is InvalidOperationException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException)
         {
@@ -293,11 +304,11 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
             // A page that did not open cancels the attempt; a cancel the
             // daemon refuses still ends this sign-in as failed, never throws
             // out of the commit.
-            await Call2(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(attempt.AttemptId)).ConfigureAwait(true);
+            await call(DaemonProtocol.Methods.NearAiCredentialCancel, NearAiCredentialSurface.SerializeCancel(attempt.AttemptId)).ConfigureAwait(true);
             return FirstRun.NearAILoginOutcome.Failed;
         }
 
-        _attemptId = attempt.AttemptId;
+        rememberAttempt(attempt.AttemptId);
 
         DateTime until = DateTime.UtcNow.AddSeconds(600);
         while (DateTime.UtcNow < until)
@@ -311,7 +322,7 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
                 return FirstRun.NearAILoginOutcome.Failed;
             }
 
-            switch (await Verdict(attempt.AttemptId).ConfigureAwait(true))
+            switch (await Verdict(call, attempt.AttemptId, fresh).ConfigureAwait(true))
             {
                 case LoginPoll.SignedIn:
                     return FirstRun.NearAILoginOutcome.SignedIn;
@@ -334,16 +345,16 @@ public sealed class FirstRunDaemon : IFirstRunDaemon
     }
 
     /// <summary><c>NearAILoginPoll.verdict</c> (FirstRunPlan.swift:63-73), read through the shared parser.</summary>
-    private async Task<LoginPoll> Verdict(string? attemptId)
+    private static async Task<LoginPoll> Verdict(Func<string, string, Task<DaemonResponse?>> call, string? attemptId, bool fresh)
     {
-        DaemonResponse? r = await Call2(DaemonProtocol.Methods.NearAiCredentialStatus, NearAiCredentialSurface.SerializeStatus(attemptId)).ConfigureAwait(true);
+        DaemonResponse? r = await call(DaemonProtocol.Methods.NearAiCredentialStatus, NearAiCredentialSurface.SerializeStatus(attemptId)).ConfigureAwait(true);
         if (r is not { IsError: false, Result: JsonElement res })
         {
             return LoginPoll.Waiting;
         }
 
         NearAiCredentialStatus status = NearAiCredentialSurface.ParseStatus(res.GetRawText());
-        if (status.SessionState == NearAiEnrollSurface.CredentialStatePresent)
+        if (fresh ? status.AttemptStatus == "complete" : status.SessionState == NearAiEnrollSurface.CredentialStatePresent)
         {
             return LoginPoll.SignedIn;
         }

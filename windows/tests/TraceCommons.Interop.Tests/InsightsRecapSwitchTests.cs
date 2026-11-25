@@ -54,6 +54,22 @@ public class InsightsRecapSwitchTests
     }
 
     [Fact]
+    public async Task LedgerFeedReadsAndWritesItsOwnSetting()
+    {
+        var daemon = new Daemon
+        {
+            Get = """{"result":{"insights_ledger_feed":true,"insights_recap_card_enabled":false}}""",
+            Set = """{"result":{"insights_ledger_feed":false,"insights_recap_card_enabled":true}}""",
+        };
+        var setting = new InsightsLedgerFeedSwitch(daemon.Call);
+        await setting.ReadAsync();
+        Assert.True(setting.On);
+        await setting.SetAsync(false);
+        Assert.Equal(("set_settings", """{"insights_ledger_feed":false}"""), daemon.Sent[1]);
+        Assert.False(setting.On);
+    }
+
+    [Fact]
     public async Task AReplyWithTheOldValueKeepsItAndSaysTheRequestFailed()
     {
         var daemon = new Daemon { Set = """{"result":{"insights_recap_card_enabled":true}}""" };

@@ -74,6 +74,8 @@ public sealed class NearAiFunding : INotifyPropertyChanged
     public string What => _copy?.FundingWhat ?? string.Empty;
     public string Message => _status?.Message ?? _copy?.FundingUnavailable ?? string.Empty;
     public string Action => (_status?.Destination is null ? _copy?.FundingRefresh : _copy?.FundingManage) ?? string.Empty;
+    public string AddFundsLabel => _copy?.BalanceAddFunds ?? string.Empty;
+    public bool CanAddFunds => _status?.Destination is not null;
     public bool Enabled => _active && !_pending && !_credentialBusy && _copy is not null && _isRunning();
 
     public async Task ActivateAsync()
@@ -88,12 +90,13 @@ public sealed class NearAiFunding : INotifyPropertyChanged
         Invalidate();
     }
 
-    public void CredentialChanged(string state, bool busy)
+    public bool CredentialChanged(string state, bool busy)
     {
-        if (_credentialState == state && _credentialBusy == busy) return;
+        if (_credentialState == state && _credentialBusy == busy) return false;
         _credentialState = state;
         _credentialBusy = busy;
         Invalidate();
+        return true;
     }
 
     private void Invalidate()
@@ -105,6 +108,11 @@ public sealed class NearAiFunding : INotifyPropertyChanged
     }
 
     public Task PressAsync() => ReadAsync(_status?.Destination);
+
+    public Task RefreshAsync() => ReadAsync(null);
+
+    public Task AddFundsAsync() => _status?.Destination is { } destination
+        ? ReadAsync(destination) : Task.CompletedTask;
 
     private async Task ReadAsync(FundingDestination? expected)
     {
@@ -154,6 +162,7 @@ public sealed class NearAiFunding : INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new(nameof(Message)));
         PropertyChanged?.Invoke(this, new(nameof(Action)));
+        PropertyChanged?.Invoke(this, new(nameof(CanAddFunds)));
         PropertyChanged?.Invoke(this, new(nameof(Enabled)));
     }
 }

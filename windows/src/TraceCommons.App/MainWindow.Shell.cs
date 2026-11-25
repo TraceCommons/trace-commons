@@ -933,6 +933,7 @@ public sealed partial class MainWindow
         {
             var settings = new SettingsView(_host, ViewModel.LegacyOffer, ViewModel.UpdateChecks);
             settings.ShowPrivateAIControls(EnsurePrivateInferencePage());
+            settings.AttachSubscriptionUsage(InsightsModel.Subscriptions);
             // Set up again unenrolled this device: the first run starts,
             // with a fresh NEAR AI sign-in, as on a device never set up.
             settings.SetUpAgainRequested += async (_, _) =>

@@ -44,8 +44,8 @@ public class CheckBoxNameTests
             }
         }
 
-        // The two consent lists in Settings, at least.
-        Assert.True(seen >= 2, $"only {seen} CheckBox tags found");
+        // The three consent lists in Settings, at least.
+        Assert.True(seen >= 3, $"only {seen} CheckBox tags found");
     }
 
     [Fact]
@@ -53,7 +53,7 @@ public class CheckBoxNameTests
     {
         string markup = Shell("TraceCommons.App/Controls/SettingsView.xaml");
         MatchCollection boxes = Regex.Matches(markup, @"<CheckBox\b[^>]*>");
-        Assert.Equal(2, boxes.Count);
+        Assert.Equal(3, boxes.Count);
         foreach (Match box in boxes)
         {
             Assert.Contains("AutomationProperties.Name=\"{x:Bind Title}\"", box.Value, StringComparison.Ordinal);
