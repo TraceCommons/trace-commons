@@ -1151,33 +1151,7 @@
                       Visibility="{x:Bind ViewModel.ShowingQueue, Mode=OneWay}"
                       RowDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto,Auto">
 
-                    <!--
-                        Content header.
-
-                        The subtitle is the app's central promise, so it is the one
-                        thing on this row that may never be cut. It wraps rather
-                        than clips, and everything beside it gives way first.
-
-                        That needs the pill to sit in an elastic column rather than
-                        an Auto one. An Auto column asks a child how wide it wants
-                        to be and grants it, so a capped, trimming pill still takes
-                        its whole cap and squeezes the sentence out; the trimming
-                        never engages because nothing ever constrains it. Two star
-                        columns at 2:1 make the split proportional instead, so the
-                        sentence gets the larger share at every width, the pill
-                        trims into what is left (its tooltip carries the full text,
-                        so nothing is lost), and the row grows taller rather than
-                        clipping if even that is not enough.
-
-                        A MinWidth on the text stack is the wrong instrument and
-                        was tried first: it does not reserve space, it lets the
-                        stack overflow its column and be painted over, which is the
-                        same clipped sentence by a different route.
-                    -->
-                    <!-- The status chip has its own row under the title,
-                         full width and wrapping: at the 440 pane it was
-                         squeezed between the title and the buttons and cut
-                         to its first word (M4: overflow is impossible). -->
+                    <!-- Give the status its own full-width row so it can wrap in narrow panes. -->
                     <Grid Grid.Row="0"
                           ColumnDefinitions="*,Auto,Auto,Auto"
                           RowDefinitions="Auto,Auto"
@@ -1194,30 +1168,13 @@
                                        TextWrapping="Wrap" />
                         </StackPanel>
 
-                        <!--
-                            The spec's Watching chip states that the watcher is
-                            running. This app cannot assert that on its own, so the
-                            chip carries the daemon's own status line instead: the
-                            same fact, sourced rather than claimed. It drops the eye
-                            glyph, which would assert it again in a second voice.
-                            The pause control beside it calls the daemon, so a
-                            timed pause survives this process closing and resumes
-                            on the same deadline every other shell uses.
-                        -->
-                        <Border Grid.Row="1"
-                                Grid.ColumnSpan="4"
-                                Margin="0,8,0,0"
-                                BorderBrush="{ThemeResource TcHairlineBrush}"
-                                BorderThickness="1"
-                                CornerRadius="{StaticResource TcPillCornerRadius}"
-                                Padding="8,2"
-                                HorizontalAlignment="Left"
-                                VerticalAlignment="Center"
-                                ToolTipService.ToolTip="{x:Bind ViewModel.StatusText, Mode=OneWay}">
-                            <TextBlock Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
-                                       Style="{StaticResource TcMonoChipTextStyle}"
-                                       TextWrapping="Wrap" />
-                        </Border>
+                        <TextBlock Grid.Row="1"
+                                   Grid.ColumnSpan="4"
+                                   Margin="0,8,0,0"
+                                   Text="{x:Bind ViewModel.StatusText, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.HasStatusText, Mode=OneWay}"
+                                   Style="{StaticResource TcCaptionTextStyle}"
+                                   TextWrapping="Wrap" />
 
                         <Button Grid.Column="1"
                                 Style="{StaticResource TcSecondaryButtonStyle}"

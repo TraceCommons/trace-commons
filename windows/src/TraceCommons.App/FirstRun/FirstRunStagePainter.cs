@@ -636,7 +636,7 @@ public sealed class FirstRunStagePainter : IDisposable
         if (pill is not null)
         {
             var r = new Rect(PrivateAIDiagram.DestinationX - half, hub.Y - PrivateAIDiagram.PillHeight / 2, PrivateAIDiagram.PillWidth, PrivateAIDiagram.PillHeight);
-            ds.FillRoundedRectangle(r, 12, 12, Argb(FirstRunTokens.TintAccent));
+            ds.FillRoundedRectangle(r, (float)GlassTokens.Radius.Tile, (float)GlassTokens.Radius.Tile, Argb(FirstRunTokens.TintAccent));
             using var format = new CanvasTextFormat
             {
                 FontSize = 12,

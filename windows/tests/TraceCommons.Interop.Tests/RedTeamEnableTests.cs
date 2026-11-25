@@ -41,6 +41,22 @@ public sealed class RedTeamEnableTests
     }
 
     [Fact]
+    public void DismissalCollapsesTheOuterSetupCard()
+    {
+        string path = System.IO.Path.Combine(System.AppContext.BaseDirectory, "shell-source",
+            "TraceCommons.App", "Controls", "ManagedSessionsView.cs.txt");
+        string source = System.IO.File.ReadAllText(path);
+        int start = source.IndexOf("private void RenderRedTeam()", System.StringComparison.Ordinal);
+        int end = source.IndexOf("private async Task", start, System.StringComparison.Ordinal);
+        string setup = source[start..end];
+
+        Assert.Contains("Child = section", setup);
+        Assert.Contains("card.Visibility = preferences.RedTeamSetupDismissed", setup);
+        Assert.Contains("_root.Children.Add(card);", setup);
+        Assert.DoesNotContain("_root.Children.Add(section);", setup);
+    }
+
+    [Fact]
     public void WindowsHomeIsExplainedAndOffersNoButton()
     {
         var snapshot = Snapshot("""{"tool":"red_team","installed":false,"install_url":null,"host_problem":"home_edition","enable_offered":false}""");

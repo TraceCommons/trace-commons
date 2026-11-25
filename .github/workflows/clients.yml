@@ -351,13 +351,19 @@ jobs:
         env:
           RUSTFLAGS: -D warnings -C target-feature=+crt-static
         run: cargo build -p trace-commons-contributor-ffi --target-dir target/crt-static
-      - name: Check the FFI cdylib needs no Visual C++ runtime
-        run: python -I scripts/ci/check-no-vc-runtime.py target/crt-static/debug/trace_commons_contributor_ffi.dll
-      - name: Upload the FFI cdylib
+      - name: Build the managed-session helper for the app job
+        env:
+          RUSTFLAGS: -D warnings -C target-feature=+crt-static
+        run: cargo build --locked -p trace-commons-contributor --bin near-ai --target-dir target/crt-static
+      - name: Check the FFI cdylib and helper need no Visual C++ runtime
+        run: python -I scripts/ci/check-no-vc-runtime.py target/crt-static/debug/trace_commons_contributor_ffi.dll target/crt-static/debug/near-ai.exe
+      - name: Upload the Windows app's native binaries
         uses: actions/upload-artifact@v4
         with:
-          name: windows-ffi-cdylib
-          path: target/crt-static/debug/trace_commons_contributor_ffi.dll
+          name: windows-app-native
+          path: |
+            target/crt-static/debug/trace_commons_contributor_ffi.dll
+            target/crt-static/debug/near-ai.exe
           if-no-files-found: error
           retention-days: 1
       # W25-D2: the FFI self-check reaches the real Credential Manager. Its
@@ -749,10 +755,11 @@ jobs:
       # own), and what this job checks is the C# binding and the packaging,
       # not the cdylib's optimisation level. The interop test project already
       # defaults to the debug directory for local runs.
-      - name: Download the contributor FFI cdylib
+      # The packaged manifest also declares the near-ai.exe execution alias.
+      - name: Download the Windows app's native binaries
         uses: actions/download-artifact@v4
         with:
-          name: windows-ffi-cdylib
+          name: windows-app-native
           path: target/debug
 
       # The interop layer targets plain net8.0 and its tests drive a REAL

@@ -99,7 +99,7 @@
                     The tab's heading row (PrivateAIInspectorView.summary,
                     InferenceViews.swift:444-472; GlassTabHeading and GlassChip):
                     the status title in the card-title face, the state's one
-                    word in a pill with its dot right after it, the core's
+                    word with a status dot, the core's
                     full sentence as the row's tooltip and help text, and the
                     subtitle under it in body type, secondary ink.
                 -->
@@ -114,22 +114,19 @@
                                    FontSize="13" FontWeight="SemiBold"
                                    Foreground="{ThemeResource TcInkPrimaryBrush}"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                        <Border CornerRadius="{StaticResource TcPillCornerRadius}" Padding="9,3" VerticalAlignment="Center"
-                                Background="{ThemeResource TcSurfaceInsetBrush}">
-                            <StackPanel Orientation="Horizontal" Spacing="5">
-                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOnBrush}"
-                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.On), Mode=OneWay}" />
-                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusAskBrush}"
-                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Ask), Mode=OneWay}" />
-                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOutsideBrush}"
-                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Outside), Mode=OneWay}" />
-                                <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOffBrush}"
-                                         Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Off), Mode=OneWay}" />
-                                <TextBlock Text="{x:Bind ViewModel.Heading.Word, Mode=OneWay}"
-                                           Style="{StaticResource TcMonoChipTextStyle}"
-                                           Foreground="{x:Bind local:PrivateInferenceView.DotInk(ViewModel.Heading.Dot), Mode=OneWay}" />
-                            </StackPanel>
-                        </Border>
+                        <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOnBrush}"
+                                     Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.On), Mode=OneWay}" />
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusAskBrush}"
+                                     Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Ask), Mode=OneWay}" />
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOutsideBrush}"
+                                     Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Outside), Mode=OneWay}" />
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{ThemeResource TcStatusOffBrush}"
+                                     Visibility="{x:Bind local:PrivateInferenceView.DotShown(ViewModel.Heading.Dot, shell:DotStatus.Off), Mode=OneWay}" />
+                            <TextBlock Text="{x:Bind ViewModel.Heading.Word, Mode=OneWay}"
+                                       Style="{StaticResource TcMonoChipTextStyle}"
+                                       Foreground="{x:Bind local:PrivateInferenceView.DotInk(ViewModel.Heading.Dot), Mode=OneWay}" />
+                        </StackPanel>
                     </StackPanel>
                     <TextBlock Text="{x:Bind ViewModel.Heading.Subtitle, Mode=OneWay}"
                                Style="{StaticResource TcBodyTextStyle}"
