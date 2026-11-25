@@ -23,10 +23,12 @@ public enum NoticeGroup
     Action,
 
     /// <summary>
-    /// The traces being contributed, kept or dismissed, in front of every
-    /// other card on Traces and History (MonitorNotices.swift:157-161).
+    /// The traces being contributed, kept or dismissed on Traces and History.
     /// </summary>
     Transfers,
+
+    /// <summary>An approval that can still be undone, shown in front while the hold is live.</summary>
+    ApprovalUndo,
 }
 
 /// <summary>
@@ -139,7 +141,7 @@ public static class NoticeCatalog
     /// approval is a new card that slides in, as on the Mac.
     /// </summary>
     public static NoticeKind Undo(IEnumerable<string> entryIds) =>
-        new(UndoPrefix + string.Join(",", entryIds), NoticeGroup.TracesNow, NoticeClose.PutsAway);
+        new(UndoPrefix + string.Join(",", entryIds), NoticeGroup.ApprovalUndo, NoticeClose.PutsAway);
 
     private const string TransferPrefix = "transfer:";
 
@@ -191,9 +193,9 @@ public static class NoticeCatalog
     public static IReadOnlyList<NoticeGroup> Groups(NoticePlace place) => place switch
     {
         NoticePlace.Traces =>
-            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
+            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers, NoticeGroup.ApprovalUndo },
         NoticePlace.History =>
-            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.HistoryOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers },
+            new[] { NoticeGroup.App, NoticeGroup.TracesOffers, NoticeGroup.HistoryOffers, NoticeGroup.TracesNow, NoticeGroup.Action, NoticeGroup.Transfers, NoticeGroup.ApprovalUndo },
         NoticePlace.HomeHistory => new[] { NoticeGroup.App, NoticeGroup.HistoryOffers, NoticeGroup.Action },
         NoticePlace.PrivateAI => new[] { NoticeGroup.App, NoticeGroup.PrivateAI, NoticeGroup.Action },
         _ => new[] { NoticeGroup.App, NoticeGroup.Action },
@@ -216,7 +218,7 @@ public static class NoticeCatalog
     /// <summary>
     /// The Mac's order inside the traces-now group (MonitorNotices.swift:377-407,
     /// :447-513): the consent notices (voids, then rewordings, then the gate
-    /// hold), then health, then the undo. The witness hold is this shell's
+    /// hold), then health. The witness hold is this shell's
     /// own and sits with the gate hold. Cards of other groups keep the order
     /// they were given in (a stable sort, every one rank 0).
     /// </summary>
@@ -227,7 +229,6 @@ public static class NoticeCatalog
         "gate-held" => 3,
         "witness-capacity" => 4,
         "health" => 5,
-        _ when IsUndo(id) => 6,
         _ => 0,
     };
 
