@@ -26,12 +26,12 @@ tags, a tag push built macOS alone.
   `workflow_dispatch` with `platform` set to `all`, `windows` or `linux`,
   and publish nothing. `app-v0.23.0` is the last release with Windows zip
   and Linux assets; the flatpak OSTree repo stays on that build.
-- A dispatch publishes nothing, with one exception: `publish_windows_app`
-  set, on a dispatch run against the `app-v<version>` tag itself (with
-  `version` equal to it and `platform` `windows` or `all`), publishes the
-  `windows-app` MSIX and feed to the bucket. `release-config` refuses it on
-  any other ref. It re-publishes a failed Windows leg of a tag release; it
-  never cuts or edits the GitHub Release and never writes `latest.json`.
+- For a Windows-only release, dispatch `release-apps.yml` on `main` with
+  `platform=windows`, `publish_windows_app=true`, and `version` matching
+  `crates/trace-commons-contributor/Cargo.toml`. This publishes the signed
+  MSIX and its update feed. To retry the Windows leg of a tagged release,
+  dispatch on the matching `app-v<version>` tag with the same inputs.
+  A dispatch leaves the GitHub Release and `latest.json` alone.
 - `updates/latest.json` carries no `windows-x86_64` desktop entry, because
   that entry comes from the `windows` zip job. Nothing installed reads that
   slug (the CLI self-updater reads only the `-cli` slugs, and the MSIX

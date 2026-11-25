@@ -450,15 +450,20 @@ fn the_app_release_checks_its_own_credentials_before_it_signs_anything() {
              MSIX with it"
         );
     }
-    // A dispatch that publishes is held to the same credentials, and must
-    // run on the tag it publishes.
+    // Publishing dispatches use the release credentials. A main dispatch
+    // publishes only Windows, and a tag dispatch must match the version.
     assert!(
         config_job.contains("if: github.event_name == 'push' || inputs.publish_windows_app"),
         "the credential pre-flight must also run for a publishing dispatch"
     );
     assert!(
-        config_job.contains("refs/tags/app-v$INPUT_VERSION"),
-        "a publishing dispatch must be refused unless it runs on refs/tags/app-v<version>"
+        config_job
+            .contains(r#"if [ "$REF" = "refs/heads/main" ] && [ "$PLATFORM" = windows ]; then"#),
+        "a main branch dispatch may publish only with platform=windows"
+    );
+    assert!(
+        config_job.contains(r#""$REF" = "refs/tags/app-v$INPUT_VERSION""#),
+        "a tag dispatch must run on the matching app-v<version> tag"
     );
 
     // The AZURE_SIGNING_* values are environment variables on `release`, so a
@@ -2063,9 +2068,8 @@ fn windows_msix_job_installs_and_verifies_before_publishing() {
     }
 
     // Publication happens on a push (tag release), or on a dispatch that
-    // explicitly sets publish_windows_app (release-config refuses one that
-    // is not on its app-v<version> tag) -- never on a plain dispatch. The
-    // build/sign/install/verify steps above run unconditionally so the whole
+    // explicitly sets publish_windows_app and passes its ref and version
+    // checks. The build/sign/install/verify steps above run unconditionally so the whole
     // path is provable without ever moving what an installed client pulls.
     for step in ["Authenticate to GCP", "setup-gcloud", "name: Publish"] {
         let at = job

@@ -10,10 +10,10 @@
 # the last release that built it (app-v0.23.0).
 #
 # A dispatch never publishes, with one exception: `publish_windows_app`
-# set, on a dispatch run against the `app-v<version>` tag itself, publishes
-# the `windows-app` job's MSIX and feed to the bucket. That is how a failed
-# Windows leg of a tag release is re-published without a new tag. It never
-# cuts or edits the GitHub Release and never writes updates/latest.json.
+# set, publishes the `windows-app` job's MSIX and feed to the bucket. Use
+# main for a Windows-only release or the matching `app-v<version>` tag
+# to re-publish the Windows leg of a tag release. A dispatch never cuts
+# or edits the GitHub Release and never writes updates/latest.json.
 # `release-config` refuses such a dispatch on any other ref.
 # Release attestation is shared by all publishing paths. `publish` and
 # `publish-updates` also branch on each platform's result.
@@ -51,11 +51,9 @@ on:
         description: Also build and sign an MSIX (unproven; never runs on a tag push)
         type: boolean
         default: false
-      # Off by default. Only the windows-app job reads it, and only on a run
-      # dispatched against the app-v<version> tag (release-config refuses it
-      # on any other ref). See the header.
+      # Off by default. Publishing dispatches are restricted by release-config.
       publish_windows_app:
-        description: Publish the Windows MSIX and its feed to the bucket (run on the app-v<version> tag)
+        description: Publish the Windows MSIX and feed (main with platform windows, or the matching app-v tag)
         type: boolean
         default: false
 
@@ -95,9 +93,7 @@ jobs:
     environment: release
     timeout-minutes: 5
     steps:
-      # A publishing dispatch must run on the tag it publishes, so the bytes
-      # in the bucket are built from the tagged commit, as a tag push's are.
-      - name: Refuse a publishing dispatch that is not on its release tag
+      - name: Verify the Windows publishing dispatch ref
         if: github.event_name == 'workflow_dispatch' && inputs.publish_windows_app
         env:
           REF: ${{ github.ref }}
@@ -105,14 +101,14 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
         run: |
           set -euo pipefail
-          if [ "$REF" != "refs/tags/app-v$INPUT_VERSION" ]; then
-            echo "refusing to publish: dispatch ref is $REF, not refs/tags/app-v$INPUT_VERSION" >&2
-            exit 1
+          if [ "$REF" = "refs/heads/main" ] && [ "$PLATFORM" = windows ]; then
+            exit 0
           fi
-          if [ "$PLATFORM" != windows ] && [ "$PLATFORM" != all ]; then
-            echo "refusing to publish: platform=$PLATFORM does not build the Windows app" >&2
-            exit 1
+          if [ "$REF" = "refs/tags/app-v$INPUT_VERSION" ] && { [ "$PLATFORM" = windows ] || [ "$PLATFORM" = all ]; }; then
+            exit 0
           fi
+          echo "refusing to publish: use main with platform=windows or the matching app-v tag with platform=windows or all" >&2
+          exit 1
 
       # Dispatch runs build and sign but do not publish (every publication
       # step in this file is guarded on `github.event_name == 'push'`, the
@@ -239,6 +235,19 @@ jobs:
           PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
           if [ "$PACKAGE_VERSION" != "$TAG_VERSION" ]; then
             echo "refusing to release: $MANIFEST is $PACKAGE_VERSION, tag is $TAG_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Confirm the Windows publication matches the contributor version
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_windows_app
+        env:
+          WINDOWS_VERSION: ${{ steps.v.outputs.short }}
+        run: |
+          set -euo pipefail
+          MANIFEST=crates/trace-commons-contributor/Cargo.toml
+          PACKAGE_VERSION="$(awk -F '"' '/^version = "/ { print $2; exit }' "$MANIFEST")"
+          if [ "$PACKAGE_VERSION" != "$WINDOWS_VERSION" ]; then
+            echo "refusing to publish: $MANIFEST is $PACKAGE_VERSION, Windows version is $WINDOWS_VERSION" >&2
             exit 1
           fi
 
@@ -483,6 +492,7 @@ jobs:
     # Dispatch only: a tag push releases macOS alone (see the header).
     if: >-
       github.event_name == 'workflow_dispatch' &&
+      !inputs.publish_windows_app &&
       (inputs.platform == 'all' || inputs.platform == 'windows')
     runs-on: windows-latest
     # The federated credential's subject is
@@ -1245,8 +1255,8 @@ jobs:
           name: windows-msix
           path: dist/
 
-      # Publication is a tag push, or a dispatch with publish_windows_app on
-      # the app-v<version> tag (release-config refuses it on any other ref).
+      # Publication is a tag push or an explicit publishing dispatch that
+      # passed the release-config and version checks.
       # Any other dispatch still builds, signs, installs and verifies above,
       # so the whole path is provable -- but it must never move what an
       # installed client would actually pull.
