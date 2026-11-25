@@ -52,6 +52,19 @@ struct Cli {
 enum RedTeamCommand {
     /// Execute one sandboxed tool call on behalf of OpenCode's plugin shim.
     Tool { name: String },
+    /// List or forget the Gateway builds you chose to trust.
+    Trust {
+        #[command(subcommand)]
+        action: RedTeamTrust,
+    },
+}
+
+#[derive(Subcommand)]
+enum RedTeamTrust {
+    /// List the trusted Gateway builds.
+    List,
+    /// Forget the trusted build whose hash starts with this prefix.
+    Forget { prefix: String },
 }
 
 #[derive(Subcommand)]
@@ -658,6 +671,30 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Command::RedTeam {
+        action: RedTeamCommand::Trust { action },
+    } = &cli.command
+    {
+        use crate::managed::red_team::{TrustAction, trust_command};
+        let env: Vec<(String, String)> = std::env::vars().collect();
+        let (out, err, code) = trust_command(
+            match action {
+                RedTeamTrust::List => TrustAction::List,
+                RedTeamTrust::Forget { prefix } => TrustAction::Forget(prefix.clone()),
+            },
+            &env,
+        );
+        for line in out {
+            println!("{line}");
+        }
+        for line in err {
+            eprintln!("{line}");
+        }
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     if let Command::MissionDraft { file } = &cli.command {
         let review = crate::mission_draft::review_file(file)?;
         if cli.json {
@@ -1014,6 +1051,34 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_red_team_trust_list_and_forget() {
+        assert!(matches!(
+            Cli::try_parse_from(["near-ai", "red-team", "trust", "list"])
+                .unwrap()
+                .command,
+            Command::RedTeam {
+                action: RedTeamCommand::Trust {
+                    action: RedTeamTrust::List
+                }
+            }
+        ));
+        match Cli::try_parse_from(["near-ai", "red-team", "trust", "forget", "f4a9b480"])
+            .unwrap()
+            .command
+        {
+            Command::RedTeam {
+                action:
+                    RedTeamCommand::Trust {
+                        action: RedTeamTrust::Forget { prefix },
+                    },
+            } => assert_eq!(prefix, "f4a9b480"),
+            _ => panic!("not a trust forget"),
+        }
+        assert!(Cli::try_parse_from(["near-ai", "red-team", "trust"]).is_err());
+        assert!(Cli::try_parse_from(["near-ai", "red-team", "trust", "forget"]).is_err());
+    }
 
     /// `--config-dir`'s help names the override variable this build reads,
     /// so a staging build does not tell people to set production's.
