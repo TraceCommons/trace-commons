@@ -295,20 +295,48 @@ jobs:
         run: cp -R release-red-sandbox "$RUNNER_TEMP/release-red-sandbox"
 
       # Each environment is verified the way the app launches against it.
-      # Production builds require a pinned compose. Staging builds accept any
-      # compose the TEE measured (red_team::attest_options), because NEAR
-      # redeploys the staging gateway several times a day; the TDX quote, TCB,
-      # report_data, mr_config_id and GPU checks still run.
-      - name: Verify production against the locked policy and staging without the pin
+      # Gateway no longer refuses a production build the attestation policy
+      # does not list: it shows the user a trust prompt instead. So pin drift
+      # is reported below, not blocking. A broken verifier still blocks here,
+      # because this pass runs every check except the compose pin (the TDX
+      # quote, TCB, report_data, mr_config_id and GPU checks) on production
+      # and on staging. Staging also accepts any compose the TEE measured
+      # (red_team::attest_options), because NEAR redeploys the staging gateway
+      # several times a day.
+      - name: Verify production and staging without the pin
         working-directory: ${{ runner.temp }}/release-red-sandbox
         shell: bash
         env:
           RTS_LIVE_NEAR_MODELS: deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated,Qwen/Qwen3.8-27B-abliterated
         run: |
-          RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \
+          RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=mr-config-only \
             cargo test --locked --test live_attest -- --ignored --test-threads=1
           RTS_LIVE_NEAR_ENVIRONMENT=staging RTS_LIVE_COMPOSE_POLICY=mr-config-only \
             cargo test --locked --test live_attest -- --ignored --test-threads=1
+
+      # Production against the locked pin, with the feed keys so a build the
+      # feed endorses counts as listed too. Non-blocking: a failure here means
+      # production runs a build the policy does not list yet, which Gateway
+      # users meet as a trust prompt. The next step reports it. Under
+      # continue-on-error the step's outcome stays 'failure' while its
+      # conclusion is 'success', which is what the report step reads.
+      - name: Report production builds the policy does not list yet
+        id: production-pin
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}/release-red-sandbox
+        shell: bash
+        env:
+          RTS_LIVE_NEAR_MODELS: deepseek-ai/DeepSeek-V4.1-Flash-1017-abliterated,Qwen/Qwen3.8-27B-abliterated
+          RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX: 7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c,39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17
+        run: |
+          RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \
+            cargo test --locked --test live_attest -- --ignored --test-threads=1
+
+      - name: Warn that production runs a build the policy does not list
+        if: steps.production-pin.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning::Production is running a build the attestation policy does not list yet. Gateway users will see the trust prompt for it."
 
   macos:
     name: macOS signed DMG

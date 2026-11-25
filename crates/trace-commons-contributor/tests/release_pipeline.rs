@@ -1877,6 +1877,21 @@ fn the_release_workflow_publishes_the_appcast() {
 /// Extracts the text of one top-level job block from a workflow file: from
 /// `\n  <name>:` up to (but not including) the next line matching `\n  <ident>:`
 /// at the same two-space indent, or end of file.
+/// Splits a job body into its steps: each starts at a `      - ` line.
+fn job_steps(job: &str) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    for line in job.lines() {
+        if line.starts_with("      - ") {
+            steps.push(String::new());
+        }
+        if let Some(step) = steps.last_mut() {
+            step.push_str(line);
+            step.push('\n');
+        }
+    }
+    steps
+}
+
 fn extract_job<'a>(workflow: &'a str, name: &str) -> &'a str {
     let marker = format!("\n  {name}:");
     let start = workflow
@@ -2109,13 +2124,13 @@ fn live_attestation_is_required_before_app_publication() {
     assert!(gate.contains("ref: ${{ steps.rts.outputs.revision }}"));
     assert!(gate.contains(r#"cp -R release-red-sandbox "$RUNNER_TEMP/release-red-sandbox""#));
     assert!(gate.contains("working-directory: ${{ runner.temp }}/release-red-sandbox"));
-    // Production builds launch only a pinned compose, so production is
-    // verified pinned. Staging builds launch any compose the TEE measured
-    // (`red_team::attest_options`), and NEAR redeploys the staging gateway
-    // several times a day, so staging is verified the way the app runs it:
-    // every check but the pin.
+    // Gateway shows a trust prompt for a production build the policy does not
+    // list, so the blocking pass runs production and staging with every check
+    // but the pin. A broken verifier still fails the release here.
     assert!(
-        gate.contains("RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=pinned \\")
+        gate.contains(
+            "RTS_LIVE_NEAR_ENVIRONMENT=production RTS_LIVE_COMPOSE_POLICY=mr-config-only \\"
+        )
     );
     assert!(
         gate.contains(
@@ -2126,8 +2141,36 @@ fn live_attestation_is_required_before_app_publication() {
     assert_eq!(
         gate.matches("cargo test --locked --test live_attest -- --ignored --test-threads=1")
             .count(),
-        2
+        3
     );
+    // The pinned pass reports drift and never blocks, and it alone carries
+    // the feed keys.
+    let steps = job_steps(gate);
+    let pinned: Vec<&String> = steps
+        .iter()
+        .filter(|step| step.contains("RTS_LIVE_COMPOSE_POLICY=pinned"))
+        .collect();
+    assert_eq!(pinned.len(), 1, "exactly one step runs the pinned policy");
+    assert!(pinned[0].contains("continue-on-error: true"));
+    assert!(pinned[0].contains("RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX:"));
+    assert!(pinned[0].contains(
+        "7b528575c138cd711ed863eb59a7a95d78d79d222a8a962ddb25196ccc14db5c,\
+         39982511b3d64da04fbb22cbec7e6040ae5c844ec750a428e6528f221ffd4d17"
+    ));
+    for step in &steps {
+        if step.contains("RTS_LIVE_COMPOSE_POLICY=pinned") {
+            assert!(step.contains("continue-on-error: true"));
+        }
+        if step.contains("RTS_ATTESTATION_POLICY_PUBLIC_KEYS_HEX") {
+            assert!(step.contains("RTS_LIVE_COMPOSE_POLICY=pinned"));
+        }
+    }
+    assert!(pinned[0].contains("id: production-pin"));
+    let warning = steps
+        .iter()
+        .find(|step| step.contains("::warning::"))
+        .expect("a step warns about production pin drift");
+    assert!(warning.contains("if: steps.production-pin.outcome == 'failure'"));
 
     // The GitHub Release supports partial platform success, so all platform
     // results together still cannot stand in for successful attestation.
