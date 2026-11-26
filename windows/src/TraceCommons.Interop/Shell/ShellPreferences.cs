@@ -78,6 +78,20 @@ public sealed class ShellPreferences
         set => Write(_values with { ShowsPromotions = value });
     }
 
+    /// <summary>The remembered widths of the main pane beside the map and of the map itself.</summary>
+    public (double Main, double Map) MonitorPaneWidths => (
+        ValidPaneWidth(_values.MonitorMainWidth, MonitorPaneLayout.MainWidth, MonitorPaneLayout.MainWidth),
+        ValidPaneWidth(_values.MonitorMapWidth, MonitorPaneLayout.MapMinWidth, MonitorPaneLayout.DefaultMapWidth));
+
+    public void KeepMonitorPaneWidths(double main, double map) => Write(_values with
+    {
+        MonitorMainWidth = ValidPaneWidth(main, MonitorPaneLayout.MainWidth, MonitorPaneLayout.MainWidth),
+        MonitorMapWidth = ValidPaneWidth(map, MonitorPaneLayout.MapMinWidth, MonitorPaneLayout.DefaultMapWidth),
+    }, notify: false);
+
+    private static double ValidPaneWidth(double? value, double minimum, double fallback) =>
+        value is double width && double.IsFinite(width) && width >= minimum ? width : fallback;
+
     /// <summary>What the Balance tile last drew, so credit that arrived while the app was closed is marked next time.</summary>
     public BalanceArrival.Reading? BalanceShown
     {
@@ -107,11 +121,11 @@ public sealed class ShellPreferences
         });
     }
 
-    private void Write(Values values)
+    private void Write(Values values, bool notify = true)
     {
         bool changed = values != _values;
         _values = values;
-        if (changed)
+        if (changed && notify)
         {
             Changed?.Invoke();
         }
@@ -166,6 +180,12 @@ public sealed class ShellPreferences
 
         [JsonPropertyName("shows_promotions")]
         public bool? ShowsPromotions { get; init; }
+
+        [JsonPropertyName("monitor_main_width")]
+        public double? MonitorMainWidth { get; init; }
+
+        [JsonPropertyName("monitor_map_width")]
+        public double? MonitorMapWidth { get; init; }
 
         [JsonPropertyName("balance_shown_received")]
         public long? BalanceShownReceived { get; init; }

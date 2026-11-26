@@ -463,13 +463,19 @@ public sealed partial class ManagedSessionsView : UserControl
                 break;
         }
 
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        var actions = new FlowPanel { Spacing = 8, LineSpacing = 8 };
         if (_snapshot.ToolArea == ManagedToolArea.Buttons)
         {
             foreach (string tool in _snapshot.SignInStartTools)
             {
                 if (ManagedSignIn.StartKey(tool) is not string key) continue;
                 actions.Children.Add(ToolButton(tool, key));
+            }
+
+            if (actions.Children.Count == 4)
+            {
+                // Keep OpenCode and Red Team together when all four buttons need two rows.
+                actions.PreferredRowBreak = 2;
             }
         }
 
