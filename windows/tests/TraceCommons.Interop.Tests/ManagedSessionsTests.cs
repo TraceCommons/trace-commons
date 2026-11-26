@@ -70,15 +70,17 @@ public sealed class ManagedSessionsTests
     }
 
     [Theory]
-    [InlineData("running", true, true, false, false, false, null, "Show,Stop")]
-    [InlineData("running", false, true, false, false, false, null, "Stop")]
-    [InlineData("starting", true, true, false, false, false, null, "")]
-    [InlineData("unknown", false, false, false, false, true, "Dismiss", "")]
-    [InlineData("exited", false, false, true, true, false, "Resume", "StartAgain,CopyResumeCommand,Dismiss")]
-    [InlineData("failed", false, false, true, false, false, "StartAgain", "Dismiss")]
-    [InlineData("exited", false, false, false, false, false, "Dismiss", "")]
+    [InlineData("running", true, true, false, false, false, null, "Show,Stop", false)]
+    [InlineData("running", false, true, false, false, false, null, "Stop", false)]
+    [InlineData("starting", true, true, false, false, false, null, "", false)]
+    [InlineData("unknown", false, false, false, false, true, "Dismiss", "", false)]
+    [InlineData("exited", false, false, true, true, false, "Resume", "StartAgain,CopyResumeCommand", true)]
+    [InlineData("failed", false, false, false, true, false, "Resume", "CopyResumeCommand", true)]
+    [InlineData("failed", false, false, true, false, false, "StartAgain", "", true)]
+    [InlineData("exited", false, false, false, false, false, "Dismiss", "", false)]
     public void SessionActionsFollowTheDaemon(
-        string state, bool focus, bool stop, bool start, bool resume, bool dismiss, string? primary, string menu)
+        string state, bool focus, bool stop, bool start, bool resume, bool dismiss, string? primary, string menu,
+        bool secondaryDismiss)
     {
         string json = System.Text.Json.JsonSerializer.Serialize(new
         {
@@ -98,6 +100,7 @@ public sealed class ManagedSessionsTests
         var actions = ManagedSessionActions.For(Assert.Single(snapshot.Sessions), snapshot.Capabilities, configDirectoryKnown: true);
         Assert.Equal(primary, actions.Primary?.ToString());
         Assert.Equal(menu, string.Join(",", actions.Menu));
+        Assert.Equal(secondaryDismiss, actions.HasSecondaryDismiss);
     }
 
     [Fact]

@@ -34,9 +34,11 @@ public sealed record ManagedSession(
 
 public enum ManagedSessionAction { Show, Stop, Resume, StartAgain, CopyResumeCommand, Dismiss }
 
-/// <summary>The session row's primary button and menu, following the Mac's action order.</summary>
+/// <summary>The session row's visible actions and remaining menu items.</summary>
 public sealed record ManagedSessionActions(ManagedSessionAction? Primary, IReadOnlyList<ManagedSessionAction> Menu)
 {
+    public bool HasSecondaryDismiss => Primary is ManagedSessionAction.Resume or ManagedSessionAction.StartAgain;
+
     public static ManagedSessionActions For(ManagedSession session, ManagedCapabilities capabilities, bool configDirectoryKnown)
     {
         var menu = new List<ManagedSessionAction>();
@@ -58,7 +60,6 @@ public sealed record ManagedSessionActions(ManagedSessionAction? Primary, IReadO
             startAgain ? ManagedSessionAction.StartAgain : ManagedSessionAction.Dismiss;
         if (resume && startAgain) menu.Add(ManagedSessionAction.StartAgain);
         if (session.CanResume && configDirectoryKnown) menu.Add(ManagedSessionAction.CopyResumeCommand);
-        if (primary != ManagedSessionAction.Dismiss) menu.Add(ManagedSessionAction.Dismiss);
         return new(primary, menu);
     }
 }
