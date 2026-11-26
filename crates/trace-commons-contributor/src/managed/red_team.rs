@@ -147,16 +147,47 @@ fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn run_setup_check(prefix: &Path, sessions_dir: &Path) -> Result<(), String> {
+    let options = rts::setup::SetupOptions {
+        check: true,
+        offline: true,
+    };
     rts::setup::run_in_prefix(
-        &rts::setup::SetupOptions {
-            check: true,
-            offline: true,
-        },
-        &windows_setup_context(prefix, sessions_dir)?.context(),
+        &options,
+        &windows_setup_context(prefix, sessions_dir)?.context(&options),
         prefix,
         &super::red_team_release::platform_release().to_archive(),
     )
     .map(|_| ())
+}
+
+/// The snapshot's version probe runs even when the user never opened a terminal.
+#[cfg(windows)]
+struct WindowsSetupCheckHost;
+
+#[cfg(windows)]
+impl rts::session::Host for WindowsSetupCheckHost {
+    fn run(
+        &self,
+        argv: &[String],
+        timeout: std::time::Duration,
+    ) -> std::io::Result<rts::mvm::RunOutput> {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty argv"))?;
+        let mut command = std::process::Command::new(program);
+        command.args(args).creation_flags(CREATE_NO_WINDOW);
+        let output = super::profiles::bounded_output_with_timeout(command, timeout)
+            .map_err(std::io::Error::other)?;
+        Ok(rts::mvm::RunOutput {
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+            killed: false,
+        })
+    }
 }
 
 #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), windows)))]
@@ -172,7 +203,6 @@ struct WindowsSetup {
     supervisor: PathBuf,
     exe: PathBuf,
     fetch: rts::setup::HttpsFetch,
-    host: rts::session::RealHost,
     mvm: rts::mvm::SpawnRunner,
     prefix: PathBuf,
     _tmp: Box<dyn std::any::Any>,
@@ -180,7 +210,7 @@ struct WindowsSetup {
 
 #[cfg(windows)]
 impl WindowsSetup {
-    fn context(&self) -> rts::setup::SetupContext<'_> {
+    fn context(&self, options: &rts::setup::SetupOptions) -> rts::setup::SetupContext<'_> {
         rts::setup::SetupContext {
             home: &self.prefix,
             defaults: &self.defaults,
@@ -188,7 +218,11 @@ impl WindowsSetup {
             supervisor: &self.supervisor,
             rts: &self.exe,
             fetch: &self.fetch,
-            host: &self.host,
+            host: if options.check {
+                &WindowsSetupCheckHost
+            } else {
+                &rts::session::RealHost
+            },
             mvm_plain: &self.mvm,
             mvm: &self.mvm,
         }
@@ -210,7 +244,6 @@ fn windows_setup_context(prefix: &Path, sessions_dir: &Path) -> Result<WindowsSe
         supervisor: rts::install::prefix_supervisor(prefix),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("near-ai.exe")),
         fetch: rts::setup::HttpsFetch::new().map_err(|e| e.to_string())?,
-        host: rts::session::RealHost,
         mvm,
         prefix: prefix.to_path_buf(),
         defaults,
@@ -239,7 +272,7 @@ pub fn setup_install(store: &ConfigStore) -> Result<(), ManagedError> {
     {
         let setup = windows_setup_context(&prefix, &sessions_dir)
             .map_err(|_| ManagedError::ToolUnavailable)?;
-        rts::setup::run_in_prefix(&opts, &setup.context(), &prefix, &release)
+        rts::setup::run_in_prefix(&opts, &setup.context(&opts), &prefix, &release)
             .map(|_| ())
             .map_err(|_| ManagedError::ToolUnavailable)
     }

@@ -5,6 +5,7 @@ use crate::config::ConfigStore;
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 pub enum NativeAction {
@@ -294,7 +295,16 @@ pub(crate) fn bounded_output_limit(
     command: Command,
     limit: u64,
 ) -> Result<std::process::Output, ManagedError> {
-    bounded_output_inner(command, limit, None)
+    bounded_output_inner(command, limit, None, Duration::from_secs(10))
+}
+
+/// Give a Windows background setup probe its own deadline.
+#[cfg(windows)]
+pub(crate) fn bounded_output_with_timeout(
+    command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, ManagedError> {
+    bounded_output_inner(command, 65536, None, timeout)
 }
 
 /// [`bounded_output`] with `input` written to the program's stdin, which is
@@ -305,13 +315,14 @@ pub(crate) fn bounded_output_with_input(
     command: Command,
     input: &[u8],
 ) -> Result<std::process::Output, ManagedError> {
-    bounded_output_inner(command, 65536, Some(input))
+    bounded_output_inner(command, 65536, Some(input), Duration::from_secs(10))
 }
 
 fn bounded_output_inner(
     mut command: Command,
     limit: u64,
     input: Option<&[u8]>,
+    timeout: Duration,
 ) -> Result<std::process::Output, ManagedError> {
     use std::io::{Read, Seek};
     use std::process::Stdio;
@@ -342,7 +353,7 @@ fn bounded_output_inner(
         // reading it fails the write, which its own exit status reports.
         let _ = stdin.write_all(input);
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if stdout.metadata().map(|m| m.len() > limit).unwrap_or(true)
             || stderr.metadata().map(|m| m.len() > 65536).unwrap_or(true)

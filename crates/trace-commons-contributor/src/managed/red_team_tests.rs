@@ -20,6 +20,43 @@ use crate::managed::{AccountId, AccountView, ConnectionKind, Generation, ToolId}
 use serde_json::json;
 use uuid::Uuid;
 
+#[cfg(windows)]
+#[test]
+fn windows_setup_probe_captures_output_without_allocating_a_console() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().unwrap();
+    let setup = windows_setup_context(&temp.path().join("runtime"), temp.path()).unwrap();
+    let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+    let script = r#"
+        Add-Type -Namespace GatewayTests -Name Console -MemberDefinition '[DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();'
+        if ([GatewayTests.Console]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 1 }
+        [Console]::WriteLine('probe complete')
+    "#;
+    let argv = vec![
+        powershell.to_str().unwrap().to_owned(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+        script.into(),
+    ];
+    let options = rts::setup::SetupOptions {
+        check: true,
+        offline: true,
+    };
+    let output = setup
+        .context(&options)
+        .host
+        .run(&argv, Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(output.code, Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "probe complete"
+    );
+}
+
 fn test_context(cwd: &Path, inputs: Vec<PathBuf>, key: &str) -> LaunchContext {
     let id = Uuid::new_v4();
     LaunchContext {
