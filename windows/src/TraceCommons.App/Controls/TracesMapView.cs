@@ -2425,19 +2425,31 @@ public sealed partial class FlowPanel : Panel
 
     public double LineSpacing { get; set; }
 
+    public int PreferredRowBreak { get; set; }
+
+    private int PreferredBreak(double width) => PreferredRowBreak > 0
+        ? FlowRows.PreferredBreak(Children.Where(child => child.Visibility != Visibility.Collapsed)
+            .Select(child => child.DesiredSize.Width).ToArray(), width, Spacing, PreferredRowBreak)
+        : 0;
+
     protected override Size MeasureOverride(Size available)
     {
-        double x = 0, y = 0, line = 0, widest = 0;
         foreach (UIElement child in Children)
         {
             child.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        }
+
+        double x = 0, y = 0, line = 0, widest = 0;
+        int preferredBreak = PreferredBreak(available.Width), placed = 0;
+        foreach (UIElement child in Children)
+        {
             if (child.Visibility == Visibility.Collapsed)
             {
                 continue;
             }
 
             Size d = child.DesiredSize;
-            if (x > 0 && x + d.Width > available.Width)
+            if (x > 0 && (placed == preferredBreak || x + d.Width > available.Width))
             {
                 y += line + LineSpacing;
                 x = 0;
@@ -2447,6 +2459,7 @@ public sealed partial class FlowPanel : Panel
             x += d.Width + Spacing;
             line = Math.Max(line, d.Height);
             widest = Math.Max(widest, x - Spacing);
+            placed++;
         }
 
         return new Size(double.IsInfinity(available.Width) ? widest : Math.Min(widest, available.Width), y + line);
@@ -2455,6 +2468,7 @@ public sealed partial class FlowPanel : Panel
     protected override Size ArrangeOverride(Size final)
     {
         double x = 0, y = 0, line = 0;
+        int preferredBreak = PreferredBreak(final.Width), placed = 0;
         foreach (UIElement child in Children)
         {
             if (child.Visibility == Visibility.Collapsed)
@@ -2463,7 +2477,7 @@ public sealed partial class FlowPanel : Panel
             }
 
             Size d = child.DesiredSize;
-            if (x > 0 && x + d.Width > final.Width)
+            if (x > 0 && (placed == preferredBreak || x + d.Width > final.Width))
             {
                 y += line + LineSpacing;
                 x = 0;
@@ -2473,6 +2487,7 @@ public sealed partial class FlowPanel : Panel
             child.Arrange(new Rect(x, y, d.Width, d.Height));
             x += d.Width + Spacing;
             line = Math.Max(line, d.Height);
+            placed++;
         }
 
         return final;

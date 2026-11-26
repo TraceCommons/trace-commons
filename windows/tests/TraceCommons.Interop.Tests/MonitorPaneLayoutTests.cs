@@ -193,6 +193,62 @@ public class MonitorPaneLayoutTests
         Assert.Equal(want, MonitorPaneLayout.DraggedMain(start, dx, width, inspector));
     }
 
+    [Fact]
+    public void ResizingRestoresTheDraggedMainWidthBeforeGrowingTheMap()
+    {
+        double keptMain = MonitorPaneLayout.DraggedMain(440, 110, 1350, showsInspector: true);
+        var narrow = MonitorPaneLayout.For(1150, true, true, keptMain);
+        var wideAgain = MonitorPaneLayout.For(1350, true, true, keptMain);
+
+        Assert.Equal(477, narrow.Main);
+        Assert.Equal(360, narrow.Map);
+        Assert.Equal(550, wideAgain.Main);
+        Assert.Equal(487, wideAgain.Map);
+        Assert.Equal(293, narrow.Inspector);
+        Assert.Equal(narrow.Inspector, wideAgain.Inspector);
+    }
+
+    [Fact]
+    public void TheWindowWiresTheMapDividerAndReopensTheMapAtItsKeptWidth()
+    {
+        string markup = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "MainWindow.xaml.txt"));
+        string shell = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.Shell.cs.txt"));
+        Assert.Contains("<controls:PaneDivider x:Name=\"MapDivider\"", markup);
+        Assert.Contains("MapDivider.Dragged += OnMapDividerDragged", shell);
+        Assert.Contains("MonitorPaneLayout.DraggedMain(", shell);
+        Assert.Contains("old, next, _keptMain, _keptMap", shell);
+        Assert.DoesNotContain("x:Name=\"InspectorDivider\"", markup);
+    }
+
+    [Fact]
+    public void TheWindowDoesNotRememberAProgrammaticFrameAsAPersonsResize()
+    {
+        string shell = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "shell-source", "TraceCommons.App/MainWindow.Shell.cs.txt"));
+        Assert.Matches(@"_placingWindow = true;\s*try\s*\{\s*AppWindow\.MoveAndResize\([^;]+;\s*_lastWindowWidth = AppWindow\.Size\.Width;", shell);
+        Assert.Matches(@"private void RememberMapWidth\(\)\s*\{\s*int width = AppWindow\.Size\.Width;\s*if \(_placingWindow \|\| width == _lastWindowWidth\)", shell);
+    }
+
+    [Fact]
+    public void DraggedPaneWidthsSurviveRelaunch()
+    {
+        string folder = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        try
+        {
+            string path = Path.Combine(folder, "preferences.json");
+            var prefs = new ShellPreferences(path);
+            Assert.Equal((440.0, 440.0), prefs.MonitorPaneWidths);
+            prefs.KeepMonitorPaneWidths(510, 400);
+
+            Assert.Equal((510.0, 400.0), new ShellPreferences(path).MonitorPaneWidths);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
+    }
+
     public static IEnumerable<object?[]> Transitions() => new[]
     {
         // width, from, to, mapWidth -> main, map, inspector, gap, lower limit (probe "transition(...)")

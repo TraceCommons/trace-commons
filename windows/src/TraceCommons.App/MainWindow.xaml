@@ -1441,6 +1441,17 @@
             <!-- The map's place (W3 draws it). -->
             <Border x:Name="MapPane" Grid.Column="2" Visibility="Collapsed" />
 
+            <controls:PaneDivider x:Name="MapDivider"
+                                  Grid.Column="1" Grid.ColumnSpan="2"
+                                  HorizontalAlignment="Left" Visibility="Collapsed"
+                                  AutomationProperties.AccessibilityView="Raw"
+                                  Background="Transparent">
+                <Border Width="3" Height="36" CornerRadius="1.5" Margin="0,0,4,0"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        Background="{ThemeResource TcInkSecondaryBrush}"
+                        Opacity="0" IsHitTestVisible="False" />
+            </controls:PaneDivider>
+
             <!--
                 The inspector (293 wide, two thirds of the main pane). In this
                 slice it holds the open folder's sessions, which the Traces

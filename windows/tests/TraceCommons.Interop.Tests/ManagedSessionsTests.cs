@@ -1,11 +1,41 @@
+using System;
+using System.IO;
 using System.Linq;
 using TraceCommons.Interop;
+using TraceCommons.Interop.Shell;
 using Xunit;
 
 namespace TraceCommons.Interop.Tests;
 
 public sealed class ManagedSessionsTests
 {
+    [Fact]
+    public void SignInCardWrapsItsLaunchAndInstallButtons()
+    {
+        string path = Path.Combine(AppContext.BaseDirectory, "shell-source",
+            "TraceCommons.App", "Controls", "ManagedSessionsView.cs.txt");
+        string source = File.ReadAllText(path);
+        int start = source.IndexOf("private void RenderSignIn()", StringComparison.Ordinal);
+        int end = source.IndexOf("private Button ToolButton(", start, StringComparison.Ordinal);
+        string signIn = source[start..end];
+
+        Assert.Contains("var actions = new FlowPanel", signIn);
+        Assert.Contains("actions.Children.Add(ToolButton(tool, key))", signIn);
+        Assert.Contains("actions.Children.Add(InstallButton(tool, withName: true))", signIn);
+        Assert.Contains("actions.PreferredRowBreak = 2", signIn);
+    }
+
+    [Theory]
+    [InlineData(445, 0)]
+    [InlineData(410, 2)]
+    [InlineData(221, 2)]
+    [InlineData(220, 0)]
+    public void TheFourToolButtonsUseBalancedRowsWhenBothPairsFit(double availableWidth, int expectedBreak)
+    {
+        double[] widths = [124, 84, 110, 103];
+        Assert.Equal(expectedBreak, FlowRows.PreferredBreak(widths, availableWidth, spacing: 8, after: 2));
+    }
+
     [Fact]
     public void SavedAccountsUseDaemonDefaultsAndLocalizedAuthenticationStates()
     {

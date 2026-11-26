@@ -58,6 +58,12 @@ public sealed partial class MainWindow
     /// <summary>The main pane's kept width beside the map.</summary>
     private double _keptMain = MonitorPaneLayout.MainWidth;
 
+    private double _keptMap = MonitorPaneLayout.DefaultMapWidth;
+    private (double StartMain, double CurrentMain)? _mapDividerDrag;
+    private DispatcherQueueTimer? _paneWidthSave;
+    private int _lastWindowWidth;
+    private bool _placingWindow;
+
     /// <summary>The pane move under way, driven once a frame (<see cref="OnMoveFrame"/>).</summary>
     private PaneMoveRun? _moveRun;
 
@@ -141,6 +147,10 @@ public sealed partial class MainWindow
         ApplyTabDescriptions();
         RegisterAccelerators();
         ApplyWindowMaterial();
+
+        (_keptMain, _keptMap) = _prefs.MonitorPaneWidths;
+        MapDivider.Dragged += OnMapDividerDragged;
+        MapDivider.DragEnded += OnMapDividerDragEnded;
 
         AppTitleBar.SizeChanged += (_, _) => UpdateTitleBarInsets();
         AppTitleBar.Loaded += (_, _) => UpdateTitleBarInsets();
@@ -576,6 +586,7 @@ public sealed partial class MainWindow
 
         // A later move takes over from wherever the window is now
         // (ThreePane.swift:557-562).
+        MapDivider.CancelDrag();
         StopMoveTicks();
         _moveRun = null;
         if (IsMaximized || ClientWidth <= 0)
@@ -591,7 +602,7 @@ public sealed partial class MainWindow
         RectInt32 work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         var workArea = new LayoutRect(work.X, work.Y, work.Width, work.Height);
         PaneMove move = MonitorWindowGrowth.Plan(
-            outer, clientWidth, workArea, Scale, old, next, _keptMain, MonitorPaneLayout.DefaultMapWidth,
+            outer, clientWidth, workArea, Scale, old, next, _keptMain, _keptMap,
             _uiSettings.AnimationsEnabled && _clockGate.MayTick);
         _keptMain = move.Main;
 
@@ -700,8 +711,21 @@ public sealed partial class MainWindow
         }
     }
 
-    private void MoveAndResize(LayoutRect frame) =>
-        AppWindow.MoveAndResize(new RectInt32((int)frame.X, (int)frame.Y, (int)frame.Width, (int)frame.Height));
+    private void MoveAndResize(LayoutRect frame)
+    {
+        // Changed can run inside MoveAndResize or arrive later. Keep the
+        // width Windows applied so neither delivery saves the placed frame.
+        _placingWindow = true;
+        try
+        {
+            AppWindow.MoveAndResize(new RectInt32((int)frame.X, (int)frame.Y, (int)frame.Width, (int)frame.Height));
+            _lastWindowWidth = AppWindow.Size.Width;
+        }
+        finally
+        {
+            _placingWindow = false;
+        }
+    }
 
     /// <summary>Sets the columns from the Mac's arithmetic at the row's width.</summary>
     private void LayoutPanes()
@@ -714,13 +738,15 @@ public sealed partial class MainWindow
         double width = ClientWidth;
         MonitorPaneLayout layout = _transition is PaneTransition transition
             ? MonitorPaneLayout.For(width, transition)
-            : MonitorPaneLayout.For(width, _presented.Map, _presented.Inspector, _keptMain);
+            : MonitorPaneLayout.For(width, _presented.Map, _presented.Inspector, _mapDividerDrag?.CurrentMain ?? _keptMain);
         MainColumn.Width = new GridLength(layout.Main);
         MapGapColumn.Width = new GridLength(layout.Map is null ? 0 : layout.MapGap);
         MapColumn.Width = new GridLength(layout.Map ?? 0);
         InspectorGapColumn.Width = new GridLength(layout.Inspector is null ? 0 : MonitorPaneLayout.PaneGap);
         InspectorColumn.Width = new GridLength(layout.Inspector ?? 0);
         MapPane.Visibility = layout.Map is null ? Visibility.Collapsed : Visibility.Visible;
+        MapDivider.Visibility = _transition is null && layout.Map is > 0 ? Visibility.Visible : Visibility.Collapsed;
+        MapDivider.Width = layout.MapGap + Math.Min(layout.Map ?? 0, MonitorPaneLayout.DividerReach);
         if (_map is not null)
         {
             _map.PaneShown = layout.Map is not null;
@@ -736,6 +762,80 @@ public sealed partial class MainWindow
     }
 
     private void OnPaneRowSizeChanged(object sender, SizeChangedEventArgs e) => LayoutPanes();
+
+    private void OnMapDividerDragged(double dx)
+    {
+        double width = ClientWidth;
+        double start = _mapDividerDrag?.StartMain
+            ?? MonitorPaneLayout.For(width, true, _presented.Inspector, _keptMain).Main;
+        double current = MonitorPaneLayout.DraggedMain(start, dx, width, _presented.Inspector);
+        _mapDividerDrag = (start, current);
+        LayoutPanes();
+    }
+
+    private void OnMapDividerDragEnded(bool commit)
+    {
+        if (_mapDividerDrag is not { } drag)
+        {
+            return;
+        }
+
+        _mapDividerDrag = null;
+        if (commit)
+        {
+            _keptMain = drag.CurrentMain;
+            MonitorPaneLayout layout = MonitorPaneLayout.For(ClientWidth, true, _presented.Inspector, _keptMain);
+            if (layout.Map is double map && map >= MonitorPaneLayout.MapMinWidth)
+            {
+                _keptMap = map;
+            }
+
+            _paneWidthSave?.Stop();
+            _prefs.KeepMonitorPaneWidths(_keptMain, _keptMap);
+        }
+
+        LayoutPanes();
+    }
+
+    /// <summary>Remember the resized map as on macOS, saving once the window stops moving.</summary>
+    private void RememberMapWidth()
+    {
+        int width = AppWindow.Size.Width;
+        if (_placingWindow || width == _lastWindowWidth)
+        {
+            return;
+        }
+
+        _lastWindowWidth = width;
+        if (!_seeded || _transition is not null || _mapDividerDrag is not null || !_presented.Map || IsMaximized || _minimised)
+        {
+            return;
+        }
+
+        MonitorPaneLayout layout = MonitorPaneLayout.For(ClientWidth, true, _presented.Inspector, _keptMain);
+        if (layout.Map is not double map || map < MonitorPaneLayout.MapMinWidth || Math.Abs(map - _keptMap) < 1)
+        {
+            return;
+        }
+
+        _keptMap = map;
+        if (_paneWidthSave is null)
+        {
+            _paneWidthSave = DispatcherQueue.CreateTimer();
+            _paneWidthSave.Interval = TimeSpan.FromMilliseconds(250);
+            _paneWidthSave.IsRepeating = false;
+            _paneWidthSave.Tick += (_, _) => SaveMapWidth();
+        }
+
+        _paneWidthSave.Stop();
+        _paneWidthSave.Start();
+    }
+
+    private void SaveMapWidth()
+    {
+        _paneWidthSave?.Stop();
+        _prefs.KeepMonitorPaneWidths(_prefs.MonitorPaneWidths.Main, _keptMap);
+    }
 
     /// <summary>
     /// The first time the window is shown: the panes its work area has room
@@ -759,7 +859,9 @@ public sealed partial class MainWindow
         _wantsInspector = seed.Inspector || InspectorDemand.OpensOnAppear(InspectorDemand.Keys(ViewModel.Demand));
 
         bool inspector = _wantsInspector && MonitorNavigation.InspectorAvailable(_at.Tab, _at.HomePage);
-        double width = MonitorPaneLayout.WindowWidth(showsMap: _wantsMap, showsInspector: inspector);
+        double width = MonitorPaneLayout.WindowWidth(
+            showsMap: _wantsMap, showsInspector: inspector, mapWidth: _keptMap,
+            main: _wantsMap ? _keptMain : MonitorPaneLayout.MainWidth);
         double frameExtra = AppWindow.Size.Width - AppWindow.ClientSize.Width;
         double height = MonitorPaneLayout.WindowHeight * scale + (AppWindow.Size.Height - AppWindow.ClientSize.Height);
         var outer = new LayoutRect(AppWindow.Position.X, AppWindow.Position.Y, AppWindow.Size.Width, AppWindow.Size.Height);
@@ -830,6 +932,7 @@ public sealed partial class MainWindow
             case TitleBarRead.Now:
                 UpdateTitleBarInsets();
                 LayoutPanes();
+                RememberMapWidth();
                 break;
             case TitleBarRead.AfterDispatch:
                 DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
@@ -850,6 +953,7 @@ public sealed partial class MainWindow
 
                     UpdateTitleBarInsets();
                     LayoutPanes();
+                    RememberMapWidth();
                 });
                 break;
         }
@@ -867,6 +971,12 @@ public sealed partial class MainWindow
         WindowClocks.Set(mayTick, OpenRoot);
         if (!mayTick)
         {
+            MapDivider.CancelDrag();
+            if (_paneWidthSave?.IsRunning == true)
+            {
+                SaveMapWidth();
+            }
+
             _visibilityDebounceTimer.Stop();
             FinishMove();
             FinishNoticeMotion();
