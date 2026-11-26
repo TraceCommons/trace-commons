@@ -109,7 +109,14 @@ public sealed partial class ManagedSessionsView
             AutomationProperties.SetAutomationId(primaryButton, $"ManagedSessionPrimary-{session.Id}");
             trailing.Children.Add(primaryButton);
         }
-        if (actions.Menu.Count > 0)
+        if (actions.HasSecondaryDismiss)
+        {
+            Button dismissButton = Button("dismiss", () => RunRowActionAsync(session, ManagedSessionAction.Dismiss));
+            AutomationProperties.SetAutomationId(dismissButton, $"ManagedSessionDismiss-{session.Id}");
+            trailing.Children.Add(dismissButton);
+        }
+        // Ended rows use the row itself for any remaining actions.
+        if (session.HoldsAccount && actions.Menu.Count > 0)
         {
             var more = new Button
             {
