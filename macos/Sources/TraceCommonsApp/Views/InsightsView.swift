@@ -38,6 +38,9 @@ struct InsightsView: View {
     /// `nil` draws no link.
     private let openTraces: (() -> Void)?
     private let openSkillsSettings: (() -> Void)?
+    /// Reports an anonymous usage count (#1920); `nil` reports nothing
+    /// (previews, renders in tests).
+    private let recordUsage: ((UsageEvent) -> Void)?
     /// The sample under the get-started card, built the first time it is
     /// drawn (`InsightsSampleModels`); never the person's own models.
     @State private var sample: InsightsSampleModels?
@@ -54,7 +57,8 @@ struct InsightsView: View {
                     openTraces: (() -> Void)? = nil,
                     openSkillsSettings: (() -> Void)? = nil,
                     skills: InsightsSkillsModel? = nil,
-                    isSkillsEnabled: Bool = false) {
+                    isSkillsEnabled: Bool = false,
+                    recordUsage: ((UsageEvent) -> Void)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         var subscriptionReader: SubscriptionUsageModel.Reader? = daemon.map { client in
             { @Sendable refresh, interactive, provider, login in
@@ -105,7 +109,7 @@ struct InsightsView: View {
                     } },
                     definitionReader: daemon.map { client in { @Sendable id in try await client.skillDefinition(skillID: id) } },
                     evidenceReader: daemon.map { client in { @Sendable reference in try await client.skillEvidence(sessionRef: reference) } },
-                    copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled)
+                    copy: storeCopy ?? [:]), isSkillsEnabled: isSkillsEnabled, recordUsage: recordUsage)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -126,8 +130,10 @@ struct InsightsView: View {
                     openTraces: (() -> Void)? = nil,
                     openSkillsSettings: (() -> Void)? = nil,
                     skills: InsightsSkillsModel? = nil,
-                    isSkillsEnabled: Bool = false) {
+                    isSkillsEnabled: Bool = false,
+                    recordUsage: ((UsageEvent) -> Void)? = nil) {
         self.isSkillsEnabled = isSkillsEnabled
+        self.recordUsage = recordUsage
         self.inspector = inspector ?? InsightsBreakdownInspector()
         self.openTraces = openTraces
         self.openSkillsSettings = openSkillsSettings
@@ -303,6 +309,14 @@ struct InsightsView: View {
         .onAppear { showSampleWeekIfAsked() }
         // Breakdown's details are the inspector's while Breakdown is shown.
         .onChange(of: visibleTab, initial: true) { _, shown in showBreakdownDetail(shown) }
+        // The sub-view on screen counts as opened (#1920): the one Insights
+        // opens on, each time Insights comes on screen (`initial`), and each
+        // one picked after. `visibleTab`, not `tab`: the Skills fallback
+        // moves `tab` without changing what is drawn, and a redraw changes
+        // neither. Skills has no count.
+        .onChange(of: visibleTab, initial: true) { _, shown in
+            if let event = Self.usageEvent(for: shown) { recordUsage?(event) }
+        }
         .onChange(of: isSkillsEnabled, initial: true) { _, enabled in
             if !enabled, tab == .skills { tab = .overview }
         }
@@ -395,6 +409,23 @@ struct InsightsView: View {
         case .relativePath: return storeCopy["insights_store_relative_path"] ?? ""
         case .pathMissing: return storeCopy["insights_store_path_missing"] ?? ""
         case .notADirectory: return storeCopy["insights_store_not_directory"] ?? ""
+        }
+    }
+}
+
+extension InsightsView {
+    /// The anonymous usage count for an Insights sub-view coming on screen
+    /// (#1920). Breakdown is `patterns`. Skills is on no list, so it counts
+    /// nothing. This app has no Sessions or Analyze tab, so
+    /// `insights_sessions_opened` and `insights_analyze_opened` are not sent
+    /// from here (a day's sessions open in Breakdown's inspector, which is
+    /// not a sub-view of its own).
+    nonisolated static func usageEvent(for tab: InsightsTab) -> UsageEvent? {
+        switch tab {
+        case .overview: .insightsOverviewOpened
+        case .patterns: .insightsBreakdownOpened
+        case .benchmarks: .insightsBenchmarksOpened
+        case .skills: nil
         }
     }
 }
