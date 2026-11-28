@@ -48,6 +48,13 @@ impl HostProblem {
     }
 }
 
+/// Whether the app shows Red Team on this host at all. Windows Home can never
+/// run it, so it is not offered there: no row, no setup card, no launcher
+/// (owner, 2026-11-27).
+pub fn red_team_shown(problem: Option<HostProblem>) -> bool {
+    problem != Some(HostProblem::HomeEdition)
+}
+
 /// The problem `rts setup`'s check names, from its error text.
 pub fn classify_setup_error(message: &str) -> Option<HostProblem> {
     if message.contains("Windows Home is not supported") {
@@ -284,6 +291,14 @@ mod tests {
         assert!(!HostProblem::HomeEdition.enable_offered());
         assert!(HostProblem::HyperVMissing.enable_offered());
         assert!(HostProblem::NotInHyperVAdministrators.enable_offered());
+    }
+
+    #[test]
+    fn windows_home_is_offered_no_red_team_at_all() {
+        assert!(!red_team_shown(Some(HostProblem::HomeEdition)));
+        assert!(red_team_shown(Some(HostProblem::HyperVMissing)));
+        assert!(red_team_shown(Some(HostProblem::NotInHyperVAdministrators)));
+        assert!(red_team_shown(None));
     }
 
     #[test]

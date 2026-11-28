@@ -606,6 +606,19 @@ impl ManagedService {
         let choice = terminal.setting;
         match request.method.as_str() {
             "managed_snapshot" => {
+                let store = ConfigStore::open(self.config_dir.clone())
+                    .map_err(|_| ManagedError::StorageUnavailable)?;
+                let red_team_status =
+                    red_team.then(|| crate::managed::red_team::setup_status(&store));
+                let red_team_installed = red_team_status.is_some_and(|status| {
+                    status.state == crate::managed::tool_setup::ToolSetupState::Ready
+                });
+                let red_team_problem = red_team_status.and_then(|status| status.problem);
+                // Windows Home can never run Red Team: the snapshot offers
+                // none of it there, so no shell shows a row, a setup card or
+                // a launcher for it.
+                let red_team =
+                    red_team && crate::managed::red_team_host::red_team_shown(red_team_problem);
                 let mut sessions = self.sessions.views()?;
                 let roots = self.sessions.resume_roots();
                 for view in &mut sessions {
@@ -672,14 +685,6 @@ impl ManagedService {
                 // herdr while sessions are grouped there (owner, 2026-11-03).
                 let destination = terminal::destination(choice);
                 let opens_in = launch_destination(terminal.herdr, destination);
-                let store = ConfigStore::open(self.config_dir.clone())
-                    .map_err(|_| ManagedError::StorageUnavailable)?;
-                let red_team_status =
-                    red_team.then(|| crate::managed::red_team::setup_status(&store));
-                let red_team_installed = red_team_status.is_some_and(|status| {
-                    status.state == crate::managed::tool_setup::ToolSetupState::Ready
-                });
-                let red_team_problem = red_team_status.and_then(|status| status.problem);
                 Ok(
                     json!({"copy":crate::managed::copy::copy(),"tools":crate::managed::profiles::tools_with_red_team(red_team, red_team_installed, red_team_problem),"cli_options":crate::managed::options::snapshot(&store)?,"revision":self.sessions.revision(),"has_launched":self.sessions.has_launched(),"accounts":self.accounts.list(),"sign_in_accounts":signin::entries_for(sign_in, red_team),"generations":Value::Object(generations),"defaults":defaults,"sessions":sessions,"capabilities":{"tool_setup":terminal::tool_setup_available(),"managed_launch":true,"folder_settings":true,"keep_saved_model":true,"background_model":true,"resume":true,"near_ai_signin":sign_in,"terminal_launch":terminal_launch,"terminal_destination":destination,"launch_destination":opens_in,"terminal_current":choice.app().map(TerminalApp::id),"terminal_chosen":terminal.chosen,"terminal_choices":choices,"herdr_available":herdr_available,"herdr_grouping":terminal.herdr,"daemon_on_host":!super::host_link::runs_sandboxed()}}),
                 )
