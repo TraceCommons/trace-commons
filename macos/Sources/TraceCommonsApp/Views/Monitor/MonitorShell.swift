@@ -287,10 +287,15 @@ struct TracesGraphFooter: View {
         }
     }
 
-    /// #1146's slide: 0.45s on `cubic-bezier(.4,0,.2,1)`; none under Reduce
-    /// Motion.
+    /// A period step's slide: the shell's one curve over the `slide` token
+    /// (0.25s), none under Reduce Motion. #1146 had 0.45s on
+    /// `cubic-bezier(.4,0,.2,1)`, but a step is pressed several times in a
+    /// row to walk back through the periods, and at 0.45s each press waits
+    /// on the last; UI motion stays under 0.3s.
+    static let slideDuration = GlassTokens.Motion.slide
+
     static func slideAnimation(_ reduceMotion: Bool) -> Animation? {
-        reduceMotion ? nil : .timingCurve(0.4, 0, 0.2, 1, duration: 0.45)
+        reduceMotion ? nil : GlassMotion.curve(slideDuration)
     }
 
     /// The range pill's inner edge (#1146: lit above, shaded below); none in

@@ -576,8 +576,10 @@ struct UsesFlow: View {
         let at = FirstRunStageLayout.point(
             CGPoint(x: 46, y: 46), radius: 46, degrees: FirstRunStageLayout.ringAngle(place, of: 5))
         let shown = place < filled
+        // Never from nothing: a seed of the orb grows and fades in, so the
+        // spring's overshoot reads as a pop rather than an appearance.
         return FirstRunOrb(diameter: 14)
-            .scaleEffect(shown ? 1 : 0)
+            .scaleEffect(shown ? 1 : FirstRunStageLayout.satelliteSeedScale)
             .opacity(shown ? 1 : 0)
             .animation(GlassMotion.expressive(reduceMotion, duration: 0.46), value: filled)
             .position(at)
